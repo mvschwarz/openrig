@@ -252,9 +252,10 @@ interface TransitionNoteRow {
  *  ladder live again. Unrelated transitions do not change the latest marker. */
 /** Durable custody-verification disposition: a transition note on the CLOSED source row,
  *  written by whoever performed the registered-host read (never by this detector),
- *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; a target
- *  is any whitespace-delimited word after the prefix (or a comma member of one), matched
- *  exactly, so a note whose prose names the successor later still verifies it (#2841).
+ *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; per note,
+ *  the first whitespace-delimited word after the prefix that names one of the row's targets
+ *  (itself or a comma member, matched exactly) is what that note verifies, so prose naming the
+ *  successor later still verifies it while a later mention of another target doesn't (#2841).
  *  Read from the ACTIVE table AND the retention archive: the daily archiver MOVES every
  *  transition of an aged terminal qitem into `queue_transitions_archive` (the exact class
  *  custody rows belong to) while the row itself keeps participating in this sweep, so an
@@ -263,7 +264,7 @@ interface TransitionNoteRow {
  *  union is the complete audit history. */
 export const CUSTODY_VERIFIED_PREFIX = "custody-verified:";
 
-function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<string> {
+function custodyVerifiedTargets(db: Database.Database, qitemId: string, targets: readonly string[]): Set<string> {
   const notes = db
     .prepare(
       `SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE ?
@@ -275,11 +276,10 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<str
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     for (const token of note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)) {
-      if (!token) continue;
-      verified.add(token);
-      for (const t of token.split(",")) {
-        if (t.trim()) verified.add(t.trim());
-      }
+      const named = [token, ...token.split(",").map((t) => t.trim())].filter(Boolean);
+      if (!named.some((t) => targets.includes(t))) continue;
+      for (const t of named) verified.add(t);
+      break;
     }
   }
   return verified;
@@ -536,7 +536,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
       `why: ${c.why}\n` +
       `verification targets (indeterminate until checked on the registered host), each with its check and its note:\n${checks}\n` +
       `After a registered-host read confirms a target, record its note on the closed row so the sweep stops asking. ` +
-      `The note starts with "custody-verified:" and names the target exactly, as a word of its own, anywhere in the note.\n` +
+      `The note starts with "custody-verified:"; its first word that names one of these targets exactly is what it verifies. ` +
+      `Name several in one comma-list word (a,b), or write one note each.\n` +
       `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.`
     );
   }
@@ -906,7 +907,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (targets.length === 0 && row.closureReason === "handed_off_to") {
         targets.push("(unspecified)");
       }
-      const verified = custodyVerifiedTargets(deps.db, row.qitemId);
+      const verified = custodyVerifiedTargets(deps.db, row.qitemId, targets);
       const verificationTargets = targets.filter((target) => {
         if (verified.has(target)) return false;
         if (target.startsWith("qitem-")) {

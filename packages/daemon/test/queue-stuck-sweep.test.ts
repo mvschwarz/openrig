@@ -1875,6 +1875,49 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
+  it("DISPOSITION IS PER NOTE: only the note's first target-naming word counts, so a later mention of another target keeps its finding (#2841)", async () => {
+    const row = await mkRow();
+    const verifiedTarget = "qitem-29990101000000-precon06";
+    const pendingTarget = "qitem-29990101000000-precon07";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${verifiedTarget},${pendingTarget}`,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${verifiedTarget} ok; ${pendingTarget} still pending`,
+    });
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`- ${pendingTarget}\n`);
+    expect(findings[0]!.body).not.toContain(`- ${verifiedTarget}\n`);
+  });
+
+  it("DISPOSITION COMMA WORD: a first target-naming word that is a comma list verifies every member (#2841)", async () => {
+    const row = await mkRow();
+    const first = "qitem-29990101000000-precon08";
+    const second = "qitem-29990101000000-precon09";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${first},${second}`,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: checked ${first},${second} on the parent host`,
+    });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
   it("DISPOSITION RECIPE IS EXACT: the finding prints each target's own note, ready to record (#2841)", async () => {
     const row = await mkRow();
     const missing = "qitem-29990101000000-precon05";
