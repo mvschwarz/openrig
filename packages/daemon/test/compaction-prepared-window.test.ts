@@ -86,6 +86,8 @@ async function fixture() {
   vi.spyOn(tmux, "isPaneInMode").mockImplementation(async () => paneInMode);
   vi.spyOn(tmux, "cancelPaneMode").mockImplementation(async () => ({ ok: false, message: "fixture: the pane stays in its mode" }) as never);
   const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db),
+    // Held-window cases explicitly opt in to transport.draft_delivery=refuse.
+    deliverOverDraft: () => false,
     sleep: async (ms) => { clock += ms; }, now: () => new Date(clock), waitForIdlePollMs: 5 });
   let activity = "idle";
   (transport as any).classifySendReadiness = async () => ({ state: activity, reason: "fixture", evidenceSource: "pane_heuristic" });
@@ -305,7 +307,7 @@ describe("#2682: a completed map holds its attempt until the window", () => {
         f.refuse("draft");
         await f.e.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
         expect(f.e.getPreparationState(seat)).toMatchObject({ attemptId, status: "stopped", compact: "not_sent" });
-        expect(f.e.getPreparationState(seat)!.reason).toMatch(/^draft_input_/);
+        expect(f.e.getPreparationState(seat)!.reason).toBe("target_needs_input");
       } else {
         f.activity("running");
         f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
@@ -840,7 +842,7 @@ describe("#2682: what still stops", () => {
     });
     f.refuse("draft");
     const outcome = await f.e.triggerManualCompact(sample(40), { operatorInitiated: true });
-    expect(outcome).toMatchObject({ triggered: false, reason: "draft_input_busy" });
+    expect(outcome).toMatchObject({ triggered: false, reason: "target_needs_input" });
     expect(f.e.getPreparationState(seat)).toMatchObject({ mode: "manual", status: "stopped" });
     expect(f.compactPastes()).toBe(0);
   });

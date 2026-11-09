@@ -1943,10 +1943,12 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
-  /** Internal: managed lifecycle input must preserve a person's draft even when the optional typing guard is off.
+  /** Explicit internal composer-preservation request. Managed compaction instead uses ordinary draft-delivery defaults.
    *  `"typed"` (#2575) holds only a box that reads typed or typed-with-suggestion; any other reading that isn't empty is
    *  pasted over and named in `pastedOverInputBox`, never called empty. */
   preserveInput?: true | "typed";
+  /** A managed idle wait follows the ordinary draft-delivery setting; menus and running work still wait/refuse. */
+  allowDraftWhileIdle?: true;
   /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
@@ -2978,6 +2980,7 @@ export class SessionTransport {
       privateInput: opts.dangerouslyInteract === true,
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
       postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
+      allowDraft: opts.allowDraftWhileIdle === true,
       signal: callerSignal(opts), cancelledBy: "caller",
     });
     if (!preWait.ok) {
@@ -3262,6 +3265,7 @@ export class SessionTransport {
         privateInput: opts?.dangerouslyInteract === true,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
         postCompactTurnBoundary: opts?.postCompactTurnBoundary === true,
+        allowDraft: opts?.allowDraftWhileIdle === true,
         signal: callerSignal(opts), cancelledBy: "caller",
       });
       waitEvidence = {
@@ -3322,6 +3326,7 @@ export class SessionTransport {
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
+          allowDraft: opts.allowDraftWhileIdle === true,
           signal: callerSignal(opts), cancelledBy: "caller",
         });
         waitEvidence = {
@@ -3349,7 +3354,7 @@ export class SessionTransport {
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
         }, opts.dangerouslyInteract === true);
-        if (recheck.state !== "idle") {
+        if (recheck.state !== "idle" && !(opts.allowDraftWhileIdle && this.deliversOverDraft(recheck))) {
           const late: { reason: string; error: string } =
             recheck.state === "needs_input"
               ? {
@@ -3550,6 +3555,9 @@ export class SessionTransport {
       const box = await this.captureInputBox(readTarget, boxRuntime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS });
       if (box.status === "typed" || box.status === "typed-with-suggestion") {
         if (draftChoice === "refuse") {
+          heldInputBox = box.status;
+          const { status, confidence, evidence, cursor } = box;
+          heldInputBoxReading = { status, confidence, evidence, cursor };
           const activity: AgentActivity = { state: "needs_input", reason: "prompt_draft", evidenceSource: "pane_heuristic",
             sampledAt: this.now().toISOString(), evidence: `input box reads ${box.status}`, fallback: true };
           // Wait evidence keeps its waitedMs and attempts; the activity is this draft's, not the idle the wait ended on.
@@ -3802,10 +3810,11 @@ export class SessionTransport {
 
   /** Wait on the existing classifier without occupying the input/lifecycle lease. With `singleObservation`, one
    *  observation within `timeoutMs` and no wait after it: a busy reading returns at once. */
-  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean }) {
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean; allowDraft?: true }) {
     const meta = this.getSessionMeta(sessionName);
     return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+      ...(opts?.allowDraft ? { allowDraft: true } : {}),
       ...(opts?.singleObservation ? { singleObservation: true } : {}) });
   }
 
@@ -3821,6 +3830,7 @@ export class SessionTransport {
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     postCompactTurnBoundary?: boolean;
+    allowDraft?: boolean;
     /** One observation only: a reading that isn't idle ends the wait at once. */
     singleObservation?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3890,7 +3900,7 @@ export class SessionTransport {
       last = activity;
       const waitedMs = input.timeoutMs - (deadline - Date.now());
 
-      if (activity.state === "idle") {
+      if (activity.state === "idle" || (input.allowDraft && this.deliversOverDraft(activity))) {
         return { ok: true, activity, waitedMs, attempts };
       }
 
@@ -3999,7 +4009,7 @@ export class SessionTransport {
 
   /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
    *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
-   *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
+   *  not join a draft (an explicit preserveInput request). Idle waits opt in to this draft policy separately. */
   private deliversOverDraft(readiness: AgentActivity, opts?: SendOpts): boolean {
     if (readiness.state !== "needs_input" || readiness.reason !== "prompt_draft" || readiness.evidenceSource !== "pane_heuristic") return false;
     if (opts?.preserveInput) return false;
