@@ -283,7 +283,7 @@ describe("HerdrSeatAdapter scoped launch (live move 1: the Herdr server's CLAUDE
     let n = 0;
     return { written, ops: {
       writeFile: async (path: string, content: string, options?: { mode: number; flag: "wx" }) => { written.set(path, { content, mode: options?.mode }); },
-      unlink: async () => {}, tmpName: () => `/tmp/orh-scoped-${++n}`, bufferName: () => `buf-${n}`,
+      unlink: async (path: string) => { written.delete(path); }, tmpName: () => `/tmp/orh-scoped-${++n}`, bufferName: () => `buf-${n}`,
     } };
   }
   const policy = (inherit = false) => () => ({ inheritTmuxEnvironment: inherit,
@@ -296,6 +296,7 @@ describe("HerdrSeatAdapter scoped launch (live move 1: the Herdr server's CLAUDE
     expect(await adapter.createSession("dev-solo@hr", "/work dir", { OPENRIG_NODE_ID: "n1", FOO: "bar" })).toEqual({ ok: true });
     const ws = [...herdr.workspaces.values()][0]!;
     expect(ws.panes).toEqual(["w1:p2"]);
+    expect(ws.env).toEqual({}); // H2: the temporary root shell gets none of the seat's values
     expect((await adapter.listPanes("dev-solo@hr")).map(p => p.id)).toEqual(["w1:p2"]);
     const argv = herdr.commands.get("w1:p2")!;
     expect(argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
@@ -338,5 +339,7 @@ describe("HerdrSeatAdapter scoped launch (live move 1: the Herdr server's CLAUDE
     a2.launchEnvironment = policy();
     expect(await a2.createSession("dev-solo@hr", "/tmp", { OPENRIG_NODE_ID: "n1" })).toMatchObject({ ok: false, code: "session_not_created" });
     expect(herdr.workspaces.size).toBe(0);
+    expect(f.written.size).toBe(0); // H1: the staged env file is removed
+
   });
 });

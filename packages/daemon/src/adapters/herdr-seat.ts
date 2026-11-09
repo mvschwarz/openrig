@@ -407,8 +407,17 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       // Like a tmux seat, a managed seat must not inherit its terminal server's environment: the person's Herdr server
       // may carry another CLAUDE_CONFIG_DIR (another account, no trust records, none of the seat's conversations).
       const scoped = await this.scopedLaunch(seatEnv, cwd);
-      const created = await this.call<{ workspace: HerdrWorkspaceInfo; root_pane: HerdrPaneInfo }>(socket, "workspace.create",
-        { label: name, ...(cwd ? { cwd } : {}), env: seatEnv, focus: false });
+      // The staged file holds the seat's values (tokens included): remove it if the pane that would read it never starts.
+      const discard = async () => { if (scoped) await (this.deps.fileOps ?? defaultTmuxFileOps()).unlink(scoped[4]!).catch(() => {}); };
+      let created: { workspace: HerdrWorkspaceInfo; root_pane: HerdrPaneInfo };
+      try {
+        // With a scoped launch the root shell only lives until it is closed below: it gets none of the seat's values.
+        created = await this.call<{ workspace: HerdrWorkspaceInfo; root_pane: HerdrPaneInfo }>(socket, "workspace.create",
+          { label: name, ...(cwd ? { cwd } : {}), ...(scoped ? {} : { env: seatEnv }), focus: false });
+      } catch (error) {
+        await discard();
+        throw error;
+      }
       const workspace = created.workspace?.workspace_id ?? created.root_pane.workspace_id;
       let pane = created.root_pane.pane_id;
       if (scoped) {
@@ -422,6 +431,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
           await this.call(socket, "pane.close", { pane_id: pane });
           pane = scopedPane;
         } catch (error) {
+          await discard();
           try { await this.call(socket, "workspace.close", { workspace_id: workspace }); } catch { /* reported below */ }
           return { ok: false, code: "session_not_created", message: `The seat's scoped Herdr pane could not be started, so its workspace was closed: ${(error as Error).message}` };
         }
