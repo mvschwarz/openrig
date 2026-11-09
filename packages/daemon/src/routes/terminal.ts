@@ -20,7 +20,8 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 // the provider runs client-side; it mutates no daemon state.
 
 import { Hono } from "hono";
-import type { TerminalService } from "../domain/terminal/terminal-service.js";
+import type { HerdrAppTarget, TerminalService } from "../domain/terminal/terminal-service.js";
+import { isAbsolute } from "node:path";
 import type { FollowControls } from "../domain/terminal/terminal-follow-policy.js";
 
 function readFollowControls(raw: Record<string, unknown>): FollowControls | { error: string } {
@@ -58,15 +59,31 @@ function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 |
 }
 
 /** Parse the `{ provider?, view }` open body honestly (a non-object / missing view → structured 400 upstream). */
-function readOpenBody(raw: unknown): { provider?: string; session?: string; view?: string; expectedPlan?: string; viewportColumns?: number } | { error: string } {
+/** herdr-app's client: an absolute app home. */
+function readHerdrAppTarget(raw: unknown): { herdrApp?: HerdrAppTarget } | { error: string } {
+  if (raw === undefined) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "herdrApp must be an object {appHome?}." };
+  const { appHome } = raw as Record<string, unknown>;
+  if (appHome !== undefined && (typeof appHome !== "string" || !isAbsolute(appHome) || /[\x00-\x1f]/.test(appHome))) return { error: "herdrApp.appHome must be an absolute path." };
+  return { herdrApp: appHome !== undefined ? { appHome } : {} };
+}
+
+function readOpenBody(raw: unknown): { provider?: string; session?: string; view?: string; expectedPlan?: string; viewportColumns?: number; herdrApp?: HerdrAppTarget } | { error: string } {
   if (raw === null || typeof raw !== "object") return {};
   const obj = raw as Record<string, unknown>;
   if (obj["session"] !== undefined && typeof obj["session"] !== "string") return { error: "session must be a session name string." };
+  const target = readHerdrAppTarget(obj["herdrApp"]);
+  if ("error" in target) return target;
   const provider = typeof obj["provider"] === "string" ? (obj["provider"] as string) : undefined;
   const view = typeof obj["view"] === "string" ? (obj["view"] as string) : undefined;
   const expectedPlan = typeof obj["expectedPlan"] === "string" ? obj["expectedPlan"] : undefined;
   const viewportColumns = typeof obj["viewportColumns"] === "number" ? obj["viewportColumns"] : undefined;
-  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) };
+  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}), ...target };
+}
+
+/** The same client from query parameters (preview, status). */
+function readHerdrAppQuery(appHome: string | undefined) {
+  return appHome === undefined ? {} : readHerdrAppTarget({ appHome });
 }
 
 /** The canonical, non-rig-scoped terminal route family. Mounted at `/api/terminal`. */
@@ -118,6 +135,17 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     return c.json(result, statusForOpen(result.ok, result.ok ? undefined : result.code));
   });
 
+  // Close one herdr-app Rig view (its cells leave the layout first; only its verified viewers end; seats untouched).
+  app.post("/close", async (c) => {
+    const svc = getService(c);
+    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
+    const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    const parsed = raw && typeof raw === "object" && !Array.isArray(raw) ? readOpenBody(raw) : { error: "expected a JSON object { provider?, view, herdrApp? }" };
+    if ("error" in parsed) return c.json({ ok: false, code: "body_invalid", error: parsed.error }, 400);
+    const result = await svc.closeView({ ...parsed, view: parsed.view ?? "" });
+    return c.json(result, result.ok ? 200 : result.code === "view_not_found" ? 404 : statusForOpen(false, result.code));
+  });
+
   app.get("/views", async (c) => {
     const svc = getService(c);
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
@@ -129,7 +157,9 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
     const width = c.req.query("viewportColumns");
     const session = c.req.query("session");
-    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(session !== undefined ? { session } : {}), ...(width !== undefined ? { viewportColumns: Number(width) } : {}) });
+    const target = readHerdrAppQuery(c.req.query("appHome"));
+    if ("error" in target) return c.json({ code: "body_invalid", error: target.error }, 400);
+    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(session !== undefined ? { session } : {}), ...(width !== undefined ? { viewportColumns: Number(width) } : {}), ...target });
     return c.json(result, "planId" in result ? 200 : statusForOpen(result.ok, result.code));
   });
 
@@ -138,7 +168,9 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
     const provider = c.req.query("provider");
     const session = c.req.query("session");
-    const result = session === undefined ? await svc.status(provider) : await svc.status(provider, session);
+    const target = readHerdrAppQuery(c.req.query("appHome"));
+    if ("error" in target) return c.json({ code: "body_invalid", error: target.error }, 400);
+    const result = await svc.status(provider, session, "herdrApp" in target ? target.herdrApp : undefined);
     return c.json(result, result.code ? statusForOpen(false, result.code) : 200);
   });
 

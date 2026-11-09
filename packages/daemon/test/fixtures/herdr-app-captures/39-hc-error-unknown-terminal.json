@@ -1,0 +1,26 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "hc-error-unknown-terminal",
+  "channel": "hc-cli",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "argv": [
+      "hc",
+      "get",
+      "--json",
+      "t999"
+    ],
+    "via": "scripts/sandbox hc (HC_SESSION=herdr-app-<sandbox>)"
+  },
+  "reply": {
+    "exit": 3,
+    "stdout": "",
+    "stderr": "{\"error\":{\"hint\":\"see `hc ls --all`\",\"kind\":\"not_found\",\"message\":\"no terminal \\\"t999\\\"\"}}\n",
+    "json": null
+  },
+  "elapsed_ms": 49,
+  "notes": "hc against a terminal that does not exist: exit code and message."
+}

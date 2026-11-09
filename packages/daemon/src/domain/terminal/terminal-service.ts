@@ -63,8 +63,9 @@ import type {
   ViewDescriptor,
 } from "./terminal-provider.js";
 
-/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller). */
-export type TerminalProviderName = "herdr" | "cmux" | "rex";
+/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller;
+ *  herdr-app = Rig-layout views in a herdr-app client, by name only). */
+export type TerminalProviderName = "herdr" | "cmux" | "rex" | "herdr-app";
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
 /** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. Rex is never chosen here. */
 const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
@@ -80,7 +81,11 @@ export interface OpenViewRequest {
   expectedPlan?: string;
   /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
   viewportColumns?: number;
+  /** The herdr-app client (its app home) for provider herdr-app. */
+  herdrApp?: HerdrAppTarget;
 }
+
+export interface HerdrAppTarget { appHome?: string }
 
 export interface TerminalPreview {
   provider: string;
@@ -129,6 +134,10 @@ export interface TerminalServiceDeps {
   resolveProvider(name: string): TerminalProvider | null;
   /** Resolve an explicit session without altering the default provider instance. */
   resolveSessionProvider?(name: string, session: string): TerminalProvider | null;
+  /** Daemon shutdown: stops herdr-app's own watcher and timers. */
+  stopHerdrApp?(): void;
+  /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
+  resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
   /** Live seats of a rig BY NAME; null when no such rig is known (vs [] = a known-but-empty rig). */
@@ -198,7 +207,7 @@ export class TerminalService {
       (selector, controls) => this.renderFollowing(selector, controls));
   }
 
-  async stop(): Promise<void> { this.unsubscribeScope?.(); await this.following?.stop(); }
+  async stop(): Promise<void> { this.unsubscribeScope?.(); this.deps.stopHerdrApp?.(); await this.following?.stop(); }
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
@@ -252,12 +261,18 @@ export class TerminalService {
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
 
-  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session">): {
+  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session" | "herdrApp">): {
     name: string; provider: TerminalProvider; session?: string;
   } | OpenViewResult {
     const name = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    if (name === "herdr-app") {
+      if (req.session !== undefined) return errorResult(name, "unsupported_terminal_session", "herdr-app selects its client by app home, not by session.");
+      const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+      return provider ? { name, provider, session: provider.appHome }
+        : errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    }
     const defaultProvider = this.deps.resolveProvider(name);
-    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, cmux or rex`);
+    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, herdr-app, cmux or rex`);
     if (req.session === undefined) return { name, provider: defaultProvider };
     const session = typeof req.session === "string" ? req.session.trim() : "";
     if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
@@ -323,7 +338,8 @@ export class TerminalService {
       };
     }
     const result = await provider.openView({ ...composed, planId });
-    if (result.opened.length === 0 && composed.opened.length > 0) {
+    // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
+    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app") {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
       notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");
@@ -423,6 +439,17 @@ export class TerminalService {
     });
   }
 
+  /** Close one herdr-app Rig view: its cells leave the client's layout first, then only its own verified viewers end.
+   *  Seats are never touched. Other providers have no close. */
+  async closeView(req: { provider?: string; view: string; herdrApp?: HerdrAppTarget }): Promise<OpenViewResult> {
+    const name = req.provider?.trim() ?? "herdr-app";
+    if (name !== "herdr-app") return errorResult(name, "close_unsupported", "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.");
+    const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+    if (!provider) return errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    if (!req.view.trim()) return errorResult(name, "view_required", "Name the Rig view to close (rv-…).");
+    return provider.closeView(req.view.trim());
+  }
+
   /** List saved views + the rig names openable as derived views. */
   async listViews(detail = false): Promise<ListViewsResult> {
     const result: ListViewsResult = {
@@ -456,8 +483,14 @@ export class TerminalService {
   }
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
-  async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
+  async status(providerName?: string, session?: string, herdrApp?: HerdrAppTarget): Promise<TerminalStatusResult> {
     const tmux = daemonTmuxServerInfo();
+    if (providerName === "herdr-app") {
+      const selected = this.selectProvider({ provider: "herdr-app", ...(herdrApp ? { herdrApp } : {}) });
+      if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
+      return { ...(tmux ? { tmux } : {}), session: selected.session, providers: [{ name: selected.name,
+        status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
+    }
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };

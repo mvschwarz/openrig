@@ -1,0 +1,69 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "space-new",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"space.new\",\"args\":{\"name\":\"person-space\",\"folder\":\"<sandbox>/work\",\"argv\":[\"sh\"]}}\n"
+  },
+  "reply": {
+    "line": "{\"space\":\"sp524ffbf49bcbe210ae2be30d9d1a8a76\",\"tab\":\"tb70e7f8353f6c88eabaec3285f582089c\",\"terminal\":\"t1\"}\n",
+    "json": {
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb70e7f8353f6c88eabaec3285f582089c",
+      "terminal": "t1"
+    }
+  },
+  "elapsed_ms": 44,
+  "notes": "A space the person works in. Reply names the new space, its first tab and terminal.",
+  "effect": {
+    "status": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb70e7f8353f6c88eabaec3285f582089c",
+      "focused_pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    },
+    "ls": {
+      "spaces": [
+        {
+          "id": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+          "name": "person-space",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": true,
+          "tabs": [
+            {
+              "id": "tb70e7f8353f6c88eabaec3285f582089c",
+              "name": "1",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t1",
+                  "pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "recent": []
+    }
+  }
+}

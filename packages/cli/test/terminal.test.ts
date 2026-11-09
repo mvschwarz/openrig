@@ -80,12 +80,12 @@ describe("rig terminal CLI", () => {
     process.exitCode = undefined;
   });
 
-  it("registers open/views/status/attach subcommands", () => {
+  it("registers open/close/views/status/attach subcommands", () => {
     const { deps } = makeDeps();
     const program = createProgram({ terminalDeps: deps });
     const cmd = program.commands.find((c) => c.name() === "terminal");
     expect(cmd).toBeDefined();
-    expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["attach", "open", "status", "views"]);
+    expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["attach", "close", "open", "status", "views"]);
   });
 
   it.each([false, true])("attaches using the daemon's effective server, preserving read-only=%s", async readOnly => {

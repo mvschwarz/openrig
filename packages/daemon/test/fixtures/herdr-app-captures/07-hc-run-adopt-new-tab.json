@@ -1,0 +1,66 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "hc-run-adopt-new-tab",
+  "channel": "hc-cli",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "argv": [
+      "hc",
+      "run",
+      "--bg",
+      "--keep",
+      "--no-parent",
+      "--json",
+      "--cwd",
+      "<sandbox>/work",
+      "--label",
+      "herdr.space=sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "--label",
+      "herdr.tab=tb-capture-view",
+      "--label",
+      "openrig.role=status",
+      "--label",
+      "openrig.view=view-2",
+      "--label",
+      "openrig.op=op-2",
+      "--",
+      "sleep",
+      "3600"
+    ],
+    "via": "scripts/sandbox hc (HC_SESSION=herdr-app-<sandbox>)"
+  },
+  "reply": {
+    "exit": 0,
+    "stdout": "{\"address\":\"t3\",\"agent\":\"sleep\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0}\n",
+    "stderr": "",
+    "json": {
+      "address": "t3",
+      "agent": "sleep",
+      "cwd": "<sandbox>/work",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  "elapsed_ms": 36,
+  "notes": "A status terminal labelled with the person's existing space and a new tab id: a new tab in that space.",
+  "context": {
+    "status_before": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb70e7f8353f6c88eabaec3285f582089c",
+      "focused_pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    }
+  }
+}
