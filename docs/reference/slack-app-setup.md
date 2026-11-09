@@ -69,10 +69,10 @@ not fill in; if so, follow the form.
     a possible repeat. An ask OpenRig can't fully check still posts, once per gateway run, through the
     person's delivery rules, so a readable quiet window still holds it. That's an ask whose attempt
     record can't be read, whose state can't be checked, or whose person's quiet hours can't be read.
-    The Slack post can show "Delivery may repeat after an earlier unconfirmed attempt." and "OpenRig
-    couldn't check that this ask is still open." These supplementary notes are omitted if they do not
-    fit. The row and command also report when the person's delivery policy could not be checked. An
-    ask that is no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for
+    The Slack post can show "Delivery may repeat after an earlier unconfirmed attempt.", "OpenRig
+    couldn't check that this ask is still open." and "OpenRig couldn't read your quiet hours." These
+    supplementary notes are omitted if they do not fit. The row and command also report when the
+    person's quiet-hours setting couldn't be read. An ask that is no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for
     Slack receipts.
 
 ## What the app asks for
@@ -388,8 +388,14 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
   connector any more (it stays on Steering and the Feed), or it's now below the posting level.
 - **A post that may already be in Slack**, confirmed or only partly sent, isn't held: it finishes as itself, in its own
   thread.
-- **If quiet hours can't be read,** nothing is posted to that person until they can, except an ask re-shown by
-  `rig slack post-open-asks`, which posts and records that the person's delivery policy was unconfirmed.
+- **If quiet hours can't be read,** that isn't a quiet window. An ask that would post goes to its usual destination with
+  no mention, and the post says "OpenRig couldn't read your quiet hours."; the ask's row records it. The person's other
+  delivery settings still decide: an escalation, a digest, an ask below the posting level, and a quiet window that can be
+  read work as before. This covers ordinary posts and digests, and asks already held for quiet hours: while the quiet
+  hours can't be read, the next release check (within about a minute) posts each of them, with no mention and the same
+  line, even if the window may still be on. The line is supplementary: a post at Slack's text or block limit leaves it
+  out, and the ask's row and `rig slack post-open-asks` still say the quiet hours couldn't be read. A person reached
+  through a relay waits until their quiet hours can be read, as before, because that post can't carry the line.
 
 ## Reconnect recovery and status
 

@@ -288,8 +288,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
     const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
-    const render = (possibleRepeat = false, stateUnconfirmed = false) => {
-      const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}`);
+    const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
+      const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
       const built = buildOutboundMessage(
@@ -322,13 +322,14 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           reconcileMarker: reconcileToken(decision.decisionId),
           possibleRepeat,
           stateUnconfirmed,
+          quietUnreadable,
         },
       );
-      renders.set(`${possibleRepeat}:${stateUnconfirmed}`, built);
+      renders.set(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`, built);
       return built;
     };
     const postInput = (possibleRepeat = false) => {
-      const shown = render(possibleRepeat, q.stateUnconfirmed === true);
+      const shown = render(possibleRepeat, q.stateUnconfirmed === true, q.quietUnreadable === true);
       return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
     };
     const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
@@ -709,7 +710,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const authored = parts;
     /** The parts a plan renders to, preflighted; with no plan, decide one from the real render. */
     const choose = (kept?: DeliveryPlan) => {
-      const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
+      // A post marked as made without the person's quiet hours never mentions them, whatever a recovered read or a saved
+      // plan would say: it's permission to deliver, not to alert. The plan's cuts and part ids stay as they are.
+      const mention = q.quietUnreadable ? undefined : kept ? kept.mention : opts.resolveMentionUserId?.(q);
       const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
       // A kept plan checks only the parts still to post: delivered parts are acknowledged, never rendered again.
       const delivered = kept ? opts.delivered.load() : new Set<string>();

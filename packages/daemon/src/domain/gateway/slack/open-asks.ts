@@ -24,7 +24,7 @@ import { makeQueuePorts } from "./queue-access.js";
 import { SeenStore } from "./state-store.js";
 import { OUTBOUND_OP, toPayload, type OutboundPostPayload } from "./outbound-driver.js";
 import type { OwnerNotificationLevel } from "../../queue-transition-log.js";
-import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, type ReleaseDisposition } from "../../policies/quiet-release.js";
+import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, QUIET_UNREADABLE_PREFIX, type ReleaseDisposition } from "../../policies/quiet-release.js";
 import { DELIVERY_DEFERRAL_ARMED_PREFIX } from "../../policies/delivery-deferral.js";
 
 export const RE_PRESENT_DECISION_PREFIX = "re-present:";
@@ -107,6 +107,7 @@ export function rePresentMarks(notes: string[], key: string): { possibleRepeat?:
 function postedUnconfirmed(notes: string[], key: string): string | null {
   const what = unconfirmedOf(notes, key);
   const words = (["attempt", "state", "policy"] as const).filter((item) => what.has(item)).map((item) => UNCONFIRMED_WORDS[item]);
+  if (notes.some((note) => hasToken(note, QUIET_UNREADABLE_PREFIX, key))) words.push("the person's quiet-hours setting");
   if (words.length === 0) return null;
   const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
   return `posted; ${list} ${words.length === 1 ? "was" : "were"} unconfirmed`;
