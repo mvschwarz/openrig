@@ -5,14 +5,18 @@ import path from "node:path";
 import type { FetchImpl } from "./slack-api.js";
 import type { InboundRouter } from "./inbound.js";
 import { ChannelRecovery } from "./channel-recovery.js";
-import { ThreadRecovery, threadKey } from "./thread-recovery.js";
+import { QUIET_RESCAN_MS, RELAYED_QUIET_RESCAN_MS, ThreadRecovery, threadKey } from "./thread-recovery.js";
 import { ChannelCoverageStore, ThreadCoverageStore, slackMicros, slackTimestamp, type ThreadCoverage } from "./state-store.js";
 import { budgetLeft, HISTORY, MethodBackoff, newRecoveryBudget, REPLIES, type RecoverySource } from "./recovery-budget.js";
+import { ACTIVE_QUEUE_STATES } from "../../queue-repository.js";
 
 /** A thread is tracked while its root was posted, or it closed, within this window. */
 export const THREAD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** A thread leaving the window within this long goes first after a gap: once it leaves, a missed reply is never recovered. */
+const EXPIRING_SOON_MS = 6 * 60 * 60 * 1000;
 
-export interface TrackedThread { channel: string; threadTs: string; state?: string; closedAt?: string | null }
+/** `askState`: the state of the queue row the thread's root belongs to; null when that row is gone. */
+export interface TrackedThread { channel: string; threadTs: string; state?: string; closedAt?: string | null; askState?: string | null }
 
 /** The channels this machine recovers: its default channel and its channel map's, except a channel
  *  its configuration relays to the machine that owns it (that machine recovers it). */
@@ -45,7 +49,7 @@ interface SlackRecoveryOptions {
   relayed?: boolean;
 }
 
-interface TrackedSource { source: ThreadRecovery; mapping: string }
+interface TrackedSource { source: ThreadRecovery; mapping: string; waiting: boolean; expiresAt: number }
 
 export class SlackRecovery {
   private readonly channels: ChannelRecovery[];
@@ -57,7 +61,9 @@ export class SlackRecovery {
   private pass?: Promise<void>;
   private stopped = false;
   private lastChannel: string | undefined;
-  private lastThread: string | undefined;
+  /** When live events last began arriving without a gap: the connector's start, or the latest Socket Mode connect that
+   *  followed a gap. A reply after it in a thread nobody waits on arrives live. */
+  private listeningSince: number;
   private threadsUnavailable: string | undefined;
   private initialized = false;
   private readonly adoptedHere = new Set<string>();
@@ -66,6 +72,7 @@ export class SlackRecovery {
 
   constructor(private readonly opts: SlackRecoveryOptions) {
     this.now = opts.now ?? Date.now;
+    this.listeningSince = this.now();
     this.channelStore = opts.channelStore ?? new ChannelCoverageStore(path.join(opts.stateDir, "slack-channel-coverage.json"));
     const channels: Array<{ channel: string | null; seed?: "adoption" }> = opts.channels.length ? opts.channels : [{ channel: null }];
     this.channels = channels.map((c) => new ChannelRecovery({ channel: c.channel, token: opts.token, stateDir: opts.stateDir,
@@ -92,6 +99,12 @@ export class SlackRecovery {
       source.initialize();
       this.adoptedHere.add(channel);
     } catch { /* an unreadable checkpoint file is never replaced; the channel keeps waiting */ }
+  }
+
+  /** The Socket Mode connection opened after a gap (not a refresh that overlapped the old one). Replies sent in the gap
+   *  past Slack's own retries weren't delivered live, so every settled thread is due once more. */
+  connected(): void {
+    this.listeningSince = this.now();
   }
 
   stop(): void {
@@ -145,14 +158,13 @@ export class SlackRecovery {
     this.restoreMethodHolds();
     // Channels and threads take turns one step at a time, each kind in its own rotation. A source with
     // more to scan rejoins the back of its kind's queue; a kind with nothing left gives its turns away.
-    const queues: RecoverySource[][] = [rotate(this.activeChannels(), this.lastChannel), rotate(this.trackedThreadSources(), this.lastThread)];
+    const queues: RecoverySource[][] = [rotate(this.activeChannels(), this.lastChannel), this.trackedThreadSources()];
     const budget = newRecoveryBudget(this.now());
     let kind = 0;
     while (!this.stopped && budgetLeft(budget, this.now()) && (queues[0]!.length || queues[1]!.length)) {
       if (!queues[kind]!.length) kind = 1 - kind;
       const source = queues[kind]!.shift()!;
       if (source instanceof ThreadRecovery) {
-        this.lastThread = source.key;
         const before = { accepted: source.accepted, deadLettered: source.deadLettered };
         const more = await source.step(budget, this.backoff);
         this.threadTotals.accepted += source.accepted - before.accepted;
@@ -166,6 +178,8 @@ export class SlackRecovery {
     }
   }
 
+  /** The threads this pass scans, in the order it scans them. Refreshes the tracked set from the seat map (a thread keeps its
+   *  source while its mapping is unchanged), then keeps only the threads that are due and sorts them by `threadOrder`. */
   private trackedThreadSources(): ThreadRecovery[] {
     if (!this.opts.trackedThreads || !this.opts.token) return [];
     let stored: Record<string, ThreadCoverage>;
@@ -178,20 +192,27 @@ export class SlackRecovery {
       return [];
     }
     const owned = this.activeChannels().flatMap((c) => (c.channel ? [c.channel] : []));
-    const since = new Date(this.now() - THREAD_WINDOW_MS).toISOString();
+    const now = this.now();
+    const since = new Date(now - THREAD_WINDOW_MS).toISOString();
     const next = new Map<string, TrackedSource>();
     for (const t of this.opts.trackedThreads(owned, since)) {
       if (!owned.includes(t.channel) || slackMicros(t.threadTs) === null) continue;
       const key = threadKey(t.channel, t.threadTs);
       const mapping = `${t.state ?? ""}|${t.closedAt ?? ""}`;
+      const waiting = (ACTIVE_QUEUE_STATES as readonly string[]).includes(t.askState ?? "");
+      const closedMs = t.closedAt ? Date.parse(t.closedAt) : NaN;
+      const expiresAt = Math.max(Number(slackMicros(t.threadTs)! / 1000n), Number.isFinite(closedMs) ? closedMs : 0) + THREAD_WINDOW_MS;
       const prior = this.threads.get(key);
-      // A changed mapping gets a fresh source (so a thread Slack couldn't find is asked again); saved coverage carries over.
-      next.set(key, prior && prior.mapping === mapping ? prior : { mapping, source: new ThreadRecovery({ channel: t.channel,
-        threadTs: t.threadTs, token: this.opts.token, store: this.threadStore, stored: stored[key], router: this.opts.router,
-        fetchImpl: this.opts.fetchImpl, now: this.now, stopped: () => this.stopped }) });
+      // A changed mapping gets a fresh source; saved coverage, and its turn among retries, carry over.
+      if (prior && prior.mapping === mapping) { next.set(key, { ...prior, waiting, expiresAt }); continue; }
+      const source = new ThreadRecovery({ channel: t.channel, threadTs: t.threadTs, token: this.opts.token, store: this.threadStore,
+        stored: stored[key], router: this.opts.router, fetchImpl: this.opts.fetchImpl, now: this.now, stopped: () => this.stopped });
+      source.lastStalledAt = prior?.source.lastStalledAt;
+      next.set(key, { mapping, waiting, expiresAt, source });
     }
     this.threads = next;
-    return [...next.values()].map((t) => t.source).sort((a, b) => (a.key < b.key ? -1 : 1));
+    const quiet = this.opts.relayed ? RELAYED_QUIET_RESCAN_MS : undefined;
+    return threadOrder([...next.values()].filter((t) => t.source.due(now, t.waiting, this.listeningSince, quiet)), this.listeningSince, now);
   }
 
   status() {
@@ -226,6 +247,8 @@ export class SlackRecovery {
         "coverage means scanned available history; dead letters are custody, not delivery",
         "five-second settle margin; larger clock skew or history visibility lag remains unverified",
         "four calls / 100 entries / 15 seconds per pass, taken in turn by channels and threads; no global chronological ordering",
+        "each thread is scanned once after boot or a reconnect from a gap (twice if the pass at the connect itself reached it, since that pass stops at the settle margin): any leaving the seven-day window within six hours first, then those whose ask waits on the person, then the rest, newest first; "
+          + `after that hourly while its ask waits, otherwise ${this.opts.relayed ? "every three hours (relayed: no gap is visible here)" : "daily"}`,
       ],
       channels: others.map(({ limits: _limits, ...rest }) => rest),
       threads: {
@@ -237,9 +260,39 @@ export class SlackRecovery {
         oldestPendingSeconds: pending.length ? Math.max(...pending.map(behind)) : null,
         backoff: byReason(["backoff"]),
         incomplete: byReason(["incomplete"]),
+        settled: count("settled"),
+        settledRescanHours: (this.opts.relayed ? RELAYED_QUIET_RESCAN_MS : QUIET_RESCAN_MS) / 3_600_000,
       },
     };
   }
+}
+
+/** The order a pass takes the due threads in, derived from saved coverage so a restart keeps it. First every thread not
+ *  yet scanned since live events last began: any about to leave the window, soonest first; then those whose ask waits on
+ *  the person, then the rest, each newest root first. Then the backstop rescans, least recently scanned first. So a boot
+ *  reaches the newest open ask first, after only the few threads that would otherwise never be scanned. A thread whose
+ *  call got nowhere since then (an error, or a page that couldn't be trusted) waits behind every other unscanned thread,
+ *  least recently stalled first, so a thread that keeps failing can't hold the same turn pass after pass. A thread that
+ *  made progress but stopped short, at the settle margin or partway through a long backlog, keeps its place. */
+function threadOrder(threads: TrackedSource[], listeningSince: number, now: number): ThreadRecovery[] {
+  const floor = BigInt(listeningSince) * 1000n;
+  const scannedAt = (t: ThreadRecovery) => { const through = slackMicros(t.coveredThrough)!; return through >= floor ? through : -1n; };
+  const stalledAt = (t: ThreadRecovery) => (t.lastStalledAt !== undefined && t.lastStalledAt >= listeningSince ? t.lastStalledAt : -1);
+  const root = (t: ThreadRecovery) => slackMicros(t.threadTs)!;
+  return threads.sort((a, b) => {
+    const sa = scannedAt(a.source), sb = scannedAt(b.source);
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    if (sa === -1n) {
+      const qa = stalledAt(a.source), qb = stalledAt(b.source);
+      if (qa !== qb) return qa - qb;
+      const ea = a.expiresAt - now < EXPIRING_SOON_MS, eb = b.expiresAt - now < EXPIRING_SOON_MS;
+      if (ea !== eb) return ea ? -1 : 1;
+      if (ea && a.expiresAt !== b.expiresAt) return a.expiresAt - b.expiresAt;
+    }
+    if (a.waiting !== b.waiting) return a.waiting ? -1 : 1;
+    const ra = root(a.source), rb = root(b.source);
+    return ra === rb ? (a.source.key < b.source.key ? -1 : 1) : ra > rb ? -1 : 1;
+  }).map((t) => t.source);
 }
 
 function rotate<T extends { key: string }>(sources: T[], last: string | undefined): T[] {

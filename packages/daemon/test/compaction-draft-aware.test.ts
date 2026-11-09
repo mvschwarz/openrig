@@ -121,6 +121,17 @@ it("an explicit draft refusal records its existing reading without draft text", 
   expect(f.writes).toEqual([]);
 });
 
+it.each([null, { x: 0, y: 0, width: 100000, height: 60 }])("an unreadable cursor does not impose a default preparation hold (cursor=%j)", async cursor => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(cursor);
+  vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue({ ...frame(""), cursor });
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  expect(outcome).toMatchObject({ triggered: true });
+  // This is not a held send: do not invent a refusal reading in the preparation record.
+  expect(f.e.getPreparationState(seat)?.inputBox).toBeUndefined();
+  expect(f.effects()).toEqual({ compactPastes: 1, prepPastes: 1, enters: 2 });
+});
+
 it("an opted-in draft refusal also protects the managed command", async () => {
   const f = await fixture({ pane: "%1", mode: "off", refuseDraft: true });
   const send = f.transport.send.bind(f.transport);

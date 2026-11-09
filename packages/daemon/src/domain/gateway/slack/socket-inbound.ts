@@ -57,7 +57,7 @@ export interface SocketInboundDeps {
   /** How often liveness is checked (default 5s). */
   livenessCheckMs?: number;
   receipts?: InboundReceiptStore;
-  recovery?: { run(): Promise<void>; stop(): void };
+  recovery?: { run(): Promise<void>; stop(): void; connected?(): void };
   log?: (msg: string) => void;
 }
 
@@ -344,6 +344,10 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         status.unechoedPosts = 0;
         status.autoReconnectSuppressedUntil = undefined; // a new connection: nothing is held back for it
         receipt({ generation: conn.generation, status: "connected" });
+        // Live events had a gap unless this connection overlaps one Slack asked to refresh, which drains until Slack closes it.
+        const overlapped = previous && previous !== conn && previous.retired && !previous.closed &&
+          (previous.retiredFor === "refresh_requested" || previous.retiredFor === "warning");
+        if (!overlapped) deps.recovery?.connected?.();
         // A connection replaced for a failed signal is presumed broken: close it now. One Slack
         // asked to refresh stays open so it drains what it is handed, until Slack closes it.
         if (previous && previous !== conn && previous.retired && !previous.closed) {
