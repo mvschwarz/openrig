@@ -69,7 +69,7 @@ export function tileAttachArgv(
     'else view "$t" "" "$@"; seen=$?; fi;',
     'if [ "$seen" -ne 0 ] || ! here "$@"; then printf "\\033[?2004l"; stty sane 2>/dev/null; [ -z "$f" ] || rm -f "$f" "$f".*; return 1; fi;',
     'pz=; if LC_ALL=C grep -aqF -- "$b0" "$f"; then pz=1; put "$@"; fi;',
-    'me=$(tty 2>/dev/null) || me=; w=; if [ -n "$me" ]; then idle "$me" "$@" & w=$!; fi; printf "\\033[?2004l";',
+    'me=$(tty 2>/dev/null) || me=; w=; if [ -n "$me" ]; then idle "$me" "$@" & w=$!; fi;',
     'if [ -z "$pz" ] && [ -s "$f" ]; then go "$@"; else "$@" attach -t "$t"; fi;',
     'if [ -n "$w" ]; then kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; fi; rm -f "$f" "$f".*; return 0; };',
     'take() { i=0; while [ "$i" -lt 256 ]; do',
