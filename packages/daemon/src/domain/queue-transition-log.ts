@@ -798,6 +798,30 @@ export class QueueTransitionLog {
     return null;
   }
 
+  findRelayOwnerNotificationReceiptByDeliveryId(
+    deliveryId: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    const trimmed = deliveryId.trim();
+    if (!trimmed) return null;
+    const encoded = encodeReceiptToken(trimmed);
+    if (!encoded) return null;
+    const rows = this.db
+      .prepare(
+        `SELECT qitem_id, transition_note FROM ${this.historySource}
+          WHERE transition_note LIKE 'relay-owner-notification-accepted %'
+            AND instr(' ' || transition_note || ' ', ' delivery_id=' || ? || ' ') > 0
+          ORDER BY transition_id DESC`,
+      )
+      .all(encoded) as Array<{ qitem_id: string; transition_note: string }>;
+    for (const row of rows) {
+      const parsed = parseRelayOwnerNotificationAccepted(row.transition_note);
+      if (parsed && parsed.deliveryId === trimmed) {
+        return { qitemId: row.qitem_id, ...parsed };
+      }
+    }
+    return null;
+  }
+
   private rowToTransition(row: QueueTransitionRow): QueueTransition {
     return {
       transitionId: row.transition_id,

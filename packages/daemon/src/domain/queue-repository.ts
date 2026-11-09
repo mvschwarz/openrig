@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
+import { loadRelayProfiles } from "./gateway/relay-config.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -4337,6 +4338,12 @@ export class QueueRepository {
     return this.transitionLog.findRelayOwnerNotificationReceiptByReplyRef(replyRef);
   }
 
+  findRelayOwnerNotificationReceiptByDeliveryId(
+    deliveryId: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    return this.transitionLog.findRelayOwnerNotificationReceiptByDeliveryId(deliveryId);
+  }
+
   recordRelayOwnerNotificationTransportFailed(input: RecordRelayOwnerNotificationTransportFailedInput): QueueItem {
     const current = this.getByIdOrThrow(input.qitemId);
     const key = typeof input.notificationKey === "string" && input.notificationKey.trim().length > 0
@@ -5131,13 +5138,21 @@ export class QueueRepository {
       : item.state === "blocked"
         ? resolveRegisteredHumanAddress(item.blockedOn, registry.entities)
         : resolveRegisteredHumanAddress(item.destinationSession, registry.entities);
+    const entity = humanAddress ? registry.entities.find((entry) => entry.address === humanAddress) : undefined;
     // A person with no connector is reached in the Feed and Steering only: nothing is posted to them, so nothing is owed.
-    if (humanAddress && registry.entities.find((entity) => entity.address === humanAddress)?.connectorBindings.length === 0) return "inactive";
+    if (entity?.connectorBindings.length === 0) return "inactive";
+    // A ready pull-mode relay has no required polling cadence (#2742): waiting to be pulled is not a missing post.
+    const primary = entity?.connectorBindings.find((b) => b.role === "primary") ?? entity?.connectorBindings[0];
+    const pullRelay = primary?.kind === "relay"
+      && (() => {
+        const p = loadRelayProfiles(undefined, { entities: registry.entities }).get(primary.connectorRef);
+        return p?.ready === true && p.mode === "pull";
+      })();
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
     // dial set to RECORD posts it) and never a missing one.
     return humanAddress
       ? { notificationKey: `${item.qitemId}:${transition.transitionId}`, startedAt: transition.ts,
-          ...(transition.ownerNotificationLevel === "RECORD" ? { quiet: true as const } : {}) }
+          ...(transition.ownerNotificationLevel === "RECORD" || pullRelay ? { quiet: true as const } : {}) }
       : "inactive";
   }
 

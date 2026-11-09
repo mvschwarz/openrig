@@ -12,20 +12,24 @@ import {
   type SecretFsOps,
 } from "./slack/secrets.js";
 
+export type RelayMode = "push" | "pull";
+
 export const RELAY_ENV_KEYS = {
+  mode: "OPENRIG_RELAY_MODE",
   url: "OPENRIG_RELAY_URL",
   outboundToken: "OPENRIG_RELAY_OUTBOUND_TOKEN",
   inboundToken: "OPENRIG_RELAY_INBOUND_TOKEN",
 } as const;
 
 export interface RelayCredentials {
-  readonly url: string;
-  readonly outboundToken: string;
+  readonly url: string | null;
+  readonly outboundToken: string | null;
   readonly inboundToken: string;
 }
 
 export interface RelayProfileReadiness {
   readonly connectorRef: string;
+  readonly mode: RelayMode;
   readonly state: "ready" | "not-ready";
   readonly configured: boolean;
   readonly ready: boolean;
@@ -137,7 +141,11 @@ export function validateRelayUrl(
   return { ok: true, url: parsed.toString() };
 }
 
-function createPrivateCredentials(url: string, outboundToken: string, inboundToken: string): RelayCredentials {
+function createPrivateCredentials(
+  url: string | null,
+  outboundToken: string | null,
+  inboundToken: string,
+): RelayCredentials {
   const creds = { url, outboundToken, inboundToken };
   Object.defineProperty(creds, "toJSON", { value: () => "[REDACTED]", enumerable: false });
   Object.defineProperty(creds, Symbol.for("nodejs.util.inspect.custom"), {
@@ -165,6 +173,7 @@ function checkRelaySecretFilePermissions(
 
 interface CandidateProfile {
   connectorRef: string;
+  mode: RelayMode;
   secretsRef: string | null;
   envFile: string | null;
   endpointUrl: string | null;
@@ -172,8 +181,8 @@ interface CandidateProfile {
   nextAction: string | null;
   warnings: string[];
   unreadyReason?: string;
-  url?: string;
-  outboundToken?: string;
+  url?: string | null;
+  outboundToken?: string | null;
   inboundToken?: string;
 }
 
@@ -190,8 +199,10 @@ function evaluateRelayCandidate(
     secretsRef: string | null = firstHuman.secretsRef,
     envFile: string | null = null,
     nextAction: string = defaultNextAction,
+    relayMode: RelayMode = "push",
   ): CandidateProfile => ({
     connectorRef,
+    mode: relayMode,
     secretsRef,
     envFile,
     endpointUrl: null,
@@ -242,9 +253,44 @@ function evaluateRelayCandidate(
   }
 
   const parsedEnv = parseEnvFile(rawText);
+  const rawMode = (parsedEnv[RELAY_ENV_KEYS.mode] ?? "").trim();
+  if (rawMode !== "" && rawMode !== "push" && rawMode !== "pull") {
+    return fail(
+      `relay profile '${connectorRef}' has invalid ${RELAY_ENV_KEYS.mode} (must be 'push' or 'pull')`,
+      secretsRef,
+      envFile!,
+    );
+  }
+  const relayMode: RelayMode = rawMode === "pull" ? "pull" : "push";
+
   const rawUrl = (parsedEnv[RELAY_ENV_KEYS.url] ?? "").trim();
   const outboundToken = (parsedEnv[RELAY_ENV_KEYS.outboundToken] ?? "").trim();
   const inboundToken = (parsedEnv[RELAY_ENV_KEYS.inboundToken] ?? "").trim();
+
+  if (relayMode === "pull") {
+    if (!inboundToken || /[\r\n\0]/.test(inboundToken)) {
+      return fail(
+        `relay profile '${connectorRef}' is missing ${RELAY_ENV_KEYS.inboundToken}`,
+        secretsRef,
+        envFile!,
+        defaultNextAction,
+        "pull",
+      );
+    }
+    return {
+      connectorRef,
+      mode: "pull",
+      secretsRef,
+      envFile: envFile!,
+      endpointUrl: null,
+      humans,
+      nextAction: defaultNextAction,
+      warnings,
+      url: null,
+      outboundToken: null,
+      inboundToken,
+    };
+  }
 
   if (!rawUrl) {
     return fail(`relay profile '${connectorRef}' is missing ${RELAY_ENV_KEYS.url}`, secretsRef, envFile!);
@@ -272,6 +318,7 @@ function evaluateRelayCandidate(
 
   return {
     connectorRef,
+    mode: "push",
     secretsRef,
     envFile: envFile!,
     endpointUrl: urlVerdict.url,
@@ -287,13 +334,17 @@ function evaluateRelayCandidate(
 function buildRelayProfile(c: CandidateProfile): RelayProfile {
   const ready = !c.unreadyReason;
   const frozenWarnings = Object.freeze([...c.warnings]);
-  const baseVerifiedReason = "relay profile verified (loopback HTTP endpoint and directional tokens configured)";
+  const baseVerifiedReason =
+    c.mode === "pull"
+      ? "relay profile verified (pull outbox mode and inbound token configured)"
+      : "relay profile verified (loopback HTTP endpoint and directional tokens configured)";
   const readyReason =
     frozenWarnings.length > 0
       ? `${baseVerifiedReason}; warning: ${frozenWarnings.join("; ")}`
       : baseVerifiedReason;
   const readiness: RelayProfileReadiness = Object.freeze({
     connectorRef: c.connectorRef,
+    mode: c.mode,
     state: ready ? "ready" : "not-ready",
     configured: ready,
     ready,
@@ -301,7 +352,9 @@ function buildRelayProfile(c: CandidateProfile): RelayProfile {
     nextAction: ready ? null : c.nextAction,
     warnings: frozenWarnings,
   });
-  const credentials = ready ? createPrivateCredentials(c.url!, c.outboundToken!, c.inboundToken!) : null;
+  const credentials = ready
+    ? createPrivateCredentials(c.url ?? null, c.outboundToken ?? null, c.inboundToken!)
+    : null;
   const profile = {
     ...readiness,
     secretsRef: c.secretsRef,

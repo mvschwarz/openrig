@@ -881,6 +881,114 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(releasedKeys).toEqual(["q-seen-1:1"]);
   });
 
+  it("retains pull-mode decisions in DispatchBuffer without HTTP POST or transport-failed notes, and finishes partial digest receipts on replay", async () => {
+    const fsx = memFs();
+    const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
+    const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
+    const outboundSeen = new SeenStore("/state/slack-outbound-seen.jsonl", fsx);
+    const bridge = recordingBridgeFixture();
+    const receipts: RelayAcceptedReceiptInfo[] = [];
+    const releasedKeys: string[] = [];
+    const failedNotes: Array<{ failureClass: string; detail: string }> = [];
+    const acceptedInDb = new Set<string>();
+
+    const transport = createRelayOutboundTransport({
+      attempted,
+      delivered,
+      outboundSeen,
+      fetchImpl: bridge.fetchImpl,
+      resolveProfile: (connectorRef) => ({
+        ok: true,
+        connectorRef,
+        mode: "pull",
+        url: null,
+        outboundToken: null,
+      }),
+      hasAcceptedReceipt: ({ qitemId, notificationKey }) => acceptedInDb.has(`${qitemId}:${notificationKey}`),
+      onAccepted: (info) => {
+        receipts.push(info);
+        acceptedInDb.add(`${info.qitemId}:${info.notificationKey}`);
+      },
+      onTransportFailed: (_p, failureClass, detail) => failedNotes.push({ failureClass, detail }),
+      release: (key) => releasedKeys.push(key),
+    });
+
+    const wire = buildInProcessWire({
+      home,
+      ops: [OUTBOUND_OP],
+      deliver: (d) => transport.deliver(d),
+    });
+
+    const digestPayload: RelayPayloadCarry & OutboundPostPayload = {
+      deliveryDigestPost: true,
+      digestId: "pull-dig-1",
+      qitemId: "q-pull-1",
+      notificationKey: "digest:alice@external:pull",
+      ownerNotificationKind: "human-required",
+      ownerNotificationLevel: "INFO",
+      humanIntent: "update",
+      destinationSession: "alice@external",
+      summary: "Pull digest summary",
+      body: "Item 1\nItem 2",
+      relayConnectorRef: "wa-pull",
+      relayEnvelope: {
+        v: 1,
+        deliveryId: "dec-pull-dig-1",
+        recipient: { handle: "alice_wa" },
+        intent: "update",
+        outcome: "digest",
+        summary: "Pull digest summary",
+        body: "Item 1\nItem 2",
+        replyRef: null,
+        items: [
+          {
+            qitemId: "q-pull-1",
+            notificationKey: "q-pull-1:1",
+            summary: "Item 1",
+            body: "Item 1 body",
+            replyRef: null,
+          },
+          {
+            qitemId: "q-pull-2",
+            notificationKey: "q-pull-2:1",
+            summary: "Item 2",
+            body: "Item 2 body",
+            replyRef: null,
+          },
+        ],
+      },
+      memberReceipts: [
+        { qitemId: "q-pull-1", notificationKey: "q-pull-1:1", level: "INFO" },
+        { qitemId: "q-pull-2", notificationKey: "q-pull-2:1", level: "INFO" },
+      ],
+    };
+
+    wire.dispatcher.dispatch(OUTBOUND_OP, "alice@external", digestPayload, {
+      decisionId: "dec-pull-dig-1",
+    });
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts).toHaveLength(0);
+    expect(attempted.load().has("dec-pull-dig-1")).toBe(true);
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(false);
+    expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+
+    // Simulate partial receipt from a prior interrupted ack (first digest item receipted, second not yet)
+    acceptedInDb.add("q-pull-1:q-pull-1:1");
+    wire.startServices?.();
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts.map((r) => `${r.qitemId}:${r.notificationKey}`)).toEqual(["q-pull-2:q-pull-2:1"]);
+    expect(acceptedInDb.has("q-pull-1:q-pull-1:1")).toBe(true);
+    expect(acceptedInDb.has("q-pull-2:q-pull-2:1")).toBe(true);
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(true);
+    expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+  });
+
   describe("resolvePrimaryRelayBinding exact address requirements", () => {
     const reg = {
       ok: true as const,
