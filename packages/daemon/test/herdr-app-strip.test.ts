@@ -49,7 +49,7 @@ describe("rig-strip acknowledgement", () => {
     expect(JSON.parse(host.writes[0]!.text)).toMatchObject({ revision: "r-1", terminals: ["t7"] });
   });
 
-  it("still acknowledges when reading ack.json fails (a first write is never skipped)", async () => {
+  it("still attempts the acknowledgement write when reading ack.json fails (whether herdr-app accepts that write is not simulated)", async () => {
     const host = hostFor(async () => { throw new Error("Text file exceeds 1 MiB"); });
     strip(host).acknowledge();
     await settle();
