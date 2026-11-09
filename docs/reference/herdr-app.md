@@ -98,7 +98,9 @@ running and named in the result.
 If a viewer ends some other way (killed outside OpenRig, herdr-core restarted), OpenRig rewrites its cell as an
 ended cell straight away. Views OpenRig recorded keep that owner across a daemon restart: when the daemon starts, it
 reconciles each app home it has views in (a viewer that ended while it was down is rewritten then) and finishes any
-pending ends. Stopping the daemon ends only its own `hc events` watcher and timers; viewers and views stay.
+pending ends. If `hc events` can't run (herdr-core missing or down), the watcher tries again after 5 s, then waits
+twice as long each time, up to 5 minutes. Stopping the daemon ends only its own `hc events` watcher and timers; viewers
+and views stay.
 
 ## Which herdr-core
 

@@ -2955,9 +2955,13 @@ export function createHerdrAppWatcher(opts: {
   reconcileAll: () => void;
   spawnFn?: typeof spawn;
   retryMs?: number;
+  maxRetryMs?: number;
 }): (() => void) & { stop(): void } {
   const spawnChild = opts.spawnFn ?? spawn;
   const retryMs = opts.retryMs ?? 5_000;
+  const maxRetryMs = opts.maxRetryMs ?? 5 * 60_000;
+  // Doubles after each child that ends without output (hc missing or failing), back to retryMs once one reports.
+  let nextRetryMs = retryMs;
   let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
   let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
   let herdrAppRetry: ReturnType<typeof setTimeout> | null = null;
@@ -2967,6 +2971,7 @@ export function createHerdrAppWatcher(opts: {
     const child = spawnChild("hc", ["events", "--json", "--label", `openrig.daemon=${opts.daemonInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: opts.env });
     herdrAppEvents = child;
     child.stdout?.on("data", () => {
+      nextRetryMs = retryMs;
       if (herdrAppReconcile) return;
       herdrAppReconcile = setTimeout(() => {
         herdrAppReconcile = null;
@@ -2978,7 +2983,8 @@ export function createHerdrAppWatcher(opts: {
       if (herdrAppEvents !== child) return;
       herdrAppEvents = null;
       if (stopped) return;
-      herdrAppRetry = setTimeout(() => { herdrAppRetry = null; watchHerdrApp(); }, retryMs);
+      herdrAppRetry = setTimeout(() => { herdrAppRetry = null; watchHerdrApp(); }, nextRetryMs);
+      nextRetryMs = Math.min(nextRetryMs * 2, maxRetryMs);
       herdrAppRetry.unref?.();
     };
     child.on("error", restart);

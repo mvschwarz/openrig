@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -774,6 +774,41 @@ describe("HerdrAppProvider: every viewer it starts is ended or still tracked", (
     second.stdout.emit("data", Buffer.from("{}\n"));
     await new Promise((r) => setTimeout(r, 230));
     expect(reconciled).toBe(1);
+  });
+
+  it("watchHerdrApp backs off while hc keeps failing, up to a cap, and starts over once a child reports", async () => {
+    const { EventEmitter } = await import("node:events");
+    const { createHerdrAppWatcher } = await import("../src/startup.js");
+    const spawned: Array<InstanceType<typeof EventEmitter> & { stdout: InstanceType<typeof EventEmitter> }> = [];
+    const spawnFn = (() => {
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), unref: () => {} });
+      spawned.push(child);
+      return child as unknown as import("node:child_process").ChildProcess;
+    }) as unknown as typeof import("node:child_process").spawn;
+    vi.useFakeTimers();
+    try {
+      const watch = createHerdrAppWatcher({ daemonInstance: "inst1", env: {}, reconcileAll: () => {}, spawnFn, retryMs: 100, maxRetryMs: 400 });
+      watch();
+      // Each failing child waits twice as long as the one before, up to the cap: 100, 200, 400, 400 ms.
+      const waits: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const before = spawned.length;
+        spawned.at(-1)!.emit("error", Object.assign(new Error("spawn hc ENOENT"), { code: "ENOENT" }));
+        let waited = 0;
+        while (spawned.length === before && waited < 1_000) { await vi.advanceTimersByTimeAsync(10); waited += 10; }
+        waits.push(waited);
+      }
+      expect(waits).toEqual([100, 200, 400, 400]);
+      // A child that reports resets it.
+      spawned.at(-1)!.stdout.emit("data", Buffer.from("{}\n"));
+      const before = spawned.length;
+      spawned.at(-1)!.emit("exit", 1, null);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(spawned.length).toBe(before + 1);
+      watch.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
