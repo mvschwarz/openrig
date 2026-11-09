@@ -710,7 +710,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const authored = parts;
     /** The parts a plan renders to, preflighted; with no plan, decide one from the real render. */
     const choose = (kept?: DeliveryPlan) => {
-      const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
+      // A post marked as made without the person's quiet hours never mentions them, whatever a recovered read or a saved
+      // plan would say: it's permission to deliver, not to alert. The plan's cuts and part ids stay as they are.
+      const mention = q.quietUnreadable ? undefined : kept ? kept.mention : opts.resolveMentionUserId?.(q);
       const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
       // A kept plan checks only the parts still to post: delivered parts are acknowledged, never rendered again.
       const delivered = kept ? opts.delivered.load() : new Set<string>();

@@ -391,8 +391,11 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
 - **If quiet hours can't be read,** that isn't a quiet window. An ask that would post goes to its usual destination with
   no mention, and the post says "OpenRig couldn't read your quiet hours."; the ask's row records it. The person's other
   delivery settings still decide: an escalation, a digest, an ask below the posting level, and a quiet window that can be
-  read work as before. This covers ordinary posts, digests and the release when quiet ends. A person reached through a
-  relay waits until their quiet hours can be read, as before, because that post can't carry the line.
+  read work as before. This covers ordinary posts and digests, and asks already held for quiet hours: while the quiet
+  hours can't be read, the next release check (within about a minute) posts each of them, with no mention and the same
+  line, even if the window may still be on. The line is supplementary: a post at Slack's text or block limit leaves it
+  out, and the ask's row and `rig slack post-open-asks` still say the quiet hours couldn't be read. A person reached
+  through a relay waits until their quiet hours can be read, as before, because that post can't carry the line.
 
 ## Reconnect recovery and status
 

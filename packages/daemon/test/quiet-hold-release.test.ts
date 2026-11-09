@@ -933,6 +933,46 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(notes(urgent).some((n) => n.startsWith("slack-quiet-unreadable "))).toBe(false);
   });
 
+  it("X-F1: a marked post never mentions, even when the read recovers between the decision and the render", async () => {
+    const row = await ask({ destinationSession: "other@external" }); // alerted: with quiet off it would interrupt
+    const alert = await alertFor(row);
+    const w = wire();
+    const real = HumanQuietStore.prototype.quietStateFor;
+    // The decision's read fails; once the row records the mark (before the render), the read recovers with quiet off.
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(function (this: HumanQuietStore, entityId: string, now: Date) {
+      if (!notes(row).some((n) => n.startsWith("slack-quiet-unreadable "))) throw new Error("disk I/O error (test)");
+      return real.call(this, entityId, now);
+    });
+    try {
+      w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(alert));
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(String(posts[0]!.text), "the marked post doesn't mention").not.toContain("UOTHER");
+  });
+
+  it("X-F1: a replay whose saved plan has a mention (its first attempt absent) posts marked, unmentioned, as the same decision", async () => {
+    const row = await ask({ destinationSession: "other@external" }); // alerted: the first attempt, quiet off, plans a mention
+    const first = wire();
+    failPosts = true; // the connector is down before the post: nothing reached Slack
+    first.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    failPosts = false;
+    expect(posts).toHaveLength(0);
+    const [original] = new DispatchBuffer(home).pending();
+    const read = quietUnreadable();
+    try {
+      restart(first); // the replay: quiet hours can't be read, and the saved plan carries the mention
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(String(posts[0]!.text), "the saved mention isn't used on a marked post").not.toContain("UOTHER");
+    expect(String(posts[0]!.text), "the same decision").toContain(`(or-mark:${original!.decisionId})`);
+    expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+  });
+
   it("O1: a partly posted ask replayed while quiet hours can't be read finishes as itself, once", async () => {
     const { row, first } = await partlyPosted();
     const read = quietUnreadable();
