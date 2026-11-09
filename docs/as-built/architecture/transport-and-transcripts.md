@@ -169,9 +169,14 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
      posture, one for each mode OpenRig can launch: bypass
      (`⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents`), accept
      edits (OpenRig's default), auto, don't ask, plan, and default
-     (`⏸ manual mode on · ← for agents`); no statusLine row between the
-     closing rule and the footer (OpenRig's statusLine collector prints
-     nothing); a blank, effort or tmux-notice row above the box; and above
+     (`⏸ manual mode on · ← for agents`); between the closing rule and the
+     footer, either no row (OpenRig's statusLine collector prints nothing) or
+     the rows a person's own statusLine prints, trusted only by position, as
+     the composer reader trusts them (#2703, #2798): the closing rule is the
+     first rule above the footer, the frame above it must check out, and no
+     row between them may be blank or look like a menu or dialog (`❯`, `›` or
+     `»` anywhere, a numbered choice past a border or gutter, a box corner, or
+     side borders); a blank, effort or tmux-notice row above the box; and above
      that, in the status slot, the completion row of the seat's last turn
      (`✻ <verb> for <duration> · done <time>` at column 0, matched by the
      Claude Code 2.1.296 bundle's grammar: one of its eight past-tense verbs,
@@ -204,10 +209,11 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
      status row, `esc to interrupt`, `paste again to expand`, a queued label,
      Codex's pending-input headers or `↳` rows, a spinner). Any other frame,
      including every running, streaming, steer-preview, paste-hint or unknown
-     layout, another seat's name, a statusLine that prints a row, a background
-     shell in the footer and a fullscreen renderer with a statusLine (which
-     reserves a row for it), reads `seat: not-idle` or
-     `unknown`, and the send reads unconfirmed. This holds when a running turn
+     layout, another seat's name, a rule or a blank, prompt-, menu- or
+     dialog-shaped row between the closing rule and the footer (so a
+     fullscreen renderer that reserves a blank row for the statusLine reads
+     as before), and a background shell in the footer, reads
+     `seat: not-idle` or `unknown`, and the send reads unconfirmed. This holds when a running turn
      hides its signal (Codex hides its `• Working` row while it streams;
      Claude Code shows only `paste again to expand` in its footer for 8 s
      after a paste, and no `esc to interrupt` under a statusLine). So a send to

@@ -1715,7 +1715,6 @@ const SEAT_IDLE_SHAPES: {
   claude: {
     openingRules: { plain: RegExp; named: (sessionName: string) => RegExp };
     footers: Record<"bypassPermissions" | "acceptEdits" | "auto" | "dontAsk" | "plan" | "default", string>;
-    statusLineRows: string[];
     boxes: RegExp[];
     notices: string[];
     statusSlot: Record<"finishedTurn" | "freshSession", RowShape>;
@@ -1750,11 +1749,13 @@ const SEAT_IDLE_SHAPES: {
       plan: "⏸ plan mode on (shift+tab to cycle) · ← for agents",
       default: "⏸ manual mode on · ← for agents",
     },
-    // The rows OpenRig's statusLine collector (provisionContextCollector, assets/claude-statusline-context.cjs) draws
-    // between the closing rule and the footer: none. It prints nothing to stdout, and Claude Code 2.1.296 draws no
-    // row for an empty statusLine in the classic renderer OpenRig launches with (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1).
-    // A statusLine that prints anything (a person's own command) is not on this list.
-    statusLineRows: [],
+    // No rows list the statusLine between the closing rule and the footer. OpenRig's collector
+    // (provisionContextCollector, assets/claude-statusline-context.cjs) prints nothing to stdout, and Claude Code
+    // 2.1.296 draws no row for an empty statusLine in the classic renderer OpenRig launches with
+    // (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1), so the footer sits right under the closing rule. A person's own
+    // statusLine command (kept by provisionContextCollector) prints rows there that no list can name, so
+    // claudeSeatIdle trusts them by position, as findClaudeComposer does since #2703, except the rows it rules out
+    // (CLAUDE_NOT_STATUS_LINE_ROW: blank, prompt-, menu- or dialog-shaped) (#2798).
     // The one row between the box's two rules: empty (after-enter-15s.J), or the Try suggestion (idle-fresh-suggestion).
     boxes: [/^❯$/, /^❯\s+Try "[^"]*"$/],
     // The row just above the opening rule: blank (after-enter-15s.J), the effort row (idle-fresh-suggestion), or a
@@ -1808,18 +1809,28 @@ const SEAT_IDLE_SHAPES: {
   },
 };
 
+// A row between the closing rule and the footer that a statusLine does not print, or that a menu, picker or dialog
+// could be drawing: blank (a fullscreen renderer reserves a row for a statusLine that prints nothing), a prompt glyph
+// anywhere, a numbered choice past a border or gutter, a box corner, or a row framed by side borders.
+const CLAUDE_NOT_STATUS_LINE_ROW = /^\s*$|[❯›»╭╮╰╯┌┐└┘]|^[\s│┃⎿]*\d+[.)]\s|^\s*[│┃].*[│┃]\s*$/;
+
 function claudeSeatIdle(lines: string[], sessionName?: string): boolean {
   const idle = SEAT_IDLE_SHAPES.claude;
   let footer = lines.length - 1;
   while (footer >= 0 && !lines[footer]!.trim()) footer--;
-  const closing = footer - 1 - idle.statusLineRows.length;
-  if (closing < 4) return false;
+  if (footer < 0 || !Object.values(idle.footers).includes(lines[footer]!.trim())) return false;
+  // The closing rule is the first rule above the footer. The rows between them are a statusLine's (#2798), trusted
+  // by position, as findClaudeComposer trusts them (#2703): the frame above must check out below, and none of them
+  // may be a row a statusLine does not print or a menu could draw (CLAUDE_NOT_STATUS_LINE_ROW); a rule among them is
+  // taken as the closing rule, so the frame check fails there.
+  let closing = footer - 1;
+  while (closing >= 0 && !rule(lines[closing]!)) closing--;
+  if (closing < 4 || lines.slice(closing + 1, footer).some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row))) return false;
   const width = (row: string) => [...row].length;
   const plainRule = (row: string) => idle.openingRules.plain.test(row);
   const openingRule = (row: string) => plainRule(row)
     || (!!sessionName && idle.openingRules.named(sessionName).test(row) && width(row) === width(lines[closing]!));
-  return Object.values(idle.footers).includes(lines[footer]!.trim())
-    && idle.statusLineRows.every((row, i) => lines[closing + 1 + i]!.trim() === row) && plainRule(lines[closing]!)
+  return plainRule(lines[closing]!)
     && idle.boxes.some((box) => box.test(lines[closing - 1]!)) && openingRule(lines[closing - 2]!)
     && idle.notices.includes(lines[closing - 3]!.trim()) && claudeStatusSlotIdle(lines, closing - 4);
 }
