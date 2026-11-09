@@ -1002,6 +1002,23 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(repo.getById(row.qitemId)!.state, "the ask stays open on Steering").toBe(state);
   });
 
+  it("a held ask whose person has no connector closes with no-connector even when quiet hours can't be read at release", async () => {
+    const row = await ask({ destinationSession: "other@external" });
+    quietOnFor("other");
+    const w = wire();
+    w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    const state = repo.getById(row.qitemId)!.state;
+    unbound.add("other");
+    const read = quietUnreadable();
+    try { await release(); } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(0);
+    expect(notes(row).find((n) => n.startsWith("quiet-release-disposition "))).toMatch(/ reason=no-connector$/);
+    expect(notes(row).some((n) => n.startsWith("slack-quiet-unreadable "))).toBe(false);
+    expect(repo.getById(row.qitemId)!.state, "the ask stays open on Steering").toBe(state);
+  });
+
   it("review 5: outside quiet, a partly posted ask replayed after a restart finishes as before", async () => {
     const { row, first } = await partlyPosted();
     restart(first);
