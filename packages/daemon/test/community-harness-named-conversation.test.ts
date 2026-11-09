@@ -30,7 +30,7 @@ describe("a community harness whose conversation OpenRig names", () => {
     const first = await app.launchHarness(binding, { name: "dev-impl@my-rig" });
     expect(first).toMatchObject({ ok: true, resumeType: "community:synth", resumeProvenance: "passed", resumeToken: expect.stringMatching(/^openrig-dev-impl-my-rig-[0-9a-f]{8}$/) });
     const name = (first as { resumeToken: string }).resumeToken;
-    expect(typed(sendShellCommand)).toBe(`/usr/bin/env OPENRIG_CONVERSATION='${name}' synth-launch`);
+    expect(typed(sendShellCommand)).toBe(`/usr/bin/env OPENRIG_CONVERSATION='${name}' /usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-launch`);
     // A second launch gets its own name, so two seats never share a conversation.
     expect(await app.launchHarness(binding, { name: "dev-impl@my-rig" })).not.toMatchObject({ resumeToken: name });
     expect(communityHarnessLabel("synth", presets, { resumeType: "community:synth", resumeToken: name, resumeProvenance: "passed" }))
@@ -41,7 +41,7 @@ describe("a community harness whose conversation OpenRig names", () => {
     const { app, sendShellCommand } = seat(`${PRESET}resume: true\n`);
     expect(await app.launchHarness(binding, { name: "dev-impl@my-rig", resumeToken: "openrig-dev-impl-1a2b3c4d", resumeType: "community:synth" }))
       .toEqual({ ok: true, resumeToken: "openrig-dev-impl-1a2b3c4d", resumeType: "community:synth", resumeProvenance: "passed" });
-    expect(typed(sendShellCommand)).toBe("/usr/bin/env OPENRIG_RESUME_REF='openrig-dev-impl-1a2b3c4d' synth-launch");
+    expect(typed(sendShellCommand)).toBe("/usr/bin/env OPENRIG_RESUME_REF='openrig-dev-impl-1a2b3c4d' /usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-launch");
   });
 
   it.each([

@@ -512,6 +512,36 @@ describe("findSlice + resolution variants", () => {
   it("3-part error when slice not found (HG-10)", () => {
     expect(() => findSlice(missionsRoot, "99-missing", "release-0.3.2")).toThrow(/not found/);
   });
+
+  it("O2: an absolute slice in another workspace's missions tree names the --workspace that selects it", () => {
+    const project = path.join(root, "projects", "alpha");
+    const slice = path.join(project, "missions", "m1", "slices", "01-x");
+    writeFile(path.join(project, "missions", "m1", "SPEC.md"), "---\nid: ALPHA.99.0.1\n---\nbody");
+    writeFile(path.join(slice, "SPEC.md"), "---\nid: ALPHA.99.0.1.1\n---\nbody");
+    let error: unknown;
+    try { findSlice(missionsRoot, slice); } catch (err) { error = err; }
+    expect(error).toBeInstanceOf(ScopeCliError);
+    expect((error as ScopeCliError).fact).toBe(`Slice path "${slice}" resolved to ${slice} but no parent mission was found.`);
+    expect((error as ScopeCliError).action).toBe(
+      `The slice is in another workspace's missions tree (${path.join(project, "missions")}), not under ${missionsRoot}. `
+      + `Select that tree with the parent --workspace option, for example: rig scope --workspace '${project}' slice <verb> '${slice}'`,
+    );
+    // The named option works: that workspace resolves the slice.
+    expect(findSlice(resolveMissionsRoot({ override: project, strictOverride: true }), slice).id).toBe("ALPHA.99.0.1.1");
+  });
+
+  it("O2: a slice outside any missions tree keeps the old advice and adds the --workspace route", () => {
+    const scratch = path.join(root, "07-target");
+    fs.mkdirSync(scratch);
+    expect(() => findSlice(missionsRoot, scratch)).toThrow(
+      "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/. For a slice in another workspace, such as a catalog project, "
+      + "select its tree with the parent option: rig scope --workspace <project root> slice <verb> <slice-path>",
+    );
+  });
+
+  it("O2: a mission not found names the --workspace route", () => {
+    expect(() => findMission(missionsRoot, "absent")).toThrow("rig scope --workspace <project root> mission <verb> <mission>");
+  });
 });
 
 describe("BC-2 BLOCK 2 — findMission rejects README-less directories", () => {

@@ -122,7 +122,7 @@ const CHANNEL_MAP_APPLY =
 const POST_OPEN_ASKS = "`rig slack post-open-asks`";
 
 type OpenAskOutcome = "posted" | "already-posted" | "queued" | "held" | "below-floor" | "no-longer-active" | "superseded"
-  | "recipient-changed" | "state-unavailable" | "transport-failed" | "uncertain";
+  | "recipient-changed" | "no-connector" | "state-unavailable" | "transport-failed" | "uncertain";
 interface OpenAsk { qitemId: string; recipient: string; summary: string | null; outcome: OpenAskOutcome; detail?: string }
 interface PostOpenAsksResponse { ok: boolean; asks: OpenAsk[] }
 
@@ -135,6 +135,7 @@ const OUTCOME_LABEL: Record<OpenAskOutcome, string> = {
   "no-longer-active": "no longer active",
   superseded: "superseded",
   "recipient-changed": "recipient changed",
+  "no-connector": "no connector (Steering and the Feed only)",
   "state-unavailable": "state unavailable",
   "transport-failed": "transport failed",
   uncertain: "uncertain",
@@ -258,7 +259,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
             channels?: Array<{ channel?: string | null; state?: string; reason?: string; lastScanAt?: string;
               coverage?: { coverageStart: string; coveredThrough: string; nextRetryAt?: number } | null }>;
-            threads?: { state?: string; reason?: string; tracked?: number; scanned?: number; pending?: number; oldestPendingSeconds?: number | null;
+            threads?: { state?: string; reason?: string; tracked?: number; scanned?: number; pending?: number; settled?: number; settledRescanHours?: number; oldestPendingSeconds?: number | null;
               backoff?: Record<string, number>; incomplete?: Record<string, number> };
             limits?: string[] } } | undefined;
         if (connector) {
@@ -288,6 +289,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             const behind = threads.oldestPendingSeconds != null ? ` (oldest ${Math.round(threads.oldestPendingSeconds / 60)} min behind)` : "";
             log(`  Thread recovery: ${threads.state ?? "unknown"}${threads.reason ? ` (${threads.reason})` : ""}; ${threads.tracked ?? 0} tracked (open, or closed within seven days); `
               + `${threads.scanned ?? 0} scanned, ${threads.pending ?? 0} waiting their turn${behind}`
+              + `${threads.settled ? `, ${threads.settled} settled (nobody waiting; rescanned ${!threads.settledRescanHours || threads.settledRescanHours === 24 ? "daily" : `every ${threads.settledRescanHours} hours`})` : ""}`
               + `${reasons(threads.backoff) ? `; backing off: ${reasons(threads.backoff)}` : ""}${reasons(threads.incomplete) ? `; incomplete: ${reasons(threads.incomplete)}` : ""}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);

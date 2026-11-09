@@ -126,6 +126,10 @@ export class SeatLaunchEnvironment {
     codexHome?: string;
     accountHome?: string | null;
     launchWrapper?: readonly string[];
+    /** Community launcher assignments precede the wrapper and native command. */
+    launcherPrefix?: string;
+    /** A runner may wrap its child while still requiring a verified launch environment itself. */
+    failClosed?: true;
     /** A pinned Claude command already names its executable. */
     claudeShellLookup?: false;
     /** In-place restart only: the shell that will run this command. The pane foreground is the running agent, so it is not probed. Set => a refusal throws. */
@@ -147,11 +151,12 @@ export class SeatLaunchEnvironment {
     const codexEnv = target.codexCwd !== undefined
       ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean)
       : [];
-    const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
+    const program = (target.launcherPrefix ?? "") + command;
+    const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${program}` : program;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       const shell = path.basename(target.launchShell ?? await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
-      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing || wrapped) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
+      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing || wrapped || target.failClosed) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
       if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
         throw new Error("Unsupported Pi pane shell");
@@ -220,14 +225,20 @@ export class SeatLaunchEnvironment {
         ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${prefix}${command}`;
+      // A long Pi command is exec'd from a staged script, and exec takes one command: `exec unset …; …` started no agent.
+      // Its account step goes to env as -u instead (the selected home is already an assignment above).
+      if (target.runtime === "pi" && accountStep) {
+        const unset = [...(clearing && homeVar ? [homeVar] : []), ...(accountHome || selectedPiHome ? scrub : [])];
+        return `/usr/bin/env ${unset.map((name) => `-u ${name}`).join(" ")} ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${target.launcherPrefix ?? ""}${prefix}${command}`;
+      }
+      return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${target.launcherPrefix ?? ""}${prefix}${command}`;
     } catch {
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.
-      console.warn(wrapped ? "[seat launch] launch_wrapper unavailable; no agent started."
+      console.warn(wrapped || target.failClosed ? "[seat launch] launch_wrapper unavailable; no agent started."
         : accountHome || clearing ? "[seat launch] Isolated account launch unavailable; no agent started."
         : "[seat launch] Environment correction unavailable; using the previous launch command.");
-      if (target.launchShell !== undefined) throw new Error("launch_wrapper unavailable; no agent started.");
+      if (target.launchShell !== undefined || target.failClosed) throw new Error("launch_wrapper unavailable; no agent started.");
       return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
         : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"
         : fallback;

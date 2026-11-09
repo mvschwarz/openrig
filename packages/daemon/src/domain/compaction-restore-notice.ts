@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { UNREADABLE_POLLS_BEFORE_DELIVERY, type RestoreDeliveryFailure } from "./claude-compaction-enforcer.js";
+import { type PreparationFailure, type RestoreDeliveryFailure } from "./claude-compaction-enforcer.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { workflowHumanDestination } from "./workflow-human-destination.js";
@@ -10,21 +11,46 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
   const { sessionName, attemptId, lastDelivery } = failure;
   const qitemId = `qitem-compaction-restore-${attemptId}`;
   const reason = [lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass].filter(Boolean).join("; ");
-  const summary = `Managed restore for ${sessionName}: ${lastDelivery.stage} undeliverable (${reason})`;
+  const summary = `Managed restore for ${sessionName}: ${lastDelivery.stage} ${lastDelivery.ok ? "delivered over an unreadable pane" : `undeliverable (${reason})`}`;
+  const possibleWriteHold = lastDelivery.reason === "input_box_not_empty"
+    ? "This step waits because this attempt's /compact may be waiting unsubmitted in the input box, where Enter could submit it; inspect the pane and clear or submit that text so the next poll can retry this restore step. If the box can't be read, cancel and restore by hand using the route below. "
+    : "";
   const existing = queue.getById(qitemId);
   if (existing) {
     // An owner's closed disposition stands. Changed evidence updates the same row without another wake.
     if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary) {
-      queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: summary });
+      queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: `${summary}. ${possibleWriteHold}`.trim() });
     }
     return;
   }
+  // A successful fallback updates an existing diagnostic; it never starts a new owner wake.
+  if (lastDelivery.ok) return;
   await queue.create({
     qitemId, sourceSession: sessionName,
     destinationSession: defaultResolveOrchestrator(db, sessionName) ?? workflowHumanDestination(),
     summary, wakeTrigger: "openrig",
     tags: ["compaction", "restore-delivery", `attempt:${attemptId}`],
     evidenceRef: failure.mapPath,
-    body: `${summary}. OpenRig still owes this stage after repeated delivery failures. Please inspect the seat and decide whether intervention is needed. This does not prove native compaction finished. The existing poll retries with its delivery checks. Inspect rig compact ${shellQuote(sessionName)} --state --json and rig seat status ${shellQuote(sessionName)} before acting. Do not issue another /compact. Restore map: ${failure.mapPath}. The latest reason is in this item's summary and transition notes. When the seat's input box can't be read but doesn't read typed, OpenRig sends the step itself after ${UNREADABLE_POLLS_BEFORE_DELIVERY} idle polls, recorded as over an unreadable box. That doesn't apply after a /compact whose result was lost, where each step waits for an empty box, or on a seat whose draft-aware delivery or typing guard holds OpenRig's input: those keep holding, draft-aware delivery until the seat's mode is set to off and a typing guard until its level admits OpenRig's input. To restore the seat yourself instead: first run rig compact ${shellQuote(sessionName)} --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land), then send the seat a restore request naming the restore map${failure.markerPath ? `, its restore-pending marker ${failure.markerPath}` : ""} and the packet the marker names.`,
+    body: `${summary}. OpenRig still owes this stage after repeated delivery failures. Please inspect the seat and decide whether intervention is needed. This does not prove native compaction finished. The existing poll retries with its delivery checks. Inspect rig compact ${shellQuote(sessionName)} --state --json and rig seat status ${shellQuote(sessionName)} before acting. Do not issue another /compact. Restore map: ${failure.mapPath}. The latest reason is in this item's summary and transition notes. Restore input follows ordinary delivery defaults: a draft can receive and submit the restore text unless the operator enabled draft protection. The seat's draft-aware mode and transport.draft_delivery=refuse keep their existing protections. A lost /compact result is not replayed. ${possibleWriteHold}To restore the seat yourself instead: first run rig compact ${shellQuote(sessionName)} --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land), then send the seat a restore request naming the restore map${failure.markerPath ? `, its restore-pending marker ${failure.markerPath}` : ""} and the packet the marker names.`,
+  });
+}
+
+/** One diagnostic per seat/occupant: an owner's disposition stands across automatic attempt IDs and restarts. */
+export async function reportPreparationFailure(db: Database.Database, queue: QueueRepository, failure: PreparationFailure): Promise<void> {
+  const key = createHash("sha256").update(`${failure.sessionName}\0${failure.occupantGeneration}`).digest("hex").slice(0, 24);
+  const qitemId = `qitem-compaction-preparation-${key}`;
+  const summary = `Managed preparation for ${failure.sessionName}: ${failure.endedAttempts} ended unsent attempts (${failure.reason})`;
+  const evidence = `Attempt ${failure.attemptId}; reason ${failure.reason}; input box ${failure.inputBox ? JSON.stringify(failure.inputBox) : "reading unavailable"}`;
+  const existing = queue.getById(qitemId);
+  if (existing) {
+    if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary)
+      queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: `${summary}. ${evidence}` });
+    return;
+  }
+  await queue.create({ qitemId, sourceSession: failure.sessionName,
+    destinationSession: defaultResolveOrchestrator(db, failure.sessionName) ?? workflowHumanDestination(),
+    summary, wakeTrigger: "openrig", tags: ["compaction", "preparation-delivery", `occupant:${failure.occupantGeneration}`],
+    evidenceRef: failure.statePath,
+    body: `${summary}. ${evidence}. These are ended automatic attempts while usage remained above the threshold, not repeated sends in one attempt. Inspect rig compact ${shellQuote(failure.sessionName)} --state --json and the seat before choosing an existing supported recovery route. This finding does not force input, skip a map, reset the seat, or change its account or model. No input is authorized by this notice.`,
   });
 }

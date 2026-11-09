@@ -24,18 +24,19 @@ import { makeQueuePorts } from "./queue-access.js";
 import { SeenStore } from "./state-store.js";
 import { OUTBOUND_OP, toPayload, type OutboundPostPayload } from "./outbound-driver.js";
 import type { OwnerNotificationLevel } from "../../queue-transition-log.js";
-import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, type ReleaseDisposition } from "../../policies/quiet-release.js";
+import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, QUIET_UNREADABLE_PREFIX, type ReleaseDisposition } from "../../policies/quiet-release.js";
 import { DELIVERY_DEFERRAL_ARMED_PREFIX } from "../../policies/delivery-deferral.js";
 
 export const RE_PRESENT_DECISION_PREFIX = "re-present:";
 const REQUESTED = "slack-re-present-requested";
 const DISPOSITION = "slack-re-present-disposition";
 const UNAVAILABLE = "slack-re-present-state-unavailable";
+const UNCONFIRMED = "slack-re-present-unconfirmed";
 const SEEDED_AT_ENABLE = "seeded-at-enable";
 
 export type OpenAskOutcome =
   | "posted" | "already-posted" | "queued" | "held" | "below-floor"
-  | "no-longer-active" | "superseded" | "recipient-changed"
+  | "no-longer-active" | "superseded" | "recipient-changed" | "no-connector"
   | "state-unavailable" | "transport-failed" | "uncertain";
 
 export interface OpenAskResult {
@@ -67,16 +68,65 @@ export function noteRePresentNotPosted(queueRepo: QueueRepository, qitemId: stri
   queueRepo.update({ qitemId, actorSession: "daemon@kernel", transitionNote: note });
 }
 
+/** What OpenRig couldn't confirm when it went on to post a re-shown ask: whether an earlier attempt reached Slack, the
+ *  ask's current state, or the person's delivery settings. */
+export type RePresentUnconfirmed = "attempt" | "state" | "policy";
+
+/** The gateway's record that it went on to post a re-shown ask although it couldn't confirm `what`. Written before the
+ *  post; what became of the post is its own receipt. */
+export function noteRePresentUnconfirmed(queueRepo: QueueRepository, qitemId: string, notificationKey: string,
+  what: RePresentUnconfirmed[], why: string): void {
+  queueRepo.update({ qitemId, actorSession: "daemon@kernel",
+    transitionNote: `${UNCONFIRMED} notification_key=${notificationKey} what=${what.join(",")} detail=${why.replace(/\s+/g, " ").trim()}` });
+}
+
+const UNCONFIRMED_WORDS: Record<RePresentUnconfirmed, string> = {
+  attempt: "an earlier attempt", state: "the ask's state", policy: "the person's delivery policy",
+};
+
+/** Everything this ask's unconfirmed records say OpenRig couldn't confirm. */
+function unconfirmedOf(notes: string[], key: string): Set<RePresentUnconfirmed> {
+  const what = new Set<RePresentUnconfirmed>();
+  for (const note of notes) {
+    if (!hasToken(note, UNCONFIRMED, key)) continue;
+    for (const item of (/\bwhat=(\S+)/.exec(note)?.[1] ?? "attempt").split(",")) {
+      if (item in UNCONFIRMED_WORDS) what.add(item as RePresentUnconfirmed);
+    }
+  }
+  return what;
+}
+
+/** The marks a later post of a re-shown ask carries, by its row's unconfirmed records for this key: "may repeat" when an
+ *  earlier attempt may be in Slack, and "couldn't check" when its state couldn't be checked. Empty for any other ask. */
+export function rePresentMarks(notes: string[], key: string): { possibleRepeat?: true; stateUnconfirmed?: true } {
+  const what = unconfirmedOf(notes, key);
+  return { ...(what.has("attempt") ? { possibleRepeat: true as const } : {}), ...(what.has("state") ? { stateUnconfirmed: true as const } : {}) };
+}
+
+/** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */
+function postedUnconfirmed(notes: string[], key: string): string | null {
+  const what = unconfirmedOf(notes, key);
+  const words = (["attempt", "state", "policy"] as const).filter((item) => what.has(item)).map((item) => UNCONFIRMED_WORDS[item]);
+  if (notes.some((note) => hasToken(note, QUIET_UNREADABLE_PREFIX, key))) words.push("the person's quiet-hours setting");
+  if (words.length === 0) return null;
+  const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
+  return `posted; ${list} ${words.length === 1 ? "was" : "were"} unconfirmed`;
+}
+
 const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome; detail?: string }> = {
   "row-not-active": { outcome: "no-longer-active" },
   superseded: { outcome: "superseded", detail: "the row has a newer ask since" },
   "recipient-changed": { outcome: "recipient-changed" },
   "below-posting-threshold": { outcome: "below-floor", detail: "the posting floor was raised before it posted" },
+  "no-connector": { outcome: "no-connector", detail: "the person has no connector now: it stays on Steering and the Feed" },
 };
 
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */
 function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; detail?: string } | null {
-  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) return { outcome: "posted" };
+  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) {
+    const detail = postedUnconfirmed(notes, key);
+    return detail ? { outcome: "posted", detail } : { outcome: "posted" };
+  }
   for (const note of [...notes].reverse()) {
     if (hasToken(note, "slack-owner-notification-transport-failed", key)) {
       return { outcome: "transport-failed", detail: /\bclass=(\S+)/.exec(note)?.[1] };
@@ -173,7 +223,11 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     const result: OpenAskResult = { qitemId: item.qitemId, notificationKey: key, recipient: item.destinationSession ?? "",
       summary: item.summary ?? null, outcome: "uncertain", reshown: false };
     results.push(result);
-    if (posted) { Object.assign(result, { outcome: "already-posted" }); continue; }
+    if (posted) {
+      const detail = postedUnconfirmed(notesOf(item.qitemId), key);
+      Object.assign(result, { outcome: "already-posted", ...(detail ? { detail } : {}) });
+      continue;
+    }
     if (!eligible) {
       Object.assign(result, { outcome: "below-floor", detail: item.ownerNotificationLevel === "RECORD"
         ? "asked at RECORD: it waits on Steering and the Feed without a Slack post"

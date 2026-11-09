@@ -11,7 +11,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
-import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { SeatLifecycleService, claimedSessionRoutes } from "../src/domain/seat-lifecycle-service.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 
@@ -430,7 +430,7 @@ describe("SeatLifecycleService", () => {
         await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
         await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
       ]) {
-        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: "Release an adopted session with: rig unclaim" });
+        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
         if (result.ok) throw new Error("expected refusal");
         expect(result.message).toContain("was adopted (origin=claimed)");
       }
@@ -444,6 +444,9 @@ describe("SeatLifecycleService", () => {
     expect(claimedResult.ok).toBe(false);
     if (claimedResult.ok) throw new Error("expected refusal");
     expect(claimedResult.code).toBe("claimed_session");
+    // the refusal names the supported routes — rig down for the (here one-seat) rig, and rig unclaim.
+    expect(claimedResult.guidance).toBe("To end the session, run rig down 's5-rig' (this rig has one seat, so it stops only this session; "
+      + "rig up 's5-rig' --existing brings the rig back). To release it from OpenRig and leave its process running, run rig unclaim 'dev-adopted@s5-rig'.");
 
     const probed = seatFixture("s5-rig", "dev.flaky");
     tmux.failProbeFor(probed.sessionName);
@@ -459,6 +462,30 @@ describe("SeatLifecycleService", () => {
     expect(bare.ok).toBe(false);
     if (bare.ok) throw new Error("expected refusal");
     expect(bare.code).toBe("no_session");
+  });
+
+  it("the claimed-session guidance counts the rig's seats and says rig down leaves an external CLI running", async () => {
+    const claimed = seatFixture("adopted-rig", "dev.adopted", { origin: "claimed" });
+    seatFixture("adopted-rig", "dev.peer");
+    const shared = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
+    if (shared.ok) throw new Error("expected refusal");
+    // more than one seat: the route that ends only this seat comes first, and rig down is named for what it ends.
+    expect(shared.guidance).toBe("To end only this session, run rig unclaim 'dev-adopted@adopted-rig' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process in its own terminal. rig down 'adopted-rig' ends all 2 seats in this rig.");
+
+    sessionRegistry.updateBinding(claimed.node.id, { attachmentType: "external_cli", externalSessionName: claimed.sessionName });
+    const external = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
+    if (external.ok) throw new Error("expected refusal");
+    expect(external.code).toBe("claimed_session");
+    expect(external.guidance).toContain("rig down leaves it running");
+    expect(external.guidance).not.toContain("run rig down");
+    expect(external.guidance).toContain("run rig unclaim 'dev-adopted@adopted-rig'");
+    expect(tmux.killed).toEqual([]);
+  });
+
+  it("claimedSessionRoutes without a seat count stays general", () => {
+    expect(claimedSessionRoutes("r", "a@r", null)).toBe("To end only this session, run rig unclaim 'a@r' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process in its own terminal. rig down 'r' ends every seat in this rig.");
   });
 
   // ---- P5 / P6 — clean ----

@@ -17,7 +17,7 @@ afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{rec
 
 function fixture(){
  const home=mkdtempSync(join(tmpdir(),'compaction-restart-'));homes.push(home);
- let clock=10000,generation='generation-one';
+ let clock=10000,generation='generation-one',body='';
  // Transport deadlines and the enforcer's injected sleeps must share the fixture clock.
  vi.spyOn(Date, 'now').mockImplementation(()=>clock);
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
@@ -26,8 +26,8 @@ function fixture(){
  // what the seat's input box reads.
  const hooks:{onWrite?:(text:string)=>void;busy?:boolean;failCompact?:boolean;box?:string}={};
  const policy={preparationRoot:'',enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
- const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendKeys:vi.fn(async()=>({ok:true})),sendText:vi.fn(async(_:string,text:string)=>{
-  writes.push(text);hooks.onWrite?.(text);
+ const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendKeys:vi.fn(async(_:string,keys:string[])=>{if(keys.includes('Enter'))body='';return{ok:true};}),sendText:vi.fn(async(_:string,text:string)=>{
+  writes.push(text);body+=text;hooks.onWrite?.(text);
   return hooks.failCompact&&text.startsWith('/compact')?{ok:false,code:'tmux_error',message:'the result was lost'}:{ok:true};
  })};
  const guard=new SeatDeliveryGuard(db,()=>({nodeId:'node-one',session:seat,pane:'%1',occupant:generation}));
@@ -37,11 +37,11 @@ function fixture(){
  (transport as any).claudeDeliveryObservation=async()=>({state:'unknown',detail:'injected process observation'});
  (transport as any).classifySendReadiness=async()=>({state:hooks.busy?'running':'idle',reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=>'fixture';
- (transport as any).capture=async()=>({ok:true,sessionName:seat,content:'',inputBox:{status:hooks.box??'empty'}});
+ (transport as any).capture=async()=>({ok:true,sessionName:seat,content:body,inputBox:{status:hooks.box??(body?'typed':'empty')}});
  const settings={resolveClaudeCompactionPolicy:()=>policy};
  // A daemon process: a new one shares the instance home, the seat and the clock, and nothing held in memory.
  const daemon=(instance=randomUUID(),options:NonNullable<ConstructorParameters<typeof ClaudeCompactionEnforcer>[2]>={})=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,daemonInstance:instance,now:()=>clock,sleep:async(ms)=>{clock+=ms;},resolveOccupantGeneration:()=>generation,...options});
- return{daemon,writes,policy,hooks,transport,home,now:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
+ return{daemon,writes,policy,hooks,transport,home,body:()=>body,clearInput:()=>{body="";},retainInput:(text:string)=>{body=text;},now:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
 }
 type F=ReturnType<typeof fixture>;
 const compacts=(f:F)=>f.writes.filter(t=>t.startsWith('/compact'));
@@ -144,6 +144,8 @@ it('a restart while /compact was being sent never sends it again, and still owes
 it('a restart after a /compact whose result was lost owes its restore steps, and neither prepares nor compacts again',async()=>{
  const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);completeMap(first);
  f.hooks.failCompact=true;await first.maybeAutoCompact(high);f.hooks.failCompact=false;
+ // The prior effect resolved externally; the enforcer does not submit the retained command.
+ f.clearInput();
  expect(compacts(f)).toHaveLength(1);expect(first.getPreparationState(seat)).toMatchObject({status:'stopped',compact:'uncertain'});
  const restarted=f.daemon();await restarted.maybeAutoCompact(high);
  // What the seat receives first: the restore steps, not a second request to write a map.
@@ -155,6 +157,8 @@ it('a restart after a /compact whose result was lost owes its restore steps, and
 it('without a restart, a /compact whose result was lost gets its restore steps, and the stopped attempt is then cleared',async()=>{
  const f=fixture();const e=f.daemon();await e.maybeAutoCompact(high);completeMap(e);
  f.hooks.failCompact=true;await e.maybeAutoCompact(high);f.hooks.failCompact=false;
+ // The prior effect resolved externally; the enforcer does not submit the retained command.
+ f.clearInput();
  expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',compact:'uncertain'});
  for(let i=0;i<3;i++)await staleTick(e);
  // What the seat receives: the restore steps, with no second /compact.
@@ -168,6 +172,8 @@ it("without a restart, a manual /compact whose result was lost gets its restore 
  const f=fixture();f.policy.enabled=false;const e=f.daemon();
  f.hooks.onWrite=(text)=>{if(text.includes('Write a restore map.'))completeMap(e);};
  f.hooks.failCompact=true;const outcome=await e.triggerManualCompact({...high,cwd:null},{operatorInitiated:true});f.hooks.failCompact=false;
+ // The prior effect resolved externally; the enforcer does not submit the retained command.
+ f.clearInput();
  for(let i=0;i<3;i++)await staleTick(e);
  expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
  expect(outcome).toMatchObject({triggered:false,restoreOwed:true});
@@ -176,13 +182,15 @@ it("without a restart, a manual /compact whose result was lost gets its restore 
 it('without a restart, the restore steps after a lost /compact result wait while the input box holds text, and say so',async()=>{
  const f=fixture();const e=f.daemon();await e.maybeAutoCompact(high);completeMap(e);
  f.hooks.failCompact=true;await e.maybeAutoCompact(high);f.hooks.failCompact=false;
+ const written=f.body();expect(written).toMatch(/^\/compact /);
  f.hooks.box='typed';for(let i=0;i<3;i++)await staleTick(e);
+ expect(f.body()).toBe(written);
  // What the seat receives first: nothing whose Enter could submit the /compact text that may wait in its box.
  expect(boundaries(f)).toHaveLength(0);
  expect(e.observedCompaction(seat)?.detail).toContain('may have /compact text waiting');
  expect(e.getOwedRestore(seat)).toMatchObject({stage:'turn_boundary',held:true,inputBox:'typed'});
  // An empty box with the seat still busy: nothing is sent, and the step still reads as owed, not idle.
- f.hooks.box='empty';f.hooks.busy=true;await staleTick(e);f.hooks.busy=false;
+ f.clearInput();f.hooks.box='empty';f.hooks.busy=true;await staleTick(e);f.hooks.busy=false;
  expect(boundaries(f)).toHaveLength(0);
  expect((await stateOf(e)).owedRestore).toMatchObject({stage:'turn_boundary',held:false,inputBox:'empty'});
  for(let i=0;i<3;i++)await staleTick(e);
@@ -194,15 +202,15 @@ it('after a restart, the restore steps after an in-flight /compact wait while th
  const attempt=completeMap(first);renameSync(attempt.mapPath+'.tmp',attempt.mapPath);
  const record=recordFile(first);
  writeFileSync(record,JSON.stringify({...JSON.parse(readFileSync(record,'utf8')),compactSending:true}));
- f.hooks.box='unrecognized';
+ f.retainInput('/compact retained issued command');f.hooks.box='unrecognized';
  const restarted=f.daemon();
  // A first look before any poll: the owed step shows, with the box not yet checked.
  expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'turn_boundary',held:false,inputBox:'not_checked'});
  for(let i=0;i<2;i++)await staleTick(restarted);
- expect(boundaries(f)).toHaveLength(0);
+ expect(boundaries(f)).toHaveLength(0);expect(f.body()).toBe('/compact retained issued command');
  expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'turn_boundary',held:true,inputBox:'unrecognized',detail:expect.stringContaining('check the pane')});
  // A harness suggestion in the box isn't input.
- f.hooks.box='likely-suggestion';await staleTick(restarted);
+ f.clearInput();f.hooks.box='likely-suggestion';await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(1);
 });
 
@@ -675,3 +683,17 @@ for(const otherUsage of [20,90,null] as (number|null)[]){
   });
  }
 }
+
+
+it('an unresolved own compact write uses the existing restore-owner notice',async()=>{
+ const f=fixture();const notify=vi.fn(async()=>{});
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:notify});
+ await e.maybeAutoCompact(high);completeMap(e);
+ f.hooks.failCompact=true;await e.maybeAutoCompact(high);f.hooks.failCompact=false;
+ const written=f.body();expect(written).toMatch(/^\/compact /);
+ for(let i=0;i<3;i++)await staleTick(e);
+ expect(f.body()).toBe(written);expect(boundaries(f)).toHaveLength(0);
+ expect(notify).toHaveBeenCalledWith(expect.objectContaining({sessionName:seat,
+  lastDelivery:expect.objectContaining({reason:'input_box_not_empty',inputBox:'typed'})}));
+ expect(JSON.parse(readFileSync(recordFile(e),'utf8'))).toMatchObject({phase:'compact_uncertain',uncertainCompact:true});
+});

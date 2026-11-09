@@ -245,7 +245,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       }
 
       const closures: string[] = [];
-      const skipped: Array<{ seat: string; why: string }> = [];
+      const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string }> = [];
       // Rotate after the latest physical delivery selection, including retained input. A single
       // cursor from history cannot lose an owner's turn just because a bounded window filled.
       const lastTarget = recent.find(e => e.deliveryStatus && e.deliveryTargetSession)?.deliveryTargetSession;
@@ -338,12 +338,13 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const matches = (key: string) => key.startsWith(`${seat.sessionName}|${idsHash}#`);
         const generationOf = (t: RowTransitionView | undefined) => t?.transitionNote?.match(/; generation ([^;\s]+);/)?.[1] ?? null;
         const reserve = [...transitions].reverse().find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && matches(keyOfNote(t.transitionNote) ?? ""));
-        const refused = openPromptRefusals(transitions).some(({ key }) => {
+        const refused = openPromptRefusals(transitions).find(({ key }) => {
           const prior = generationOf(transitions.find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(t.transitionNote) === key));
           return matches(key) && (generation === null || prior === null || prior === generation);
         });
         if (refused) {
-          skipped.push({ seat: seat.sessionName, why: "destination-refused-interactive-prompt" });
+          skipped.push({ seat: seat.sessionName, why: "destination-refused-interactive-prompt", primaryRow,
+            obligations: namedIds, episodeKey: refused.key, refusalReason: refused.note });
           continue;
         }
         const lastKey = reserve && keyOfNote(reserve.transitionNote!);

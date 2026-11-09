@@ -38,10 +38,9 @@ import * as path from "node:path";
  *   second one (`recoverAfterRestart`). A prompt or /compact is marked in
  *   flight at its write, so a restart never sends it again. A restart between
  *   a post-compact stage's send and its record can send that one stage again.
- * - A /compact whose outcome is unknown owes its restore steps, with or
- *   without a restart. Its text may wait unsubmitted in the input box, where
- *   any Enter would submit it, so each step goes only into an empty box and
- *   is held, visibly, while the box holds text or can't be read.
+ * - A /compact whose outcome is unknown is never replayed, with or without
+ *   a restart. Only its first owed step waits until the recorded possible
+ *   write clears; subsequent input follows ordinary draft-delivery settings.
  * - Definite pre-write prep failures retry at most three times. Uncertain
  *   delivery never replays. Unfinished preparation stops visibly until an
  *   explicit retry. A completed automatic map keeps its bounded idle grace.
@@ -435,16 +434,18 @@ export interface RestoreDeliveryAttempt {
   errorClass?: string;
   failures: number;
   noticeErrorClass?: string;
-  /** Consecutive idle polls whose input box read neither empty nor typed for this step (#2575). */
+  /** Consecutive polls of this owed stage whose readiness could not be determined. */
+  unknownReadinessPolls?: number;
+  /** Legacy unreadable-poll count from records written before restore input followed ordinary delivery defaults. */
   unreadable?: number;
   /** What the input box read: on a hold, the reading held on; on a delivery over a box OpenRig couldn't read (#2575),
    *  that reading. Never "empty" on a delivery. */
   inputBox?: string;
 }
 
-/** #2575: after this many consecutive idle polls that can't read the box, a post-compaction step goes ahead; a typed
- *  draft still holds it. Waiting doesn't show the box is empty, so the delivery is recorded as over an unreadable box. */
+/** Legacy #2575 threshold for old diagnostics. Managed input now follows ordinary draft-delivery defaults. */
 export const UNREADABLE_POLLS_BEFORE_DELIVERY = 2;
+const UNKNOWN_READINESS_POLLS_BEFORE_DELIVERY = 2;
 export interface RestoreDeliveryFailure {
   sessionName: string;
   attemptId: string;
@@ -460,6 +461,8 @@ export interface ObservedCompaction {
   detail: string;
 }
 export interface PreparationState {
+  /** The reading that held this preparation send; never includes draft text. */
+  inputBox?: SendResult["heldInputBoxReading"];
   policyActor?: TerminalActor;
   attemptId: string;
   occupantGeneration: string | null;
@@ -535,7 +538,27 @@ export const RESTART_RECOVERY_WINDOW_MS_DEFAULT = 6 * 60 * 60_000;
 /** This daemon process. A record this process wrote is its own state, never something to recover. */
 const DAEMON_PROCESS_ID = randomUUID();
 
+export interface PreparationFailure {
+  sessionName: string;
+  occupantGeneration: string;
+  attemptId: string;
+  mapPath: string;
+  statePath: string;
+  endedAttempts: number;
+  reason: string;
+  inputBox?: PreparationState["inputBox"];
+}
+interface PreparationFailureRun {
+  occupantGeneration: string;
+  sessionId: string | null;
+  endedAttempts: number;
+  lastAttemptId: string;
+  reportedAttempts?: number;
+}
+
 interface CompactionRecord {
+  preparationFailures?: PreparationFailureRun;
+  inputBox?: PreparationState["inputBox"];
   /** The daemon process that last wrote it. */
   daemon: string;
   attemptId: string;
@@ -559,7 +582,7 @@ interface CompactionRecord {
   operatorInitiated?: boolean;
   /** The /compact send had begun (its map published) when this was written; its outcome isn't known. */
   compactSending?: true;
-  /** The owed restore steps follow a /compact whose outcome is unknown, so each goes only into an empty input box. */
+  /** The owed restore steps follow a /compact whose outcome is unknown; the command is never replayed. */
   uncertainCompact?: true;
   /** A `preparing` attempt held with its map complete until a window (#2682); see `PreparationState.prepared`. */
   prepared?: true;
@@ -617,9 +640,6 @@ function readCompactionRecord(file: string): CompactionRecord | null {
   } catch { return null; }
 }
 
-/** Input-box readings that hold nothing typed: an owed step after an uncertain /compact may go in. A harness suggestion isn't input. */
-const INPUT_BOX_CLEAR = new Set(["empty", "likely-suggestion"]);
-
 function strandedSummary(record: CompactionRecord): StrandedCompaction {
   return { attemptId: record.attemptId, mapPath: record.mapPath, phase: record.phase, recordedAt: new Date(record.updatedAt).toISOString() };
 }
@@ -661,10 +681,8 @@ export class ClaudeCompactionEnforcer {
   private readonly recovered = new Set<string>();
   /** Open records too old to resume: the seat's restore may still be owed. */
   private readonly stranded = new Map<string, CompactionRecord>();
-  /** Seats whose owed restore steps follow a /compact whose outcome is unknown: its text may wait unsubmitted in the input
-   *  box, where any Enter would submit it, so each step goes only into an empty box. */
+  /** Seats whose owed restore steps follow a /compact whose outcome is unknown; never replay that command. */
   private readonly afterUncertainCompact = new Set<string>();
-  /** What the input box last read for such a seat, before an owed step (absent until the first check). */
   private readonly lastInputBox = new Map<string, string>();
   private readonly restartRecoveryWindowMs: number;
   private readonly daemonInstance: string;
@@ -676,6 +694,7 @@ export class ClaudeCompactionEnforcer {
     saturationBoundPercentage: number;
   }) => Promise<void> | void;
 
+  private readonly onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
   private readonly onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
   private readonly terminalPolicies?: TerminalPolicyStore;
 
@@ -683,6 +702,7 @@ export class ClaudeCompactionEnforcer {
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
     opts?: {
+      onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
       onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
       terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
@@ -707,6 +727,7 @@ export class ClaudeCompactionEnforcer {
     },
   ) {
     this.onRestoreDeliveryFailure = opts?.onRestoreDeliveryFailure;
+    this.onPreparationFailure = opts?.onPreparationFailure;
     this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -773,7 +794,7 @@ export class ClaudeCompactionEnforcer {
     // One readiness read, with no wait after it: this runs inside the monitor's serial poll, so a busy seat must not hold
     // the other seats' polls. A busy seat, or a read that fails, waits for a later poll.
     let idle: { ok: boolean };
-    try { idle = await this.sessionTransport.waitUntilIdle(session, CAPTURE_READABLE_BUDGET_MS, undefined, { singleObservation: true }); }
+    try { idle = await this.sessionTransport.waitUntilIdle(session, CAPTURE_READABLE_BUDGET_MS, undefined, { singleObservation: true, allowDraft: true }); }
     catch { idle = { ok: false }; }
     if (!idle.ok) return { triggered: false, reason: "waiting_for_idle" };
     // The gate is used up only when the replacement request goes out (deliverPreparation), and that send checks idle
@@ -843,17 +864,19 @@ export class ClaudeCompactionEnforcer {
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
     const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
       ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
+      : lastDelivery.reason === "delivered_over_unreadable_pane"
+        ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over a pane OpenRig couldn't read; its activity remained unknown.`
       : ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.${lastDelivery.unreadable
-        ? ` After ${UNREADABLE_POLLS_BEFORE_DELIVERY} idle polls that can't read the input box, the step goes in anyway; a typed draft still holds it.` : ""}`;
+        ? " The operator’s draft-protection settings still apply." : ""}`;
     const step = steps[stage];
     if (!this.afterUncertainCompact.has(sessionName)) {
-      return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
+      return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent once the pane is idle or after two consecutive polls cannot determine its activity.${failure}` };
     }
-    const inputBox = this.lastInputBox.get(sessionName) ?? "not_checked";
-    const held = inputBox !== "not_checked" && !INPUT_BOX_CLEAR.has(inputBox);
-    return { stage, held: held || failed, inputBox, ...last, detail: (held
-      ? `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.`
-      : `OpenRig owes this seat its ${step} next, after a /compact whose result was lost. Each step goes only into an empty input box, sent on a poll once the pane is idle (the box last read ${inputBox}).`) + failure };
+    const inputBox = lastDelivery?.inputBox ?? this.lastInputBox.get(sessionName) ?? "not_checked";
+    const held = failed || (inputBox !== "not_checked" && inputBox !== "empty" && inputBox !== "likely-suggestion");
+    return { stage, held, inputBox, ...last, detail: held
+      ? `held: OpenRig may have /compact text waiting from this attempt's uncertain write; any Enter could submit it. The input box reads ${inputBox}; check the pane and reconcile that effect. No command or restore input is replayed.${failure}`
+      : `OpenRig owes this seat its ${step} after an uncertain /compact. The outstanding write is checked before any restore Enter; unrelated delivery keeps ordinary draft settings.${failure}` };
   }
 
   /** An open record from before a restart that was too old to resume, while no later attempt has replaced it. */
@@ -970,9 +993,12 @@ export class ClaudeCompactionEnforcer {
     } finally {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
-      if (record && lastDelivery && lastDelivery !== previous && lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
+      const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
+      if (record && lastDelivery && lastDelivery !== previous && (lastDelivery.failures >= 2 || deliveredUnreadable) && this.onRestoreDeliveryFailure) {
         void Promise.resolve().then(() => {
-          if (this.records.get(input.sessionName) !== record || record.record.lastDelivery !== lastDelivery || this.pendingPostCompactRestore.get(input.sessionName) !== stage) return;
+          const current = this.records.get(input.sessionName);
+          if ((current !== record && !(deliveredUnreadable && !current && !this.pendingPostCompactRestore.has(input.sessionName)))
+            || record.record.lastDelivery !== lastDelivery || (!deliveredUnreadable && this.pendingPostCompactRestore.get(input.sessionName) !== stage)) return;
           return this.onRestoreDeliveryFailure!({ sessionName: input.sessionName, attemptId: record.record.attemptId, mapPath: record.record.mapPath,
             markerPath: path.join(this.openrigHome, "compaction", "restore-pending", `${sanitizeSessionKey(input.sessionName)}.json`), lastDelivery });
         }).catch(error => {
@@ -994,8 +1020,9 @@ export class ClaudeCompactionEnforcer {
     const prior = record.record.lastDelivery;
     // Active work is the expected wait between restore steps, not an undeliverable stage.
     const waiting = result.reason === "wait_for_idle_timeout" && result.activity?.state === "running";
-    // The idle wait passed and the box read neither empty nor typed. A recognised draft, a hold with no reading, or any
-    // other result breaks the run.
+    const unknownReadinessPolls = !result.ok && result.reason === "target_activity_unknown"
+      ? (prior?.stage === stage ? prior.unknownReadinessPolls ?? 0 : 0) + 1 : 0;
+    // Retain the earlier input-box diagnostic separately from unknown pane readiness.
     const held = result.heldInputBox;
     const unreadable = !result.ok && result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
       ? (prior && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
@@ -1005,6 +1032,7 @@ export class ClaudeCompactionEnforcer {
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
       ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
+      ...(unknownReadinessPolls ? { unknownReadinessPolls } : {}),
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
   }
@@ -1025,19 +1053,18 @@ export class ClaudeCompactionEnforcer {
     policy: ClaudeCompactionPolicy,
   ): Promise<EnforcerOutcome | null> {
     // A missing or still-high sample need not show that /compact has finished. The newest idle
-    // hook can predate it, so these drains require a live pane read to establish idle.
+    // hook can predate it: require live readiness, then admit only unknown after two consecutive owed-stage polls.
     const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
       && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
-    // #2575: after enough idle polls that couldn't read the box for this step, the step goes in unless the box reads typed.
-    // Not after a /compact whose result was lost: there an Enter could submit /compact, so that check below stays strict.
-    const last = this.records.get(input.sessionName)?.record.lastDelivery;
-    const overUnreadable = !this.afterUncertainCompact.has(input.sessionName) && !!last && last.stage === pendingStage && !last.ok
-      && (last.unreadable ?? 0) >= UNREADABLE_POLLS_BEFORE_DELIVERY;
+    // Owed input uses the ordinary delivery policy, including the operator's explicit draft protection.
     const sendOpts = {
       openrigNotice: true as const,
-      preserveInput: overUnreadable ? "typed" as const : true as const,
+      allowDraftWhileIdle: true as const,
+      ...((this.records.get(input.sessionName)?.record.lastDelivery?.unknownReadinessPolls ?? 0) >= UNKNOWN_READINESS_POLLS_BEFORE_DELIVERY
+        ? { allowUnknownWhileIdle: true as const } : {}),
+      ...(pendingStage === "turn_boundary" && this.afterUncertainCompact.has(input.sessionName) ? { preserveInput: true as const } : {}),
       beforeWrite: () => {
         if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
       },
@@ -1071,14 +1098,16 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "stale_generation" };
       }
     }
-    // After a /compact whose outcome is unknown, its text may still wait unsubmitted in the input box, and this step's Enter
-    // would submit it. So each step goes only into a box holding nothing typed (a harness suggestion isn't input); while it
-    // holds text or can't be read, the step waits for the next poll, and the notice and --state say why.
-    if (this.afterUncertainCompact.has(input.sessionName)) {
+    if (pendingStage === "turn_boundary" && this.afterUncertainCompact.has(input.sessionName)) {
+      // Only this attempt's possible /compact write is outstanding. A later Enter must not submit it.
       const box = await this.inputBoxStatus(input.sessionName);
       if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       this.lastInputBox.set(input.sessionName, box);
-      if (!INPUT_BOX_CLEAR.has(box)) return { triggered: false, reason: "input_box_not_empty" };
+      if (box !== "empty" && box !== "likely-suggestion") {
+        this.recordRestoreFailure(input.sessionName, pendingStage, this.records.get(input.sessionName),
+          { ok: false, reason: "input_box_not_empty", heldInputBox: box });
+        return { triggered: false, reason: "input_box_not_empty" };
+      }
     }
     if (pendingStage === "turn_boundary") {
       // Only this first step after /compact reads past the compaction output that fills the screen above the input box.
@@ -1092,6 +1121,8 @@ export class ClaudeCompactionEnforcer {
         // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
         return { triggered: false, reason: "send_failed" };
       }
+      this.afterUncertainCompact.delete(input.sessionName);
+      this.lastInputBox.delete(input.sessionName);
       this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
       this.persistStage(input.sessionName, "restore_prompt", undefined, this.overUnreadableDelivery("turn_boundary", boundary));
       return { triggered: true };
@@ -1159,7 +1190,6 @@ export class ClaudeCompactionEnforcer {
       this.persistStage(input.sessionName, "done", undefined, this.overUnreadableDelivery("compliance_prompt", compliance));
       this.records.delete(input.sessionName);
       this.afterUncertainCompact.delete(input.sessionName);
-      this.lastInputBox.delete(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
       // The attempt is finished, including one stopped after a lost /compact result whose restore this was.
       const finished = this.pendingPreCompactPrep.get(input.sessionName);
@@ -1200,6 +1230,7 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "invalid_policy" };
     }
     this.recoverAfterRestart(input, policy.preparationRoot || null);
+    await this.noteEndedPreparation(input, policy);
     // A trigger sample must not block work already owed to this occupant. Restore reads can
     // themselves exceed a low threshold; keep the same stage, authorization and idle gates.
     const drained = await this.drainPendingStage(input, policy);
@@ -1391,7 +1422,7 @@ export class ClaudeCompactionEnforcer {
     do {
       const remaining = attempt.deadlineAt! - this.now();
       if (remaining <= 0) return failed(this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
-      try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal); }
+      try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
       catch { idle = { ok: false, reason: "transport_unavailable" }; }
       this.reconcilePreparations();
       if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
@@ -1542,7 +1573,7 @@ export class ClaudeCompactionEnforcer {
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
         usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
-      }), { openrigNotice: true, preserveInput: true, ...idleGate, beforeWrite: () => {
+      }), { openrigNotice: true, allowDraftWhileIdle: true, ...idleGate, beforeWrite: () => {
         this.reconcilePreparations();
         if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted || attempt.status === "stopped")
           throw new DeliveryGuardError("preparation_stopped", "This compaction attempt ended before preparation input.");
@@ -1566,7 +1597,8 @@ export class ClaudeCompactionEnforcer {
     // Record this attempt's effect even if cancellation/retry happened during the await.
     // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
     attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
-    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends });
+    attempt.inputBox = prep?.heldInputBoxReading;
+    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox });
     // The replacement request went out (or may have): the ended attempt's gate is used up.
     if (!notSent && attempt.afterEnded !== undefined && this.pendingPreCompactPrep.get(input.sessionName) === attempt) this.lastEnded.delete(input.sessionName);
     if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
@@ -1614,9 +1646,9 @@ export class ClaudeCompactionEnforcer {
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       const idleWait = this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS;
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: attempt.prepared ? idleWait : Math.max(1, Math.min(idleWait, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, allowDraftWhileIdle: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: attempt.prepared ? idleWait : Math.max(1, Math.min(idleWait, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
-    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
+    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase" | "activity" | "heldInputBox">;
     let guardRefused = false;
     try {
       const guard = this.sessionTransport.deliveryGuard;
@@ -1641,14 +1673,18 @@ export class ClaudeCompactionEnforcer {
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
       // A completed map whose /compact was refused before any input, for a window that isn't open yet, is held with the
       // same map instead of stopped and asked for again after the retry cooldown (#2682).
-      if (notSent && typeof result.reason === "string" && HOLD_REASONS.has(result.reason) && this.holdPrepared(input.sessionName, attempt, result.reason)) {
+      // Explicit global draft refusal is reported by the idle preflight, before a draft_* input exception.
+      const policyDraftHold = result.reason === "target_needs_input" && result.activity?.reason === "prompt_draft"
+        && result.activity.evidenceSource === "pane_heuristic" && (result.heldInputBox === "typed" || result.heldInputBox === "typed-with-suggestion");
+      const windowReason = policyDraftHold ? "draft_input_busy" : result.reason;
+      if (notSent && typeof windowReason === "string" && HOLD_REASONS.has(windowReason) && this.holdPrepared(input.sessionName, attempt, windowReason)) {
         return { ok: false, reason: PREPARED_AWAITING_WINDOW };
       }
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
       // marks those `not_reached`. Reconciliation still bounds the idle grace and stops on an occupant change.
       // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
       // as not sent, and a fresh attempt may begin after the retry cooldown.
-      const draftHold = typeof result.reason === "string" && result.reason.startsWith("draft_");
+      const draftHold = policyDraftHold || (typeof result.reason === "string" && result.reason.startsWith("draft_"));
       if (attempt.mode === "automatic" && attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold) {
         return { ok: false, reason: "waiting_for_idle" };
       }
@@ -1673,12 +1709,11 @@ export class ClaudeCompactionEnforcer {
     return { ok: true };
   }
 
-  /** What the seat's input box holds now, as `rig capture --json` reads it (`empty`, `likely-suggestion`, `typed`, ...), or
-   *  why it couldn't be read. Never throws. */
-  private async inputBoxStatus(sessionName: string): Promise<string> {
+  /** Reconcile this attempt's possible write using the existing capture path. Unknown is not a resolved write. */
+  private async inputBoxStatus(sessionName: string): Promise<NonNullable<SendResult["heldInputBox"]>> {
     try {
       const capture = await this.sessionTransport.capture(sessionName, { inputBox: true, readable: { width: 120, height: 40 } });
-      return capture.inputBox?.status ?? capture.reason ?? "unknown";
+      return capture.inputBox?.status ?? "unknown";
     } catch { return "unknown"; }
   }
 
@@ -1759,9 +1794,12 @@ export class ClaudeCompactionEnforcer {
 
   /** Start the record for a new attempt, beside its map. */
   private startRecord(sessionName: string, attempt: PreparationAttempt): void {
+    const previous = this.records.get(sessionName)?.record;
+    const preparationFailures = attempt.mode === "automatic" && previous?.occupantGeneration === attempt.occupantGeneration
+      ? previous?.preparationFailures : undefined;
     this.records.set(sessionName, { file: path.join(path.dirname(attempt.mapPath), COMPACTION_RECORD_FILE), record: {
       daemon: this.daemonInstance, attemptId: attempt.attemptId, session: sessionName, occupantGeneration: attempt.occupantGeneration, mode: attempt.mode,
-      phase: "preparing", delivery: attempt.delivery, deadlineAt: attempt.deadlineAt, sends: attempt.sends,
+      phase: "preparing", delivery: attempt.delivery, deadlineAt: attempt.deadlineAt, sends: attempt.sends, preparationFailures,
       mapPath: attempt.mapPath, marker: attempt.marker, compactInstruction: attempt.compactInstruction,
       preparationRoot: attempt.preparationRoot, ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
       ...(attempt.afterEnded !== undefined ? { afterEnded: attempt.afterEnded, afterEndedSessionId: attempt.afterEndedSessionId ?? null } : {}),
@@ -1788,8 +1826,10 @@ export class ClaudeCompactionEnforcer {
     if (current) this.persist(sessionName, current.record.attemptId, { phase, ...(reason !== undefined ? { reason } : {}), lastDelivery });
   }
 
-  /** A step that went in over a box OpenRig couldn't read stays on the record as that (#2575); any other advance clears it. */
+  /** An unreadable pane or input box stays explicit on the delivered step; any other advance clears it. */
   private overUnreadableDelivery(stage: PendingPostCompactStage, result: SendResult): RestoreDeliveryAttempt | undefined {
+    if (result.activity?.state === "unknown") return { stage, at: new Date(this.now()).toISOString(), ok: true,
+      reason: "delivered_over_unreadable_pane", activity: { state: "unknown", reason: result.activity.reason, evidenceSource: result.activity.evidenceSource }, failures: 0 };
     return result.pastedOverInputBox ? { stage, at: new Date(this.now()).toISOString(), ok: true,
       reason: "delivered_over_unreadable_input_box", inputBox: result.pastedOverInputBox, failures: 0 } : undefined;
   }
@@ -1835,6 +1875,8 @@ export class ClaudeCompactionEnforcer {
     if (record.daemon === this.daemonInstance || record.phase === "done") return;
     const live = this.resolveOccupantGeneration?.(session) ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
     if (record.phase === "ended") {
+      if (record.occupantGeneration !== null && live === record.occupantGeneration
+        && this.now() - (record.endedAt ?? record.updatedAt) < this.restartRecoveryWindowMs) this.records.set(session, newest);
       // An ended automatic attempt of this occupant whose request was delivered and whose /compact was never sent keeps a
       // busy seat from a fresh request (#2682), as in memory. Only a stop writes endedAt; a /compact that was sent (and then
       // cancelled) never stopped, and one whose result was lost is marked uncertainCompact.
@@ -1857,7 +1899,7 @@ export class ClaudeCompactionEnforcer {
     if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
     const stale = this.now() - record.updatedAt > this.restartRecoveryWindowMs;
     // A /compact whose send had begun, or whose outcome was lost, is never sent again; its restore steps are owed in case it
-    // ran, each only into an empty input box. The restore request tells a seat that didn't compact to say so and skip.
+    // ran. Only the first step reconciles that possible write; later input follows ordinary delivery settings.
     const phase = (record.phase === "preparing" && record.compactSending) || record.phase === "compact_uncertain" ? "turn_boundary" : record.phase;
     const inFlight = phase !== record.phase;
     if (phase === "preparing") {
@@ -1876,7 +1918,7 @@ export class ClaudeCompactionEnforcer {
         compact: "not_sent", sends: record.sends,
         deadlineAt: record.deadlineAt ?? (record.delivery === "not_sent" ? null : record.updatedAt + AUTO_PREP_WAIT_MS_DEFAULT),
         policyWasEnabled: true, preparationRoot: record.preparationRoot, controller: new AbortController(),
-        compactInstruction: record.compactInstruction,
+        compactInstruction: record.compactInstruction, inputBox: record.inputBox,
         // A held attempt comes back held, with its recorded hold (never stamped again) and its map's age and usage.
         ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt, preparedReason: record.preparedReason ?? "map_complete_seat_never_idle" } : {}),
         ...(held ? { mapReadyAt: record.mapReadyAt ?? record.preparedAt ?? record.updatedAt } : record.mapReadyAt !== undefined ? { mapReadyAt: record.mapReadyAt } : {}),
@@ -1900,7 +1942,7 @@ export class ClaudeCompactionEnforcer {
     this.pendingPostCompactRestore.set(session, phase);
     this.pendingStageGeneration.set(session, record.occupantGeneration);
     if (inFlight || record.uncertainCompact) {
-      this.afterUncertainCompact.add(session);
+      if (phase === "turn_boundary") this.afterUncertainCompact.add(session);
       this.persist(session, record.attemptId, { uncertainCompact: true });
     }
     if (record.restoreCarry) this.restoreCarry.set(session, record.restoreCarry);
@@ -1910,6 +1952,44 @@ export class ClaudeCompactionEnforcer {
     if (record.mode === "manual") {
       this.setManualStage(session, phase === "compliance_prompt" ? "restore-sent" : "compact-sent", undefined, record.operatorInitiated);
     }
+  }
+
+  /** Count ended attempts, never individual send calls. The current attempt record carries the run across restarts. */
+  private async noteEndedPreparation(input: EnforcerInput, policy: ClaudeCompactionPolicy): Promise<void> {
+    const current = this.records.get(input.sessionName);
+    if (!current) return;
+    const r = current.record, generation = this.liveGeneration(input.sessionName);
+    const interrupted = this.pendingPreCompactPrep.get(input.sessionName)?.cancelled || !policy.enabled || input.usedPercentage == null || input.usedPercentage < policy.thresholdPercent
+      || r.mode !== "automatic" || generation === null || generation !== r.occupantGeneration
+      || (r.sessionId && input.sessionId && r.sessionId !== input.sessionId)
+      || r.delivery !== "not_sent" || r.belowSince !== undefined || r.compactSending || r.uncertainCompact
+      || ["preparation_cancelled", "preparation_replaced", "stale_generation", "disabled", "daemon_restarted",
+        "below_threshold_while_prepared", "prepared_map_stale", "occupant_generation_unavailable"].includes(r.reason ?? "");
+    if (interrupted) {
+      if (r.preparationFailures) this.persist(input.sessionName, r.attemptId, { preparationFailures: undefined });
+      return;
+    }
+    if (r.phase !== "ended" || r.endedAt === undefined || r.sends === 0) return;
+    const old = r.preparationFailures;
+    const run: PreparationFailureRun = old && Number.isSafeInteger(old.endedAttempts) && old.endedAttempts >= 0
+      && typeof old.lastAttemptId === "string" && (old.sessionId === null || typeof old.sessionId === "string")
+      && old.occupantGeneration === generation
+      && (!old.sessionId || !input.sessionId || old.sessionId === input.sessionId) ? old
+      : { occupantGeneration: generation, sessionId: input.sessionId ?? null, endedAttempts: 0, lastAttemptId: "" };
+    if (run.lastAttemptId !== r.attemptId) {
+      run.lastAttemptId = r.attemptId; run.endedAttempts++;
+      this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
+    }
+    if (run.endedAttempts < 3 || run.reportedAttempts === run.endedAttempts || !this.onPreparationFailure) return;
+    try {
+      await this.onPreparationFailure({ sessionName: input.sessionName, occupantGeneration: generation,
+        attemptId: r.attemptId, mapPath: r.mapPath, statePath: current.file, endedAttempts: run.endedAttempts,
+        reason: r.reason ?? "send_failed", ...(r.inputBox ? { inputBox: r.inputBox } : {}) });
+      if (this.records.get(input.sessionName) === current && current.record.preparationFailures === run) {
+        run.reportedAttempts = run.endedAttempts;
+        this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
+      }
+    } catch { /* The same diagnostic stays eligible on existing polls; no input effect or new scheduler. */ }
   }
 
   private stopPreparation(session: string, reason: string, expected?: PreparationAttempt): void {
@@ -1930,6 +2010,9 @@ export class ClaudeCompactionEnforcer {
   cancelPreparation(session: string): PreparationState | null {
     const attempt = this.pendingPreCompactPrep.get(session);
     if (attempt) attempt.cancelled = true;
+    const record = this.records.get(session)?.record;
+    if (record) this.persist(session, record.attemptId, { preparationFailures: undefined,
+      ...(!attempt && record.phase === "ended" ? { reason: "preparation_cancelled" } : {}) });
     if (attempt?.status === "compact-sent" || this.pendingPostCompactRestore.has(session)) {
       // Abandon management, not the provider command: keep its unconfirmed receipt and map.
       // Do not clear automatic dedup/re-arm state or send any input. A later explicit retry

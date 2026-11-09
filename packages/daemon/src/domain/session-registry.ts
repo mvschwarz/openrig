@@ -398,6 +398,18 @@ export class SessionRegistry {
     ).get(nodeId, generationUuid));
   }
 
+  /** True when this generation is registered for this node and only no-launch adoptions ('adopt': reconcile, bind,
+   * self-attach) were registered after it. Adoption registers the same live process again without replacing it, so
+   * that occupant is still the seat's; a launch kind after it (initial, fresh, handover) replaced it. Throws on ledger
+   * faults, like isOccupantGenerationRegistered. */
+  isOccupantContinuedByAdoption(nodeId: string, generationUuid: string): boolean {
+    return Boolean(this.db.prepare(
+      `SELECT 1 FROM occupant_tenures e WHERE e.node_id = ? AND e.generation_uuid = ? AND NOT EXISTS (
+         SELECT 1 FROM occupant_tenures l WHERE l.node_id = e.node_id AND l.generation_ordinal > e.generation_ordinal
+           AND l.kind <> 'adopt') LIMIT 1`,
+    ).get(nodeId, generationUuid));
+  }
+
   mintOccupantTenure(
     nodeId: string,
     kind: OccupantKind,

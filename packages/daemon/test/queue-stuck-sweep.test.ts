@@ -606,6 +606,32 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
+  // The repository records the prefix in lowercase and its undelivered listing matches it exactly; the sweep's retry
+  // matches it the same way, so a listed row whose result only resembles it is not taken for an unbound pane and re-sent.
+  it("does not re-send a wake whose result only matches 'unroutable:' ignoring case", async () => {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
+    });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    expect(row.lastNudgeResult).toMatch(/^unroutable:/);
+    const failedAt = new Date(Date.now() - 10 * 60_000);
+    setNudgeResult(row.qitemId, "Unroutable: no pane yet", failedAt);
+    // Offer the row to the sweep as undelivered, whatever the listing's own prefix filter says.
+    vi.spyOn(repo, "findUndelivered").mockImplementation(((opts?: { qitemId?: string }) =>
+      !opts?.qitemId || opts.qitemId === row.qitemId ? [repo.getById(row.qitemId)!] : []) as typeof repo.findUndelivered);
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    // The row's finding goes to the orchestrator, so only a wake retry could reach the seat.
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(sent).not.toContain("late@r");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toBe("Unroutable: no pane yet");
+    expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(failedAt.toISOString());
+  });
+
   // With the durable wake intents in place (the production path), the re-send goes through the row's own intent: it's
   // claimed and settled, so a later startup drain doesn't wake the seat a second time.
   async function lateSeatWithOutbox(extra: Partial<ConstructorParameters<typeof QueueRepository>[2]> = {}) {
@@ -2424,6 +2450,30 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(repo.waitingView(row.qitemId)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
     await sweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("an unclaimed finding says when the seat can't be read, and doesn't when it can", async () => {
+    const unread = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "work" });
+    age(unread.qitemId);
+    await sweep();
+    expect((await findingsFor(unread.qitemId))[0]!.body).toContain("; owner activity unknown (can't read the seat)");
+
+    repo.attachActivityReader(() => ({ activity: "idle", needsInput: { count: 0, reason: null } } as never));
+    const read = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "more work" });
+    age(read.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(read.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
+  });
+
+  it("a person's unposted ask gets its unclaimed finding without the seat clause: a person has no seat to read", async () => {
+    const row = await ask();
+    age(row.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
   });
 
   it.each(["never-posted", "transport-failed"] as const)("a %s human ask keeps its existing finding", async (outcome) => {

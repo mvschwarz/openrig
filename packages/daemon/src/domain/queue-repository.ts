@@ -1935,7 +1935,7 @@ export class QueueRepository {
    *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
    *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
   unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
-    return row.lastNudgeResult?.toLowerCase().startsWith("unroutable:") === true
+    return row.lastNudgeResult?.startsWith("unroutable:") === true
       && !row.claimedAt
       && row.deliveryOutcome !== "never-posted" && row.deliveryOutcome !== "transport-failed"
       && !this.isLocalHumanDecisionWithoutGateway(row)

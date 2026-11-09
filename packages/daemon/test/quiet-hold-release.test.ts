@@ -339,10 +339,11 @@ describe("after QA: changed circumstances and a second person", () => {
   let historyIncomplete = false; // the reconciler's history scan stops early (more pages, no cursor): "maybe"
   let failFromPost = 0; // when set, the Nth post and every one after it fail before posting
   let registryOk = true;
+  const unbound = new Set<string>(); // people whose last connector binding was removed
   const person = (id: string) => ({
     entityId: id, class: "human" as const, displayName: id, address: `${id}@external`,
     prefs: id === "person" ? { deliveryClass: "C", availability: "available" } : { deliveryClass: "B", availability: "available" },
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: id === "person" ? "UPERSON" : "UOTHER" }],
+    connectorBindings: unbound.has(id) ? [] : [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: id === "person" ? "UPERSON" : "UOTHER" }],
   });
   const registry = () => registryOk ? { ok: true as const, entities: order.map(person) } : { ok: false as const, error: "registry unavailable (test)" };
 
@@ -359,6 +360,7 @@ describe("after QA: changed circumstances and a second person", () => {
     historyIncomplete = false;
     failFromPost = 0;
     registryOk = true;
+    unbound.clear();
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
@@ -497,7 +499,7 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(posts).toHaveLength(1);
   });
 
-  it("after review: a quiet-hours read that fails during quiet posts nothing; a missing quiet-hours table still reads as not quiet", async () => {
+  it("O1: an ask whose quiet-hours read fails during quiet posts once, unmentioned, saying so; a readable window holds the next; a missing quiet-hours table still reads as not quiet", async () => {
     quietOn();
     const row = await ask();
     const w = wire();
@@ -507,19 +509,26 @@ describe("after QA: changed circumstances and a second person", () => {
       expect(() => quietHoldFor(db, "person", new Date())).toThrow(/disk I\/O error/);
       w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
       await settle();
-      expect(posts).toHaveLength(0);
-      expect(notes(row).some((n) => n.startsWith("delivery-decision: "))).toBe(false); // nothing decided yet
+      expect(posts).toHaveLength(1);
+      expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+      expect(String(posts[0]!.text), "no mention: quiet hours would have muted one").not.toContain("UPERSON");
+      expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(false);
+      expect(notes(row).find((n) => n.startsWith(`slack-quiet-unreadable notification_key=${alert.notificationKey} `))).toMatch(/disk I\/O error \(test\)/);
     } finally { spy.mockRestore(); }
-    w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert)); // the sweep offers it again
+    expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+    // A readable quiet window still holds: the next ask, during the same quiet, waits for its release.
+    const next = await ask();
+    const nextAlert = await alertFor(next);
+    w.dispatcher.dispatch(OUTBOUND_OP, nextAlert.destinationSession!, toPayload(nextAlert));
     await settle();
-    expect(posts).toHaveLength(0);
-    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    expect(posts).toHaveLength(1);
+    expect(notes(next).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
     const bare = new Database(":memory:");
     expect(quietHoldFor(bare, "person", new Date())).toBeNull();
     bare.close();
   });
 
-  it("after QA: a decision deferred by a failed quiet read leaves the ask for the real sweep to offer again, and it's held then", async () => {
+  it("O1: the real sweep's ask whose quiet read fails posts once, saying so, and the next sweep doesn't offer it again", async () => {
     quietOn();
     let driver: SlackOutboundDriver | undefined;
     const start = SlackOutboundDriver.prototype.start;
@@ -532,15 +541,15 @@ describe("after QA: changed circumstances and a second person", () => {
       const first = await driver!.sweepOnce();
       await settle();
       expect(first.dispatched).toEqual([row.qitemId]);
-      expect(posts).toHaveLength(0);
-      expect(notes(row).some((n) => n.startsWith("delivery-decision: "))).toBe(false);
+      expect(posts).toHaveLength(1);
+      expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
     } finally { read.mockRestore(); }
     const second = await driver!.sweepOnce(); // the quiet state is readable again
     await settle();
-    expect(second.fresh, "the deferred ask is offered again without a restart").toBe(1);
-    expect(posts).toHaveLength(0);
-    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
-    expect(releaseJobs()).toHaveLength(1);
+    expect(second.fresh, "posted: not offered again").toBe(0);
+    expect(posts).toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(false);
+    expect(releaseJobs()).toHaveLength(0);
   });
 
   it("review: a hold whose release job can't be registered leaves nothing half-written; the next flush holds it properly and it posts once", async () => {
@@ -788,7 +797,7 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
   });
 
-  it.each(["maybe", "absent"])("review 8: an attempted digest that reads %s, whose quiet read fails, stays pending as it is; the next flush leaves it", async (landing) => {
+  it.each(["maybe", "absent"])("O1 (was review 8): an attempted digest that reads %s, whose quiet read fails, posts once, saying so; the next flush leaves it", async (landing) => {
     const row = await ask();
     const alert = await alertFor(row);
     repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: `delivery-decision: digest window=4h notification_key=${alert.notificationKey}` });
@@ -808,15 +817,17 @@ describe("after QA: changed circumstances and a second person", () => {
       restart(first); // the replay: not found in Slack, then quiet hours can't be read
       await settle();
     } finally { read.mockRestore(); }
-    expect(posts.length, "nothing posts").toBe(before);
-    expect(notes(row).some((n) => n.startsWith("slack-owner-notification-posted "))).toBe(false);
-    expect(new DispatchBuffer(home).pending(), "the original, id and payload, is still pending").toEqual([original]);
+    expect(posts.length, "it posts once").toBe(before + 1);
+    expect(String(posts.at(-1)!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith(`slack-quiet-unreadable notification_key=${alert.notificationKey} `))).toBe(true);
+    expect(new DispatchBuffer(home).pending(), "delivered: nothing left pending").toEqual([]);
     const flushed = await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
       dispatch: () => { throw new Error("the next flush must not re-mint it"); } });
     expect(flushed.dispatched).toBe(0);
   });
 
-  it("review 8 (control): a never-attempted digest whose quiet read fails is acked; the next flush selects it again", async () => {
+  it("O1 (was review 8's control): a never-attempted digest whose quiet read fails posts once, saying so; the next flush selects nothing", async () => {
     const row = await ask();
     const alert = await alertFor(row);
     repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: `delivery-decision: digest window=4h notification_key=${alert.notificationKey}` });
@@ -829,12 +840,13 @@ describe("after QA: changed circumstances and a second person", () => {
       wire(); // startup replays it: never attempted, then quiet hours can't be read
       await settle();
     } finally { read.mockRestore(); }
-    expect(posts).toHaveLength(0);
-    expect(buffer.pending(), "acked").toHaveLength(0);
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(buffer.pending(), "delivered").toHaveLength(0);
     let dispatched = 0;
     await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
       dispatch: () => { dispatched++; return { ok: true }; } });
-    expect(dispatched, "the next flush selects it again").toBe(1);
+    expect(dispatched, "posted: the next flush doesn't select it").toBe(0);
   });
 
   it.each(["absent", "maybe"])("review 7: an attempted routine ask whose landing reads %s hasn't started, so quiet holds it", async (landing) => {
@@ -856,7 +868,7 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(notes(row).some((n) => n.startsWith("slack-owner-notification-posted "))).toBe(false);
   });
 
-  it("review 7: an attempted post that never landed, whose quiet read fails, is retained; once reads recover it's held, then released once", async () => {
+  it("O1 (was review 7): an attempted post that never landed, whose quiet read fails, posts once, saying so; recovered reads and quiet's end don't post it again", async () => {
     const row = await ask({ destinationSession: "other@external" });
     const first = wire();
     failPosts = true; // attempted, but the connector was down before the post: nothing reached Slack
@@ -868,19 +880,143 @@ describe("after QA: changed circumstances and a second person", () => {
     const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
     let w: ReturnType<typeof wire>;
     try {
-      w = restart(first); // the replay can't decide
+      w = restart(first); // the replay: it hasn't started, and quiet hours can't be read
       await settle();
     } finally { read.mockRestore(); }
-    expect(posts).toHaveLength(0);
-    expect(new DispatchBuffer(home).pending(), "retained, not acked").toHaveLength(1);
-    w = restart(w); // reads recover: it hasn't started, so quiet holds it
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(new DispatchBuffer(home).pending(), "delivered").toHaveLength(0);
+    w = restart(w); // reads recover
     await settle();
-    expect(posts).toHaveLength(0);
-    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    expect(posts).toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(false);
     quiet.end("other", { endedBy: "t", now: new Date() });
     await release();
     expect(posts).toHaveLength(1);
     expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+  });
+
+  const quietUnreadable = () => vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+
+  it("O1: a held ask whose quiet hours can't be read when its release runs posts once, unmentioned, saying so", async () => {
+    const row = await ask({ destinationSession: "other@external" });
+    quietOnFor("other");
+    const w = wire();
+    w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    expect(posts).toHaveLength(0);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    const read = quietUnreadable();
+    try { await release(); } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(String(posts[0]!.text)).not.toContain("UOTHER");
+    expect(notes(row).find((n) => n.startsWith("slack-quiet-unreadable "))).toMatch(/disk I\/O error \(test\)/);
+    expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+    await release(); // the job's next pass has nothing left to post
+    expect(posts).toHaveLength(1);
+  });
+
+  it("O1: with quiet hours unreadable the person's other settings still decide: a digest-class ask waits for its digest, an escalation posts as always", async () => {
+    const digestAsk = await ask({ humanAlert: false }); // person is class C: a digest
+    const urgent = await ask({ destinationSession: "other@external", tags: ["escalation"] });
+    const w = wire();
+    const read = quietUnreadable();
+    try {
+      w.dispatcher.dispatch(OUTBOUND_OP, "person@external", toPayload(await alertFor(digestAsk)));
+      w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(urgent)));
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(notes(digestAsk).some((n) => n.startsWith("delivery-decision: digest window=4h "))).toBe(true);
+    expect(notes(digestAsk).some((n) => n.startsWith("slack-quiet-unreadable "))).toBe(false);
+    expect(posts).toHaveLength(1); // the escalation, which quiet hours never change
+    expect(String(posts[0]!.text)).toContain("UOTHER");
+    expect(String(posts[0]!.text)).not.toContain("couldn't read your quiet hours");
+    expect(notes(urgent).some((n) => n.startsWith("slack-quiet-unreadable "))).toBe(false);
+  });
+
+  it("X-F1: a marked post never mentions, even when the read recovers between the decision and the render", async () => {
+    const row = await ask({ destinationSession: "other@external" }); // alerted: with quiet off it would interrupt
+    const alert = await alertFor(row);
+    const w = wire();
+    const real = HumanQuietStore.prototype.quietStateFor;
+    // The decision's read fails; once the row records the mark (before the render), the read recovers with quiet off.
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(function (this: HumanQuietStore, entityId: string, now: Date) {
+      if (!notes(row).some((n) => n.startsWith("slack-quiet-unreadable "))) throw new Error("disk I/O error (test)");
+      return real.call(this, entityId, now);
+    });
+    try {
+      w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(alert));
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(String(posts[0]!.text), "the marked post doesn't mention").not.toContain("UOTHER");
+  });
+
+  it("X-F1: a replay whose saved plan has a mention (its first attempt absent) posts marked, unmentioned, as the same decision", async () => {
+    const row = await ask({ destinationSession: "other@external" }); // alerted: the first attempt, quiet off, plans a mention
+    const first = wire();
+    failPosts = true; // the connector is down before the post: nothing reached Slack
+    first.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    failPosts = false;
+    expect(posts).toHaveLength(0);
+    const [original] = new DispatchBuffer(home).pending();
+    const read = quietUnreadable();
+    try {
+      restart(first); // the replay: quiet hours can't be read, and the saved plan carries the mention
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
+    expect(String(posts[0]!.text), "the saved mention isn't used on a marked post").not.toContain("UOTHER");
+    expect(String(posts[0]!.text), "the same decision").toContain(`(or-mark:${original!.decisionId})`);
+    expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+  });
+
+  it("O1: a partly posted ask replayed while quiet hours can't be read finishes as itself, once", async () => {
+    const { row, first } = await partlyPosted();
+    const read = quietUnreadable();
+    try {
+      restart(first);
+      await settle();
+    } finally { read.mockRestore(); }
+    finishedAsContinuation(row);
+  });
+
+  it("a held ask whose person has no connector when quiet ends closes with no-connector, not below the posting threshold", async () => {
+    const row = await ask({ destinationSession: "other@external" });
+    quietOnFor("other");
+    const w = wire();
+    w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    const state = repo.getById(row.qitemId)!.state;
+    unbound.add("other"); // their last binding removed (rig gateway human add --replace without --binding)
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    await release();
+    expect(posts).toHaveLength(0);
+    expect(notes(row).find((n) => n.startsWith("quiet-release-disposition "))).toMatch(/ reason=no-connector$/);
+    expect(notes(row).some((n) => n.includes("reason=below-posting-threshold"))).toBe(false);
+    expect(repo.getById(row.qitemId)!.state, "the ask stays open on Steering").toBe(state);
+  });
+
+  it("a held ask whose person has no connector closes with no-connector even when quiet hours can't be read at release", async () => {
+    const row = await ask({ destinationSession: "other@external" });
+    quietOnFor("other");
+    const w = wire();
+    w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    const state = repo.getById(row.qitemId)!.state;
+    unbound.add("other");
+    const read = quietUnreadable();
+    try { await release(); } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(0);
+    expect(notes(row).find((n) => n.startsWith("quiet-release-disposition "))).toMatch(/ reason=no-connector$/);
+    expect(notes(row).some((n) => n.startsWith("slack-quiet-unreadable "))).toBe(false);
+    expect(repo.getById(row.qitemId)!.state, "the ask stays open on Steering").toBe(state);
   });
 
   it("review 5: outside quiet, a partly posted ask replayed after a restart finishes as before", async () => {
@@ -1157,6 +1293,38 @@ describe("Capability 3 — relay-bound human reuses quiet hold/release, digest, 
   afterEach(() => {
     db.close();
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("O1's relay distinction: a relay post can't say its quiet hours couldn't be read, so it waits as before", async () => {
+    const secretsFile = join(home, "relay.env");
+    const w = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => relayRegistry(prefs, secretsFile), resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        relayPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    });
+    try {
+      w.startServices?.();
+      const row = await repo.create({ sourceSession: "asker@r", destinationSession: "lead@r", body: "Relay park body", nudge: false });
+      repo.update({ qitemId: row.qitemId, actorSession: "lead@r", state: "blocked", blockedOn: `${HUMAN}@kernel`,
+        summary: "Approve relay park", evidenceRef: "/proof/relay.md", transitionNote: "parked" });
+      const ports = makeQueuePorts(repo, { loadHumanRegistry: () => relayRegistry(prefs, secretsFile) } as never);
+      const alert = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((a) => a.qitemId === row.qitemId)!;
+      const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+      try {
+        w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, alert);
+        await settle();
+      } finally { read.mockRestore(); }
+      expect(relayPosts).toHaveLength(0);
+      const noted = repo.listTransitions(row.qitemId).map((t) => t.transitionNote ?? "");
+      expect(noted.some((n) => n.startsWith("slack-quiet-unreadable ") || n.startsWith("delivery-decision: "))).toBe(false);
+    } finally {
+      w.stop();
+    }
   });
 
   it("holds routine relay asks during quiet hours, releases them after quiet ends, and flushes digest asks with per-question replyRefs", async () => {

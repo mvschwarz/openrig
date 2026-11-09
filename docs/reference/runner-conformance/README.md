@@ -13,6 +13,8 @@ node check-runner.mjs --runner 'my-runner --agent-command {agent}' --name my-har
 - **`--name`** is your preset's name, which your posts carry as `runtime`.
 - **`--resume` and `--first-input`** say your preset declares `resume: true` and `first_input: true`. Without them,
   those cases are skipped, because OpenRig wouldn't pass that input.
+- **`--launch-wrapper`** says your preset declares `launch_wrapper: true` and enables case 10 from the
+  [runner contract](../harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch).
 - **`--cases 2,4`** runs only some cases. `--json` prints a machine-readable report. `--keep` keeps each launch's
   folder: the agent's message log, the launch record and the scenario.
 - **`--wait-ms 20000`** waits longer for each step (default 8000), for a runner whose agent takes a while to start. The check's shorter settling times, and the fake agent's own delays and holds, grow in proportion.
@@ -62,6 +64,7 @@ In an installed OpenRig, the check is at `$(npm root -g)/@openrig/cli/daemon/doc
 | 7c | 9 | **Advisory.** Closing the pane ends the agent process. Section 9 marks this duty as proposed, and lets a runner list in `limits` what may keep running, so this result is shown as met or not met and never counts as a pass or a fail, or toward the exit status. The fake agent outlives a hangup here, so the runner has to end it |
 | 8 | 7 | An unknown request from the agent gets JSON-RPC `-32601`, and the next prompt still goes through |
 | 9 | 9 | `OPENRIG_FIRST_INPUT`'s exact bytes, newlines and spaces included, are the first prompt |
+| 10 | 2 | The native child runs through the configured wrapper, preserving literal arguments, without inheriting the runner's wrapper handoff |
 
 ## What it doesn't check
 

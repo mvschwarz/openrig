@@ -57,7 +57,11 @@ export function tileAttachArgv(
     // into a file, through any paste it opens, with a UTF-8 character it ends inside completed. Nothing passes through
     // a shell variable, so every byte is kept, NUL included, and flow-control and other special keys are read as keys.
     // - Keys alone go in the attach command itself, through the new client (send-keys -K): tmux runs them for that
-    //   client before anything typed since, so its key table applies, the prefix included.
+    //   client before anything typed since, so its key table applies, the prefix included. That needs a tmux 3.5 or later
+    //   server (3.3a has no -K, and 3.4 drops keys sent that way). The server's own #{version} decides, read just before
+    //   the attach: a newer tmux binary can still be talking to an older server. Below 3.5, or when the version can't be
+    //   read, they go to the pane before the tile attaches: a prefix typed first then reaches the seat instead of acting
+    //   as the prefix.
     // - A burst with a paste goes to the pane in order before the tile attaches: keys, then the paste (paste-buffer
     //   frames it if the agent asked), then keys. tmux reads anything typed since only once the tile has attached.
     // The tile's terminal keeps that one mode (raw, paste framing on) from the first key until tmux takes the terminal at
@@ -69,8 +73,9 @@ export function tileAttachArgv(
     'else view "$t" "" "$@"; seen=$?; fi;',
     'if [ "$seen" -ne 0 ] || ! here "$@"; then printf "\\033[?2004l"; stty sane 2>/dev/null; [ -z "$f" ] || rm -f "$f" "$f".*; return 1; fi;',
     'pz=; if LC_ALL=C grep -aqF -- "$b0" "$f"; then pz=1; put "$@"; fi;',
-    'me=$(tty 2>/dev/null) || me=; w=; if [ -n "$me" ]; then idle "$me" "$@" & w=$!; fi; printf "\\033[?2004l";',
-    'if [ -z "$pz" ] && [ -s "$f" ]; then go "$@"; else "$@" attach -t "$t"; fi;',
+    'me=$(tty 2>/dev/null) || me=; w=; if [ -n "$me" ]; then idle "$me" "$@" & w=$!; fi;',
+    'kk=; case "$("$@" display-message -p -t "$t" "#{version}" 2>/dev/null)" in next-*|master|[4-9].*|[1-9][0-9].*|3.[5-9]*|3.[1-9][0-9]*) kk=1;; esac;',
+    'ng=1; if [ -z "$pz" ] && [ -s "$f" ]; then if [ -n "$kk" ]; then ng=; go "$@"; else kz 0 $(($(wc -c < "$f"))) "$@"; fi; fi; [ -z "$ng" ] || "$@" attach -t "$t";',
     'if [ -n "$w" ]; then kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; fi; rm -f "$f" "$f".*; return 0; };',
     'take() { i=0; while [ "$i" -lt 256 ]; do',
     'if [ $(($(LC_ALL=C grep -abo -F -- "$b0" "$f" | wc -l))) -gt $(($(LC_ALL=C grep -abo -F -- "$b1" "$f" | wc -l))) ];',

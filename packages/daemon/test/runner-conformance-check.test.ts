@@ -33,12 +33,25 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
     // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 2 });
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 2, advisory: 2 });
     expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
     expect(report.results.find((r) => r.id === "4c")).toMatchObject({ status: "advisory", met: true });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
+
+  it("checks native-child wrapping and environment scrubbing when the runner declares wrapper support", async () => {
+    const { code, report } = await check(["--cases", "10", "--launch-wrapper"]);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map(r => [r.id, r.status])).toEqual([["10", "pass"]]);
+    expect(code).toBe(0);
+  }, 60_000);
+
+  it.each(["ignore-wrapper", "leak-wrapper"])("rejects a runner that breaks wrapper conformance: %s", async mutation => {
+    const { code, report } = await check(["--cases", "10", "--launch-wrapper"], ` --break ${mutation}`);
+    expect(report.results).toMatchObject([{ id: "10", status: "fail" }]);
+    expect(code).toBe(1);
+  }, 60_000);
 
   // Section 9 marks the shutdown duty as proposed, and a runner may list what keeps running in its limits. So the check
   // reports it on its own, outside pass and fail and the exit status.
