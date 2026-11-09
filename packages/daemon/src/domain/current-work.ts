@@ -208,13 +208,15 @@ function tagValues(tags: string[], prefix: string): string[] {
  *
  * `inspectWorkNodeDirs` preserves whether `root` could actually be read as a directory
  * (`ok: true` even when 0 children match, vs `ok: false` with the OS error code when
- * `readdirSync` fails) so callers that distinguish an unavailable root from a completed
- * zero-match check do not collapse both to `[]`.
+ * `readdirSync` fails) and whether any non-matching child's `SPEC.md` failed to read for a
+ * reason other than ordinary absence (`incomplete: true` when `readFileSync` throws anything
+ * other than `ENOENT`/`ENOTDIR`). `resolveWorkNodeDirs` keeps the historical contract of
+ * returning the matched directories (`[]` when `root` cannot be read).
  */
 export function inspectWorkNodeDirs(
   root: string,
   wanted: string,
-): { ok: true; matches: Match[] } | { ok: false; code?: string } {
+): { ok: true; matches: Match[]; incomplete: boolean } | { ok: false; code?: string } {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
@@ -222,6 +224,7 @@ export function inspectWorkNodeDirs(
     return { ok: false, code: (err as NodeJS.ErrnoException)?.code };
   }
   const out: Match[] = [];
+  let incomplete = false;
   for (const dir of entries.sort()) {
     if (dir === wanted) {
       out.push({ dir, form: "directory name" });
@@ -230,12 +233,14 @@ export function inspectWorkNodeDirs(
     let raw: string;
     try {
       raw = fs.readFileSync(path.join(root, dir, "SPEC.md"), "utf8");
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") incomplete = true;
       continue;
     }
     if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
   }
-  return { ok: true, matches: out };
+  return { ok: true, matches: out, incomplete };
 }
 
 export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
@@ -244,6 +249,7 @@ export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
 }
 
 export const SCOPE_ADVISORY_HEADER = "X-OpenRig-Scope-Advisory";
+export const SCOPE_ADVISORY_MAX_HEADER_CHARS = 1024;
 
 export type CreateScopeAdvisory =
   | { status: "unresolved"; tag: string; count: 0 }
@@ -251,11 +257,57 @@ export type CreateScopeAdvisory =
   | { status: "unavailable"; tags: string[] }
   | { status: "skipped"; tags: string[] };
 
+const SAFE_SCOPE_TAG_MAX_CHARS = 160;
+const SAFE_SCOPE_TAG_MAX_ENCODED_CHARS = 240;
+const SCOPE_ADVISORY_MAX_TAGS = 8;
 const SAFE_SCOPE_TAG_RE = /^(?:mission|slice):[^\x00-\x1f\x7f]{1,160}$/;
 
+function serializeAsciiJson(value: unknown): string {
+  return JSON.stringify(value).replace(
+    /[\u007f-\uffff]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 function sanitizeScopeTag(raw: string): string | null {
-  const cleaned = raw.replace(/[\x00-\x1f\x7f]+/g, "").trim().slice(0, 160);
-  return SAFE_SCOPE_TAG_RE.test(cleaned) ? cleaned : null;
+  const cleaned = raw.replace(/[\x00-\x1f\x7f]+/g, "").trim();
+  const prefix = cleaned.startsWith(MISSION_TAG)
+    ? MISSION_TAG
+    : cleaned.startsWith(SLICE_TAG)
+      ? SLICE_TAG
+      : null;
+  if (!prefix) return null;
+  const body = cleaned.slice(prefix.length).trim();
+  if (!body) return null;
+  let out = prefix;
+  let encodedLen = prefix.length;
+  for (const ch of body) {
+    const chEncodedLen = serializeAsciiJson(ch).length - 2;
+    if (
+      out.length + ch.length > SAFE_SCOPE_TAG_MAX_CHARS ||
+      encodedLen + chEncodedLen > SAFE_SCOPE_TAG_MAX_ENCODED_CHARS
+    ) {
+      break;
+    }
+    out += ch;
+    encodedLen += chEncodedLen;
+  }
+  return SAFE_SCOPE_TAG_RE.test(out) ? out : null;
+}
+
+function boundScopeTags(status: "unavailable" | "skipped", tags: string[]): string[] {
+  const bounded: string[] = [];
+  for (const raw of tags) {
+    const safe = sanitizeScopeTag(raw);
+    if (!safe || bounded.includes(safe)) continue;
+    const candidate = [...bounded, safe];
+    if (serializeAsciiJson({ status, tags: candidate }).length > SCOPE_ADVISORY_MAX_HEADER_CHARS) {
+      break;
+    }
+    bounded.push(safe);
+    if (bounded.length >= SCOPE_ADVISORY_MAX_TAGS) break;
+  }
+  return bounded;
 }
 
 function parseCreateScopeTags(tags: string[] | null | undefined): {
@@ -283,24 +335,34 @@ function parseCreateScopeTags(tags: string[] | null | undefined): {
   for (const raw of [...missions.map((m) => `mission:${m}`), ...slices.map((s) => `slice:${s}`), ...malformed]) {
     const safe = sanitizeScopeTag(raw);
     if (safe && !scopeTags.includes(safe)) scopeTags.push(safe);
-    if (scopeTags.length >= 8) break;
+    if (scopeTags.length >= SCOPE_ADVISORY_MAX_TAGS) break;
   }
   return { missions, slices, malformed, scopeTags };
 }
 
 export function skippedCreateScopeAdvisory(tags: string[] | null | undefined): CreateScopeAdvisory | null {
   const { scopeTags } = parseCreateScopeTags(tags);
-  return scopeTags.length > 0 ? { status: "skipped", tags: scopeTags } : null;
+  const bounded = boundScopeTags("skipped", scopeTags);
+  return bounded.length > 0 ? { status: "skipped", tags: bounded } : null;
 }
 
 export function encodeScopeAdvisory(advisory: CreateScopeAdvisory): string {
-  return JSON.stringify(advisory).replace(/[\u007f-\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  if (advisory.status === "unavailable" || advisory.status === "skipped") {
+    return serializeAsciiJson({
+      status: advisory.status,
+      tags: boundScopeTags(advisory.status, advisory.tags),
+    });
+  }
+  const tag = sanitizeScopeTag(advisory.tag) ?? "mission:invalid";
+  return advisory.status === "unresolved"
+    ? serializeAsciiJson({ status: "unresolved", tag, count: 0 })
+    : serializeAsciiJson({ status: "ambiguous", tag, count: advisory.count });
 }
 
 /**
  * Nonblocking post-create scope check (#2725). Distinguishes a completed check whose
  * mission/slice tag resolved to 0 or >1 directories from a check that could not run
- * because the catalogue or missions root was unavailable.
+ * because the catalogue, missions root, or candidate SPEC metadata was unavailable.
  */
 export function evaluateCreateScope(
   tags: string[] | null | undefined,
@@ -308,6 +370,10 @@ export function evaluateCreateScope(
 ): CreateScopeAdvisory | null {
   const { missions, slices, malformed, scopeTags } = parseCreateScopeTags(tags);
   if (scopeTags.length === 0) return null;
+  const unavailable = (): CreateScopeAdvisory => ({
+    status: "unavailable",
+    tags: boundScopeTags("unavailable", scopeTags),
+  });
 
   let missionsRoot: string | null = null;
   try {
@@ -315,12 +381,12 @@ export function evaluateCreateScope(
   } catch {
     missionsRoot = null;
   }
-  if (!missionsRoot) return { status: "unavailable", tags: scopeTags };
+  if (!missionsRoot) return unavailable();
 
   try {
     fs.readdirSync(missionsRoot);
   } catch {
-    return { status: "unavailable", tags: scopeTags };
+    return unavailable();
   }
 
   if (malformed.length > 0) {
@@ -335,11 +401,12 @@ export function evaluateCreateScope(
     const missionTarget = missions[0]!;
     const missionTag = sanitizeScopeTag(`mission:${missionTarget}`) ?? scopeTags[0]!;
     const missionCheck = inspectWorkNodeDirs(missionsRoot, missionTarget);
-    if (!missionCheck.ok) return { status: "unavailable", tags: scopeTags };
-    if (missionCheck.matches.length === 0) return { status: "unresolved", tag: missionTag, count: 0 };
+    if (!missionCheck.ok) return unavailable();
     if (missionCheck.matches.length > 1) {
       return { status: "ambiguous", tag: missionTag, count: missionCheck.matches.length };
     }
+    if (missionCheck.incomplete) return unavailable();
+    if (missionCheck.matches.length === 0) return { status: "unresolved", tag: missionTag, count: 0 };
     resolvedMissionDir = missionCheck.matches[0]!.dir;
   }
 
@@ -354,12 +421,13 @@ export function evaluateCreateScope(
     const sliceCheck = inspectWorkNodeDirs(slicesRoot, sliceTarget);
     if (!sliceCheck.ok) {
       if (sliceCheck.code === "ENOENT") return { status: "unresolved", tag: sliceTag, count: 0 };
-      return { status: "unavailable", tags: scopeTags };
+      return unavailable();
     }
-    if (sliceCheck.matches.length === 0) return { status: "unresolved", tag: sliceTag, count: 0 };
     if (sliceCheck.matches.length > 1) {
       return { status: "ambiguous", tag: sliceTag, count: sliceCheck.matches.length };
     }
+    if (sliceCheck.incomplete) return unavailable();
+    if (sliceCheck.matches.length === 0) return { status: "unresolved", tag: sliceTag, count: 0 };
   }
 
   return null;
