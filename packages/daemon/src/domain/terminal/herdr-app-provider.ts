@@ -70,14 +70,27 @@ const GATED_WRAPPER = [
 /** An interactive viewer's gate: its file, when its window ends (epoch seconds), and the line its cell shows then. */
 export interface ViewerGate { path: string; until: number; expired: string }
 
+/** The same seat's read-only tile, from the composed tile `sh -c <script> openrig-tile <session> <tmux> <server...>`
+ *  (tile-attach.ts). Null when the composed argv doesn't have that shape, so nothing is built from a guess. */
+export function readOnlyTile(attach: readonly string[]): string[] | null {
+  const [sh, flag, script, tag, session, tmux] = attach;
+  if (attach.length < 6 || !sh || flag !== "-c" || !script || tag !== "openrig-tile" || !session || !tmux) return null;
+  const tile = tileAttachArgv(tmux, attach.slice(6), session, true);
+  return tile.length === attach.length && tile[0] === sh && tile[1] === "-c" && tile[3] === tag && tile.slice(4).every((a, i) => a === attach[4 + i]) ? tile : null;
+}
+
+/** An interactive cell whose read-only tile couldn't be built: it shows this and takes no input (fail closed). */
+const UNSHAPED_TILE = 'printf "\\r\\n%s\\r\\n" "OpenRig could not build a read-only view of this seat (the tile command has a shape this OpenRig does not know), so this cell takes no input. Open the view with --window, or update OpenRig."; exec tail -f /dev/null';
+
 /** A viewer's argv. A remote pane runs its ssh paneCommand as composed, and a read-only local pane its read-only tile;
- *  OpenRig rewrites neither. An interactive local pane, given its gate, shows the read-only tile until the gate opens
- *  and the view's writable tile after (`GATED_WRAPPER`). */
+ *  OpenRig rewrites neither. An interactive local pane shows the read-only tile until its gate opens and the view's
+ *  writable tile after (`GATED_WRAPPER`); without a gate, or with a tile it can't read, it takes no input at all. */
 export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: ViewerGate): string[] {
   if (!pane.attachArgv) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, "/bin/sh", "-c", pane.paneCommand];
-  if (pane.readOnly || !gate) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
-  // The composed tile is `sh -c <script> openrig-tile <session> <tmux> <server args...>`; the same seat's read-only tile.
-  const readOnly = tileAttachArgv(pane.attachArgv[5]!, pane.attachArgv.slice(6), pane.attachArgv[4]!, true);
+  if (pane.readOnly) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
+  const readOnly = readOnlyTile(pane.attachArgv);
+  // Never the writable tile without its gate: no gate, or a tile shape this code can't read, fails closed.
+  if (!gate || !readOnly) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, "/bin/sh", "-c", UNSHAPED_TILE, "openrig-unshaped"];
   return ["/bin/sh", "-c", GATED_WRAPPER, "openrig-viewer", nonce, gate.path, String(gate.until), gate.expired, readOnly[2]!, ...pane.attachArgv];
 }
 
@@ -328,6 +341,7 @@ export class HerdrAppProvider implements TerminalProvider {
     // 1. Journal first (owned-view work starts here).
     this.deps.ownWork?.();
     const name = view.viewDescriptor?.name ?? view.spaceLabel ?? view.id;
+    const unshaped: string[] = [];
     const created: ViewRecord[] = view.pages.map((page, index) => {
       const id = `rv-${this.nonce()}`;
       return {
@@ -336,9 +350,11 @@ export class HerdrAppProvider implements TerminalProvider {
         viewers: page.map((pane) => {
           const nonce = this.nonce();
           const cell = cellFor(id, pane, nonce, null);
-          const gated = !!pane.attachArgv && !pane.readOnly;
+          const interactive = !!pane.attachArgv && !pane.readOnly;
+          const gated = interactive && !!readOnlyTile(pane.attachArgv!);
+          if (interactive && !gated) unshaped.push(pane.label);
           const gateUntil = this.gateDeadline();
-          const gate = gated ? { path: this.gatePath(nonce), until: Math.floor(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
+          const gate = interactive ? { path: this.gatePath(nonce), until: Math.floor(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
             nonce, argv: viewerArgv(pane, nonce, gate), readOnly: pane.readOnly,
             attach: pane.attachArgv ? "local" as const : "remote" as const,
@@ -347,6 +363,7 @@ export class HerdrAppProvider implements TerminalProvider {
         }),
       };
     });
+    if (unshaped.length) notes.push(`${unshaped.join(", ")}: OpenRig could not build a read-only view of ${unshaped.length === 1 ? "this seat" : "these seats"} (the tile command has a shape this OpenRig does not know), so ${unshaped.length === 1 ? "its cell takes" : "their cells take"} no input and ${unshaped.length === 1 ? "says" : "say"} so. Open the view with --window, or update OpenRig.`);
     state.views.push(...created);
     await files.save(state);
 

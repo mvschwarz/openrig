@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrAppProvider, UNKNOWN_START_TTL_MS } from "../src/domain/terminal/herdr-app-provider.js";
+import { HerdrAppProvider, UNKNOWN_START_TTL_MS, readOnlyTile, viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
 import { describeModInstall, installRigMods } from "../src/domain/terminal/herdr-app-install.js";
@@ -291,6 +291,31 @@ describe("HerdrAppProvider.openView", () => {
       expect(reads - before).toBeGreaterThanOrEqual(4);
       expect(reads - before).toBeLessThanOrEqual(13);
     }, 10_000);
+
+    it("an interactive viewer never runs the writable tile without its gate: an unknown tile shape or a missing gate fails closed", async () => {
+      const composedTile = pane("dev.build@demo").attachArgv!;
+      // The composer's real tile gives the same seat's read-only tile.
+      expect(readOnlyTile(composedTile)).toEqual(tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "dev.build@demo", true));
+      // Shapes this code can't read give nothing to build from.
+      for (const odd of [["tmux", "attach", "-t", "=dev.build@demo"], composedTile.slice(0, 5), [...composedTile.slice(0, 3), "other-tag", ...composedTile.slice(4)]]) {
+        expect(readOnlyTile(odd)).toBeNull();
+        const argv = viewerArgv({ attachArgv: odd, paneCommand: "", readOnly: false }, "n9", { path: "/x/n9.shown", until: 9_999_999_999, expired: "x" });
+        expect(argv.join(" ")).toContain("could not build a read-only view of this seat");
+        expect(argv).not.toContain(odd[2]); // nothing of the composed command runs
+      }
+      const noGate = viewerArgv({ attachArgv: composedTile, paneCommand: "", readOnly: false }, "n9");
+      expect(noGate.join(" ")).toContain("could not build a read-only view of this seat");
+      expect(noGate).not.toContain(composedTile[2]);
+    });
+
+    it("an open whose tile shape is unknown journals no gate for that cell, which takes no input, and says why", async () => {
+      const odd: ComposedPane = { ...pane("dev.build@demo"), attachArgv: ["tmux", "attach", "-t", "=dev.build@demo"] };
+      const result = await provider.openView(composed([odd, pane("dev.ops@demo")]));
+      expect(result.notes?.join(" ")).toContain("dev.build · S1: OpenRig could not build a read-only view of this seat");
+      expect((await viewers()).map((v) => [v.seat, v.gate])).toEqual([["dev.build@demo", undefined], ["dev.ops@demo", "open"]]);
+      expect(world.terminals.get("t10")!.argv.join(" ")).toContain("could not build a read-only view of this seat");
+      expect(existsSync(gateOf("n2"))).toBe(false);
+    });
 
     it("stop() ends the followers", async () => {
       world.applies = false;
