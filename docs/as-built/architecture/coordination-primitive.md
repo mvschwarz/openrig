@@ -237,7 +237,9 @@ The sweep reports six finding kinds. Its custody check covers closures that
 name a successor qitem or a seat (`closure_reason = handed_off_to`) in the last
 24 hours, plus older closures with open findings. A seat target is satisfied by
 a local successor carrying this row's lineage, and any target by a
-`custody-verified: <target> …` note on the closed row. A new custody finding for
+`custody-verified:` note on the closed row: per note, its first word that names one
+of the row's targets exactly (or a comma list of them) is what it verifies, and later
+mentions don't count; the finding prints each target's note. A new custody finding for
 a human destination goes to the agent that closed the item, using the closing
 transition from active or archived history. Later notes and notification
 receipts do not change that owner. If the closing actor is missing, human, system
