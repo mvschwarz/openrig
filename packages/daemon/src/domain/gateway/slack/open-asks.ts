@@ -96,10 +96,11 @@ function unconfirmedOf(notes: string[], key: string): Set<RePresentUnconfirmed> 
   return what;
 }
 
-/** Whether an earlier attempt of this re-shown ask may be in Slack, by its row: a later post of it (a quiet release, say)
- *  says it may repeat. */
-export function rePresentAttemptUnconfirmed(notes: string[], key: string): boolean {
-  return unconfirmedOf(notes, key).has("attempt");
+/** The marks a later post of a re-shown ask carries, by its row's unconfirmed records for this key: "may repeat" when an
+ *  earlier attempt may be in Slack, and "couldn't check" when its state couldn't be checked. Empty for any other ask. */
+export function rePresentMarks(notes: string[], key: string): { possibleRepeat?: true; stateUnconfirmed?: true } {
+  const what = unconfirmedOf(notes, key);
+  return { ...(what.has("attempt") ? { possibleRepeat: true as const } : {}), ...(what.has("state") ? { stateUnconfirmed: true as const } : {}) };
 }
 
 /** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */

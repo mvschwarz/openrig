@@ -64,7 +64,7 @@ import {
 } from "../delivery-rules-engine.js";
 import { armDeliveryDeferral } from "../../policies/delivery-deferral.js";
 import { confirmReleaseAtPost, currentAskVerdict, holdForQuiet } from "../../policies/quiet-release.js";
-import { noteRePresentNotPosted, noteRePresentUnconfirmed, rePresentAttemptUnconfirmed, RE_PRESENT_DECISION_PREFIX, type RePresentUnconfirmed } from "./open-asks.js";
+import { noteRePresentNotPosted, noteRePresentUnconfirmed, rePresentMarks, RE_PRESENT_DECISION_PREFIX, type RePresentUnconfirmed } from "./open-asks.js";
 import { quietHoldFor } from "../human-quiet-windows.js";
 import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
 import { loadRelayProfiles } from "../relay-config.js";
@@ -879,6 +879,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // Decisions already in the dispatch buffer when this wire is built are retained from an earlier
   // run: posts that failed or never finished, which startServices() replays.
   const replayedAtStart = new Set(new DispatchBuffer(opts.home).pending().map((d) => d.decisionId));
+  /** The marks a later post of a re-shown ask carries, from its row (see `rePresentMarks`); empty for any other ask. */
+  const rowMarks = (qitemId: string | undefined, key: string | undefined): ReturnType<typeof rePresentMarks> =>
+    qitemId && key ? rePresentMarks(opts.queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? ""), key) : {};
   // A replayed notification for a row that has since left the active states is history, not news
   // (a post that failed, retried a day later): it posts nothing, and the row says why, unless the
   // episode already has its posted receipt. Returning ok drains it from the dispatch buffer.
@@ -958,7 +961,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet!, notificationKey: m.notificationKey } });
       return false;
     });
-    if (kept.length === members.length) return targetDeliver(decision); // unchanged: the original, as it is
+    if (kept.length === members.length) {
+      // A digest holding a re-shown ask whose earlier attempt may be in Slack says it may repeat, and an attempt log that
+      // can't be read doesn't hold it. A kept digest decides the same when it comes back here.
+      const repeat = !relay && members.some((m) => rowMarks(m.qitemId, m.notificationKey).possibleRepeat);
+      return targetDeliver(repeat ? { ...decision, payload: { ...p, possibleRepeat: true } } : decision); // the original, as it is
+    }
     if (kept.length === 0 || !aggregate) return { ok: true as const }; // nothing left to post under it
     const keptIds = new Set(kept.map((m) => m.qitemId));
     const body = String(p.body ?? "").split("\n").filter((line) => [...keptIds].some((id) => line.endsWith(`[${id}]`))).join("\n");
@@ -1026,9 +1034,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       });
       if (verdict === "post") {
         // A re-shown ask whose earlier attempt may be in Slack keeps saying so when its release posts it, and an attempt
-        // log that still can't be read doesn't hold the release.
-        const repeat = p.qitemId && rePresentAttemptUnconfirmed(opts.queueRepo.listTransitions(p.qitemId).map((t) => t.transitionNote ?? ""), key);
-        return targetDeliver(repeat ? { ...decision, payload: { ...p, possibleRepeat: true } } : decision);
+        // log that still can't be read doesn't hold the release. (The release has just re-checked its state.)
+        const { possibleRepeat } = relay ? {} : rowMarks(p.qitemId, key);
+        return targetDeliver(possibleRepeat ? { ...decision, payload: { ...p, possibleRepeat } } : decision);
       }
       // Declined (the row says why) or couldn't be checked (nothing written): either way nothing posts now. Acking is
       // safe because the window's release job owns redelivery until the ask has a receipt or a disposition; keeping it
@@ -1122,7 +1130,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
-      return targetDeliver(decision);
+      // A deferred re-shown ask keeps its marks when the fire posts it: the fire checks nothing again.
+      const marks = relay ? {} : rowMarks(p.qitemId, fireKey);
+      return targetDeliver(Object.keys(marks).length > 0 ? { ...decision, payload: { ...p, ...marks } } : decision);
     }
     // A post confirmed partly in Slack finishes without consulting quiet hours, so it is resolved before the decision
     // (which reads them). Only a started multipart post is checked here, from the stores first, so an ordinary

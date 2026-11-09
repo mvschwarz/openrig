@@ -23,6 +23,8 @@ import { setSharedChannel } from "../src/domain/gateway/participants.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
+import { runDeliveryDigestFlush } from "../src/domain/policies/delivery-digest-flush.js";
+import { buildDeferralFirePayload } from "../src/domain/gateway/operator-delivery-engine.js";
 import { postOpenAsks, rePresentDecisionId } from "../src/domain/gateway/slack/open-asks.js";
 import { gatewayRoutes } from "../src/routes/gateway.js";
 
@@ -244,6 +246,48 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(JSON.stringify(posts[0])).toContain("Delivery may repeat after an earlier unconfirmed attempt.");
     await vi.waitFor(() => expect(new DispatchBuffer(home).pending(), "the release isn't held by the unreadable log").toHaveLength(0));
     expect((await run(w, 0)).counts).toEqual({ "already-posted": 1 });
+  });
+
+  /** A re-shown ask kept in the buffer with its attempt log unreadable, replayed by a started wire. */
+  async function replayWithUnreadableLog(row: QueueItem) {
+    const [open] = (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" }))
+      .filter((e) => e.item.qitemId === row.qitemId);
+    new DispatchBuffer(home).enqueue({ kind: "outbound_decision", decisionId: rePresentDecisionId(keyOf(row)), op: OUTBOUND_OP, entityBindingRef: `${HUMAN}@external`, payload: toPayload(open!.item) });
+    mkdirSync(join(home, "state", "slack-attempted-decisions.jsonl"), { recursive: true });
+    const w = wire();
+    w.startServices?.();
+    await vi.waitFor(() => expect(notes(row).some((n) => n.startsWith("slack-re-present-unconfirmed "))).toBe(true));
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
+    return w;
+  }
+
+  it("an away person's deferred re-shown escalation keeps its repeat line when the fire posts it, and the unreadable log doesn't hold it", async () => {
+    registry = registryWith({ deliveryClass: "B", availability: "away" });
+    const row = await repo.create({ sourceSession: "dev-qa@r", destinationSession: "orch-lead@r", body: "urgent body", tags: ["escalation"], nudge: false });
+    repo.update({ qitemId: row.qitemId, actorSession: "orch-lead@r", state: "blocked", blockedOn: `${HUMAN}@kernel`, summary: "Urgent", evidenceRef: "/proof/urgent.md", transitionNote: "parked" });
+    await enable();
+    const w = await replayWithUnreadableLog(row);
+    expect(posts, "deferred for the away person, not posted yet").toHaveLength(0);
+    // The fire, as startup dispatches it at its time.
+    w.dispatcher.dispatch(OUTBOUND_OP, `${HUMAN}@external`, buildDeferralFirePayload(repo.getById(row.qitemId)!, keyOf(row)), { decisionId: `deferral:${keyOf(row)}` });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0])).toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending(), "the fire isn't held by the unreadable log").toHaveLength(0));
+  });
+
+  it("a re-shown ask the person gets in a digest keeps its repeat line when the flush posts it, and the unreadable log doesn't hold it", async () => {
+    registry = registryWith({ deliveryClass: "C", availability: "available" });
+    const row = await park();
+    await enable();
+    const w = await replayWithUnreadableLog(row);
+    expect(posts, "contained in the digest, not posted yet").toHaveLength(0);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: digest "))).toBe(true);
+    const flushed = await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: () => registry }, home, window: "4h",
+      dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never) });
+    expect(flushed.dispatched).toBe(1);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0])).toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending(), "the flush isn't held by the unreadable log").toHaveLength(0));
   });
 
   it("an ask whose state can't be checked, with no earlier attempt, posts once with that line and is reported posted, state unconfirmed", async () => {
