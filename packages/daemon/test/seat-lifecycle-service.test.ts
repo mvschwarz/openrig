@@ -430,7 +430,7 @@ describe("SeatLifecycleService", () => {
         await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
         await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
       ]) {
-        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: "Release an adopted session with: rig unclaim" });
+        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
         if (result.ok) throw new Error("expected refusal");
         expect(result.message).toContain("was adopted (origin=claimed)");
       }
@@ -469,8 +469,9 @@ describe("SeatLifecycleService", () => {
     seatFixture("adopted-rig", "dev.peer");
     const shared = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
     if (shared.ok) throw new Error("expected refusal");
-    expect(shared.guidance).toContain("run rig down 'adopted-rig' (it stops managed sessions in this 2-seat rig;");
-    expect(shared.guidance).toContain("run rig unclaim 'dev-adopted@adopted-rig'");
+    // more than one seat: the route that ends only this seat comes first, and rig down is named for what it ends.
+    expect(shared.guidance).toBe("To end only this session, run rig unclaim 'dev-adopted@adopted-rig' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process in its own terminal. rig down 'adopted-rig' ends all 2 seats in this rig.");
 
     sessionRegistry.updateBinding(claimed.node.id, { attachmentType: "external_cli", externalSessionName: claimed.sessionName });
     const external = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
@@ -483,7 +484,8 @@ describe("SeatLifecycleService", () => {
   });
 
   it("claimedSessionRoutes without a seat count stays general", () => {
-    expect(claimedSessionRoutes("r", "a@r", null)).toContain("rig down 'r' (it stops managed sessions in this rig;");
+    expect(claimedSessionRoutes("r", "a@r", null)).toBe("To end only this session, run rig unclaim 'a@r' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process in its own terminal. rig down 'r' ends every seat in this rig.");
   });
 
   // ---- P5 / P6 — clean ----

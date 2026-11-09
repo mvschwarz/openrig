@@ -1438,8 +1438,10 @@ Examples:
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
-session, such as a handover successor, is refused: rig down <rig> ends it with
-the rest of its rig, and rig unclaim releases it and leaves it running.
+session is refused: to end only it, run rig unclaim <session> (it releases the
+session and leaves its process running), then end that process in its own
+terminal. rig down <rig> ends every seat in its rig, so it is the route only
+for a one-seat rig.
 A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
 adopted and is refused too, until its next launched handover or managed launch;
 the refusal says so. Stopping ends that agent's session and any work in progress:

@@ -644,7 +644,7 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     const w = world();
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
-      .toMatchObject({ ok: false, code: "claimed_session", guidance: "Release an adopted session with: rig unclaim" });
+      .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
     w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run("2026-11-01T10:00:00.000Z", w.node.id);
     const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
