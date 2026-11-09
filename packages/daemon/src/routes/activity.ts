@@ -501,12 +501,15 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     // #1524 (a) for Codex, #2768 for Claude, synchronous with the write below (no await between them): a known earlier
     // occupant's hook (its generation is registered for this node and isn't the current one) neither writes nor
     // publishes. An absent or unregistered generation, no current tenure, or an unreadable ledger keep today's write.
+    // A no-launch adoption (reconcile, bind, self-attach) registers the live process again without replacing it, so
+    // an occupant followed only by adoptions is still current; a launch after it is what makes it earlier.
     if (runtime === "codex" || runtime === "claude-code") {
       let generationMismatch = false;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
         generationMismatch = !!generation && !!current && current.generationUuid !== generation
-          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)
+          && !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation);
       } catch { /* an unreadable ledger is no evidence of a mismatch */ }
       if (generationMismatch) {
         return c.json({
