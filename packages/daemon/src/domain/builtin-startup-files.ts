@@ -61,6 +61,8 @@ function shippedSpecsRootOf(p: string): { root: string; layout: InstallLayout } 
  *  install's daemon/assets, and its absolutePath is exactly <ownerRoot>/<that built-in's relative path>. Null for
  *  anything else, including a custom file with the same name or path suffix. */
 function builtinLayout(file: { path: string; absolutePath: string; ownerRoot: string }): InstallLayout | null {
+  // Persisted contexts from older versions may lack ownerRoot or path: their identity is unknown, so not a built-in.
+  if (typeof file.ownerRoot !== "string" || typeof file.absolutePath !== "string") return null;
   const relative = typeof file.path === "string" ? BUILTIN_STARTUP_FILES.get(file.path) : undefined;
   if (!relative) return null;
   const storedRoot = nodePath.resolve(file.ownerRoot);

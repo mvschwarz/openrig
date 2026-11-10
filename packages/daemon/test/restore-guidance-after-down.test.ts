@@ -27,8 +27,9 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { mergeManagedBlock, MANAGED_BLOCK_START, MANAGED_BLOCK_END } from "../src/domain/managed-blocks.js";
-import { appendIsCleanupSafe } from "../src/domain/restore-guidance.js";
+import { appendIsCleanupSafe, seatGuidance } from "../src/domain/restore-guidance.js";
 import type { ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import type { NodeStartupSnapshot } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
@@ -612,5 +613,30 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       "a truncated legacy BEGIN": "# P\n<!-- BEGIN RIGGED MANAGED BLOCK: \nnotes\n",
     };
     for (const [name, content] of Object.entries(safe)) expect(appendIsCleanupSafe(content, add), name).toBe(true);
+  });
+});
+
+// A selection saved by an older version can hold an openrig-start.md entry with no ownerRoot. Its identity is unknown, so
+// it doesn't anchor the context-entry block, and the rest of the seat's guidance selection is still put back.
+describe("an older saved selection whose openrig-start.md has no ownerRoot", () => {
+  const assets = "/old/node_modules/@openrig/cli/daemon/assets";
+  const snapshot = (ownerKnown: boolean) => ({
+    runtime: "claude-code", projectionEntries: [], startupActions: [],
+    resolvedStartupFiles: [
+      { path: "SOP.md", absolutePath: "/team/SOP.md", ownerRoot: "/team", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "openrig-start.md", absolutePath: `${assets}/guidance/openrig-start.md`, ...(ownerKnown ? { ownerRoot: assets } : {}),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] },
+    ],
+  }) as unknown as NodeStartupSnapshot;
+
+  it("keeps the whole selection, required SOP included, and adds no block for the unknown entry", () => {
+    const guidance = seatGuidance(snapshot(false), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md"]);
+    expect(guidance?.items.find((item) => item.blockId === "SOP.md")?.required).toBe(true);
+  });
+
+  it("with its ownerRoot, the same entry anchors the block (control)", () => {
+    const guidance = seatGuidance(snapshot(true), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md", "openrig-context-entry.md"]);
   });
 });

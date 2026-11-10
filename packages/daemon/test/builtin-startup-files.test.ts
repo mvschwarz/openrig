@@ -227,6 +227,14 @@ describe("withContextEntryFloor", () => {
     expect(files[2]).toMatchObject({ deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"], ownerRoot: RUNNING, required: false });
   });
 
+  // An older saved entry can lack ownerRoot. Its identity is unknown, so it isn't an anchor, and nothing throws.
+  it("an older saved openrig-start.md with no ownerRoot isn't an anchor, and the list comes back as it was", () => {
+    const legacy = { path: "openrig-start.md", absolutePath: `${OLD}/guidance/openrig-start.md`, deliveryHint: "guidance_merge" as const,
+      required: false, appliesOn: ["fresh_start" as const, "restore" as const] } as unknown as typeof start;
+    const files = [culture, legacy];
+    expect(withContextEntryFloor(files, RUNNING)).toEqual(files);
+  });
+
   it("ships a thin pointer that names the skills router, help and declared context, not a method", () => {
     const text = readFileSync(path.join(runningBuiltinAssetsRoot(), "guidance", "openrig-context-entry.md"), "utf8");
     for (const pointer of ["openrig-skills", "rig context get help", "rig context list", "rig context work-install", "LEARNED.md"]) expect(text).toContain(pointer);
