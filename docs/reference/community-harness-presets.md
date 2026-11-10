@@ -315,8 +315,26 @@ Its [README](community-harness-examples/dsh/README.md) has the setup and a check
 and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner` or `passes_model` is refused by an older
+module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner`, `passes_model` or `launch_wrapper` is refused by an older
 OpenRig that doesn't know the field.
+
+## Community-maintained runner: nodecode (@smota)
+
+A runner preset for [nodecode](https://nodecode.ai), a self-modifying Common Lisp agent with a headless JSON-lines mode
+(`nodecode rpc`). Listed here so it can be found; it isn't certified, shipped with OpenRig or supported by OpenRig's maintainers.
+
+| | |
+|---|---|
+| Maintainer | [@smota](https://github.com/smota) |
+| Repository | [smota/openrig-nodecode](https://github.com/smota/openrig-nodecode), Apache-2.0, no npm dependencies |
+| Tested with | Unreleased OpenRig `main` at `7078c754d` (its package version reads 0.7.1), built from source without fork-only commits; nodecode `0.1.13+98dd6dc80`; Node 22.23.4. Not tested on a released OpenRig (none knows `launch_wrapper`). |
+| Needs | an OpenRig that knows `launch_wrapper` (this file documents it). OpenRig 0.7.10 and earlier refuse the preset with "unknown field launch_wrapper". |
+| Test record | connector `d8dd4e6`: 95 unit checks (fake and native nodecode), `npm run test:live` (6 steps against the author's daemon built from that `main`) and an opt-in native permission-question proof with a seeded `:NOBODY` failure; results are the author's, not reproduced by OpenRig |
+| Declares | `launch_result`, `runner`, `resume`, `first_input`, `passes_model`, `launch_wrapper` |
+| Resume | `nodecode rpc <session>`; a session the gateway doesn't know is refused with `error: "missing"` (exit 3) and never replaced. The installer adds `--resume-policy last-completed`: when the session's last turn failed or was cancelled, the runner moves the head back to the last completed turn before taking input, so a resumed seat continues from its last good state; `--resume-policy head` (the bare runner's default) resumes at the head as left. Pass either flag to `scripts/install-preset.mjs` to choose. |
+| Reports | `active`, `PreToolUse`, `Stop` and `session_identity` to `/api/activity/hooks`; permission questions through `/api/activity/permission-requests` |
+| Fork commits | none needed. Stock `main` accepts the runner's `session_identity` report (the hook answers ok and the identity event is published) but does not persist a community resume token from it; the seat's identity reads unconfirmed, as for any community harness. Two fork-only daemon commits (`be17fa528`, `cbb109b62`) add that plus model and context readings, and are not part of this entry. |
+| Limits | no turn cancel; permissions bridged from nodecode's `organism.questions` only, and that proof is driven by a model prompt, so it is opt-in; a question reaches OpenRig only when every choice reads as allow or reject (once or always), others are answered in the pane by typing the exact choice, and only the first four choices are offered through OpenRig; model, provider and effort apply to fresh sessions, a resumed one stays pinned; its gateway keeps running after `rig down`; the installed preset runs each seat in its own nodecode profile (`--seat-profile auto`, sharing the operator's memories and skills), while the bare runner uses the operator's organism unless `--profile` is set; `node` must be on the pane's `PATH` |
 
 ## Pass the first startup input at launch
 
