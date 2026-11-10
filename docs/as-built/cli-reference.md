@@ -1125,6 +1125,28 @@ off, draft-aware and hold modes, immediate refusal results and held-message insp
 |---|---|---|
 | `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
 
+A rebuild starts a new native conversation and primes it from durable artifacts. In the JSON result,
+`currentStatus.continuityOutcome` describes the executed source (`rebuilt`, `forked`, `fresh`, or unknown
+for a discovered successor); `sourceOutcome` lists the rebuild artifacts and gaps or the fork origin.
+The legacy `continuityTransferred` field is always `false`, not a transfer verdict. A complete binding
+does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back this handover's occupant
+tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
+
+For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
+successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the
+observed predecessor policy and retains the usual launch additions: workspace-write adds Git metadata,
+seat-folder and pod-state writable roots; read-only adds none. The result describes this launch policy,
+not an observed exact difference. A supported observed predecessor policy is carried without fresh
+directory additions when no newer saved selection replaces it.
+An unreadable or unsupported predecessor policy does not stop the rebuild; without a saved envelope,
+the ordinary launch settings apply and the result reports the missing comparison. Emitted arguments
+are not proof of the successor's native enforcement, and the named Codex config profile still loads.
+
+`sourceOutcome.model.requested` is the seat's configured Codex model pin, or `null` for the runtime's
+configuration/default. A rebuild reapplies that choice rather than the predecessor's in-pane model;
+`predecessorCompared: false` explicitly reports that no native model comparison was performed. This
+reports launch intent, not the model actually used by the successor. Older daemons omit this object.
+
 ### startup-proof
 
 | Invocation | Aliases | Declared options |

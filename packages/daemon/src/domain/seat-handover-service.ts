@@ -62,6 +62,7 @@ export interface SeatHandoverMutationResult {
   ok: true;
   dryRun: false;
   mutated: true;
+  /** Legacy compatibility field, always false. Read currentStatus.continuityOutcome and sourceOutcome instead. */
   continuityTransferred: false;
   seat: SeatHandoverPlan["seat"];
   // The source reported to the operator is the ORIGINAL intent
@@ -100,7 +101,8 @@ export interface SeatHandoverMutationResult {
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity;
+        model?: { requested: string | null; predecessorCompared: false } };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
   /** #2456: the required startup files the successor started without, where a start would have failed. The seat reads as
@@ -509,7 +511,15 @@ export class SeatHandoverService {
     let permissionContinuity: CodexPermissionContinuity | undefined;
     if (observedCodexPermissions) {
       const observed = observedCodexPermissions;
-      if (observed.state === "observed") {
+      if (permissionOverride.codexPermissions) {
+        // Saved envelopes retain ordinary launch additions; only an observed predecessor
+        // policy uses the exact carry path. Describe policy, not an observed native delta.
+        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+          ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
+          : "without additional writable directory grants, as on a read-only fresh launch";
+        permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
+          + (observed.state === "unverified" ? ` Predecessor permissions could not be compared: ${observed.reason}` : "") };
+      } else if (observed.state === "observed") {
         const selection = new NativePermissionStore(this.db).read(node.id);
         const selectedAt = selection ? parseSqliteUtcMs(selection.updatedAt) : NaN;
         const started = (lstartToMinTs(observed.processStartedAt) ?? Infinity) * 1000;
@@ -522,9 +532,7 @@ export class SeatHandoverService {
         // A saved choice made since this process started is for the successor, even if the
         // predecessor took a later turn. The same-second ordering is not distinguishable.
         // The seat's own envelope is its declared choice for every successor.
-        if (permissionOverride.codexPermissions) {
-          permissionContinuity = { state: "selection_used", detail: "The seat's own permission envelope was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
-        } else if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
+        if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
           || (changed && (!Number.isFinite(changedAt) || changedAt >= started))
           || (!!node.codex_config_profile?.trim() && node.codex_config_profile.trim() !== observed.profile)) {
           permissionContinuity = { state: "selection_used", detail: "The current saved permission choice or declared successor profile was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
@@ -695,7 +703,9 @@ export class SeatHandoverService {
       } else {
         emptyChainReason = "artifacts" in chain ? "the durable chain resolved to zero artifacts" : chain.emptyReason;
       }
-      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}), ...(emptyChainReason ? { emptyChainReason } : {}) };
+      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}),
+        ...(node.runtime === "codex" ? { model: { requested: node.model?.trim() || null, predecessorCompared: false as const } } : {}),
+        ...(emptyChainReason ? { emptyChainReason } : {}) };
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
         runtime: node.runtime,
         seatRef: input.seatRef,
