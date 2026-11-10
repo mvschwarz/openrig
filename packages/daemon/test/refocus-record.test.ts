@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readRefocusRecord } from "../src/domain/refocus-record.js";
@@ -15,10 +15,10 @@ function withHome(run: (home: string) => void) {
 }
 
 /** One prompt through the real hook script, as Claude's UserPromptSubmit would deliver it. */
-function prompt(home: string, conversationId: string) {
+function prompt(home: string, conversationId: string, seat = session) {
   const transcript = join(home, `${conversationId}.jsonl`);
   writeFileSync(transcript, "{}\n");
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: session };
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: seat };
   const result = spawnSync(process.execPath, [hook, "--runtime", "claude"], { env, encoding: "utf8", timeout: 20_000,
     input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: conversationId, transcript_path: transcript, prompt: "hello" }) });
   expect(result.status).toBe(0);
@@ -57,6 +57,42 @@ describe("seat status reads what OpenRig's own refocus hook recorded", () => {
       const record = readRefocusRecord(home, session, null);
       expect(record.currentConversation).toBe("unknown");
       expect(record.detail).toContain("no resume token");
+    });
+  });
+
+  it.each([["empty", ""], ["truncated", "{\"lastBytes\": 12"], ["not a record", "[]"]])("a %s current record reads unknown, never 'recorded', and doesn't date the history", (_kind, bytes) => {
+    withHome((home) => {
+      mkdirSync(join(home, "refocus"), { recursive: true });
+      writeFileSync(join(home, "refocus", `${session}__${conversation}.json`), bytes);
+      const record = readRefocusRecord(home, session, conversation);
+      expect(record).toMatchObject({ currentConversation: "unknown", lastRecordedAt: null });
+      expect(record.detail).toContain("can't be read");
+    });
+  });
+
+  it("a state folder that can't be read reads unknown, not 'no record'", () => {
+    withHome((home) => {
+      prompt(home, conversation);
+      const dir = join(home, "refocus");
+      chmodSync(dir, 0o000);
+      try {
+        const record = readRefocusRecord(home, session, conversation);
+        expect(record).toMatchObject({ lastRecordedAt: "unknown", currentConversation: "unknown" });
+        expect(record.detail).toContain("couldn't be read (EACCES)");
+      } finally { chmodSync(dir, 0o755); }
+    });
+  });
+
+  it("a seat whose name extends this one's never supplies this seat's history", () => {
+    withHome((home) => {
+      prompt(home, conversation, "sample@rig__other");
+      expect(readRefocusRecord(home, "sample@rig__other", conversation)).toMatchObject({ currentConversation: true });
+      const record = readRefocusRecord(home, "sample@rig", "its-own-conversation");
+      expect(record).toMatchObject({ lastRecordedAt: "unknown", currentConversation: false });
+      expect(record.detail).toContain("may belong to another seat");
+      // Once this seat has its own record, its current conversation is still exact.
+      prompt(home, "its-own-conversation", "sample@rig");
+      expect(readRefocusRecord(home, "sample@rig", "its-own-conversation")).toMatchObject({ currentConversation: true });
     });
   });
 
