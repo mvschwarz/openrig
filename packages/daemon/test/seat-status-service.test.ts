@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
@@ -147,6 +147,31 @@ describe("SeatStatusService", () => {
     expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
     expect(status("dev-pi@home-rig").runtime_home).toEqual({ variable: "PI_CODING_AGENT_DIR", home: null, source: "native_default" });
     expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
+  });
+
+  it("shows what OpenRig's own refocus hook recorded for a Claude or Codex seat, from that hook's state in OPENRIG_HOME", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "seat-refocus-"));
+    try {
+      const rig = rigRepo.createRig("refocus-rig");
+      const nodes = {
+        claude: rigRepo.addNode(rig.id, "dev.claude", { runtime: "claude-code" }),
+        codex: rigRepo.addNode(rig.id, "dev.codex", { runtime: "codex" }),
+        pi: rigRepo.addNode(rig.id, "dev.pi", { runtime: "pi" }),
+      };
+      for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@refocus-rig`);
+      // The claude seat's hook has recorded a conversation; the codex seat's never has.
+      mkdirSync(path.join(home, "refocus"));
+      writeFileSync(path.join(home, "refocus", "dev-claude@refocus-rig__conv-1.json"), JSON.stringify({ lastBytes: 1, baselineAt: "2026-11-10T00:00:00Z" }));
+      const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", OPENRIG_HOME: home } });
+      const status = (ref: string) => {
+        const result = svc.getStatus(ref);
+        if (!result.ok) throw new Error(result.code);
+        return result.status;
+      };
+      expect(status("dev-claude@refocus-rig").refocus).toMatchObject({ lastRecordedAt: expect.any(String), currentConversation: "unknown" });
+      expect(status("dev-codex@refocus-rig").refocus).toMatchObject({ lastRecordedAt: null, detail: expect.stringContaining("has no record for this seat") });
+      expect(status("dev-pi@refocus-rig")).not.toHaveProperty("refocus");
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   it("names a Claude seat's own subscription token by its label and file, and says when that file wouldn't apply at the next launch", () => {

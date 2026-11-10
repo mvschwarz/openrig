@@ -13,6 +13,7 @@ import { seatAccountHome, RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } 
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
+import { readRefocusRecord, type RefocusRecord } from "./refocus-record.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -21,6 +22,9 @@ export interface SeatStatus {
    * Completion applies only to the displayed actor; other actors' pending state is unknown. */
   permission_stop?: PermissionStopStatus;
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
+  /** Claude and Codex seats: what OpenRig's own refocus hook has recorded for this seat, from its state files. Evidence
+   *  of what ran, not readiness from configuration. */
+  refocus?: RefocusRecord;
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -157,6 +161,7 @@ export class SeatStatusService {
     return {
       permission_stop: this.permissionStopStatus(entry),
       ...this.compactionStatus(entry),
+      ...this.refocusStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,
       rig_name: entry.rigName,
@@ -191,6 +196,13 @@ export class SeatStatusService {
         : unavailablePermissionStop();
     }
     catch { return unavailablePermissionStop(); }
+  }
+
+  private refocusStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "refocus"> {
+    if ((entry.runtime !== "claude-code" && entry.runtime !== "codex") || !entry.canonicalSessionName) return {};
+    // The same home the hook resolves (refocus.cjs).
+    const home = this.env.OPENRIG_HOME || path.join(this.env.HOME || "/tmp", ".openrig");
+    return { refocus: readRefocusRecord(home, entry.canonicalSessionName, entry.resumeToken ?? null) };
   }
 
   private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {

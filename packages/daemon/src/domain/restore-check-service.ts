@@ -1201,7 +1201,7 @@ export class RestoreCheckService {
       ? `No saved explicit activity resource or selected core-plugin channel; current desired activity-hook selection is unknown: ${desired.evidence}`
       : desired.selected
         ? "Current desired activity hooks are selected, but neither OpenRig channel is saved for this conversation (stale selection); restore preserves the saved selection and does not adopt the current profile"
-        : "No saved explicit activity resource or selected core-plugin channel, and current desired activity hooks are not selected; inspection is not applicable to these known OpenRig channels (other user hooks are not inspected)";
+        : "No saved explicit activity resource or selected core-plugin channel, and current desired activity hooks are not selected; inspection is not applicable to these known OpenRig channels (other user hooks are not inspected). Without openrig-core, OpenRig's refocus and compaction-restore hooks don't run in this seat; rig seat status shows what its refocus hook has recorded";
     return { check, status: desired.status === "known" && !desired.selected ? "green" : "yellow", evidence, remediation: "" };
   }
 
