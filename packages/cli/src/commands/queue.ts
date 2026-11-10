@@ -902,8 +902,8 @@ const UPDATE_STATE_WRITE_FLAGS = [
  * DaemonClient stamps), whatever --source says. Outside one, a routine can name itself with --source <name>@external:
  * it rides the body as the declared actor, which the daemon records as claimed:v1 because no header names a seat, so
  * the note is attributed to an external actor and never to a seat, and OPENRIG_SESSION_NAME is never forged. The
- * external path records a note only. Returns the body actor to send (undefined = the header decides), or false after
- * printing why nothing was sent.
+ * external path records a note only, on the local daemon (the caller refuses a --host that resolves to another host).
+ * Returns the body actor to send (undefined = the header decides), or false after printing why nothing was sent.
  */
 function resolveUpdateActor(source: string | undefined, opts: Record<string, unknown>): { actorSession?: string } | false {
   const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
@@ -922,12 +922,6 @@ function resolveUpdateActor(source: string | undefined, opts: Record<string, unk
     if (seat) {
       process.stderr.write(`warning: --source ${trimmed} is ignored: this runs in the seat ${seat}, which is the note's actor.\n`);
       return {};
-    }
-    if (opts.host !== undefined) {
-      // A forwarded create stamps the origin host on a two-part name; this body actor would reach the other host bare,
-      // indistinguishable from a routine of that host. Until the cross-host form is settled, refuse rather than blur it.
-      return refuse("--source with --host is not supported yet: the other host would record the routine without the host it ran on. " +
-        "Append the note on the routine's own host. Nothing was sent.");
     }
     return { actorSession: trimmed };
   }
@@ -1352,7 +1346,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
-    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only. A managed seat stays the actor")
+    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
@@ -1400,6 +1394,14 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       await withClient(deps, async (local) => {
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        if (actor.actorSession !== undefined && target.remote) {
+          // #2866: the other host would record the routine bare, indistinguishable from a routine of its own (a
+          // forwarded create stamps the origin; this path doesn't). A --host that resolves locally is fine.
+          console.error(`--source with --host ${target.remote} is not supported: that host would record ${actor.actorSession} ` +
+            "without the host it ran on. Append the note on the routine's own host. Nothing was sent.");
+          process.exitCode = 1;
+          return;
+        }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,

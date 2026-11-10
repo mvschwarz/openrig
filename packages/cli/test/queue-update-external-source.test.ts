@@ -22,6 +22,9 @@ let repo: QueueRepository;
 let server: any;
 let port = 0;
 const seenHeaders: Array<string | undefined> = [];
+const SELF_HOST_ID = "this-host";
+const REMOTE_URL = "http://127.0.0.1:9";
+const remoteCalls: string[] = [];
 
 // Same hermetic isolation as queue-update-metadata-reject-cli.test.ts: ambient OPENRIG_URL / RIGGED_URL /
 // OPENRIG_PORT win over the injected state file, so they are removed for the CLI-invocation window only.
@@ -40,6 +43,8 @@ beforeAll(async () => {
     seenHeaders.push(c.req.header("x-openrig-session"));
     c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); await next();
   });
+  // The daemon's own host id, as /healthz reports it: a `--host` naming it resolves to this daemon (queueHostTarget).
+  app.get("/healthz", (c) => c.json({ ok: true, selfHostId: SELF_HOST_ID }));
   app.route("/api/queue", queueRoutes());
   await new Promise<void>((resolve) => { server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info: { port: number }) => { port = info.port; resolve(); }); });
 });
@@ -55,8 +60,14 @@ function loopbackUrl(): string { return `http://127.0.0.1:${port}`; }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function deps(): any {
   return {
+    // One registered http host besides this daemon, so `--host other-host` resolves to a truly remote target.
+    hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "other-host", transport: "http", url: REMOTE_URL }] } }),
     lifecycleDeps: { spawn: () => ({ pid: 1, unref() {} }), fetch: async () => ({ ok: true }), kill: () => true, readFile: (p: string) => (p === STATE_FILE ? JSON.stringify({ pid: 1, port, host: "127.0.0.1", db: "x", startedAt: "x" }) : null), writeFile() {}, removeFile() {}, exists: (p: string) => p === STATE_FILE, mkdirp() {}, openForAppend: () => 3, isProcessAlive: () => true },
     clientFactory: (url: string) => {
+      // The remote host's client is built but must never be called: every method records the call and fails.
+      if (url === REMOTE_URL) {
+        return new Proxy({}, { get: (_t, prop) => async () => { remoteCalls.push(String(prop)); throw new Error(`remote ${String(prop)} called`); } });
+      }
       if (url !== loopbackUrl()) throw new Error(`test-isolation guard: clientFactory url '${url}' !== loopback '${loopbackUrl()}'`);
       return new DaemonClient(url);
     },
@@ -90,6 +101,7 @@ describe("#2866 rig queue update --source <name>@external (note only, external a
     vi.stubEnv("OPENRIG_SESSION_NAME", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
     seenHeaders.length = 0;
+    remoteCalls.length = 0;
     id = (await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "work" })).qitemId;
   });
   afterEach(() => { vi.unstubAllEnvs(); });
@@ -134,11 +146,21 @@ describe("#2866 rig queue update --source <name>@external (note only, external a
     expect(transitions(id).at(-1)).toMatchObject({ actor_session: "routine-nightly@external", identity_provenance: "claimed:v1" });
   });
 
-  it("refuses --source with --host (the other host would lose the routine's origin); nothing is sent", async () => {
+  it.each(["local", SELF_HOST_ID])("accepts --host %s, which resolves to this daemon: the note is recorded as the external routine", async (host) => {
+    const { out, exit } = await runCli(["update", id, "--source", "routine-nightly@external", "--note", `via --host ${host}`, "--host", host, "--json"]);
+    expect(exit, out).toBeFalsy();
+    expect(transitions(id).at(-1)).toMatchObject({ actor_session: "routine-nightly@external", transition_note: `via --host ${host}`, identity_provenance: "claimed:v1" });
+  });
+
+  it("refuses --source with a --host that resolves to another host (it would lose the routine's origin); nothing is written", async () => {
+    const beforeTxns = transitions(id).length;
     const { out, exit } = await runCli(["update", id, "--source", "routine-nightly@external", "--note", "x", "--host", "other-host"]);
     expect(exit).toBe(1);
-    expect(out).toContain("--source with --host is not supported yet");
-    expect(seenHeaders).toEqual([]);
+    expect(out).toContain("--source with --host other-host is not supported");
+    expect(out).toContain("Nothing was sent");
+    // Only the self-id probe reached this daemon; nothing was posted here or to the other host.
+    expect(remoteCalls).toEqual([]);
+    expect(transitions(id).length).toBe(beforeTxns);
   });
 
   it.each(["dev-x@rig", "routine-nightly", "routine@externalx", "human@kernel"])("refuses --source %s (not <name>@external); nothing is sent", async (source) => {
