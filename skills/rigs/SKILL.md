@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when a person in their own Claude Code or Codex session mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex) on their project. That includes installing, setting up, starting or updating OpenRig, seeing, getting back to or re-attaching to their OpenRig agents (including bringing a stopped team back), TUI or operator, starting or sharing a team, and joining this session to one. Operating a running rig from inside it (fleet recovery, seat handover, watchdog wakes, in-rig upgrades) is the openrig-skills skill.
+description: Use when a person in their own Claude Code, Codex or OMP (Oh My Pi) session mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex) on their project. That includes installing, setting up, starting or updating OpenRig, seeing, getting back to or re-attaching to their OpenRig agents (including bringing a stopped team back), TUI or operator, starting or sharing a team, and joining this session to one. Operating a running rig from inside it (fleet recovery, seat handover, watchdog wakes, in-rig upgrades) is the openrig-skills skill.
 ---
 
 # rigs: your route into OpenRig
@@ -135,7 +135,7 @@ person needs in their project or home folder and name that path.
 
   Attach only on their yes; if they decline, continue the operator handoff. For this first contact, use the kernel's
   rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
-  `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex> --print-env`.
+  `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex|omp> --print-env`.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
   (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
   later `rig` command. Check with `rig whoami --json`, and use it or `rig seat status` later for identity and state,
