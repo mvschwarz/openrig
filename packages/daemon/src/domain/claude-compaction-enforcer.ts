@@ -529,6 +529,14 @@ interface PreparationAttempt extends PreparationState {
  *  path and marker are kept so the restore can name a map the seat completed anyway, or say none was required. */
 interface RestoreCarry { mapPath: string | null; compactInstruction: string | null; skipMap?: { mapPath: string; marker: string } }
 
+/** Under --skip-map, a map the seat completed at the attempt path anyway, or null. Nothing publishes the .tmp under
+ *  --skip-map, so the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
+function completedSkippedMap({ mapPath, marker }: { mapPath: string; marker: string }): string | null {
+  return [mapPath, `${mapPath}.tmp`].find((file) => {
+    try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(marker); } catch { return false; }
+  }) ?? null;
+}
+
 /** The file, beside an attempt's restore map, where the daemon records what it last did for that attempt. The agent
  *  never writes it. A restarted daemon reads it to pick the attempt up again. */
 export const COMPACTION_RECORD_FILE = "COMPACTION-STATE.json";
@@ -862,7 +870,9 @@ export class ClaudeCompactionEnforcer {
     const lastDelivery = record?.lastDelivery;
     const failed = !!lastDelivery && lastDelivery.failures > 0;
     // The map the restore request names: under --skip-map only one the seat completed anyway, never a path with no map.
-    const mapPath = this.restoreCarry.get(sessionName)?.skipMap ? this.restoreMapFields(sessionName).attemptMapPath : record?.mapPath;
+    // The record keeps the --skip-map choice through every owed stage; the in-memory carry ends once the request lands.
+    const skipMap = record?.restoreCarry?.skipMap;
+    const mapPath = skipMap ? completedSkippedMap(skipMap) : record?.mapPath;
     const last = { ...(lastDelivery ? { lastDelivery } : {}), ...(mapPath ? { mapPath } : {}) };
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
     const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
@@ -1732,16 +1742,12 @@ export class ClaudeCompactionEnforcer {
     this.pendingStageGeneration.set(sessionName, attempt.occupantGeneration);
   }
 
-  /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path
-   *  anyway, or a plain statement that none was required. Nothing publishes the .tmp under --skip-map, so
-   *  the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
+  /** The map the restore request names. With --skip-map: a map the seat completed anyway (`completedSkippedMap`),
+   *  or a plain statement that none was required. */
   private restoreMapFields(sessionName: string): { attemptMapPath: string | null; noMapRequired: boolean } {
     const carry = this.restoreCarry.get(sessionName);
     if (!carry?.skipMap) return { attemptMapPath: carry?.mapPath ?? null, noMapRequired: false };
-    const { mapPath, marker } = carry.skipMap;
-    const completed = [mapPath, `${mapPath}.tmp`].find((file) => {
-      try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(marker); } catch { return false; }
-    });
+    const completed = completedSkippedMap(carry.skipMap);
     return completed ? { attemptMapPath: completed, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
   }
 

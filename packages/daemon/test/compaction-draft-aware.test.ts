@@ -169,11 +169,14 @@ it.each([{ skipMap: false, written: true }, { skipMap: true, written: false }, {
       return r;
     });
     expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap })).toMatchObject({ triggered: true });
-    expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true });
-    const owed = f.e.getOwedRestore(seat)!;
-    expect(owed.stage).toBe("restore_prompt");
-    if (written) expect(owed.mapPath).toBe(skipMap ? `${mapPath}.tmp` : mapPath);
-    else expect(owed).not.toHaveProperty("mapPath");
+    // The same answer while the restore request and then the audit are owed: the request landing ends the in-memory carry.
+    for (const stage of ["restore_prompt", "compliance_prompt"]) {
+      expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true });
+      const owed = f.e.getOwedRestore(seat)!;
+      expect(owed.stage).toBe(stage);
+      if (written) expect(owed.mapPath).toBe(skipMap ? `${mapPath}.tmp` : mapPath);
+      else expect(owed).not.toHaveProperty("mapPath");
+    }
   });
 
 it.each([false, true])("empty composer still permits managed preparation and command (footer=%s)", async footer => {

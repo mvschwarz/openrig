@@ -112,8 +112,10 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("a person's notice n
       expect(text).not.toContain("/openrig/compaction");
     }
     expect(row.body).toContain("Managed restore for writer@demo: restore_prompt undeliverable");
-    expect(row.body).toContain("rig compact 'writer@demo' --state shows the stage, why it waits and the restore map");
+    expect(row.body).toContain("rig compact 'writer@demo' --state shows the stage, why it waits and, when this compaction has one, its restore map.");
     expect(row.body).toContain("run rig compact 'writer@demo' --cancel");
+    // A --skip-map compaction has no map to name (owedRestore.mapPath is absent), so the route without one is in words.
+    expect(row.body).toContain("If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.");
     expect(row.body.includes("inspect the pane and clear or submit that text")).toBe(reason === "input_box_not_empty");
   } finally { selected.mockRestore(); db.close(); }
 });
