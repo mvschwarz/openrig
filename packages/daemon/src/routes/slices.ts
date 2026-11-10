@@ -266,29 +266,59 @@ function resolveSliceProjectLookup(
     return () => null;
   }
   if (projects.length === 0) return () => null;
+  // The resolver is request-local. Reuse inference only for the same canonical
+  // project/mission-root matches, keeping the two containment relations distinct.
+  const inferredByContainment = new Map<string, { id: string; root: string }>();
   return (slicePath: string): string | null => {
     const actualSlicePath = safeRealpath(slicePath);
-    const matching = projects.filter(
-      (p) => isInsideDir(p.root, actualSlicePath) || isInsideDir(p.missionsRoot, actualSlicePath),
-    );
+    const matching = projects.flatMap((project) => {
+      const projectRootContains = isInsideDir(project.root, actualSlicePath);
+      const missionsRootContains = isInsideDir(project.missionsRoot, actualSlicePath);
+      return projectRootContains || missionsRootContains
+        ? [{ project, projectRootContains, missionsRootContains }]
+        : [];
+    });
     if (matching.length === 0) return null;
 
     let selected: (typeof projects)[number] | undefined;
     if (matching.length === 1) {
-      selected = matching[0];
+      selected = matching[0]?.project;
     } else {
       if (!catalogPath) return null;
-      try {
-        const inferred = inferCatalogProject(
-          catalogPath,
-          new ProjectReadError("project_required", "Slice queue counts require one containing project"),
-          { cwd: actualSlicePath },
-          [],
-        );
-        if (inferred.selectedBy !== "cwd") return null;
-        selected = matching.find((project) => project.id === inferred.id && project.root === inferred.root);
-      } catch {
-        return null;
+      const cacheKey = JSON.stringify(
+        matching
+          .map(({ project, projectRootContains, missionsRootContains }) => ({
+            id: project.id,
+            root: project.root,
+            missionsRoot: project.missionsRoot,
+            error: project.error ?? null,
+            projectRootContains,
+            missionsRootContains,
+          }))
+          .sort((a, b) => {
+            const left = JSON.stringify(a);
+            const right = JSON.stringify(b);
+            return left < right ? -1 : left > right ? 1 : 0;
+          }),
+      );
+      const cached = inferredByContainment.get(cacheKey);
+      if (cached) {
+        selected = matching.find(({ project }) => project.id === cached.id && project.root === cached.root)?.project;
+      } else {
+        try {
+          const inferred = inferCatalogProject(
+            catalogPath,
+            new ProjectReadError("project_required", "Slice queue counts require one containing project"),
+            { cwd: actualSlicePath },
+            [],
+          );
+          if (inferred.selectedBy !== "cwd") return null;
+          selected = matching.find(({ project }) => project.id === inferred.id && project.root === inferred.root)?.project;
+          if (!selected) return null;
+          inferredByContainment.set(cacheKey, { id: inferred.id, root: inferred.root });
+        } catch {
+          return null;
+        }
       }
     }
     if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
