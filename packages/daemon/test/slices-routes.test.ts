@@ -1102,6 +1102,58 @@ describe("GET /api/slices observed queue counts", () => {
     });
   });
 
+  it("deduplicates configured and catalog counting roots by physical slice identity through a symlink", async () => {
+    catalog([{ id: "default", root: "." }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    const physicalPath = addSlice(".", "shipping", "shared", "shipped", "SLICE.SHARED");
+    const aliasWorkspaceRoot = path.join(root, "workspace-alias");
+    fs.symlinkSync(root, aliasWorkspaceRoot, "dir");
+    const aliasMissionsRoot = path.join(aliasWorkspaceRoot, "missions");
+    configureCatalogRoute(aliasMissionsRoot);
+    row("symlink-qualified", "done", ["project:default", "mission:shipping", "slice:shared"]);
+
+    // The configured root is reached through the symlink; the request's
+    // catalog adds the same missions tree by its physical path.
+    const { app } = route("default", false, aliasMissionsRoot, [path.join(root, "slices")]);
+    const entries = await list(app);
+    const visiblePath = path.join(aliasMissionsRoot, "shipping", "slices", "shared");
+    expect(defaultMissionsRoot).toBe(path.join(root, "missions"));
+    expect(visiblePath).not.toBe(physicalPath);
+    expect(fs.realpathSync(visiblePath)).toBe(fs.realpathSync(physicalPath));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.slicePath).toBe(visiblePath);
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, done: 1 });
+    authoredUnchanged();
+  });
+
+  it("counts project-less authored mission aliases against catalog-only claims", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    const defaultSharedPath = addSlice(".", "shipping", "shared", "shipped");
+    const fooSharedPath = addSlice("projects/foo", "shipping", "shared", "active");
+    write(path.join(defaultMissionsRoot, "shipping", "SPEC.md"), "---\nid: M.SHARED\nstatus: active\n---\n# Shipping\n");
+    write(path.join(fooMissionsRoot, "shipping", "SPEC.md"), "---\nid: M.SHARED\nstatus: active\n---\n# Foo shipping\n");
+    const uniqueControlPath = addSlice(".", "support", "alias-control", "active");
+    write(path.join(defaultMissionsRoot, "support", "SPEC.md"), "---\nid: M.UNIQUE\nstatus: active\n---\n# Support\n");
+    configureCatalogRoute(defaultMissionsRoot);
+    row("shared-mission-id-partial", "blocked", ["mission:M.SHARED", "slice:shared"]);
+    row("default-directory-control", "done", ["project:default", "mission:shipping", "slice:shared"]);
+    row("unique-mission-id-control", "pending", ["project:default", "mission:M.UNIQUE", "slice:alias-control"]);
+
+    // The catalog-only foo project contributes ambiguity but does not enter the list.
+    const entries = await list(route("default", false, defaultMissionsRoot, [path.join(root, "slices")]).app);
+    expect(fooSharedPath).not.toBe(defaultSharedPath);
+    expect(entries.map((entry) => entry.slicePath).sort()).toEqual([defaultSharedPath, uniqueControlPath].sort());
+    const defaultShared = entries.find((entry) => entry.slicePath === defaultSharedPath)!;
+    const uniqueControl = entries.find((entry) => entry.slicePath === uniqueControlPath)!;
+    expect(defaultShared.queueCounts, "the shared mission ID does not assign the project-less row to default")
+      .toEqual({ ...ZERO, done: 1 });
+    expect(uniqueControl.queueCounts, "a unique authored mission ID remains a valid counting alias")
+      .toEqual({ ...ZERO, pending: 1 });
+    authoredUnchanged();
+  });
+
   it("counts beyond the existing 500-row display bucket without changing qitemCount", async () => {
     addSlice("alpha", "shipping", "busy");
     db.transaction(() => {
