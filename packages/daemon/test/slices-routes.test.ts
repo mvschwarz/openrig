@@ -12,6 +12,21 @@
 //   - 503 on slices_root_not_configured (graceful when env unset)
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+const catalogReadObservation = vi.hoisted(() => ({ activePath: null as string | null, reads: 0 }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
+      if (catalogReadObservation.activePath !== null && String(args[0]) === catalogReadObservation.activePath) {
+        catalogReadObservation.reads++;
+      }
+      return actual.readFileSync(...args);
+    }) as typeof actual.readFileSync,
+  };
+});
+
 import { Hono } from "hono";
 import { getRequestListener } from "@hono/node-server";
 import { once } from "node:events";
@@ -753,19 +768,14 @@ describe("GET /api/slices observed queue counts", () => {
   }
 
   async function withCatalogReadCount<T>(action: () => Promise<T>): Promise<{ result: T; reads: number }> {
-    const catalogPath = path.join(root, "workspace.yaml");
-    const read = fs.readFileSync;
-    let reads = 0;
-    // Observe the real filesystem boundary; count the fixture catalog and let every read proceed.
-    const observer = vi.spyOn(fs, "readFileSync").mockImplementation((target, ...args) => {
-      if (target === catalogPath) reads++;
-      return read(target, ...args);
-    });
+    catalogReadObservation.activePath = path.join(root, "workspace.yaml");
+    catalogReadObservation.reads = 0;
     try {
       const result = await action();
-      return { result, reads };
+      return { result, reads: catalogReadObservation.reads };
     } finally {
-      observer.mockRestore();
+      catalogReadObservation.activePath = null;
+      catalogReadObservation.reads = 0;
     }
   }
 
