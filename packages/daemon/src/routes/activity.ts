@@ -439,6 +439,12 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
     // Pi-RPC community harnesses share this protocol, but persist community:<name>.
     const isPi = runtime === "pi" && resolved.runtime === "pi";
     const isCommunityPi = !isPi && (resolved.runtime !== null && resolved.runtime !== "omp" && isPiRpcHarness(store.db, resolved.sessionId, resolved.runtime));
+    // A current generation isn't a runtime binding: a process started inside the seat (a Pi helper, say) carries the
+    // seat's generation. Only the seat's own runtime reports its identity; any other keeps the saved token and publishes
+    // nothing for the seat, as OMP's runtime check does above.
+    if (isCommunityPi && runtime !== resolved.runtime) {
+      return c.json({ ok: true, ignored: "runtime_mismatch", tokenPersisted: false });
+    }
     if (isPi || isCommunityPi) {
       // A delayed get_state from a retired runner must not replace the successor's
       // resume token or publish a current identity. Keep resolution, this check

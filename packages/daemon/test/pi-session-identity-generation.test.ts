@@ -203,7 +203,8 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
   const settle = () => Promise.all(pending.splice(0));
   const token = () => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = 1").get();
   const latest = () => store.getLatestForNode({ nodeId: "fork-node", sessionName: "worker@fork-test" });
-  return { post, runner, getState, settle, token, latest, posts };
+  const identities = () => db.prepare("SELECT payload FROM events WHERE type = 'agent.session_identity'").all();
+  return { post, runner, getState, settle, token, latest, posts, identities };
 }
 
 describe("a protocol: pi-rpc fork's identity and attention", () => {
@@ -212,6 +213,20 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     f.getState(f.runner(), "/fixture/omo/a.jsonl");
     expect((await f.settle()).map((r) => r.status)).toEqual([200]);
     expect(f.token()).toEqual({ resume_type: "community:omo", resume_token: "/fixture/omo/a.jsonl" });
+  });
+
+  it("a current-generation identity from another runtime in the seat (a Pi helper) keeps the fork's token and publishes nothing", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2, token: { type: "community:omo", value: "/fixture/omo/a.jsonl", provenance: "hook" } });
+    const identity = { eventFamily: "session_identity", nodeId: "fork-node", sessionName: "worker@fork-test", generation: "fork-current" };
+    const helper = await f.post({ ...identity, runtime: "pi", sessionId: "helper-1", sessionFile: "/fixture/pi/b.jsonl" });
+    expect(await helper.json()).toMatchObject({ ignored: "runtime_mismatch", tokenPersisted: false });
+    expect(f.token()).toEqual({ resume_type: "community:omo", resume_token: "/fixture/omo/a.jsonl" });
+    expect(f.identities()).toEqual([]);
+    // The control: the seat's own runtime, with the same generation, still reports the seat's identity.
+    const own = await f.post({ ...identity, runtime: "omo", sessionId: "fork-session", sessionFile: "/fixture/omo/b.jsonl" });
+    expect(await own.json()).toMatchObject({ provenance: "rpc", tokenPersisted: true });
+    expect(f.token()).toEqual({ resume_type: "community:omo", resume_token: "/fixture/omo/b.jsonl" });
+    expect(f.identities()).toHaveLength(1);
   });
 
   it("a preset's own runner (agent_runner 1) with a current generation and a sessionFile keeps its launcher token", async () => {
