@@ -71,13 +71,16 @@ export function readRefocusRecord(home: string, sessionName: string, resumeToken
   // without one is this seat's; a file with one may not be, and then the history is unknown rather than borrowed.
   let newest = 0;
   let ambiguous = false;
+  let historyProblem: string | undefined;
   for (const name of names) {
     if (!name.startsWith(`${seatKey}__`) || !name.endsWith(".json")) continue;
     if (name.slice(seatKey.length + 2, -".json".length).includes("__")) { ambiguous = true; continue; }
+    // A record that can't be read or isn't whole might be the newest, so the history is unknown, never older or absent.
     const record = validRecord(join(dir, name));
     if (record.ok) newest = Math.max(newest, record.mtimeMs);
+    else historyProblem ??= record.reason;
   }
-  const lastRecordedAt = ambiguous ? "unknown" : newest ? new Date(newest).toISOString() : null;
+  const lastRecordedAt = ambiguous || historyProblem ? "unknown" : newest ? new Date(newest).toISOString() : null;
 
   const detail = noIdentity
     ? "OpenRig's refocus hook runs in this seat but gets no conversation identity, so it can't measure or refocus."
@@ -85,6 +88,8 @@ export function readRefocusRecord(home: string, sessionName: string, resumeToken
       ? "OpenRig's refocus hook has a record for this seat's current conversation."
       : currentProblem
         ? `This seat's refocus record for its current conversation can't be read (${currentProblem}), so whether the hook ran in it is unknown.`
+        : historyProblem
+          ? `One of this seat's earlier refocus records can't be read (${historyProblem}), so when the hook last recorded this seat is unknown${currentConversation === false ? "; it has no record for the current conversation" : ""}.`
         : lastRecordedAt === "unknown"
           ? `A refocus record under this seat's name may belong to another seat whose name begins with it, so when the hook last recorded this seat is unknown${currentConversation === false ? "; it has no record for the current conversation" : ""}.`
           : lastRecordedAt

@@ -65,8 +65,28 @@ describe("seat status reads what OpenRig's own refocus hook recorded", () => {
       mkdirSync(join(home, "refocus"), { recursive: true });
       writeFileSync(join(home, "refocus", `${session}__${conversation}.json`), bytes);
       const record = readRefocusRecord(home, session, conversation);
-      expect(record).toMatchObject({ currentConversation: "unknown", lastRecordedAt: null });
+      expect(record).toMatchObject({ currentConversation: "unknown", lastRecordedAt: "unknown" });
       expect(record.detail).toContain("can't be read");
+    });
+  });
+
+  it("an earlier record that can't be read makes the history unknown, never 'no record' or an older time", () => {
+    withHome((home) => {
+      // Alone: an unreadable earlier record, and the seat now has another conversation (or no resume token).
+      prompt(home, "earlier");
+      const earlier = join(home, "refocus", `${session}__earlier.json`);
+      chmodSync(earlier, 0o000);
+      try {
+        for (const token of ["now", null]) {
+          const record = readRefocusRecord(home, session, token);
+          expect(record.lastRecordedAt).toBe("unknown");
+          expect(record.detail).toContain("can't be read (EACCES)");
+        }
+        // Beside a readable older record: the readable one isn't passed off as the last.
+        prompt(home, "oldest");
+        expect(readRefocusRecord(home, session, "now").lastRecordedAt).toBe("unknown");
+        expect(readRefocusRecord(home, session, "oldest").currentConversation).toBe(true);
+      } finally { chmodSync(earlier, 0o644); }
     });
   });
 
