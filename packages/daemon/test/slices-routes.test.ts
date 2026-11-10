@@ -696,6 +696,19 @@ describe("GET /api/slices observed queue counts", () => {
     write(path.join(root, "workspace.yaml"), JSON.stringify({ projects }));
   }
 
+  function addCatalogProject(id: string, catalogRoot: string): string {
+    const projectRoot = path.resolve(root, catalogRoot);
+    write(path.join(projectRoot, "SPEC.md"), `---\nid: ${id}\n---\n# Project\n`);
+    write(path.join(projectRoot, "project.yaml"), `id: ${id}\nmissions:\n  root: missions\n`);
+    return path.join(projectRoot, "missions");
+  }
+
+  function configureCatalogRoute(slicesRoot: string): void {
+    const config = path.join(root, "settings.json");
+    write(config, JSON.stringify({ workspace: { root, catalogPath: path.join(root, "workspace.yaml"), slicesRoot } }));
+    settings = new SettingsStore(config);
+  }
+
   function addSlice(project: string, mission: string, name: string, status = "active", id = name): string {
     const missionRoot = path.join(root, project, "missions", mission);
     write(path.join(missionRoot, "SPEC.md"), `---\nid: M.${mission.toUpperCase()}\nstatus: active\n---\n# Mission\n`);
@@ -737,6 +750,23 @@ describe("GET /api/slices observed queue counts", () => {
 
   function authoredUnchanged(): void {
     for (const [file, bytes] of docs) expect(fs.readFileSync(file, "utf8"), file).toBe(bytes);
+  }
+
+  async function withCatalogReadCount<T>(action: () => Promise<T>): Promise<{ result: T; reads: number }> {
+    const catalogPath = path.join(root, "workspace.yaml");
+    const read = fs.readFileSync;
+    let reads = 0;
+    // Observe the real filesystem boundary; count the fixture catalog and let every read proceed.
+    const observer = vi.spyOn(fs, "readFileSync").mockImplementation((target, ...args) => {
+      if (target === catalogPath) reads++;
+      return read(target, ...args);
+    });
+    try {
+      const result = await action();
+      return { result, reads };
+    } finally {
+      observer.mockRestore();
+    }
   }
 
   beforeEach(() => {
@@ -998,6 +1028,114 @@ describe("GET /api/slices observed queue counts", () => {
     expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: fooSlicePath, status: "active", rawStatus: "active" });
     authoredUnchanged();
     expect(entries[0]!.queueCounts, "the default project's same-name decoy must not inflate foo").toEqual({ ...ZERO, pending: 1 });
+  });
+
+  it("bounds real workspace catalog reads when many slices share one containing-root set", async () => {
+    const names = ["nested-01", "nested-02", "nested-03", "nested-04", "nested-05"];
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    configureCatalogRoute(fooMissionsRoot);
+
+    const addSameNameProjectPair = (name: string): void => {
+      addSlice(".", "shipping", name);
+      addSlice("projects/foo", "shipping", name);
+      row(`foo-${name}`, "pending", ["project:foo", "mission:shipping", `slice:${name}`]);
+      row(`default-${name}`, "failed", ["project:default", "mission:shipping", `slice:${name}`]);
+    };
+    addSameNameProjectPair(names[0]!);
+    const { app, indexer } = route("foo", false, fooMissionsRoot);
+    expect(indexer.projectId).toBeUndefined();
+
+    const small = await withCatalogReadCount(() => list(app));
+    expect(small.result).toHaveLength(1);
+    expect(small.result[0]).toMatchObject({ name: names[0], slicePath: path.join(fooMissionsRoot, "shipping", "slices", names[0]!) });
+    expect(small.result[0]!.queueCounts).toEqual({ ...ZERO, pending: 1 });
+
+    for (const name of names.slice(1)) addSameNameProjectPair(name);
+    const many = await withCatalogReadCount(() => list(app, "?refresh=1"));
+    expect(many.result.map((entry) => entry.name).sort()).toEqual([...names].sort());
+    for (const name of names) {
+      const entry = many.result.find((candidate) => candidate.name === name)!;
+      expect(entry.slicePath).toBe(path.join(fooMissionsRoot, "shipping", "slices", name));
+      expect(entry.queueCounts, `default project's same-name ${name} row is excluded`).toEqual({ ...ZERO, pending: 1 });
+    }
+    expect(small.reads).toBeGreaterThan(0);
+    expect(many.reads, "catalog reads should stay bounded by the shared containing-root set, not slice count")
+      .toBeLessThanOrEqual(small.reads + 1);
+    authoredUnchanged();
+  });
+
+  it("does not reuse a selection across different containing-root sets in one request", async () => {
+    const fooNames = ["a-foo-01", "b-foo-02"];
+    const barNames = ["y-bar-01", "z-bar-02"];
+    catalog([
+      { id: "default", root: "." },
+      { id: "foo", root: "projects/foo" },
+      { id: "bar", root: "projects/bar" },
+    ]);
+    addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    const barMissionsRoot = addCatalogProject("bar", "projects/bar");
+    configureCatalogRoute(fooMissionsRoot);
+
+    for (const name of fooNames) {
+      addSlice(".", "shipping", name);
+      addSlice("projects/foo", "shipping", name);
+      row(`foo-${name}`, "pending", ["project:foo", "mission:shipping", `slice:${name}`]);
+      row(`default-${name}`, "failed", ["project:default", "mission:shipping", `slice:${name}`]);
+    }
+    for (const name of barNames) {
+      addSlice(".", "shipping", name);
+      addSlice("projects/bar", "shipping", name);
+      row(`bar-${name}`, "done", ["project:bar", "mission:shipping", `slice:${name}`]);
+      row(`default-${name}`, "blocked", ["project:default", "mission:shipping", `slice:${name}`]);
+    }
+
+    const { app, indexer } = route("foo", false, fooMissionsRoot, [barMissionsRoot]);
+    expect(indexer.projectId).toBeUndefined();
+    const entries = await list(app);
+    expect(entries.map((entry) => entry.name).sort()).toEqual([...fooNames, ...barNames].sort());
+    for (const name of fooNames) {
+      const entry = entries.find((candidate) => candidate.name === name)!;
+      expect(entry.slicePath).toBe(path.join(fooMissionsRoot, "shipping", "slices", name));
+      expect(entry.queueCounts, `default project's same-name ${name} row is excluded`).toEqual({ ...ZERO, pending: 1 });
+    }
+    for (const name of barNames) {
+      const entry = entries.find((candidate) => candidate.name === name)!;
+      expect(entry.slicePath).toBe(path.join(barMissionsRoot, "shipping", "slices", name));
+      expect(entry.queueCounts, `default project's same-name ${name} row is excluded`).toEqual({ ...ZERO, done: 1 });
+    }
+    authoredUnchanged();
+  });
+
+  it("uses the updated workspace catalog on the next HTTP request", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    configureCatalogRoute(fooMissionsRoot);
+    addSlice(".", "shipping", "shared");
+    const fooSlicePath = addSlice("projects/foo", "shipping", "shared");
+    row("old-project-row", "pending", ["project:foo", "mission:shipping", "slice:shared"]);
+    row("new-project-row", "done", ["project:renamed", "mission:shipping", "slice:shared"]);
+    row("default-decoy-row", "blocked", ["project:default", "mission:shipping", "slice:shared"]);
+
+    const { app, indexer } = route("foo", false, fooMissionsRoot);
+    expect(indexer.projectId).toBeUndefined();
+    const first = await list(app);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ name: "shared", slicePath: fooSlicePath });
+    expect(first[0]!.queueCounts).toEqual({ ...ZERO, pending: 1 });
+
+    catalog([{ id: "default", root: "." }, { id: "renamed", root: "projects/foo" }]);
+    addCatalogProject("renamed", "projects/foo");
+    const second = await withCatalogReadCount(() => list(app));
+    expect(second.reads).toBeGreaterThan(0);
+    expect(second.result).toHaveLength(1);
+    expect(second.result[0]).toMatchObject({ name: "shared", slicePath: fooSlicePath });
+    expect(second.result[0]!.queueCounts, "the renamed project's row replaces the old owner on a fresh request")
+      .toEqual({ ...ZERO, done: 1 });
+    authoredUnchanged();
   });
 
   it.each(["unidentified root", "ambiguous project root"])("reports null rather than observed zero for %s", async reason => {
