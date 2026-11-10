@@ -58,6 +58,7 @@ import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type H
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import type { QueueItem, QueueRepository } from "../domain/queue-repository.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
+import { PAIR_SOURCE_SESSION } from "../domain/hosts/pairing-ask.js";
 import { existsSync } from "node:fs";
 import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-registry.js";
 import { resolveDefaultPerson } from "../domain/gateway/participants.js";
@@ -89,8 +90,6 @@ function describePairTtl(ms: number): string {
   return `about ${count(Math.round(ms / 1000), "second")}`;
 }
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
-
-const PAIR_SOURCE_SESSION = "host-pair@kernel";
 
 /** The pairing request's one question. Approval is only ever this explicit choice: the person's click on its Approve
  *  option (the TUI, Steering, Slack's buttons), or an agent seat's close that names it, the option-id answer ACP rows

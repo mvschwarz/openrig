@@ -82,7 +82,7 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     } else {
       expect(out.join("\n")).toContain("Pairing code: 424242");
       // The person on the target answers the request with Approve (TUI, Steering, Slack); an agent seat names the choice.
-      expect(out.join("\n")).toContain("On the target, its person approves it by answering the pairing request with Approve: in the TUI (rig tui, then attention), on Steering, or with Slack's Approve button. A typed reply doesn't approve.");
+      expect(out.join("\n")).toContain("On the target, its person approves it by answering the pairing request with Approve: in the TUI (rig tui, then attention), on Steering, or with Slack's Approve button. On a 0.7.11 or later target a typed reply doesn't approve; on an older target any typed reply approves.");
       expect(out.join("\n")).toContain("From an agent seat on the target instead: rig queue update qitem-1 --state done --closure-reason no-follow-on --resolution approve");
       expect(out.join("\n")).not.toContain("On the target: rig queue update");
       expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");

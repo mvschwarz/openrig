@@ -13,6 +13,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
@@ -30,10 +31,15 @@ const registry = { ok: true as const, entities: [{ entityId: "pair-person", clas
 const closes: Array<() => void> = [];
 afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 
-async function fixture() {
+/** The production destination check. `kernel: false` is a daemon started without a kernel rig (--no-kernel), where no
+ *  row can be addressed to `…@kernel`; the agent's rig is registered either way. */
+async function fixture({ kernel = true }: { kernel?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "pair-explicit-"));
   const db = new Database(join(home, "queue.sqlite")); migrate(db, ALL_MIGRATIONS); const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry,
+  const rigs = kernel ? ["kernel", "fixture-rig"] : ["fixture-rig"];
+  const validateRig = makeTopologyDestinationCheck({ findRigsByName: (name) => rigs.filter((rig) => rig === name),
+    loadHumanRegistry: () => registry, sharedChannels: () => [] });
+  const repo = new QueueRepository(db, bus, { validateRig, loadHumanRegistry: () => registry,
     transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();
@@ -57,9 +63,12 @@ async function fixture() {
     const text = await res.text();
     return { http: res.status, body: res.status === 200 ? JSON.parse(text) as { status: string; token?: string } : null, leaksToken: text.includes(BEARER) };
   };
-  /** Steering's question card and the TUI's acts both post Mission Control's answer verb; the TUI's carry the primary user. */
+  /** Steering's question card and the TUI's acts both post Mission Control's answer verb. The TUI's carry the primary
+   *  user's authority and no seat header (attention-model.ts answerRequest); the route honours it only then. */
   const answer = async (input: Record<string, unknown>) => {
-    const res = await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": PERSON },
+    const tui = input.authority === "primary-user";
+    const res = await app.request("/api/mission-control/action", { method: "POST",
+      headers: { "Content-Type": "application/json", ...(tui ? {} : { "X-OpenRig-Session": PERSON }) },
       body: JSON.stringify({ verb: "answer", qitemId: ask, actorSession: PERSON, ...input }) });
     return { status: res.status, body: await res.json() as Record<string, unknown> };
   };
@@ -67,7 +76,9 @@ async function fixture() {
     container: { type: "message", message_ts: "1.1", channel_id: "CPAIR" }, message: { ts: "1.1" },
     actions: [{ type: "button", block_id: "or-q:pair", action_id: `or-opt:${optionId}`, value: optionId, action_ts: "2.2" }] });
   const slackThreadReply = (text: string) => router.route({ type: "message", user: "UPAIR", channel: "CPAIR", thread_ts: "1.1", ts: "3.3", text });
-  return { repo, contract, ask, issued, poll, answer, slackButton, slackThreadReply };
+  /** Rows created in reply to the request: an answer to it is kept on the request itself, so there are none. */
+  const replyRows = () => repo.list({ limit: 1000 }).filter((item) => item.replyTo === ask || item.destinationSession === "host-pair@kernel");
+  return { repo, contract, ask, issued, poll, answer, slackButton, slackThreadReply, replyRows };
 }
 
 describe("host pairing: only an explicit Approve hands over the token (r9)", () => {
@@ -124,6 +135,59 @@ describe("host pairing: only an explicit Approve hands over the token (r9)", () 
     await act(f);
     expect(f.repo.getById(f.ask)?.humanAnswers).toEqual({ pair: "deny" });
     expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  });
+
+  // An answer is kept on the request, like a runner's permission request's: no reply row goes to host-pair@kernel, so it
+  // works the same on a daemon without a kernel rig, and nothing is left for a seat that doesn't exist.
+  it.each([true, false])("kernel rig registered: %s. An Approve choice (Steering, the TUI, Slack) closes the request in place and approves once", async (kernel) => {
+    for (const [actor, act] of [
+      [PERSON, (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve" })],
+      // The terminal names no responder: the TUI's act is recorded unattributed.
+      ["human@host", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve", authority: "primary-user" })],
+      [PERSON, (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("approve")],
+    ] as const) {
+      const f = await fixture({ kernel });
+      const result = await act(f);
+      // Steering and the TUI answer over HTTP; Slack's router returns its own disposition.
+      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
+      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on", humanAnswers: { pair: "approve" } });
+      expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(actor);
+      expect(f.replyRows()).toEqual([]);
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+      expect((await f.poll()).http).toBe(404);
+    }
+  });
+
+  it.each([true, false])("kernel rig registered: %s. A Deny choice (Steering, Slack) closes the request in place and denies once", async (kernel) => {
+    for (const act of [
+      (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "deny" }),
+      (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("deny"),
+    ]) {
+      const f = await fixture({ kernel });
+      const result = await act(f);
+      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
+      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: "deny" } });
+      expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(PERSON);
+      expect(f.replyRows()).toEqual([]);
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+      expect((await f.poll()).http).toBe(404);
+    }
+  });
+
+  it.each([true, false])("kernel rig registered: %s. A typed reply (Steering, Slack) closes the request in place, words kept, denied", async (kernel) => {
+    for (const act of [
+      (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "yes" }),
+      (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("yes"),
+    ]) {
+      const f = await fixture({ kernel });
+      const result = await act(f);
+      // Steering and the TUI answer over HTTP; Slack's router returns its own disposition.
+      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
+      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: "yes" } } });
+      expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(PERSON);
+      expect(f.replyRows()).toEqual([]);
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+    }
   });
 
   it("an agent seat approves only by naming the choice: rig queue update --state done --closure-reason no-follow-on --resolution approve", async () => {
