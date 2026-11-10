@@ -4,7 +4,7 @@
 // never as "nothing needs attention".
 
 import type { DaemonClient } from "./client.js";
-import { attentionReason, type NodeEntry } from "./commands/ps.js";
+import { attentionReason, questionReason, type NodeEntry } from "./commands/ps.js";
 
 export interface SeatAttention {
   seat: string;
@@ -71,7 +71,8 @@ export async function checkSeatAttention(client: DaemonClient, seats: readonly s
         if (!node.needsAttention) continue;
         // The daemon's own precedence: its arbitrated answer, and the hook only when it has none.
         const question = node.arbitratedNeedsInput ?? (node.agentActivity?.state === "needs_input");
-        check.attention.push({ seat, reason: attentionReason(node), waitingOnPerson: question });
+        // A live question names its own reason. An older recorded error would describe something else.
+        check.attention.push({ seat, reason: question ? questionReason(node) ?? "reason unavailable" : attentionReason(node), waitingOnPerson: question });
       }
     }
     for (const seat of wanted) {
