@@ -44,6 +44,9 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("notifies the seat's
     else expect(body).not.toContain(possibleWriteHold);
     expect(body).toContain("first run rig compact 'writer@restore-notice' --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land)");
     expect(body).toContain("naming the restore map, its restore-pending marker /openrig/compaction/restore-pending/writer.json and the packet the marker names.");
+    // #2845: an agent owner keeps the paths it works from.
+    expect(body).toContain("Restore map: /maps/attempt-one/RESTORE-MAP.md.");
+    expect(queue.getById(id)?.evidenceRef).toBe("/maps/attempt-one/RESTORE-MAP.md");
     expect(send).toHaveBeenCalledTimes(1);
     // A restarted reporter uses the same persisted item, not an in-memory dedup list.
     const restarted = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });
@@ -83,6 +86,37 @@ it("a human fallback is a plain ask: urgent-only stays on Steering while every-a
     human.subscriptions = [];
     await reportRestoreDeliveryFailure(db, queue, { ...failure, attemptId: "human-every-ask" });
     expect(queue.listTransitions("qitem-compaction-restore-human-every-ask")[0]).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+  } finally { selected.mockRestore(); db.close(); }
+});
+
+// #2845: a notice to a person may be relayed to chat, so it names the seat, the stage and the local command, and leaves
+// the restore map, the marker and any session id on the host.
+it.each(["target_activity_unknown", "input_box_not_empty"])("a person's notice names the seat, stage and command, with no local path or session id (%s)", async (reason) => {
+  const db = createDb();
+  migrate(db, ALL_MIGRATIONS);
+  const human = { entityId: "human-owner", class: "human", displayName: "Owner", address: "human-owner@external", connectorBindings: [], prefs: {}, subscriptions: [] } as unknown as HumanFragment;
+  const selected = vi.spyOn(humanSelection, "workflowHumanDestination").mockReturnValue(human.address);
+  try {
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [human] }) });
+    const sessionId = "0f9c3b1e-5a7d-4c2e-9b8a-1d2e3f4a5b6c";
+    const failure: RestoreDeliveryFailure = { sessionName: "writer@demo", attemptId: "person", mapPath: `/tmp/claude-compaction-restore/${sessionId}-20261110/RESTORE-MAP.md`,
+      markerPath: "/openrig/compaction/restore-pending/writer.json",
+      lastDelivery: { stage: "restore_prompt", at: "2026-01-01T00:00:00Z", ok: false, reason, failures: 2 } };
+    await reportRestoreDeliveryFailure(db, queue, failure);
+    const row = queue.getById("qitem-compaction-restore-person")!;
+    expect(row.destinationSession).toBe("human-owner@external");
+    expect(row.evidenceRef).toBeNull();
+    for (const text of [row.body, row.summary, row.evidenceRef ?? ""]) {
+      expect(text).not.toContain(sessionId);
+      expect(text).not.toContain("/tmp/claude-compaction-restore");
+      expect(text).not.toContain("/openrig/compaction");
+    }
+    expect(row.body).toContain("Managed restore for writer@demo: restore_prompt undeliverable");
+    expect(row.body).toContain("rig compact 'writer@demo' --state shows the stage, why it waits and, when this compaction has one, its restore map.");
+    expect(row.body).toContain("run rig compact 'writer@demo' --cancel");
+    // A --skip-map compaction has no map to name (owedRestore.mapPath is absent), so the route without one is in words.
+    expect(row.body).toContain("If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.");
+    expect(row.body.includes("inspect the pane and clear or submit that text")).toBe(reason === "input_box_not_empty");
   } finally { selected.mockRestore(); db.close(); }
 });
 

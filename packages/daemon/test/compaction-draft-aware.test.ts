@@ -156,6 +156,29 @@ it("an opted-in draft refusal protects owed restore input", async () => {
   expect(f.e.getOwedRestore(seat)?.stage).toBe("turn_boundary");
 });
 
+// #2845: a person's restore notice leaves the map path out and points to rig compact <seat> --state, so the owed restore
+// names the map the restore request uses; under --skip-map, only a map the seat completed anyway.
+it.each([{ skipMap: false, written: true }, { skipMap: true, written: false }, { skipMap: true, written: true }])(
+  "the owed restore names the map the restore request uses (skipMap=$skipMap, map written=$written)", async ({ skipMap, written }) => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    let mapPath: string | null = null;
+    const real = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => {
+      const r = await real(s, t, o);
+      if (mapPath === null) { mapPath = f.e.getPreparationState(seat)!.mapPath; if (written) f.stageMap(); }
+      return r;
+    });
+    expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap })).toMatchObject({ triggered: true });
+    // The same answer while the restore request and then the audit are owed: the request landing ends the in-memory carry.
+    for (const stage of ["restore_prompt", "compliance_prompt"]) {
+      expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true });
+      const owed = f.e.getOwedRestore(seat)!;
+      expect(owed.stage).toBe(stage);
+      if (written) expect(owed.mapPath).toBe(skipMap ? `${mapPath}.tmp` : mapPath);
+      else expect(owed).not.toHaveProperty("mapPath");
+    }
+  });
+
 it.each([false, true])("empty composer still permits managed preparation and command (footer=%s)", async footer => {
   const f = await fixture({ pane: "%1", mode: "off", footer });
   expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true })).toMatchObject({ triggered: true });
