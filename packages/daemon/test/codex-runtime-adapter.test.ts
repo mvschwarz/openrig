@@ -2728,11 +2728,7 @@ describe("rebuild permission continuity", () => {
     const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
       network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: false,
       writable_roots: ["/kept dir", "/kept'quote"] } } satisfies CodexPermissionEnvelope;
-    // The rebuild service passes both the saved selection and its exact rebuild envelope.
     const binding = { ...makeBinding("/repo/review"), teamPermissionDefault: true,
-      codexPermissions: { sandbox: "workspace-write" as const, approval: "on-request" as const,
-        writable_roots: envelope.sandboxPolicy.writable_roots, network_access: false,
-        exclude_tmpdir_env_var: true, exclude_slash_tmp: false },
       codexRebuildPermissions: envelope };
     expect((await adapter.launchHarness(binding, { name: "dev-review@test-rig" })).ok).toBe(true);
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];

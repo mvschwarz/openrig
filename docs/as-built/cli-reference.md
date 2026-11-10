@@ -1133,9 +1133,11 @@ does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back
 tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
 
 For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
-successor selection, and an unverified fallback. A saved `--codex-permissions` envelope is emitted
-without adding fresh Git, seat, or queue writable directories; it wins over the observed predecessor
-policy. A supported observed predecessor policy is carried when no newer saved selection replaces it.
+successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the
+observed predecessor policy and retains the usual launch additions: workspace-write adds Git metadata,
+seat-folder and pod-state writable roots; read-only adds none. The result describes this launch policy,
+not an observed exact difference. A supported observed predecessor policy is carried without fresh
+directory additions when no newer saved selection replaces it.
 An unreadable or unsupported predecessor policy does not stop the rebuild; without a saved envelope,
 the ordinary launch settings apply and the result reports the missing comparison. Emitted arguments
 are not proof of the successor's native enforcement, and the named Codex config profile still loads.

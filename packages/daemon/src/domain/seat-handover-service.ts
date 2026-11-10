@@ -1,5 +1,4 @@
 import type { CodexPermissionEnvelope, CodexPermissionContinuity, CodexRebuildPermissions } from "./codex-rebuild-permissions.js";
-import { codexMemberEnvelope } from "./codex-member-permissions.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
 import type Database from "better-sqlite3";
@@ -513,10 +512,12 @@ export class SeatHandoverService {
     if (observedCodexPermissions) {
       const observed = observedCodexPermissions;
       if (permissionOverride.codexPermissions) {
-        // A rebuild uses the saved envelope without fresh-launch Git, seat or queue grants,
-        // even when the predecessor's newer native policy could not be compared.
-        codexRebuildPermissions = codexMemberEnvelope(permissionOverride.codexPermissions);
-        permissionContinuity = { state: "selection_used", detail: "The seat's saved permission envelope was emitted without fresh-launch directory grants. The predecessor policy was not carried; native successor equivalence is unverified."
+        // Saved envelopes retain ordinary launch additions; only an observed predecessor
+        // policy uses the exact carry path. Describe policy, not an observed native delta.
+        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+          ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
+          : "without additional writable directory grants, as on a read-only fresh launch";
+        permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
           + (observed.state === "unverified" ? ` Predecessor permissions could not be compared: ${observed.reason}` : "") };
       } else if (observed.state === "observed") {
         const selection = new NativePermissionStore(this.db).read(node.id);
