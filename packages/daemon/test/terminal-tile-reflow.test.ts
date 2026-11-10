@@ -9,5 +9,5 @@ it.skipIf(spawnSync("tmux", ["-V"]).status !== 0)("the shipped writable tile fol
     fileURLToPath(new URL("./helpers/tmux-tile-reflow.py", import.meta.url)),
     JSON.stringify(tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", false)),
   ], { timeout: 45000 });
-  expect(JSON.parse(stdout)).toEqual({ sizes: ["40x24", "120x35", "160x45", "52x28", "132x40", "40x24", "132x40"], localPin: "unset", nativeInput: true, firstKeys: true, pasteBytes: 448012, prefixCopyMode: true });
+  expect(JSON.parse(stdout)).toEqual({ sizes: ["40x24", "120x35", "160x45", "52x28", "132x40", "40x24", "132x40"], earlyKeys: true, earlyPaste: true, restoredModes: true, localPin: "unset", nativeInput: true, firstKeys: true, pasteBytes: 448012, prefixCopyMode: true });
 }, 50000);
