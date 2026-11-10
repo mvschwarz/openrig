@@ -377,10 +377,11 @@ person's words and doesn't approve: it closes the request, and the requester is 
 close without `--resolution approve` denies too.
 
 A 0.7.10 or earlier target asks no question. Its person approves with the request's Approve, in the TUI (`rig tui`,
-then `attention`: open it) or on Steering, and from an agent seat `rig queue update <id> --state done --closure-reason
-no-follow-on` approves. There, every close that leaves the request `done` approves it: a typed reply, and Steering's
-Deny and Drop, included. To refuse a pairing on such a target, let it expire, or from an agent seat set the request
-`denied` (`rig queue update <id> --state denied`); a `canceled` or `failed` state refuses too.
+then `attention`: open it; the TUI from 0.7.1) or on Steering, and from an agent seat `rig queue update <id> --state done
+--closure-reason no-follow-on` approves. There, every close that leaves the request `done` approves it, whatever its
+closure reason: a typed reply, or an agent seat's `rig queue update <id> --state done --closure-reason denied`,
+included. To refuse a pairing on such a target, let it expire, or from an agent seat set the request `denied`
+(`rig queue update <id> --state denied`); a `canceled` or `failed` state refuses too.
 
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
