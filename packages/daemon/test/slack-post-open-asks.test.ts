@@ -48,6 +48,7 @@ describe("rig slack post-open-asks through the gateway", () => {
   let home: string;
   let registry: ReturnType<typeof registryWith>;
   let failPosts: boolean;
+  let unreadablePosts: boolean;
   let historyFails: boolean;
   let historyReads: number;
   let postAttempts: number;
@@ -62,6 +63,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     home = mkdtempSync(join(tmpdir(), "post-open-asks-"));
     posts.length = 0;
     failPosts = false;
+    unreadablePosts = false;
     historyFails = false;
     historyReads = 0;
     postAttempts = 0;
@@ -78,6 +80,8 @@ describe("rig slack post-open-asks through the gateway", () => {
         if (String(url).includes("chat.postMessage")) {
           postAttempts += 1;
           if (failPosts) throw new TypeError("fetch failed");
+          // Slack answered 200 and the body read then failed: the post may be in the channel.
+          if (unreadablePosts) return new Response(new ReadableStream({ start(c) { c.error(new Error("timeout after 15000ms")); } }), { status: 200 });
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
         }
@@ -202,6 +206,33 @@ describe("rig slack post-open-asks through the gateway", () => {
     const again = await run(w, 0);
     expect(resultFor(again, row)).toMatchObject({ outcome: "transport-failed", reshown: false, detail: expect.stringMatching(/another try/) });
     expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+  });
+
+  it("an ask Slack answered without a readable reply reads uncertain in every branch, never transport failed", async () => {
+    const row = await park();
+    await enable();
+    unreadablePosts = true;
+    const w = wire();
+    const first = await run(w);
+    expect(notes(row).some((n) => n.startsWith(`slack-owner-notification-transport-failed notification_key=${keyOf(row)} class=possibly-posted `))).toBe(true);
+    expect(resultFor(first, row)).toMatchObject({ outcome: "uncertain", reshown: true, detail: "may already be in Slack (its reply couldn't be read)" });
+    // Its decision is kept, so the gateway's next start checks Slack for the marker before any resend.
+    const kept = await run(w, 0);
+    expect(resultFor(kept, row)).toMatchObject({ outcome: "uncertain", reshown: false,
+      detail: "may already be in Slack (its reply couldn't be read); the gateway checks Slack for its marker before any resend when it next starts" });
+    // A buffer it can't read: the row's own record still says what's known.
+    const bufferPath = dispatchBufferPath(home);
+    const bufferBytes = readFileSync(bufferPath, "utf8");
+    writeFileSync(bufferPath, "{ not json");
+    const unreadableBuffer = await run(w, 0);
+    expect(resultFor(unreadableBuffer, row)).toMatchObject({ outcome: "uncertain", reshown: false, detail: "may already be in Slack (its reply couldn't be read)" });
+    writeFileSync(bufferPath, bufferBytes);
+    // No decision left to resend: it says so.
+    new DispatchBuffer(home).ack(rePresentDecisionId(keyOf(row)));
+    const settled = await run(w, 0);
+    expect(resultFor(settled, row)).toMatchObject({ outcome: "uncertain", reshown: false,
+      detail: "may already be in Slack (its reply couldn't be read); no resend is pending" });
+    for (const r of [first, kept, unreadableBuffer, settled]) expect(r.counts["transport-failed"]).toBeUndefined();
   });
 
   it("an ask whose quiet hours can't be read posts, saying so, and its row and the command say the quiet-hours setting was unconfirmed", async () => {

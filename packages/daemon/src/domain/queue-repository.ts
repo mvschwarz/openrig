@@ -2462,8 +2462,11 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "humanAlert is true or false.");
     }
     if (humanAlert !== true) return;
-    if (!this.isPersonAddress(destination) || humanIntent === "update") {
-      throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy: it needs a human destination, and an update isn't an ask.");
+    if (!this.isPersonAddress(destination)) {
+      throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy: it needs a human destination.");
+    }
+    if (humanIntent === "update") {
+      throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices and follow Slack's posting floor and delivery settings.");
     }
   }
 

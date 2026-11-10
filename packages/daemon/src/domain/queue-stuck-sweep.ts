@@ -826,7 +826,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // Match the notification source in slack/queue-access.ts, not the agent wake's escalator.
       const noticeOwner = row.state === "blocked" || resolutionNotice ? row.destinationSession : row.sourceSession;
       const noticeRecipient = resolutionNotice ? notification.actorSession : row.state === "blocked" ? row.blockedOn : row.destinationSession;
-      const failure = humanNotice
+      // Slack answered 2xx but its body couldn't be read (slack-delivery's POSSIBLY_POSTED_CLASS): it may be in Slack.
+      const possiblyPosted = humanNotice && /\bclass=possibly-posted\b/.test(row.deliveryFailureDetail ?? "");
+      const failure = possiblyPosted
+        ? `human notice may have posted to ${noticeRecipient}: Slack answered but its reply couldn't be read (${row.deliveryFailureDetail}); the gateway checks Slack for its marker before any resend`
+        : humanNotice
         ? `human notice ${row.deliveryOutcome} to ${noticeRecipient}: ${row.deliveryFailureDetail}`
         : `wake failed (${row.lastNudgeResult ?? "failed"})`;
       // Quiet hours: a held, turned-back or released ask belongs to its window's release job, so a failed wake, or a post
