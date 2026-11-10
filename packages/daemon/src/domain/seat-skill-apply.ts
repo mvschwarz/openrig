@@ -79,12 +79,16 @@ export function bootstrapLineChoice(settings: Pick<SettingsStore, "resolveOne">)
 }
 
 /** The seat a session name names (its latest session), or why not. */
-export function resolveSeat(db: Db, sessionName: string): { ok: true; seat: SeatRef } | { ok: false; error: string } {
+/** A known seat on a runtime without seat skills carries `unsupportedRuntime`: a read reports it, a write refuses it. */
+export function resolveSeat(db: Db, sessionName: string): { ok: true; seat: SeatRef } | { ok: false; error: string; unsupportedRuntime?: string } {
   const row = db.prepare(`SELECT n.id AS nodeId, n.rig_id AS rigId, n.logical_id AS logicalId, n.runtime AS runtime, n.cwd AS cwd
     FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`).get(sessionName) as
     { nodeId: string; rigId: string; logicalId: string; runtime: string | null; cwd: string | null } | undefined;
   if (!row) return { ok: false, error: `no OpenRig seat has the session ${sessionName}` };
-  if (row.runtime !== "claude-code" && row.runtime !== "codex") return { ok: false, error: `${sessionName} is a ${row.runtime ?? "unknown"} seat; seat skills are kept for Claude Code and Codex seats` };
+  if (row.runtime !== "claude-code" && row.runtime !== "codex") {
+    const runtime = row.runtime ?? "unknown";
+    return { ok: false, error: `${sessionName} is a ${runtime} seat; seat skills are kept for Claude Code and Codex seats`, unsupportedRuntime: runtime };
+  }
   return { ok: true, seat: { nodeId: row.nodeId, rigId: row.rigId, logicalId: row.logicalId, runtime: row.runtime, sessionName, cwd: row.cwd ?? "." } };
 }
 

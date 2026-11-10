@@ -88,6 +88,37 @@ describe("rig skill loadout --seat", () => {
     expect(logs.some((l) => l.startsWith("router") || l.startsWith("bootstrap") || l.startsWith("agent") || l.startsWith("prompt"))).toBe(false);
   });
 
+  it("#2895 (b): a seat on a runtime without seat skills prints the daemon's note and exits 0, in text and in --json", async () => {
+    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
+    const note = "dev-impl@team is a pi-tui seat; seat skills are kept for Claude Code and Codex seats";
+    const unsupported = { seat: { sessionName: "dev-impl@team", runtime: "pi-tui" }, unsupported: true, note,
+      storage: null, skills: [], catalogDigest: null, occupant: null, delivery: null };
+    const { deps } = makeDeps({ status: 200, data: unsupported });
+    await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
+    expect(logs).toEqual([note]);
+    expect(errors).toEqual([]);
+    expect(process.exitCode).toBeUndefined();
+    logs.length = 0;
+    await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--json"]);
+    expect(JSON.parse(logs.join("\n"))).toEqual(unsupported);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("#2895 (b): an unknown session and --apply on a runtime without seat skills still exit 1 with the daemon's error", async () => {
+    process.env["OPENRIG_SESSION_NAME"] = "nobody@nowhere";
+    const unknown = makeDeps({ status: 404, data: { error: "no OpenRig seat has the session nobody@nowhere" } });
+    await skillCommand(unknown.deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
+    expect(errors).toEqual(["no OpenRig seat has the session nobody@nowhere"]);
+    expect(process.exitCode).toBe(1);
+    errors.length = 0; process.exitCode = undefined;
+    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
+    const refused = "dev-impl@team is a pi-tui seat; seat skills are kept for Claude Code and Codex seats";
+    const apply = makeDeps({ status: 200, data: {} }, { status: 404, data: { error: refused } });
+    await skillCommand(apply.deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--apply"]);
+    expect(errors).toEqual([refused]);
+    expect(process.exitCode).toBe(1);
+  });
+
   it("says plainly that a shell without a seat identity is not an OpenRig seat, and shows no one else's skills", async () => {
     delete process.env["OPENRIG_SESSION_NAME"];
     const { deps, client } = makeDeps({ status: 200, data: inspection });
