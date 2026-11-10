@@ -898,7 +898,12 @@ describe("GET /api/slices observed queue counts", () => {
     row("project-missing", "blocked", ["mission:shipping", "slice:shared"]);
     row("both-missing", "failed", ["slice:shared"]);
 
-    const { app, indexer } = route("foo", false, fooMissionsRoot, [defaultMissionsRoot]);
+    // The same foo folder is also discovered as a flat root; it remains one physical candidate.
+    const duplicatePathRoot = path.dirname(fooPath);
+    const { app, indexer } = route("foo", false, fooMissionsRoot, [
+      defaultMissionsRoot,
+      duplicatePathRoot,
+    ]);
     expect(indexer.projectId).toBeUndefined();
     const active = await list(app, "?filter=active");
     expect(defaultPath).not.toBe(fooPath);
