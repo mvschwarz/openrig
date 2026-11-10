@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
-import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 
@@ -711,7 +711,10 @@ export class SliceIndexer {
     const sliceIdsByPath = new Map<string, string | null>();
     const pathsBySliceId = new Map<string, Set<string>>();
     for (const [physicalPath, location] of locationsByPath) {
-      const id = this.readSliceId(location.slicePath);
+      const id = this.readSliceIdForCounting(
+        location.slicePath,
+        () => { candidateScanComplete = false; },
+      );
       sliceIdsByPath.set(physicalPath, id);
       if (!id || candidateNames.has(id)) continue;
       const claimants = pathsBySliceId.get(id) ?? new Set<string>();
@@ -941,7 +944,7 @@ export class SliceIndexer {
           continue;
         }
         missionNames.add(entry.name);
-        const id = this.readSliceId(entryPath);
+        const id = this.readSliceIdForCounting(entryPath, onReadError);
         missions.push({ name: entry.name, missionPath, id });
         if (id) {
           const claimants = claims.get(id) ?? new Set<string>();
@@ -1016,6 +1019,36 @@ export class SliceIndexer {
       const id = parseFrontmatter(fs.readFileSync(nodeFile, "utf8"))["id"];
       return typeof id === "string" && id.length > 0 ? id : null;
     } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Counting needs to retain uncertainty about authored IDs: an unreadable
+   * hidden candidate must not disappear from the ambiguity set. Keep optional
+   * absence and readable nodes without IDs compatible with the lenient reader.
+   */
+  private readSliceIdForCounting(slicePath: string, onReadError: () => void): string | null {
+    let nodeFile: string | null = null;
+    for (const name of NODE_FILE_PRECEDENCE) {
+      const candidate = path.join(slicePath, name);
+      try {
+        fs.statSync(candidate);
+        nodeFile = candidate;
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          onReadError();
+          return null;
+        }
+      }
+    }
+    if (!nodeFile) return null;
+    try {
+      const id = parseFrontmatter(fs.readFileSync(nodeFile, "utf8"))["id"];
+      return typeof id === "string" && id.length > 0 ? id : null;
+    } catch {
+      onReadError();
       return null;
     }
   }
