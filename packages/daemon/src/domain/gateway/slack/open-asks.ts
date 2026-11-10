@@ -23,6 +23,7 @@ import { sharedChannelAddresses } from "../participants.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SeenStore } from "./state-store.js";
 import { OUTBOUND_OP, toPayload, type OutboundPostPayload } from "./outbound-driver.js";
+import { POSSIBLY_POSTED_CLASS } from "./slack-delivery.js";
 import type { OwnerNotificationLevel } from "../../queue-transition-log.js";
 import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, QUIET_UNREADABLE_PREFIX, type ReleaseDisposition } from "../../policies/quiet-release.js";
 import { DELIVERY_DEFERRAL_ARMED_PREFIX } from "../../policies/delivery-deferral.js";
@@ -243,7 +244,9 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     }
     if (pending) {
       Object.assign(result, fact?.outcome === "transport-failed"
-        ? { outcome: "transport-failed", detail: `${fact.detail ?? "failed"}; kept for another try when the gateway next starts` }
+        ? { outcome: "transport-failed", detail: fact.detail === POSSIBLY_POSTED_CLASS
+          ? "may already be in Slack (its reply couldn't be read); the gateway checks Slack for its marker before any resend when it next starts"
+          : `${fact.detail ?? "failed"}; kept for another try when the gateway next starts` }
         : pending);
       continue;
     }
