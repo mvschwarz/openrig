@@ -18,6 +18,8 @@ import nodePath from "node:path";
 const BUILTIN_STARTUP_FILES: ReadonlyMap<string, string> = new Map([
   ["CULTURE-default.md", "guidance/CULTURE-default.md"],
   ["openrig-start.md", "guidance/openrig-start.md"],
+  // The context-entry floor: a pointer to the skills router, help and declared context, delivered wherever openrig-start.md is.
+  ["openrig-context-entry.md", "guidance/openrig-context-entry.md"],
   // OPR.0.7.0.13: the constant pointer a managed Codex seat follows to its own skills (the same text for every seat).
   ["openrig-seat-skills.md", "guidance/openrig-seat-skills.md"],
   ["openrig-onboarding-01.md", "onboarding/01-world-and-purpose.md"],
@@ -108,6 +110,22 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
   }
   const mapped = mapUnderShippedSpecs(file.ownerRoot, file.absolutePath, specsRoot, exists);
   return mapped ? { ...file, ownerRoot: mapped.root, absolutePath: mapped.file } : file;
+}
+
+/** The context-entry floor beside the identity overlay. A seat whose saved startup files predate
+ *  openrig-context-entry.md gets it wherever its saved built-in openrig-start.md is delivered, from the running install
+ *  and with the same delivery. The saved context isn't rewritten; this only adds to what is delivered. */
+export function withContextEntryFloor<T extends { path: string; absolutePath: string; ownerRoot: string }>(
+  files: T[],
+  assetsRoot: string = runningBuiltinAssetsRoot(),
+): T[] {
+  if (files.some((file) => file.path === "openrig-context-entry.md")) return files;
+  const start = files.findIndex((file) => file.path === "openrig-start.md"
+    && nodePath.resolve(file.absolutePath).endsWith(nodePath.join("assets", "guidance", "openrig-start.md")));
+  if (start < 0) return files;
+  const entry = { ...files[start]!, path: "openrig-context-entry.md", ownerRoot: assetsRoot,
+    absolutePath: nodePath.join(assetsRoot, "guidance", "openrig-context-entry.md"), required: false } as T;
+  return [...files.slice(0, start + 1), entry, ...files.slice(start + 1)];
 }
 
 /**

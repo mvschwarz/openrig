@@ -903,6 +903,13 @@ profiles:
     );
     expect(paths).toContain("openrig-start.md");
     expect(paths.some((path) => path.startsWith("openrig-onboarding-"))).toBe(false);
+    // The context-entry floor isn't part of the onboarding pack: every seat gets it, right after openrig-start.md,
+    // on fresh starts and restores.
+    const files = rows.flatMap((row) => JSON.parse(row.resolved_files_json) as Array<{ path: string; deliveryHint: string; appliesOn: string[] }>);
+    const floors = files.filter((file) => file.path === "openrig-context-entry.md");
+    expect(floors.length).toBe(rows.length);
+    expect(floors[0]).toMatchObject({ deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"] });
+    expect(paths[paths.indexOf("openrig-start.md") + 1]).toBe("openrig-context-entry.md");
 
     db.close();
   });

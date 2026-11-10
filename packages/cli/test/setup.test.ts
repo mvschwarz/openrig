@@ -1111,7 +1111,8 @@ describe("rig setup: the router-line question", () => {
     expect(routerStep(result)).toMatchObject({ status: "skipped", message: expect.stringContaining("it isn't a yes"), fixHint: "rig setup --router-line yes, or rig setup --router-line no" });
     expect(result.routerLine).toMatchObject({ answer: "unasked", files: expect.stringContaining("AGENTS.md"), limit: expect.stringContaining("doesn't remove a line already written") });
     expect(result.routerLine.line).toContain("rig skill loadout --seat self");
-    expect(result.routerLine.ifNo).toContain("Nothing is written into these files");
+    expect(result.routerLine.ifNo).toContain("This line isn't written");
+    expect(result.routerLine.ifNo).toContain("names the `openrig-skills` router");
     expect(set).not.toHaveBeenCalled();
     expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
   });

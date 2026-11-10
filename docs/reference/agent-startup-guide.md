@@ -204,7 +204,7 @@ Startup content is merged additively through layers. Each layer adds to what the
 4. Rig layer       — from the RigSpec's top-level startup block
 5. Pod layer       — from the pod's startup block
 6. Member layer    — from the member's startup block in the RigSpec
-7. Operator layer  — added by OpenRig: openrig-start.md and, on a fresh start, the onboarding pack
+7. Operator layer  — added by OpenRig: openrig-start.md, openrig-context-entry.md and, on a fresh start, the onboarding pack
 ```
 
 A member with a `starter_ref` gets that agent starter's files in front of the agent layer. Terminal seats
@@ -220,7 +220,7 @@ A member with a `starter_ref` gets that agent starter's files in front of the ag
 | Rig | Rig spec author | Rig-wide context for all agents | Project documentation |
 | Pod | Rig spec author | Pod-specific coordination context | Pod SOP, intra-pod workflow |
 | Member | Rig spec author | Individual member overrides | Member-specific instructions, cwd-specific context |
-| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); on a fresh start, `openrig-onboarding-01.md` and `-02.md` unless `onboarding.default_pack.enabled` is false |
+| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); `openrig-context-entry.md`, a pointer to the skills router, help and declared context, for every seat; on a fresh start, `openrig-onboarding-01.md` and `-02.md` unless `onboarding.default_pack.enabled` is false |
 
 After the files, OpenRig sends a session-identity message (rig, pod, member, logical ID) once the seat is ready.
 

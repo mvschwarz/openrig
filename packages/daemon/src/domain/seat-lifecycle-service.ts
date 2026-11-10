@@ -20,7 +20,7 @@ import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import { resolveStartupProof } from "./startup-resolver.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
@@ -2151,7 +2151,7 @@ export class SeatLifecycleService {
       return this.malformedStartupContext(nodeId, (err as Error).message);
     }
 
-    const startupFiles = resolvedStartupFiles.map((file) => ({
+    const startupFiles = withContextEntryFloor(resolvedStartupFiles).map((file) => ({
       kind: file.kind,
       path: file.path,
       deliveryHint: file.deliveryHint,

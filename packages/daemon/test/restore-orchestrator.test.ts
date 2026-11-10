@@ -5800,6 +5800,25 @@ describe("RestoreOrchestrator", () => {
       expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
     });
 
+    // This saved selection predates the context-entry floor: the replay delivers it right after openrig-start.md, from the
+    // running install and not required. The fresh launch then records what it delivered, so the floor is saved once.
+    it("fresh replay of a selection saved before the context-entry floor delivers the floor beside openrig-start.md", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; appliesOn: string[]; deliveryHint: string }>);
+      const paths = delivered.map((f) => f.path);
+      expect(paths[paths.indexOf("openrig-start.md") + 1]).toBe("openrig-context-entry.md");
+      expect(delivered.filter((f) => f.path === "openrig-context-entry.md")).toEqual([{
+        path: "openrig-context-entry.md", absolutePath: `${RUNNING_ASSETS}/guidance/openrig-context-entry.md`, ownerRoot: RUNNING_ASSETS,
+        required: false, appliesOn: ["fresh_start", "restore"], deliveryHint: "guidance_merge",
+      }]);
+      const saved = db.prepare("SELECT resolved_files_json FROM node_startup_context").get() as { resolved_files_json: string };
+      expect((JSON.parse(saved.resolved_files_json) as Array<{ path: string }>).filter((f) => f.path === "openrig-context-entry.md")).toHaveLength(1);
+    });
+
     it("re-anchors even while the old install still exists (current shipped guidance is selected)", async () => {
       const { snap, deliverStartup, adapter } = seedPodAware(false);
       const result = await createOrchestrator().restore(snap.id, {

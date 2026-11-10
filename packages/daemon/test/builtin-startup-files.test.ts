@@ -1,7 +1,8 @@
 // #261: recognized built-in startup files re-anchor to the running install; nothing else moves.
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, runningBuiltinAssetsRoot, runningShippedSpecsRoot } from "../src/domain/builtin-startup-files.js";
+import { readFileSync } from "node:fs";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, runningBuiltinAssetsRoot, runningShippedSpecsRoot, withContextEntryFloor } from "../src/domain/builtin-startup-files.js";
 
 const RUNNING = "/new/lib/node_modules/@openrig/cli/daemon/assets";
 const OLD = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
@@ -11,6 +12,7 @@ describe("reanchorBuiltinStartupFile", () => {
   it.each([
     ["CULTURE-default.md", "guidance/CULTURE-default.md"],
     ["openrig-start.md", "guidance/openrig-start.md"],
+    ["openrig-context-entry.md", "guidance/openrig-context-entry.md"],
     ["openrig-onboarding-01.md", "onboarding/01-world-and-purpose.md"],
     ["openrig-onboarding-02.md", "onboarding/02-self-and-competent-action.md"],
   ])("re-anchors %s from an old packaged install, preserving metadata", (name, rel) => {
@@ -184,5 +186,34 @@ describe("legacy persisted shapes are returned exactly as stored", () => {
   it("projection entry without sourcePath does not throw and is unchanged", () => {
     const legacy = { absolutePath: "/tmp/never-read/CLAUDE.md", category: "memory" } as unknown as { sourcePath: string; absolutePath: string };
     expect(reanchorShippedProjectionEntry(legacy)).toBe(legacy);
+  });
+});
+
+// The context-entry floor reaches seats saved before it existed: wherever their saved built-in openrig-start.md is
+// delivered, the floor is delivered beside it, from the running install. The saved context itself isn't changed.
+describe("withContextEntryFloor", () => {
+  const culture = { path: "CULTURE-default.md", absolutePath: `${RUNNING}/guidance/CULTURE-default.md`, ownerRoot: RUNNING, ...meta };
+  const start = { path: "openrig-start.md", absolutePath: `${RUNNING}/guidance/openrig-start.md`, ownerRoot: RUNNING, ...meta, required: false };
+  const member = { path: "notes.md", absolutePath: "/rigs/team/notes.md", ownerRoot: "/rigs/team", ...meta };
+
+  it("adds the floor right after a saved built-in openrig-start.md, from the running install and with its delivery", () => {
+    const files = withContextEntryFloor([culture, start, member], RUNNING);
+    expect(files.map((file) => file.path)).toEqual(["CULTURE-default.md", "openrig-start.md", "openrig-context-entry.md", "notes.md"]);
+    expect(files[2]).toEqual({ ...start, path: "openrig-context-entry.md", absolutePath: `${RUNNING}/guidance/openrig-context-entry.md`, ownerRoot: RUNNING, required: false });
+  });
+
+  it("adds nothing when the floor is already there, when there's no built-in openrig-start.md, or for a user file of that name", () => {
+    const floor = { ...start, path: "openrig-context-entry.md", absolutePath: `${RUNNING}/guidance/openrig-context-entry.md` };
+    expect(withContextEntryFloor([culture, start, floor], RUNNING)).toHaveLength(3);
+    expect(withContextEntryFloor([culture, member], RUNNING)).toHaveLength(2);
+    const userStart = { ...start, absolutePath: "/rigs/team/openrig-start.md", ownerRoot: "/rigs/team" };
+    expect(withContextEntryFloor([userStart], RUNNING)).toEqual([userStart]);
+  });
+
+  it("ships a thin pointer that names the skills router, help and declared context, not a method", () => {
+    const text = readFileSync(path.join(runningBuiltinAssetsRoot(), "guidance", "openrig-context-entry.md"), "utf8");
+    for (const pointer of ["openrig-skills", "rig context get help", "rig context list", "rig context work-install", "LEARNED.md"]) expect(text).toContain(pointer);
+    expect(text).not.toContain("mission-slice-sop");
+    expect(text.length).toBeLessThan(1000);
   });
 });
