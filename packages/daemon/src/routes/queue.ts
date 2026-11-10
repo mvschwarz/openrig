@@ -695,10 +695,12 @@ export function queueRoutes(): Hono {
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
-      const payload = fwd.payload as Record<string, unknown>;
-      if (!skippedScope) return c.json(payload, fwd.status as 200);
-      const existingAdvisories = Array.isArray(payload.advisories) ? payload.advisories : [];
-      return c.json({ ...payload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
+      const payload = fwd.payload;
+      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+        return c.json(payload, fwd.status as 200);
+      const objectPayload = payload as Record<string, unknown>;
+      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
     }
 
     try {
