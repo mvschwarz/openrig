@@ -624,6 +624,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    // A seat seen running or idle is reachable: re-send wakes recorded unroutable before it was bound (#2789).
+    void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
+      .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);

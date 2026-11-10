@@ -634,11 +634,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
 
   // With the durable wake intents in place (the production path), the re-send goes through the row's own intent: it's
   // claimed and settled, so a later startup drain doesn't wake the seat a second time.
-  async function lateSeatWithOutbox() {
+  async function lateSeatWithOutbox(extra: Partial<ConstructorParameters<typeof QueueRepository>[2]> = {}) {
     db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
     db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
     const sent: string[] = [];
     repo = new QueueRepository(db, new EventBus(db), {
+      ...extra,
       validateRig: () => true,
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
@@ -655,6 +656,141 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
     return { sent, outbox, row };
   }
+
+  // #2789: the seat needn't wait for the sweep's next tick. Seen running or idle once bound, it gets the wake at once,
+  // through the same intent, and the sweep after it has nothing left to send or report.
+  it("re-sends a wake recorded unroutable as soon as its bound seat is seen idle, leaving the sweep nothing to do", async () => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r"]);
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^unroutable:/);
+    await runSweep();
+    await repo.drainPendingWakeIntents();
+    expect(sent).toEqual(["late@r"]);
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("doesn't re-send an unroutable wake while the seat waits at a prompt, or for another seat's activity", async () => {
+    const { sent, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "needs_input");
+    await repo.retryUnroutableWakesOnReachable("sender@r", "idle");
+    expect(sent).toEqual([]);
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(/^unroutable:/);
+  });
+
+  it("doesn't re-send an unroutable wake while the seat's compaction restore is still owed", async () => {
+    let restoreOwed = true;
+    const { sent } = await lateSeatWithOutbox({ hasPendingPostCompactStage: (session: string) => restoreOwed && session === "late@r" });
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual([]);
+    restoreOwed = false;
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r"]);
+  });
+
+  it("re-sends an un-parked row's blocker wake recorded unroutable, not its already delivered own wake", async () => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle"); // the row's own wake lands
+    expect(sent).toEqual(["late@r"]);
+    // The seat goes away; the row is parked on a blocker, which then closes and un-parks it while the seat is unbound.
+    db.prepare("DELETE FROM bindings WHERE id = 'late-binding'").run();
+    const blocker = await repo.create({ sourceSession: "sender@r", destinationSession: "sender@r", body: "blocker" });
+    repo.update({ qitemId: row.qitemId, actorSession: "late@r", state: "blocked", blockedOn: blocker.qitemId });
+    repo.claim({ qitemId: blocker.qitemId, destinationSession: "sender@r" });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "sender@r", state: "done", closureReason: "no-follow-on" });
+    expect(repo.getById(row.qitemId)!.state).toBe("pending");
+    const blockerWake = () => db.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+      .get(row.qitemId) as { outbox_id: string; delivery_state: string } | undefined;
+    await vi.waitFor(() => expect(blockerWake()?.delivery_state).toBe("failed"));
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(/^unroutable:/);
+
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r", "late@r"]);
+    expect(blockerWake()!.delivery_state).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+  });
+
+  it("sends related rows' wakes once per pass when the seat refuses, and a later pass still delivers them", async () => {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    let atPrompt = true;
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (_destination, text) => { sent.push(text);
+        return atPrompt ? { ok: false, sent: false, reason: "target_needs_input" } : { ok: true, verified: true }; } },
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    // A returned result and its resume: both created before the seat is bound, their wakes correlated.
+    const rows = [];
+    for (const body of ["result", "resume"]) {
+      const created = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body });
+      await vi.waitFor(() => expect(outbox.getById(`wake-intent-${created.qitemId}`)?.deliveryState).toBe("failed"));
+      db.prepare("UPDATE outbox_entries SET tags = ? WHERE outbox_id = ?").run(JSON.stringify(["queue:return:common"]), `wake-intent-${created.qitemId}`);
+      rows.push(created);
+    }
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1); // one combined send, refused at the prompt, and not sent again for the second row
+    for (const row of rows) expect(repo.getById(row.qitemId)!.lastNudgeResult).toBe("failed:target_needs_input");
+
+    atPrompt = false;
+    await repo.retryPromptWakesOnClear("late@r", "needs_input");
+    await repo.retryPromptWakesOnClear("late@r", "idle");
+    expect(sent).toHaveLength(2);
+    for (const row of rows) expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+  });
+
+  // A correlated peer is claimed only if it qualifies for this retry itself: one that may already have been written,
+  // or whose wake failed for another reason, isn't sent with the row that does.
+  async function correlatedLateRows() {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (_destination, text) => { sent.push(text); return { ok: true, verified: true }; } },
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    const [failed, peer] = [await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "result" }),
+      await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "resume" })];
+    for (const row of [failed, peer]) {
+      await vi.waitFor(() => expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("failed"));
+      db.prepare("UPDATE outbox_entries SET tags = ? WHERE outbox_id = ?").run(JSON.stringify(["queue:return:common"]), `wake-intent-${row.qitemId}`);
+    }
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    return { sent, outbox, failed, peer };
+  }
+
+  it("doesn't replay a correlated peer that may already have been written, sending only the failed row's wake", async () => {
+    const { sent, outbox, failed, peer } = await correlatedLateRows();
+    db.prepare("UPDATE outbox_entries SET delivery_state = 'indeterminate' WHERE outbox_id = ?").run(`wake-intent-${peer.qitemId}`);
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(failed.qitemId);
+    expect(sent[0]).not.toContain(peer.qitemId);
+    expect(outbox.getById(`wake-intent-${failed.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${peer.qitemId}`)?.deliveryState).toBe("indeterminate");
+  });
+
+  it("doesn't send a correlated peer whose wake failed for another reason with the row this retry re-sends", async () => {
+    const { sent, outbox, failed, peer } = await correlatedLateRows();
+    // The peer's wake was refused at a prompt: the prompt-clear retry's to re-send, not this one's.
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'failed:target_needs_input' WHERE qitem_id = ?").run(peer.qitemId);
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(failed.qitemId);
+    expect(sent[0]).not.toContain(peer.qitemId);
+    expect(outbox.getById(`wake-intent-${failed.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${peer.qitemId}`)?.deliveryState).toBe("failed");
+  });
 
   it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
     const { sent, outbox, row } = await lateSeatWithOutbox();

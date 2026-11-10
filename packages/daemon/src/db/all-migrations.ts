@@ -2,6 +2,9 @@ import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
 import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_instance_root_objective.js";
+import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
+import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
+import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -311,4 +314,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   workflowInstanceSpecSchema,
   eventsRetentionMarksSchema,
   workflowInstanceRootObjectiveSchema,
+  queueErasureSchema,
+  queueErasureLinkIndexesSchema,
+  queueErasureBatchesSchema,
 ];
