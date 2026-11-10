@@ -14,17 +14,57 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const catalogReadObservation = vi.hoisted(() => ({ activePath: null as string | null, reads: 0 }));
+const nodeMetadataFault = vi.hoisted(() => ({
+  readPath: null as string | null,
+  readCode: "EACCES",
+  readHits: 0,
+  selectionPath: null as string | null,
+  selectionCode: "EACCES",
+  selectionHits: 0,
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
-      if (catalogReadObservation.activePath !== null && String(args[0]) === catalogReadObservation.activePath) {
-        catalogReadObservation.reads++;
-      }
-      return actual.readFileSync(...args);
-    }) as typeof actual.readFileSync,
-  };
+  const injectedError = (code: string) => Object.assign(new Error("injected node metadata failure"), { code });
+  const existsSync = ((...args: Parameters<typeof actual.existsSync>) => {
+    if (String(args[0]) === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
+      nodeMetadataFault.selectionHits++;
+      // existsSync hides access errors as false; a later README can then mask SPEC.
+      return false;
+    }
+    return actual.existsSync(...args);
+  }) as typeof actual.existsSync;
+  const statSync = ((...args: Parameters<typeof actual.statSync>) => {
+    if (String(args[0]) === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
+      nodeMetadataFault.selectionHits++;
+      throw injectedError(nodeMetadataFault.selectionCode);
+    }
+    return actual.statSync(...args);
+  }) as typeof actual.statSync;
+  const accessSync = ((...args: Parameters<typeof actual.accessSync>) => {
+    if (String(args[0]) === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
+      nodeMetadataFault.selectionHits++;
+      throw injectedError(nodeMetadataFault.selectionCode);
+    }
+    return actual.accessSync(...args);
+  }) as typeof actual.accessSync;
+  const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
+    const requestedPath = String(args[0]);
+    if (catalogReadObservation.activePath !== null && requestedPath === catalogReadObservation.activePath) {
+      catalogReadObservation.reads++;
+    }
+    if (requestedPath === nodeMetadataFault.readPath && nodeMetadataFault.readPath !== null) {
+      nodeMetadataFault.readHits++;
+      throw injectedError(nodeMetadataFault.readCode);
+    }
+    if (requestedPath === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
+      nodeMetadataFault.selectionHits++;
+      throw injectedError(nodeMetadataFault.selectionCode);
+    }
+    return actual.readFileSync(...args);
+  }) as typeof actual.readFileSync;
+  const actualDefault = (actual as unknown as { default?: object }).default ?? actual;
+  const defaultFs = Object.assign(Object.create(actualDefault), { existsSync, statSync, accessSync, readFileSync });
+  return { ...actual, existsSync, statSync, accessSync, readFileSync, default: defaultFs };
 });
 
 import { Hono } from "hono";
@@ -725,11 +765,30 @@ describe("GET /api/slices observed queue counts", () => {
     settings = new SettingsStore(config);
   }
 
-  function addSlice(project: string, mission: string, name: string, status = "active", id = name): string {
+  function nodeBytes(id: string, status = "active", heading = "Node"): string {
+    return `---\nid: ${id}\nstatus: ${status}\n---\n# ${heading}\n`;
+  }
+
+  function addSlice(
+    project: string,
+    mission: string,
+    name: string,
+    status = "active",
+    id = name,
+    nodeFiles: { slice?: string | null; mission?: string | null; missionId?: string } = {},
+  ): string {
     const missionRoot = path.join(root, project, "missions", mission);
-    write(path.join(missionRoot, "SPEC.md"), `---\nid: M.${mission.toUpperCase()}\nstatus: active\n---\n# Mission\n`);
+    if (nodeFiles.mission !== null) {
+      const missionFile = nodeFiles.mission ?? "SPEC.md";
+      const missionId = nodeFiles.missionId ?? `M.${mission.toUpperCase()}`;
+      write(path.join(missionRoot, missionFile), nodeBytes(missionId, "active", "Mission"));
+    }
     const dir = path.join(missionRoot, "slices", name);
-    write(path.join(dir, "SPEC.md"), `---\nid: ${id}\nstatus: ${status}\n---\n# Slice\n`);
+    fs.mkdirSync(dir, { recursive: true });
+    if (nodeFiles.slice !== null) {
+      const sliceFile = nodeFiles.slice ?? "SPEC.md";
+      write(path.join(dir, sliceFile), nodeBytes(id, status, "Slice"));
+    }
     return dir;
   }
 
@@ -764,6 +823,40 @@ describe("GET /api/slices observed queue counts", () => {
     return body.slices;
   }
 
+  async function withNodeReadFailure<T>(
+    file: string,
+    code: string,
+    action: () => Promise<T>,
+  ): Promise<{ result: T; failureHits: number }> {
+    nodeMetadataFault.readPath = file;
+    nodeMetadataFault.readCode = code;
+    nodeMetadataFault.readHits = 0;
+    try {
+      const result = await action();
+      return { result, failureHits: nodeMetadataFault.readHits };
+    } finally {
+      nodeMetadataFault.readPath = null;
+      nodeMetadataFault.readHits = 0;
+    }
+  }
+
+  async function withNodeSelectionFailure<T>(
+    file: string,
+    code: string,
+    action: () => Promise<T>,
+  ): Promise<{ result: T; failureHits: number }> {
+    nodeMetadataFault.selectionPath = file;
+    nodeMetadataFault.selectionCode = code;
+    nodeMetadataFault.selectionHits = 0;
+    try {
+      const result = await action();
+      return { result, failureHits: nodeMetadataFault.selectionHits };
+    } finally {
+      nodeMetadataFault.selectionPath = null;
+      nodeMetadataFault.selectionHits = 0;
+    }
+  }
+
   function authoredUnchanged(): void {
     for (const [file, bytes] of docs) expect(fs.readFileSync(file, "utf8"), file).toBe(bytes);
   }
@@ -781,6 +874,10 @@ describe("GET /api/slices observed queue counts", () => {
   }
 
   beforeEach(() => {
+    nodeMetadataFault.readPath = null;
+    nodeMetadataFault.readHits = 0;
+    nodeMetadataFault.selectionPath = null;
+    nodeMetadataFault.selectionHits = 0;
     root = fs.mkdtempSync(path.join(os.tmpdir(), "slice-counts-"));
     docs = new Map();
     db = createDb();
@@ -1409,5 +1506,142 @@ describe("GET /api/slices observed queue counts", () => {
       expect(small.map(s => s.queueCounts)).toEqual([{ ...ZERO, pending: 1 }]);
       expect(many.map(s => s.queueCounts)).toEqual(Array.from({ length: 24 }, () => ({ ...ZERO, pending: 1 })));
     } finally { spy.mockRestore(); }
+  });
+
+  describe("PR2902 JOIN001 hidden authored node metadata", () => {
+    const readFailureVariants = [
+      { nodeFile: "SPEC.md", code: "EACCES" },
+      { nodeFile: "README.md", code: "EIO" },
+    ] as const;
+
+    function addCatalogOnlyFoo(): { defaultMissionsRoot: string; fooMissionsRoot: string } {
+      catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+      const defaultMissionsRoot = addCatalogProject("default", ".");
+      const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+      configureCatalogRoute(defaultMissionsRoot);
+      return { defaultMissionsRoot, fooMissionsRoot };
+    }
+
+    it.each(readFailureVariants)(
+      "JOIN001 RED: returns unknown for a partial slice-ID row when hidden $nodeFile read fails ($code)",
+      async ({ nodeFile, code }) => {
+        const visiblePath = addSlice("alpha", "shipping", "shared", "active", "SLICE.SHARED");
+        const hiddenPath = addSlice("beta", "shipping", "shared", "active", "SLICE.SHARED", { slice: nodeFile });
+        if (nodeFile === "SPEC.md") write(path.join(hiddenPath, "README.md"), nodeBytes("SLICE.LEGACY"));
+        row("hidden-slice-id-partial", "pending", ["slice:SLICE.SHARED"]);
+
+        const { app } = route("alpha", false, path.join(root, "alpha", "missions"), [path.join(root, "beta", "missions")]);
+        const observed = await withNodeReadFailure(path.join(hiddenPath, nodeFile), code, () => list(app));
+        expect(observed.failureHits).toBeGreaterThan(0);
+        expect(observed.result).toHaveLength(1);
+        expect(observed.result[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+        expect(observed.result[0]!.queueCounts).toBeNull();
+        authoredUnchanged();
+      },
+    );
+
+    it.each([
+      {
+        scenario: "readable collision",
+        hiddenId: "SLICE.SHARED",
+        hiddenNodeFile: "SPEC.md",
+        expected: { pending: 0, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+      {
+        scenario: "readable unique alias",
+        hiddenId: "SLICE.HIDDEN",
+        hiddenNodeFile: "SPEC.md",
+        expected: { pending: 1, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+      {
+        scenario: "genuinely absent optional node",
+        hiddenId: "unused-without-node",
+        hiddenNodeFile: null,
+        expected: { pending: 1, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+    ])("keeps slice-ID control behavior for a $scenario", async ({ hiddenId, hiddenNodeFile, expected }) => {
+      const visiblePath = addSlice("alpha", "shipping", "shared", "active", "SLICE.SHARED");
+      const hiddenPath = addSlice("beta", "shipping", "shared", "active", hiddenId, { slice: hiddenNodeFile });
+      row("slice-id-control", "pending", ["slice:SLICE.SHARED"]);
+
+      const { app } = route("alpha", false, path.join(root, "alpha", "missions"), [path.join(root, "beta", "missions")]);
+      const entries = await list(app);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+      expect(entries[0]!.slicePath).not.toBe(hiddenPath);
+      expect(entries[0]!.queueCounts).toEqual(expected);
+      authoredUnchanged();
+    });
+
+    it.each(readFailureVariants)(
+      "JOIN001 RED: returns unknown for a partial mission-ID row when catalog-only hidden $nodeFile read fails ($code)",
+      async ({ nodeFile, code }) => {
+        const { defaultMissionsRoot, fooMissionsRoot } = addCatalogOnlyFoo();
+        const visiblePath = addSlice(".", "shipping", "shared", "active", "SLICE.SHARED", { missionId: "M.SHARED" });
+        addSlice("projects/foo", "shipping", "shared", "active", "SLICE.SHARED", { mission: nodeFile, missionId: "M.SHARED" });
+        if (nodeFile === "SPEC.md") write(path.join(fooMissionsRoot, "shipping", "README.md"), nodeBytes("M.LEGACY"));
+        row("hidden-mission-id-partial", "pending", ["mission:M.SHARED", "slice:shared"]);
+
+        const { app } = route("default", false, defaultMissionsRoot, [path.join(root, "slices")]);
+        const hiddenMissionFile = path.join(fooMissionsRoot, "shipping", nodeFile);
+        const observed = await withNodeReadFailure(hiddenMissionFile, code, () => list(app));
+        expect(observed.failureHits).toBeGreaterThan(0);
+        expect(observed.result).toHaveLength(1);
+        expect(observed.result[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+        expect(observed.result[0]!.queueCounts).toBeNull();
+        authoredUnchanged();
+      },
+    );
+
+    it.each([
+      {
+        scenario: "readable collision",
+        hiddenMissionId: "M.SHARED",
+        hiddenMissionFile: "SPEC.md",
+        expected: { pending: 0, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+      {
+        scenario: "readable unique alias",
+        hiddenMissionId: "M.HIDDEN",
+        hiddenMissionFile: "SPEC.md",
+        expected: { pending: 1, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+      {
+        scenario: "genuinely absent optional mission node",
+        hiddenMissionId: "unused-without-node",
+        hiddenMissionFile: null,
+        expected: { pending: 1, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 },
+      },
+    ])("keeps mission-ID control behavior for a $scenario", async ({ hiddenMissionId, hiddenMissionFile, expected }) => {
+      const { defaultMissionsRoot } = addCatalogOnlyFoo();
+      const visiblePath = addSlice(".", "shipping", "shared", "active", "SLICE.SHARED", { missionId: "M.SHARED" });
+      addSlice("projects/foo", "shipping", "shared", "active", "SLICE.SHARED", {
+        mission: hiddenMissionFile,
+        missionId: hiddenMissionId,
+      });
+      row("mission-id-control", "pending", ["mission:M.SHARED", "slice:shared"]);
+
+      const { app } = route("default", false, defaultMissionsRoot, [path.join(root, "slices")]);
+      const entries = await list(app);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+      expect(entries[0]!.queueCounts).toEqual(expected);
+      authoredUnchanged();
+    });
+
+    it("JOIN001 RED: does not let an inaccessible hidden SPEC fall through to a unique legacy README ID", async () => {
+      const visiblePath = addSlice("alpha", "shipping", "shared", "active", "SLICE.SHARED");
+      const hiddenPath = addSlice("beta", "shipping", "shared", "active", "SLICE.SHARED");
+      write(path.join(hiddenPath, "README.md"), nodeBytes("SLICE.LEGACY"));
+      row("hidden-spec-selection-partial", "pending", ["slice:SLICE.SHARED"]);
+
+      const { app } = route("alpha", false, path.join(root, "alpha", "missions"), [path.join(root, "beta", "missions")]);
+      const observed = await withNodeSelectionFailure(path.join(hiddenPath, "SPEC.md"), "EACCES", () => list(app));
+      expect(observed.failureHits).toBeGreaterThan(0);
+      expect(observed.result).toHaveLength(1);
+      expect(observed.result[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+      expect(observed.result[0]!.queueCounts).toBeNull();
+      authoredUnchanged();
+    });
   });
 });
