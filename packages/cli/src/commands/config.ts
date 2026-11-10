@@ -78,6 +78,8 @@ Keys:
   progress.scan_roots    name:/abs/path,name:/abs/path
   ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
+  ui.topology_remote_seats  TUI topology: read a remote rig's seats through this daemon inside a reachable
+                         http-transport host, instead of the rig ps pointer (default off; reopen the TUI after changing)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
   agents.*               advisor_session, operator_session

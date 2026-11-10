@@ -142,8 +142,10 @@ describe("config routes (User Settings v0)", () => {
     // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
     // + 2 retention.closed_content_days, retention.closed_metadata_days (closed-work erasure; default 0 = keep).
     // + 1 retention.erasure_ledger (queue erasure's replay ledger; default empty = none).
-    expect(Object.keys(body.settings).length).toBe(104);
+    // + 1 ui.topology_remote_seats (read a remote rig's seats in the TUI topology; default off).
+    expect(Object.keys(body.settings).length).toBe(105);
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
+    expect(body.settings["ui.topology_remote_seats"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
     expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
     expect(body.settings["retention.closed_content_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });

@@ -708,6 +708,64 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     ? "  ✕ rigs read failed — named in the status line"
     : `  (no rigs served by ${host.name})`;
 }
+/** A remote rig page reads identity, state and context only: queue, work, actions and seat detail are this host's
+ *  reads and are deliberately absent, never rendered as zero. */
+function remoteSeatColumns(contentWidth: number): AgentColumn[] {
+  if (contentWidth >= 110) return [
+    ["pod", "POD", 10, "left"], ["seat", "SEAT", 20, "left"], ["runtime", "RT", 4, "left"],
+    ["model", "MODEL", 16, "left"], ["effort", "CFG EFF", 8, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 12, "left"],
+  ];
+  if (contentWidth >= 78) return [
+    ["pod", "POD", 7, "left"], ["seat", "SEAT", 14, "left"], ["runtime", "RT", 3, "left"],
+    ["context", "CTX", 5, "right"], ["status", "STATE", 10, "left"],
+  ];
+  return [
+    ["pod", "POD", 5, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
+    ["context", "CTX", 4, "right"], ["status", "STATE", 8, "left"],
+  ];
+}
+
+function remoteRigSeatLines(state: ViewState, rig: FleetSnapshot["hosts"][number]["rigs"][number], contentWidth: number, motion: MotionCtx): ContentLine[] {
+  const leaf = state.drill.at(-1);
+  const podFilter = leaf?.kind === "pod" ? leaf.name : null;
+  const all = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })));
+  const rows = all
+    .filter(({ pod, agent }) => !podFilter || pod === podFilter)
+    .filter(({ pod, agent }) => !state.filter || agent.name.includes(state.filter) || pod.includes(state.filter));
+  const columns = remoteSeatColumns(contentWidth);
+  const lines: ContentLine[] = [
+    { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"} · seats read through this daemon` },
+    { text: "  QUEUE, WORK, NOW, seat detail and actions are this host's reads; a remote page shows identity, state and context only." },
+    { text: tableRow(columns, { pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: "CFG EFF", context: "CTX", status: "STATE" }) },
+    { text: "━".repeat(columnsWidth(columns)) },
+  ];
+  if (rows.length === 0) {
+    lines.push({ text: "  (no seats reported for this rig)" });
+    return lines;
+  }
+  let previousPod: string | null = null;
+  for (const { pod, agent } of rows) {
+    const firstInPod = pod !== previousPod;
+    if (firstInPod && previousPod != null) lines.push({ text: "┈".repeat(columnsWidth(columns)) });
+    previousPod = pod;
+    const stateCell = operationalState(agent.status, motion);
+    lines.push({
+      text: tableRow(columns, {
+        pod: firstInPod ? pod : "",
+        seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
+        runtime: runtimeShort(agent.runtime),
+        model: tableModel(agent.model),
+        effort: tableEffort(agent.effort, agent.effortSource, 8),
+        context: contextCompact(agent.context, contentWidth < 110),
+        status: stateCell.word,
+      }),
+    });
+  }
+  const working = rows.filter(({ agent }) => ["active", "working", "running"].includes(agent.status)).length;
+  lines.push({ text: "" }, { text: `${rows.length} seats · ${working} working` });
+  return lines;
+}
+
 
 /** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG repeats on every row so scrolled rows keep it. */
 function instanceContentLines(
@@ -937,12 +995,19 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         : `host ${hostName} is not a registered host here · rig host list` }];
       return [{ text: "(no rigs served — proven empty, not fabricated)" }];
     }
-    if (rig.remoteHost) return [
-      { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
-      { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
-    ];
-    if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}…` }];
-    if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} · refresh to Retry` }];
+    if (rig.remoteHost) {
+      // ui.topology_remote_seats (default off): the TABLE tab reads the open rig's seats through this daemon and
+      // renders them here; every other tab, and the shipped default, keeps the CLI pointer.
+      if (snap.topologyRemoteSeats !== true || state.viewTab !== "table") return [
+        { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
+        snap.topologyRemoteSeats === true
+          ? { text: `Seats are read on the TABLE tab; graph, health and recent stay unread for a remote host: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` }
+          : { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
+      ];
+      if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name} on ${rig.remoteHost}…` }];
+      if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} on ${rig.remoteHost} · refresh to Retry` }];
+      return remoteRigSeatLines(state, rig, contentWidth, motion);
+    }
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all

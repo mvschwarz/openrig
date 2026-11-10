@@ -149,6 +149,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines", "ui.timezone",
       "ui.enabled",
+      "ui.topology_remote_seats",
       "recovery.auto_drive_provider_prompts",
       "recovery.provider_auth_env_allowlist",
       // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
@@ -870,6 +871,13 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("ui.preview.default_lines defaults to 50", () => {
     const store = new ConfigStore(configPath);
     expect(store.get("ui.preview.default_lines")).toBe(50);
+  });
+
+  it("ui.topology_remote_seats defaults off and accepts a boolean", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("ui.topology_remote_seats")).toBe(false);
+    store.set("ui.topology_remote_seats", "true");
+    expect(store.get("ui.topology_remote_seats")).toBe(true);
   });
 
   it("ui.preview.* keys coerce numeric values from set", () => {
