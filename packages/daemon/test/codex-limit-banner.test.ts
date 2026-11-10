@@ -42,6 +42,16 @@ describe("detectCodexLimitBanner", () => {
     expect(detectCodexLimitBanner(BANNER)).toMatchObject({ resetText: "4:14 AM" });
   });
 
+  it("matches the typographic apostrophe Codex prints (U+2019)", () => {
+    const pane = [
+      "■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit",
+      "https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 1st, 2026 12:30 AM.",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toMatchObject({
+      resetText: "Nov 1st, 2026 12:30 AM",
+    });
+  });
+
   it("tolerates leading indent but still requires the marker first", () => {
     expect(detectCodexLimitBanner("   ■ You've hit your usage limit. try again at 4:14 AM.")).toMatchObject({
       resetText: "4:14 AM",
