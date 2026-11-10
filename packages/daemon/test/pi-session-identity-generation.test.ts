@@ -172,7 +172,9 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
     return event;
   } } as EventBus;
   const registry = new SessionRegistry(db);
-  const store = new AgentActivityStore({ db, eventBus,
+  // The store reads on the runner's clock, so the runner's hooks are fresh at read rather than aged by the wall clock.
+  const clock = "2026-11-09T16:20:00.000Z";
+  const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock),
     resolveOccupantGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (nodeId, generation) => registry.isOccupantGenerationRegistered(nodeId, generation) });
   const app = new Hono();
@@ -191,7 +193,7 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
   const pending: Promise<Response>[] = [];
   const runner = (requestedSessionFile?: string) => new RunnerCore({
     sendRpc() {}, mirrorLine() {}, mirrorAppend() {}, writeSidecar() {},
-    now: () => "2026-11-09T16:20:00.000Z",
+    now: () => clock,
     postActivity(payload) { pending.push(Promise.resolve(post(payload))); },
   }, { nodeId: "fork-node", sessionName: "worker@fork-test", generation: "fork-current" },
   { runtime: opts.runtime, ...(requestedSessionFile ? { requestedSessionFile } : {}) });
@@ -234,11 +236,11 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     const fork = forkFixture({ runtime: "omo", agentRunner: 2 });
     fork.getState(fork.runner(), null);
     await fork.settle();
-    expect(fork.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+    expect(fork.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
     const own = forkFixture({ runtime: "dsh", agentRunner: 1 });
     await own.post({ runtime: "dsh", nodeId: "fork-node", sessionName: "worker@fork-test", generation: "fork-current",
       hookEvent: "Notification", subtype: "runtime_error", occurredAt: "2026-11-09T16:20:00.000Z" });
-    expect(own.latest()).toMatchObject({ rawSubtype: "runtime_error" });
+    expect(own.latest()).toMatchObject({ rawSubtype: "runtime_error", stale: false });
     expect(own.latest()?.state).not.toBe("needs_input");
   });
 });
