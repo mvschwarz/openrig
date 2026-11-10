@@ -140,6 +140,7 @@ interface SeatHandoverMutationResult {
   ok: true;
   dryRun: false;
   mutated: true;
+  /** Legacy compatibility field, always false. Read currentStatus.continuityOutcome and sourceOutcome instead. */
   continuityTransferred: false;
   seat: SeatHandoverPlan["seat"];
   source: {
@@ -168,7 +169,8 @@ interface SeatHandoverMutationResult {
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
+        model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
   restorePacket?: { status: "unconfirmed"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
@@ -384,7 +386,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
+    console.log("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
     if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
+    if (outcome.model) {
+      console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
+    }
     if (outcome.primedArtifacts.length > 0) {
       const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);

@@ -1258,8 +1258,36 @@ describe("SeatHandoverService", () => {
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
     expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used" } } } });
     const binding = launchHarness.mock.calls[0]![0];
-    expect(binding.codexRebuildPermissions).toBeUndefined();
+    expect(binding.codexRebuildPermissions).toEqual({ approvalPolicy: "on-request", sandboxPolicy: { type: "read-only" } });
     expect(binding.codexPermissions).toEqual(own);
+  });
+
+  it.each(["observed", "unverified"] as const)("rebuild does not widen a saved workspace envelope when predecessor permissions are %s", async state => {
+    const { node } = seedSeat({ codexConfigProfile: "locked" });
+    const own = { sandbox: "workspace-write", approval: "on-request", writable_roots: ["/shared/state"],
+      network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+    currentCodexPermissions.mockResolvedValue(state === "observed"
+      ? { state, envelope: { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } },
+          profile: "locked", processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" }
+      : { state, reason: "The native policy uses unsupported profile fields." });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used" } } } });
+    if (state === "unverified") expect(result).toMatchObject({ result: { sourceOutcome: { permissions: {
+      detail: expect.stringContaining("Predecessor permissions could not be compared: The native policy uses unsupported profile fields.") } } } });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ codexConfigProfile: "locked", codexRebuildPermissions: {
+      approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write", writable_roots: ["/shared/state"],
+        network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true } } });
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["chosen-model", null])("rebuild reports the configured model choice (%s), without claiming a native comparison", async model => {
+    seedSeat({ model: model ?? undefined });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { continuityTransferred: false,
+      currentStatus: { continuityOutcome: "rebuilt", handoverResult: "complete" },
+      sourceOutcome: { mode: "rebuild", model: { requested: model, predecessorCompared: false } } } });
+    expect(launchHarness.mock.calls[0]![0].model ?? null).toBe(model);
   });
 
   it.each(["minted", "mint fails"] as const)("a rebuild handover's receipt reads its lineage record back (%s)", async (mint) => {
