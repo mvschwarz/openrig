@@ -76,12 +76,20 @@ describe("collectClaudeStatuslineSignals — reader → provider_statusline / ex
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
   });
 
-  it("malformed cache JSON → unknown(empty_reading), never throws", () => {
+  it("malformed cache JSON → unknown(unreadable_cache), never throws", () => {
     const sigs = collectClaudeStatuslineSignals(readerDeps({
       listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
       readCacheRaw: () => "{ not json",
     }));
     expect(sigs[0]!.sourceClass).toBe("unknown");
+    expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
+  });
+
+  it("a valid cache with no windows keeps empty_reading (distinct from an unreadable cache)", () => {
+    const sigs = collectClaudeStatuslineSignals(readerDeps({
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
+      readCacheRaw: () => JSON.stringify({ seatSession: "dev-impl@rig", asOf: CACHE_ASOF }),
+    }));
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
   });
 });
@@ -111,14 +119,15 @@ describe("0.5.8 provider-usage compatibility bridge", () => {
     const malformedCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
-      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+      .toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
 
     fs.rmSync(path.join(canonical, "legacy@rig.json"));
     fs.mkdirSync(path.join(canonical, "legacy@rig.json"));
     const wrongTypeCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
     expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
     expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
-      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+      .toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
     fs.rmSync(home, { recursive: true, force: true });
   });
 });
+

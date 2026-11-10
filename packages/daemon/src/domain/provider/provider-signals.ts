@@ -131,6 +131,8 @@ export interface ClaudeSignalInput {
   seatSession: string;
   /** false = the statusline cache has not been written yet (before the first API response). */
   cachePresent: boolean;
+  /** True when a cache file exists but cannot be read or parsed. Distinct from an empty reading. */
+  cacheUnreadable?: boolean;
   /** Present only when the cache exists and carried a rate_limits object. */
   reading?: ClaudeStatuslineReading;
   asOf: string;
@@ -140,6 +142,7 @@ export interface ClaudeSignalInput {
 export const CLAUDE_UNKNOWN_REASON = {
   no_statusline_cache_yet: "claude_no_statusline_cache_yet",
   empty_reading: "claude_statusline_cache_had_no_windows",
+  unreadable_cache: "claude_statusline_cache_unreadable",
 } as const;
 
 function claudeUnknownSignal(
@@ -165,15 +168,20 @@ function claudeUnknownSignal(
 /**
  * Normalize a Claude statusline `rate_limits` reading into `signals[]` rows.
  * - seat before first response (no cache) → explicit unknown row.
+ * - a cache that exists but cannot be read/parsed → its own unknown reason (broken, not empty).
  * - seat with subscription windows → one `provider_statusline` row per window (five_hour, and
  *   seven_day normalized to "weekly"); a genuine 0 survives as 0.
  * - subscription with cache but no windows → explicit unknown row (never fabricated zeros).
  */
 export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSignal[] {
-  const { seatSession, cachePresent, reading, asOf, staleAfter } = input;
+  const { seatSession, cachePresent, cacheUnreadable, reading, asOf, staleAfter } = input;
 
   if (!cachePresent) {
     return [claudeUnknownSignal(seatSession, asOf, CLAUDE_UNKNOWN_REASON.no_statusline_cache_yet, staleAfter)];
+  }
+
+  if (cacheUnreadable) {
+    return [claudeUnknownSignal(seatSession, asOf, CLAUDE_UNKNOWN_REASON.unreadable_cache, staleAfter)];
   }
 
   const windows: Array<["five_hour" | "weekly", ClaudeStatuslineWindow | undefined]> = [

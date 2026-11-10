@@ -61,15 +61,16 @@ export interface ClaudeUsageReaderDeps {
 
 /**
  * Read each Claude seat's provider_usage cache → provider_statusline rows via
- * claudeStatuslineSignals. Explicit unknown rows for absent cache (no_statusline_cache_yet) and
- * cache-present-but-no/-malformed windows (empty_reading).
- * Never throws — a malformed cache is treated as present-with-no-windows, not a crash.
+ * claudeStatuslineSignals. Explicit unknown rows for absent cache (no_statusline_cache_yet),
+ * an unreadable cache (unreadable_cache), and a valid cache with no windows (empty_reading).
+ * Never throws — a malformed cache becomes an unknown row, not a crash.
  */
 export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): ProviderSignal[] {
   const now = deps.now();
   const out: ProviderSignal[] = [];
   for (const seat of deps.listClaudeSeats()) {
     let cachePresent = false;
+    let cacheUnreadable = false;
     let reading: ClaudeStatuslineReading | undefined;
     let staleAfter: string | undefined;
     let capturedAsOf: string | undefined;
@@ -84,7 +85,8 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
         staleAfter = parsed.staleAfter;
         capturedAsOf = typeof parsed.asOf === "string" ? parsed.asOf : undefined;
       } catch {
-        // Malformed cache → present-with-no-windows (empty_reading unknown), never a throw.
+        // Malformed cache → present-but-unreadable (its own unknown), never a throw.
+        cacheUnreadable = true;
         reading = undefined;
       }
     }
@@ -92,6 +94,7 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
       ...claudeStatuslineSignals({
         seatSession: seat.seatSession,
         cachePresent,
+        cacheUnreadable,
         reading,
         // Signal asOf = when the reading was captured (the cache's asOf) when present+valid; else now.
         asOf: cachePresent && capturedAsOf ? capturedAsOf : now,
