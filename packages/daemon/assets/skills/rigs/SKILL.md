@@ -155,6 +155,12 @@ person needs in their project or home folder and name that path.
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
+- **If you start a team yourself** instead of through the operator, do its fit check first. A built-in team can need a
+  sign-in the person doesn't have: `starter` runs its reviewer on Codex, so someone on Claude Code alone stops at a Codex
+  sign-in just when the review should start. `rig specs preview <team> --kind rig --json` lists each seat's runtime.
+  Check those logins (`claude auth status`, `codex login status`), or go by what the person told you. If one is missing
+  or you can't tell, say so before launching and let them choose: the operator adapts the team to the logins they have,
+  or they sign in first.
 - **Relay the operator's questions** unless the person declined the Codex offer below and explicitly chose the operator route: the operator asks in its own pane, and the person may not be looking there.
   After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
   something (start this team? which folder? which option?), ask them here in the operator's words and send their
@@ -176,7 +182,8 @@ person needs in their project or home folder and name that path.
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>`. A permission prompt is the person's to answer: show it to them, with any
-  others waiting, one line each (seat, exact action, the choices offered). Before sending their choice, capture that
+  others waiting, one line each (seat, exact action, the choices offered). For a commit, also say whether the team's
+  review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
   (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
