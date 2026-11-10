@@ -1856,6 +1856,84 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(findings[0]!.body).toContain(missing);
   });
 
+  it("DISPOSITION NAMED ANYWHERE: a custody-verified note that names the target later in its prose silences it (#2841)", async () => {
+    const row = await mkRow();
+    const missing = "qitem-29990101000000-precon04";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: return-channel create echoed ${missing} pending at next@r`,
+    });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("DISPOSITION IS PER NOTE: only the note's first target-naming word counts, so a later mention of another target keeps its finding (#2841)", async () => {
+    const row = await mkRow();
+    const verifiedTarget = "qitem-29990101000000-precon06";
+    const pendingTarget = "qitem-29990101000000-precon07";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${verifiedTarget},${pendingTarget}`,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${verifiedTarget} ok; ${pendingTarget} still pending`,
+    });
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`- ${pendingTarget}\n`);
+    expect(findings[0]!.body).not.toContain(`- ${verifiedTarget}\n`);
+  });
+
+  it("DISPOSITION COMMA WORD: a first target-naming word that is a comma list verifies every member (#2841)", async () => {
+    const row = await mkRow();
+    const first = "qitem-29990101000000-precon08";
+    const second = "qitem-29990101000000-precon09";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${first},${second}`,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: checked ${first},${second} on the parent host`,
+    });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("DISPOSITION RECIPE IS EXACT: the finding prints each target's own note, ready to record (#2841)", async () => {
+    const row = await mkRow();
+    const missing = "qitem-29990101000000-precon05";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`rig queue update ${row.qitemId} --note "custody-verified: ${missing} <how verified>"`);
+  });
+
   it("FOUNDER DEFAULTS: cadence 300s and unclaimed age 60min on the daemon config surface, twinned in the module constants", async () => {
     const mod = await sweepMod();
     expect(mod.DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS).toBe(300);
@@ -1944,7 +2022,7 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
     expect(findings[0]!.summary).toMatch(new RegExp(`^Custody not checked: no successor of ${row.qitemId} in this store \\(\\d+ min\\)$`));
     expect(findings[0]!.body).toContain("- next@r");
     expect(findings[0]!.body).toContain("OPENRIG_URL=<registered-host> rig queue list --destination next@r");
-    expect(findings[0]!.body).toContain("custody-verified: <target>");
+    expect(findings[0]!.body).toContain(`--note "custody-verified: next@r <how verified>"`);
     expect(findings[0]!.tags).toContain(`stuck-sweep:dangling-closure:${row.qitemId}`);
     await runSweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(1);

@@ -81,6 +81,26 @@ export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 /** Where a compose region sits on screen, and where its caret lands. */
 export interface ComposeLayout { rows: number; caretRow: number; caretColumn: number; }
 
+const SEGMENTER = (() => {
+  try {
+    return new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  } catch {
+    return null;
+  }
+})();
+
+/** Grapheme clusters: what a terminal lays out. A ZWJ family emoji is one cluster
+ *  taking two cells where its code points would sum to six; a combining mark adds none. */
+export function* graphemesOf(text: string): Generator<string> {
+  if (SEGMENTER) {
+    for (const part of SEGMENTER.segment(text)) yield part.segment;
+  } else {
+    for (const character of text) yield character;
+  }
+}
+
+const TAB_WIDTH = 8;
+
 export function composeLayout(text: string, width: number, caret = text.length): ComposeLayout {
   if (!text) return { rows: 0, caretRow: 0, caretColumn: 0 };
   if (width <= 0) return { rows: text.split("\n").length, caretRow: 0, caretColumn: 0 };
@@ -90,20 +110,23 @@ export function composeLayout(text: string, width: number, caret = text.length):
   let caretColumn = 0;
   let index = 0;
   const place = () => { caretRow = row; caretColumn = column; };
-  for (const character of text) {
+  for (const segment of graphemesOf(text)) {
     if (index === caret) place();
-    if (character === "\n") {
+    if (segment === "\n") {
       row += 1;
       column = 0;
+    } else if (segment === "\t") {
+      // A tab advances to the next ordinary tab stop, clamped to the last column.
+      column = Math.min((Math.floor(column / TAB_WIDTH) + 1) * TAB_WIDTH, width - 1);
     } else {
-      const cells = Math.max(0, stringWidth(character));
+      const cells = Math.max(0, stringWidth(segment));
       if (column + cells > width) {
         row += 1;
         column = 0;
       }
       column += cells;
     }
-    index += character.length;
+    index += segment.length;
   }
   if (index === caret) place();
   return { rows: row + 1, caretRow, caretColumn };
@@ -119,8 +142,8 @@ export function composeLayout(text: string, width: number, caret = text.length):
 
 /** The live region a pane host repaints around transcript writes. */
 export interface PaneCompositor {
-  /** Bind the line editor the compose line renders from. */
-  attach(read: () => string, redraw: () => void, caretUp?: () => number): void;
+  /** Bind the line editor the compose line renders from, and where its cursor sits. */
+  attach(read: () => string, redraw: () => void, caretUp?: () => number, readCursor?: () => number): void;
   /** Unbind the editor; any held streamed tail is flushed and the live region is dropped. */
   detach(): void;
   /** A keystroke changed the draft: repaint the live region from readline's state. A
@@ -155,6 +178,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
   let openLine = false;
   let screenRows = 0;
   let readCaretUp: (() => number) | null = null;
+  let readCaretIndex: (() => number) | null = null;
   const widthKnown = () => typeof out.columns === "number" && out.columns > 0;
   const composeText = () => (readInput && redrawLine ? readInput() : "");
   const composeRows = () => {
@@ -164,9 +188,13 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
   const clip = (text: string) => {
     const flat = text.replace(/[\r\n\t]+/g, " ").trimEnd();
     if (!widthKnown() || stringWidth(flat) < out.columns) return flat;
-    let clipped = flat;
-    while (clipped && stringWidth(clipped) + 1 > out.columns - 1) {
-      clipped = Array.from(clipped).slice(0, -1).join("");
+    let used = 0;
+    let clipped = "";
+    for (const segment of graphemesOf(flat)) {
+      const cells = Math.max(0, stringWidth(segment));
+      if (used + cells > out.columns - 1) break;
+      clipped += segment;
+      used += cells;
     }
     return `${clipped}\u2026`;
   };
@@ -209,23 +237,36 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     out.write(text.endsWith("\n") ? text : `${text}\n`);
     paint();
   };
-  // A tile attaching or detaching reflows the pane. Erase with the wider of the recorded
-  // and the recomputed row counts — the old paint may now wrap wider or narrower — then
-  // repaint at the new width. Conservative on purpose: never leave a stale region row.
+  // A tile attaching or detaching reflows the pane, and the terminal keeps the cursor on
+  // its character. So the old paint now occupies exactly what the new width says it does:
+  // the pinned status wraps to ceil(cells/columns) rows, the draft to its layout rows.
+  // Move down to the region's last row — past the lines below the caret — erase exactly
+  // that many rows, and repaint at the new width. No max(): under-erasing leaves a stale
+  // copy of a wrapped status, over-erasing drops a transcript line off the screen.
   const onResize = () => {
-    const recomputed = (status !== null ? 1 : 0) + composeRows();
-    const down = readCaretUp ? readCaretUp() : 0;
+    if (!widthKnown()) {
+      screenRows = 0;
+      return;
+    }
+    const draft = composeText();
+    const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
+    const draftRows = layout ? layout.rows : 0;
+    const statusLines = status !== null ? Math.max(1, Math.ceil(stringWidth(status) / out.columns)) : 0;
+    const down = layout ? layout.rows - 1 - layout.caretRow : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
-    eraseLines(Math.max(screenRows, recomputed));
+    // A pinned status without a draft also owns the blank row its trailing newline
+    // left the cursor on — the same row paint() counts into screenRows.
+    eraseLines(statusLines + (draftRows || (status !== null ? 1 : 0)));
     screenRows = 0;
     paint();
   };
   out.on("resize", onResize);
   const pane: PaneCompositor = {
-    attach(read, redraw, caretUp) {
+    attach(read, redraw, caretUp, readCursor) {
       readInput = read;
       redrawLine = redraw;
       readCaretUp = caretUp ?? null;
+      readCaretIndex = readCursor ?? null;
     },
     detach() {
       eraseScreen();
@@ -233,12 +274,18 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       readInput = null;
       redrawLine = null;
       readCaretUp = null;
+      readCaretIndex = null;
       openLine = false;
       screenRows = 0;
     },
     refresh() {
       eraseScreen();
-      if (held && !composeText()) flushHeld();
+      // With no region left, an unfinished streamed line goes out verbatim so the
+      // next delta continues it on the same row instead of splitting mid-word.
+      if (held && status === null && !composeText()) {
+        writeVerbatim(held);
+        held = "";
+      }
       paint();
     },
     transcript(text) {
@@ -269,11 +316,9 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       openLine = false;
     },
     diagnostic(text) {
-      // Without a known width there is no region to pin into: plain output instead.
-      if (!widthKnown()) {
-        pane.line(text);
-        return;
-      }
+      // Without a known width there is no region to pin into. Callers already wrote
+      // the transcript copy; printing here would duplicate it.
+      if (!widthKnown()) return;
       if (openLine) {
         out.write("\n");
         openLine = false;
@@ -326,7 +371,12 @@ export function createRunnerInput(
     return readline.createInterface({ input, crlfDelay: Infinity }).on("line", submit);
   }
 
+  const [major = 0, minor = 0, patch = 0] = process.versions.node.split(".").map(Number);
+  const batchText = (major === 22 && (minor === 21 || (minor === 22 && patch === 0)))
+    || (major === 24 && minor >= 9 && (minor < 11 || (minor === 11 && patch <= 1)))
+    || (major === 25 && (minor === 0 || (minor === 1 && patch === 0)));
   const keys = new PassThrough();
+  const editorInput = batchText ? new PassThrough() : keys;
   // Readline edits against a discard sink: it must never draw on the terminal, because
   // _refreshLine does moveCursor(0, -prevRows) + clearScreenDown(), which erases whatever the
   // compositor put above the draft. The compositor owns every terminal byte instead.
@@ -347,10 +397,10 @@ export function createRunnerInput(
     output.write("\r");
     if (layout.caretColumn > 0) output.write(`\u001b[${layout.caretColumn}C`);
   };
-  pane?.attach(() => `${editor.line ?? ""}`, renderCompose, () => caretUp);
+  pane?.attach(() => `${editor.line ?? ""}`, renderCompose, () => caretUp, () => Math.max(0, Math.min(Number(editor.cursor) || 0, `${editor.line ?? ""}`.length)));
 
   const editor = readline.createInterface({
-    input: keys, output: sink, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+    input: editorInput, output: sink, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
   });
   // Node forces dumb-terminal mode without editing if TERM=dumb. When terminal: true
   // was requested, remove the dumb-mode override so VT100 line editing is preserved.
@@ -370,10 +420,32 @@ export function createRunnerInput(
     pane?.refresh();
   };
   const clear = () => setLine("", 0);
+  // Node 22.21–22.22.0 (also some 24/25 releases) appends batched text after
+  // cursor edits. Decode keys with Node, then write each plain-text run at once;
+  // controls flush that run first. Fixed Node keeps its original undo grouping.
+  let typed = "";
+  const flushTyped = () => {
+    if (!typed) return;
+    const text = typed;
+    typed = "";
+    editor.write(text);
+  };
+  const keypress = (text: string | undefined, key: readline.Key) => {
+    if (text && !key.ctrl && !key.meta && !/[\u0000-\u001f\u007f]/.test(text)) typed += text;
+    else {
+      flushTyped();
+      editor.write(text ?? "", key);
+    }
+  };
+  if (batchText) {
+    readline.emitKeypressEvents(keys);
+    keys.on("keypress", keypress);
+  }
   const consume = (text: string) => {
     if (paste === null) {
       pane?.beforeInput();
       keys.write(text);
+      if (batchText) flushTyped();
     } else if (!discarded) {
       pasteBytes += Buffer.byteLength(text);
       if (pasteBytes > MAX_PI_INPUT_BYTES) {
@@ -441,8 +513,10 @@ export function createRunnerInput(
     input.removeListener("end", end);
     input.setRawMode(wasRaw);
     input.pause();
+    keys.removeListener("keypress", keypress);
     keys.destroy();
     pane?.detach();
+    if (editorInput !== keys) editorInput.destroy();
     output.write("\u001b[?2004l");
   });
   return editor;

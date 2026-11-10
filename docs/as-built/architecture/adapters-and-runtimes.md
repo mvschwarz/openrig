@@ -398,6 +398,21 @@ adapter never closes a session on it and reports `rex_outcome_unknown`.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 
+`HerdrAppProvider` (`herdr-app-provider.ts`) opens a view in a herdr-app
+window (one provider per app home, cached in `startup.ts`). In the daemon it is
+used only when named (`resolveHerdrAppProvider` in `terminal-service.ts`). Its
+transport (`herdr-app-transport.ts`) sends one JSON line per
+connection to `<app home>/herdr-app.sock` and reads the window's own "did not
+answer" as `unknown`. A view is a child of OpenRig's stack in a derived
+`layouts/rig.json` (`deriveRigLayout`, `herdr-app-layout.ts`), written
+atomically, with viewers started by `hc run --bg --no-parent` and journalled
+first (`herdr-app-state.ts`). Removal rewrites the file before a viewer ends,
+and ends it only after the `rig-strip` mod's acknowledgement
+(`<app home>/openrig/ack.json`) shows a layout without it. An `hc events`
+watcher (`startup.ts`) turns a viewer that ended elsewhere into an ended cell.
+Its four mods ship in `packages/daemon/assets/herdr-app/mods/` and are
+installed by `herdr-app-install.ts`.
+
 ### Tmux server selection
 
 Before reconciliation, `startup.ts` calls `selectTmuxServer` in

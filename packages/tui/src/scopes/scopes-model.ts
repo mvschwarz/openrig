@@ -14,13 +14,29 @@ export interface ReadinessSnap {
   issues?: string[];
   /** The authored judgment policy; null when none is readable. `configured` alone also covers a leftover judgments
    * directory or a failed policy read. Absent from an older daemon, which is read as no policy. */
-  policy?: { judges: string[] } | null;
+  policy?: { judges: string[]; everyJudge?: boolean } | null;
   history?: Array<{ ref: string; id: string; verdict: string; previous: string | null }>;
   items: Array<{ id: string; index: number; text: string; state: string; reason: string; judgment: {
     id: string; actor?: string; at?: string; verdict?: string; previous?: string | null;
     subject?: { kind: string; ref: string; comparison?: string };
     evidence?: Array<{ ref: string; sha256: string }>;
-  } | null }>;
+  } | null;
+    /** Each policy judge's own latest judgment on the item. Absent from an older daemon. */
+    judges?: Array<{ actor: string; state: string; reason: string; sequence: number | null; decides: boolean }> }>;
+}
+
+/** One line per policy judge: its own latest judgment and whether it decides the item now. Shown when the policy names
+ *  more than one judge, or requires every judge. */
+function judgeLines(policy: ReadinessSnap["policy"], judges: ReadinessSnap["items"][number]["judges"]): Array<{ text: string; token: Token }> {
+  if (!judges?.length || (judges.length < 2 && !policy?.everyJudge)) return [];
+  return [
+    { text: policy?.everyJudge ? "Judges · every judge must accept:" : "Judges · the item's latest judgment decides:", token: "dim" },
+    ...judges.map(j => ({
+      text: `  ${j.actor} · ${j.state.toUpperCase()} · ` + (j.sequence === null ? "no judgment"
+        : `judgment ${j.sequence}${j.decides ? "" : " · not deciding (a later judgment decides the item)"} · ${j.reason}`),
+      token: (j.state === "accepted" ? "ok" : j.state === "pending" ? "dim" : "warn") as Token,
+    })),
+  ];
 }
 export interface SliceScopeSnap {
   error?: string;
@@ -160,8 +176,11 @@ export function proofProvenanceLines(proof: ReadinessSnap | null | undefined, wi
     lines.push({ text: "" });
     add("Item " + item.index + " · " + item.state.toUpperCase() + " · " + item.text, item.state === "accepted" ? "ok" : "warn");
     add(item.reason, item.state === "unknown" ? "warn" : "dim");
+    const perJudge = judgeLines(proof.policy, item.judges);
+    for (const line of perJudge) add(line.text, line.token);
     const judgment = item.judgment;
     if (!judgment) { add("No current attributed judgment.", "warn"); continue; }
+    if (perJudge.length) add("Latest judgment on this item (corrections chain on it):");
     add("Subject: " + (judgment.subject ? judgment.subject.kind + " · " + judgment.subject.ref : "unknown — subject not served"));
     if (judgment.subject?.comparison) add("Comparison: " + judgment.subject.comparison);
     add("Actor: " + (judgment.actor ?? "unknown — actor not served") + " · recorded " + (judgment.at ?? "unknown"));
@@ -190,8 +209,13 @@ function proofEvidence(detail: SliceScopeSnap, item: ScopeContractItem): Array<{
   const current = detail.readiness?.configured
     ? detail.readiness.items.find(i => item.id !== undefined && i.id === item.id) : undefined;
   const judgment = current?.judgment;
+  const every = detail.readiness?.policy?.everyJudge === true;
+  if (current && every) lines.push({ text: `Every judge must accept · item ${current.state}: ${current.reason}`, token: current.state === "accepted" ? "ok" : "warn" });
+  if (current) lines.push(...judgeLines(detail.readiness?.policy, current.judges));
   if (judgment) {
-    lines.push({ text: `Current judgment ${judgment.id}: ${current.reason}`, token: current.state === "accepted" ? "ok" : "warn" });
+    lines.push(every
+      ? { text: `Latest judgment ${judgment.id}`, token: "dim" }
+      : { text: `Current judgment ${judgment.id}: ${current!.reason}`, token: current!.state === "accepted" ? "ok" : "warn" });
     if (judgment.previous) lines.push({ text: `Corrects: ${judgment.previous}`, token: "dim" });
     for (const evidence of judgment.evidence ?? []) {
       lines.push({ text: `Evidence: ${evidence.ref}`, token: "dim" });

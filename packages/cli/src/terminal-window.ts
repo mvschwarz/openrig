@@ -520,18 +520,20 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         pane = placeholder;
       } else pane = (await runTmux([...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
       // Nested source clients on this server can make a new window too narrow to split.
-      // Use the viewer's configured detached size, then restore normal client resizing.
+      // Use the viewer's detached size only while splitting; always release to inherited client sizing.
       const [width, height] = (await runTmux(["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
-      const sizing = (await runTmux(["show-options", "-Awv", "-t", pane, "window-size"])).trim();
-      await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
-      await runTmux(["select-pane", "-t", pane, "-T", first.label]);
-      for (const item of page.slice(1)) {
-        pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
-        await runTmux(["select-pane", "-t", pane, "-T", item.label]);
-        await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+      try {
+        await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
+        await runTmux(["select-pane", "-t", pane, "-T", first.label]);
+        for (const item of page.slice(1)) {
+          pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
+          await runTmux(["select-pane", "-t", pane, "-T", item.label]);
+          await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+        }
+        await runTmux(["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
+      } finally {
+        await runTmux(["set-option", "-wu", "-t", `${viewer}:${name}`, "window-size"]);
       }
-      await runTmux(["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
-      await runTmux(["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
     }
     await runTmux(["select-window", "-t", `${viewer}:view-1`]);
     if (!window) {

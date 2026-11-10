@@ -260,7 +260,7 @@ describe("terminal preview width", () => {
     }
   });
 
-  it("previews the kernel view for cmux without the wide TUI's width, as the cmux open sends none", async () => {
+  it("previews the kernel view for cmux and herdr-app without the wide TUI's width, as their opens send none", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
     const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
     const requests: string[] = [];
@@ -273,8 +273,9 @@ describe("terminal preview width", () => {
       }) as typeof fetch });
       await client.previewTerminal("saved:kernel", "cmux");
       await client.previewTerminal("saved:kernel", "herdr");
+      await client.previewTerminal("saved:kernel", { provider: "herdr-app", appHome: "/srv/app" });
       expect(requests.map(url => [new URL(url).searchParams.get("provider"), new URL(url).searchParams.get("viewportColumns")]))
-        .toEqual([["cmux", null], ["herdr", "160"]]);
+        .toEqual([["cmux", null], ["herdr", "160"], ["herdr-app", null]]);
     } finally {
       if (descriptor) Object.defineProperty(process.stdout, "columns", descriptor);
       else delete (process.stdout as unknown as Record<string, unknown>)["columns"];

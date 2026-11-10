@@ -12,7 +12,8 @@ import { parseSessionName } from "./session-name.js";
  *   2. `LEARNED.md` (seat lineage lessons);
  *   3. the latest restore packet, when the compaction seam's seat-keyed
  *      restore-pending marker names one;
- *   4. superseded recap chain, newest first.
+ *   4. superseded recap chain, newest first, marked `optional`: the briefing
+ *      lists these as history to read only when needed, not as required reading.
  *
  * The builder only DECLARES addresses; the handover service existence-filters
  * them (a declared-but-missing address is recorded as a named GAP, never
@@ -22,7 +23,7 @@ import { parseSessionName } from "./session-name.js";
 export function buildRebuildPrimingChain(
   seatRef: string,
   opts: { topologyRoot: string; openrigHome: string },
-): { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string } {
+): { artifacts: Array<{ address: string; label: string; optional?: true }> } | { emptyReason: string } {
   const parsed = parseSessionName(seatRef);
   if (parsed.kind !== "canonical") {
     return { emptyReason: `seat ref '${seatRef}' did not parse as canonical <seat>@<rig> — no durable chain resolved, never guessed` };
@@ -35,6 +36,7 @@ export function buildRebuildPrimingChain(
     ...listRecapChain(seatDir).reverse().map((entry, index) => ({
       address: entry.path,
       label: `superseded recap (${index + 1} generation${index === 0 ? "" : "s"} back)`,
+      optional: true as const,
     })),
   ];
   return { artifacts };

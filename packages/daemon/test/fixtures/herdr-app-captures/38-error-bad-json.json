@@ -1,0 +1,20 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "error-bad-json",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{not json\n"
+  },
+  "reply": {
+    "line": "{\"error\":\"bad request: key must be a string at line 1 column 2\"}\n",
+    "json": {
+      "error": "bad request: key must be a string at line 1 column 2"
+    }
+  },
+  "elapsed_ms": 0,
+  "notes": "A request line that is not JSON: answered by the socket thread itself (`bad request`)."
+}

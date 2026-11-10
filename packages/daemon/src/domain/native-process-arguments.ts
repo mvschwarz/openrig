@@ -9,7 +9,8 @@ const MAX_ARGS = 4096;
 const MAX_OUTPUT = 2 * MAX_BYTES;
 
 // KERN_PROCARGS2 begins with argc and the executable path, followed by argc NUL-delimited
-// arguments and then the environment. Only the arguments are returned by this helper.
+// arguments and then the environment. Normal identity reads return only argv; an explicit
+// transient continuation capture also requests the environment.
 const MAC_ARGUMENTS = `ObjC.import("Foundation");
 ObjC.bindFunction("sysctl", ["int", ["void *", "uint32_t", "void *", "void *", "void *", "size_t"]]);
 function number(bytes, count) {
@@ -17,7 +18,7 @@ function number(bytes, count) {
   for (var i = count - 1; i >= 0; i--) value = value * 256 + bytes.charCodeAt(i);
   return value;
 }
-function parse(data, used) {
+function parse(data, used, environment) {
   if (used < 7 || used > 1048576) return null;
   var exact = data.subdataWithRange({location: 0, length: used});
   var bytes = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(exact, $.NSISOLatin1StringEncoding));
@@ -49,7 +50,22 @@ function parse(data, used) {
     args.push(argument);
     offset = end + 1;
   }
-  return args[0] ? args : null;
+  if (!args[0]) return null;
+  if (!environment) return args;
+  var env = Object.create(null);
+  while (offset < used) {
+    var end = bytes.indexOf("\\u0000", offset);
+    if (end < 0 || end >= used) return null;
+    if (end === offset) break; // End of environ; XNU apple strings follow a NUL separator.
+    if (end > offset) {
+      var entry = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(exact.subdataWithRange({location: offset, length: end - offset}), $.NSUTF8StringEncoding));
+      if (typeof entry !== "string") return null;
+      var eq = entry.indexOf("=");
+      if (eq > 0) env[entry.slice(0, eq)] = entry.slice(eq + 1);
+    }
+    offset = end + 1;
+  }
+  return { argv: args, env: env };
 }
 function run(inputs) {
   var data = $.NSMutableData.dataWithLength(1048576);
@@ -59,14 +75,14 @@ function run(inputs) {
     if (outputSize > 2097152) return [request.pid, null];
     if (request.fixture) {
       var fixture = $.NSData.alloc.initWithBase64EncodedStringOptions(request.fixture, 0);
-      return [request.pid, parse(fixture, Number(fixture.length))];
+      return [request.pid, parse(fixture, Number(fixture.length), request.environment)];
     }
     var mib = $.NSData.alloc.initWithBase64EncodedStringOptions(request.mib, 0);
     var size = $.NSData.alloc.initWithBase64EncodedStringOptions(request.size, 0).mutableCopy;
     if ($.sysctl(mib.bytes, 3, data.mutableBytes, size.mutableBytes, null, 0) !== 0) return [request.pid, null];
     var sizeBytes = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(size, $.NSISOLatin1StringEncoding));
     var used = typeof sizeBytes === "string" && sizeBytes.length === 8 ? number(sizeBytes, 8) : 0;
-    var args = parse(data, used);
+    var args = parse(data, used, request.environment);
     if (args) {
       var answerSize = JSON.stringify(args).length;
       if (outputSize + answerSize > 2097152) return [request.pid, null];
@@ -165,4 +181,34 @@ export async function readNativeProcessArguments(requested: number[]): Promise<M
     }
   } catch { /* No OS argv is unknown, never a fallback to flattened ps text. */ }
   return result;
+}
+
+/** Transient launch capture for an owned continuation. Never stored in a snapshot or diagnostic. */
+export async function readNativeProcessLaunch(pid: number): Promise<{ argv: string[]; env: Record<string, string> } | null> {
+  if (!Number.isInteger(pid) || pid <= 0 || pid > 2147483647) return null;
+  try {
+    if (process.platform === "linux") {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 2000);
+      try {
+        const argv = await boundedLinuxCmdline(pid, controller.signal);
+        const chunks: Buffer[] = []; let length = 0;
+        for await (const chunk of createReadStream(`/proc/${pid}/environ`, { highWaterMark: 64 * 1024, signal: controller.signal })) {
+          length += chunk.length; if (length > MAX_BYTES) return null; chunks.push(chunk);
+        }
+        const entries = parseLinuxProcessArguments(Buffer.concat(chunks, length));
+        return argv && entries ? { argv, env: Object.fromEntries(entries.filter(e => e.indexOf("=") > 0).map(e => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)])) } : null;
+      } finally { clearTimeout(timer); }
+    }
+    if (process.platform === "darwin") {
+      const size = Buffer.alloc(8); size.writeBigUInt64LE(BigInt(MAX_BYTES));
+      const mib = Buffer.alloc(12); [1, 49, pid].forEach((value, index) => mib.writeInt32LE(value, index * 4));
+      const { stdout } = await execFileAsync("/usr/bin/osascript", ["-l", "JavaScript", "-e", MAC_ARGUMENTS,
+        JSON.stringify({ pid, mib: mib.toString("base64"), size: size.toString("base64"), environment: true })],
+        { encoding: "utf8", timeout: 2000, maxBuffer: MAX_OUTPUT });
+      const value = JSON.parse(stdout)?.[0]?.[1];
+      return value && Array.isArray(value.argv) && value.argv.every((a: unknown) => typeof a === "string")
+        && value.env && typeof value.env === "object" && Object.values(value.env).every(v => typeof v === "string") ? value : null;
+    }
+  } catch { /* Unknown capture: the caller reports it and uses ordinary launch resolution. */ }
+  return null;
 }

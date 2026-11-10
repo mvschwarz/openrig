@@ -1,0 +1,749 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "commands",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"commands\":true}\n"
+  },
+  "reply": {
+    "line": "[{\"name\":\"space.new\",\"args\":[{\"name\":\"name\",\"required\":false},{\"name\":\"folder\",\"required\":false},{\"name\":\"tab\",\"required\":false},{\"name\":\"argv\",\"required\":false},{\"name\":\"task\",\"required\":false},{\"name\":\"machine\",\"required\":false}],\"about\":\"Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).\"},{\"name\":\"space.close\",\"args\":[{\"name\":\"id\",\"required\":false},{\"name\":\"confirmed\",\"required\":false}],\"about\":\"Close a space and end its terminals (asks first unless confirmed).\"},{\"name\":\"space.rename\",\"args\":[{\"name\":\"id\",\"required\":false},{\"name\":\"name\",\"required\":false}],\"about\":\"Rename a space (asks the person when no name; an empty name: called after where its first terminal is again).\"},{\"name\":\"space.move\",\"args\":[{\"name\":\"id\",\"required\":true},{\"name\":\"index\",\"required\":true}],\"about\":\"Move a space to a position (1 = first).\"},{\"name\":\"tab.new\",\"args\":[{\"name\":\"name\",\"required\":false},{\"name\":\"space\",\"required\":false},{\"name\":\"folder\",\"required\":false},{\"name\":\"argv\",\"required\":false},{\"name\":\"task\",\"required\":false},{\"name\":\"mod\",\"required\":false},{\"name\":\"props\",\"required\":false}],\"about\":\"Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).\"},{\"name\":\"tab.close\",\"args\":[{\"name\":\"id\",\"required\":false},{\"name\":\"confirmed\",\"required\":false}],\"about\":\"Close a tab and end its terminals.\"},{\"name\":\"tab.rename\",\"args\":[{\"name\":\"id\",\"required\":false},{\"name\":\"name\",\"required\":false}],\"about\":\"Rename a tab (asks the person when no name; an empty name: called by its number again).\"},{\"name\":\"tab.move\",\"args\":[{\"name\":\"id\",\"required\":true},{\"name\":\"index\",\"required\":true}],\"about\":\"Move a tab to a position in its space (1 = first).\"},{\"name\":\"pane.split\",\"args\":[{\"name\":\"direction\",\"required\":true},{\"name\":\"pane\",\"required\":false},{\"name\":\"argv\",\"required\":false},{\"name\":\"mod\",\"required\":false},{\"name\":\"props\",\"required\":false}],\"about\":\"Split a pane (default: the focused one) \\\"right\\\" or \\\"down\\\" with a new terminal, or with a mod (`mod`, its `props`) beside it.\"},{\"name\":\"pane.close\",\"args\":[{\"name\":\"pane\",\"required\":false}],\"about\":\"Close a pane and end its terminal.\"},{\"name\":\"terminal.open\",\"args\":[{\"name\":\"argv\",\"required\":false},{\"name\":\"folder\",\"required\":false},{\"name\":\"place\",\"required\":false},{\"name\":\"name\",\"required\":false}],\"about\":\"Start a terminal: as a new tab (place \\\"tab\\\", default), or \\\"right\\\"/\\\"down\\\" of the focused pane.\"},{\"name\":\"terminal.keep\",\"args\":[{\"name\":\"terminal\",\"required\":true},{\"name\":\"place\",\"required\":false}],\"about\":\"Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \\\"right\\\"/\\\"down\\\".\"},{\"name\":\"terminal.park\",\"args\":[{\"name\":\"terminal\",\"required\":true}],\"about\":\"Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again).\"},{\"name\":\"terminal.right_click\",\"args\":[{\"name\":\"to\",\"required\":true},{\"name\":\"terminal\",\"required\":false}],\"about\":\"Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \\\"program\\\" or \\\"menu\\\" (Herdr's, the default). Shift+right-click is always the menu.\"},{\"name\":\"terminal.pin\",\"args\":[{\"name\":\"terminal\",\"required\":true},{\"name\":\"pinned\",\"required\":true}],\"about\":\"Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it.\"},{\"name\":\"terminal.kill\",\"args\":[{\"name\":\"terminal\",\"required\":true}],\"about\":\"End a terminal and its sub-agents.\"},{\"name\":\"space.select\",\"args\":[{\"name\":\"index\",\"required\":false},{\"name\":\"id\",\"required\":false}],\"about\":\"Show a space (by position or id).\"},{\"name\":\"space.next\",\"args\":[],\"about\":\"Show the next space.\"},{\"name\":\"space.prev\",\"args\":[],\"about\":\"Show the previous space.\"},{\"name\":\"tab.select\",\"args\":[{\"name\":\"index\",\"required\":false},{\"name\":\"id\",\"required\":false}],\"about\":\"Show a tab (by position in the space, or id).\"},{\"name\":\"tab.settle\",\"args\":[{\"name\":\"id\",\"required\":false}],\"about\":\"Put a tab away on this screen (default: the shown one): out of the lists, still running. It comes back when shown or when an agent in it needs you.\"},{\"name\":\"tab.unsettle\",\"args\":[{\"name\":\"id\",\"required\":false}],\"about\":\"Bring a settled tab back to the lists.\"},{\"name\":\"tab.next\",\"args\":[],\"about\":\"Show the next tab.\"},{\"name\":\"tab.prev\",\"args\":[],\"about\":\"Show the previous tab.\"},{\"name\":\"pane.zoom\",\"args\":[{\"name\":\"pane\",\"required\":false}],\"about\":\"Show only this pane of its tab, or all again.\"},{\"name\":\"pane.focus\",\"args\":[{\"name\":\"pane\",\"required\":false},{\"name\":\"terminal\",\"required\":false}],\"about\":\"Focus a pane (or the pane showing a terminal).\"},{\"name\":\"pane.go\",\"args\":[{\"name\":\"direction\",\"required\":true}],\"about\":\"Focus the pane or focusable mod to the \\\"left\\\", \\\"right\\\", \\\"up\\\" or \\\"down\\\".\"},{\"name\":\"pane.swap\",\"args\":[{\"name\":\"direction\",\"required\":true}],\"about\":\"Swap the focused pane with its neighbor in a direction.\"},{\"name\":\"terminal.peek\",\"args\":[{\"name\":\"terminal\",\"required\":true}],\"about\":\"Peek at a running terminal over the tab, with keep-as-tab and close controls.\"},{\"name\":\"terminal.show\",\"args\":[{\"name\":\"terminal\",\"required\":false},{\"name\":\"pane\",\"required\":false}],\"about\":\"Show a terminal in a pane for now, in place of its own (no terminal: back).\"},{\"name\":\"terminal.copy\",\"args\":[],\"about\":\"Copy the focused terminal's selection. With nothing selected, that key goes to the program.\"},{\"name\":\"terminal.scroll\",\"args\":[{\"name\":\"lines\",\"required\":false},{\"name\":\"pages\",\"required\":false},{\"name\":\"to\",\"required\":false},{\"name\":\"terminal\",\"required\":false}],\"about\":\"Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: \\\"top\\\" (oldest history) or \\\"bottom\\\" (the live screen). This scrolls Herdr's view, not the program.\"},{\"name\":\"terminal.paste\",\"args\":[],\"about\":\"Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).\"},{\"name\":\"terminal.paste_image\",\"args\":[],\"about\":\"Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.\"},{\"name\":\"terminal.search\",\"args\":[],\"about\":\"Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal.\"},{\"name\":\"agent.focus\",\"args\":[{\"name\":\"terminal\",\"required\":true}],\"about\":\"Show an agent (sub-agents too).\"},{\"name\":\"agent.next\",\"args\":[],\"about\":\"Show the next agent, in the order the agents list shows them.\"},{\"name\":\"agent.prev\",\"args\":[],\"about\":\"Show the previous agent.\"},{\"name\":\"layout.switch\",\"args\":[{\"name\":\"name\",\"required\":false}],\"about\":\"Show a layout (layouts/<name>.json), or the next one.\"},{\"name\":\"layout.clone\",\"args\":[{\"name\":\"name\",\"required\":true},{\"name\":\"as\",\"required\":false}],\"about\":\"Duplicate a layout as <name>-copy (or as), then show it.\"},{\"name\":\"mod.clone\",\"args\":[{\"name\":\"name\",\"required\":true},{\"name\":\"as\",\"required\":false}],\"about\":\"Duplicate a mod as <name>-copy (or as).\"},{\"name\":\"layout.set\",\"args\":[{\"name\":\"layout\",\"required\":true}],\"about\":\"Replace a personal layout tree; shipped layouts accept only click/look fields (not structure).\"},{\"name\":\"layout.toggle\",\"args\":[{\"name\":\"id\",\"required\":true}],\"about\":\"Hide or show a layout node.\"},{\"name\":\"layout.show\",\"args\":[{\"name\":\"id\",\"required\":true}],\"about\":\"Show a layout node.\"},{\"name\":\"layout.hide\",\"args\":[{\"name\":\"id\",\"required\":true}],\"about\":\"Hide a layout node.\"},{\"name\":\"layout.resize\",\"args\":[{\"name\":\"id\",\"required\":true},{\"name\":\"px\",\"required\":false},{\"name\":\"weight\",\"required\":false}],\"about\":\"Size a layout node.\"},{\"name\":\"layout.select\",\"args\":[{\"name\":\"stack\",\"required\":true},{\"name\":\"child\",\"required\":true}],\"about\":\"Show one child of a stack.\"},{\"name\":\"layout.reset\",\"args\":[{\"name\":\"name\",\"required\":false}],\"about\":\"Reset a shipped layout and its clicks (the old file is kept aside).\"},{\"name\":\"mod.open\",\"args\":[{\"name\":\"name\",\"required\":true}],\"about\":\"Toggle a mod as the overlay its mod.json describes; calling again closes it.\"},{\"name\":\"overlay.close\",\"args\":[{\"name\":\"id\",\"required\":false}],\"about\":\"Close an overlay (default: the top dialog or popup).\"},{\"name\":\"app.help\",\"args\":[],\"about\":\"Toggle the keys dialog.\"},{\"name\":\"app.welcome\",\"args\":[],\"about\":\"Show the welcome again.\"},{\"name\":\"app.whats_new\",\"args\":[],\"about\":\"Show what this release brought (it opens once by itself after an update).\"},{\"name\":\"app.feedback\",\"args\":[{\"name\":\"message\",\"required\":false},{\"name\":\"from\",\"required\":false}],\"about\":\"Draft feedback for the person to review and send (from: person or agent).\"},{\"name\":\"app.palette\",\"args\":[],\"about\":\"Toggle the command palette: every command by name, with its key; calling again closes it.\"},{\"name\":\"app.settings\",\"args\":[{\"name\":\"section\",\"required\":false}],\"about\":\"Open the settings (section: look, alerts, updates).\"},{\"name\":\"app.check_updates\",\"args\":[],\"about\":\"Look for a newer Herdr and herdr-core now.\"},{\"name\":\"app.update_core\",\"args\":[],\"about\":\"Update herdr-core to its latest release of this generation; terminals keep running.\"},{\"name\":\"app.reset\",\"args\":[],\"about\":\"The escape hatch: set the shown layout and keys aside, back to the default screen.\"},{\"name\":\"app.theme\",\"args\":[{\"name\":\"name\",\"required\":true}],\"about\":\"Use a theme (a preset or themes/<name>.json).\"},{\"name\":\"app.zoom_in\",\"args\":[],\"about\":\"Make everything bigger.\"},{\"name\":\"app.zoom_out\",\"args\":[],\"about\":\"Make everything smaller.\"},{\"name\":\"app.zoom_reset\",\"args\":[],\"about\":\"Back to normal size.\"},{\"name\":\"app.update\",\"args\":[],\"about\":\"Restart into the update Herdr downloaded (your terminals keep running).\"},{\"name\":\"app.quit\",\"args\":[],\"about\":\"Quit (macOS).\"},{\"name\":\"app.hide\",\"args\":[],\"about\":\"Hide the app (macOS).\"},{\"name\":\"app.hide_others\",\"args\":[],\"about\":\"Hide other apps (macOS).\"},{\"name\":\"app.show_all\",\"args\":[],\"about\":\"Show all apps (macOS).\"},{\"name\":\"window.close\",\"args\":[],\"about\":\"Close the window (on Linux, quits).\"},{\"name\":\"window.minimize\",\"args\":[],\"about\":\"Minimize the window.\"},{\"name\":\"window.maximize\",\"args\":[],\"about\":\"Maximize the window, or back.\"}]\n",
+    "json": [
+      {
+        "name": "space.new",
+        "args": [
+          {
+            "name": "name",
+            "required": false
+          },
+          {
+            "name": "folder",
+            "required": false
+          },
+          {
+            "name": "tab",
+            "required": false
+          },
+          {
+            "name": "argv",
+            "required": false
+          },
+          {
+            "name": "task",
+            "required": false
+          },
+          {
+            "name": "machine",
+            "required": false
+          }
+        ],
+        "about": "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."
+      },
+      {
+        "name": "space.close",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          },
+          {
+            "name": "confirmed",
+            "required": false
+          }
+        ],
+        "about": "Close a space and end its terminals (asks first unless confirmed)."
+      },
+      {
+        "name": "space.rename",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          },
+          {
+            "name": "name",
+            "required": false
+          }
+        ],
+        "about": "Rename a space (asks the person when no name; an empty name: called after where its first terminal is again)."
+      },
+      {
+        "name": "space.move",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          },
+          {
+            "name": "index",
+            "required": true
+          }
+        ],
+        "about": "Move a space to a position (1 = first)."
+      },
+      {
+        "name": "tab.new",
+        "args": [
+          {
+            "name": "name",
+            "required": false
+          },
+          {
+            "name": "space",
+            "required": false
+          },
+          {
+            "name": "folder",
+            "required": false
+          },
+          {
+            "name": "argv",
+            "required": false
+          },
+          {
+            "name": "task",
+            "required": false
+          },
+          {
+            "name": "mod",
+            "required": false
+          },
+          {
+            "name": "props",
+            "required": false
+          }
+        ],
+        "about": "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new)."
+      },
+      {
+        "name": "tab.close",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          },
+          {
+            "name": "confirmed",
+            "required": false
+          }
+        ],
+        "about": "Close a tab and end its terminals."
+      },
+      {
+        "name": "tab.rename",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          },
+          {
+            "name": "name",
+            "required": false
+          }
+        ],
+        "about": "Rename a tab (asks the person when no name; an empty name: called by its number again)."
+      },
+      {
+        "name": "tab.move",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          },
+          {
+            "name": "index",
+            "required": true
+          }
+        ],
+        "about": "Move a tab to a position in its space (1 = first)."
+      },
+      {
+        "name": "pane.split",
+        "args": [
+          {
+            "name": "direction",
+            "required": true
+          },
+          {
+            "name": "pane",
+            "required": false
+          },
+          {
+            "name": "argv",
+            "required": false
+          },
+          {
+            "name": "mod",
+            "required": false
+          },
+          {
+            "name": "props",
+            "required": false
+          }
+        ],
+        "about": "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."
+      },
+      {
+        "name": "pane.close",
+        "args": [
+          {
+            "name": "pane",
+            "required": false
+          }
+        ],
+        "about": "Close a pane and end its terminal."
+      },
+      {
+        "name": "terminal.open",
+        "args": [
+          {
+            "name": "argv",
+            "required": false
+          },
+          {
+            "name": "folder",
+            "required": false
+          },
+          {
+            "name": "place",
+            "required": false
+          },
+          {
+            "name": "name",
+            "required": false
+          }
+        ],
+        "about": "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."
+      },
+      {
+        "name": "terminal.keep",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          },
+          {
+            "name": "place",
+            "required": false
+          }
+        ],
+        "about": "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."
+      },
+      {
+        "name": "terminal.park",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          }
+        ],
+        "about": "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."
+      },
+      {
+        "name": "terminal.right_click",
+        "args": [
+          {
+            "name": "to",
+            "required": true
+          },
+          {
+            "name": "terminal",
+            "required": false
+          }
+        ],
+        "about": "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."
+      },
+      {
+        "name": "terminal.pin",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          },
+          {
+            "name": "pinned",
+            "required": true
+          }
+        ],
+        "about": "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."
+      },
+      {
+        "name": "terminal.kill",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          }
+        ],
+        "about": "End a terminal and its sub-agents."
+      },
+      {
+        "name": "space.select",
+        "args": [
+          {
+            "name": "index",
+            "required": false
+          },
+          {
+            "name": "id",
+            "required": false
+          }
+        ],
+        "about": "Show a space (by position or id)."
+      },
+      {
+        "name": "space.next",
+        "args": [],
+        "about": "Show the next space."
+      },
+      {
+        "name": "space.prev",
+        "args": [],
+        "about": "Show the previous space."
+      },
+      {
+        "name": "tab.select",
+        "args": [
+          {
+            "name": "index",
+            "required": false
+          },
+          {
+            "name": "id",
+            "required": false
+          }
+        ],
+        "about": "Show a tab (by position in the space, or id)."
+      },
+      {
+        "name": "tab.settle",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          }
+        ],
+        "about": "Put a tab away on this screen (default: the shown one): out of the lists, still running. It comes back when shown or when an agent in it needs you."
+      },
+      {
+        "name": "tab.unsettle",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          }
+        ],
+        "about": "Bring a settled tab back to the lists."
+      },
+      {
+        "name": "tab.next",
+        "args": [],
+        "about": "Show the next tab."
+      },
+      {
+        "name": "tab.prev",
+        "args": [],
+        "about": "Show the previous tab."
+      },
+      {
+        "name": "pane.zoom",
+        "args": [
+          {
+            "name": "pane",
+            "required": false
+          }
+        ],
+        "about": "Show only this pane of its tab, or all again."
+      },
+      {
+        "name": "pane.focus",
+        "args": [
+          {
+            "name": "pane",
+            "required": false
+          },
+          {
+            "name": "terminal",
+            "required": false
+          }
+        ],
+        "about": "Focus a pane (or the pane showing a terminal)."
+      },
+      {
+        "name": "pane.go",
+        "args": [
+          {
+            "name": "direction",
+            "required": true
+          }
+        ],
+        "about": "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."
+      },
+      {
+        "name": "pane.swap",
+        "args": [
+          {
+            "name": "direction",
+            "required": true
+          }
+        ],
+        "about": "Swap the focused pane with its neighbor in a direction."
+      },
+      {
+        "name": "terminal.peek",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          }
+        ],
+        "about": "Peek at a running terminal over the tab, with keep-as-tab and close controls."
+      },
+      {
+        "name": "terminal.show",
+        "args": [
+          {
+            "name": "terminal",
+            "required": false
+          },
+          {
+            "name": "pane",
+            "required": false
+          }
+        ],
+        "about": "Show a terminal in a pane for now, in place of its own (no terminal: back)."
+      },
+      {
+        "name": "terminal.copy",
+        "args": [],
+        "about": "Copy the focused terminal's selection. With nothing selected, that key goes to the program."
+      },
+      {
+        "name": "terminal.scroll",
+        "args": [
+          {
+            "name": "lines",
+            "required": false
+          },
+          {
+            "name": "pages",
+            "required": false
+          },
+          {
+            "name": "to",
+            "required": false
+          },
+          {
+            "name": "terminal",
+            "required": false
+          }
+        ],
+        "about": "Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: \"top\" (oldest history) or \"bottom\" (the live screen). This scrolls Herdr's view, not the program."
+      },
+      {
+        "name": "terminal.paste",
+        "args": [],
+        "about": "Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it)."
+      },
+      {
+        "name": "terminal.paste_image",
+        "args": [],
+        "about": "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal."
+      },
+      {
+        "name": "terminal.search",
+        "args": [],
+        "about": "Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal."
+      },
+      {
+        "name": "agent.focus",
+        "args": [
+          {
+            "name": "terminal",
+            "required": true
+          }
+        ],
+        "about": "Show an agent (sub-agents too)."
+      },
+      {
+        "name": "agent.next",
+        "args": [],
+        "about": "Show the next agent, in the order the agents list shows them."
+      },
+      {
+        "name": "agent.prev",
+        "args": [],
+        "about": "Show the previous agent."
+      },
+      {
+        "name": "layout.switch",
+        "args": [
+          {
+            "name": "name",
+            "required": false
+          }
+        ],
+        "about": "Show a layout (layouts/<name>.json), or the next one."
+      },
+      {
+        "name": "layout.clone",
+        "args": [
+          {
+            "name": "name",
+            "required": true
+          },
+          {
+            "name": "as",
+            "required": false
+          }
+        ],
+        "about": "Duplicate a layout as <name>-copy (or as), then show it."
+      },
+      {
+        "name": "mod.clone",
+        "args": [
+          {
+            "name": "name",
+            "required": true
+          },
+          {
+            "name": "as",
+            "required": false
+          }
+        ],
+        "about": "Duplicate a mod as <name>-copy (or as)."
+      },
+      {
+        "name": "layout.set",
+        "args": [
+          {
+            "name": "layout",
+            "required": true
+          }
+        ],
+        "about": "Replace a personal layout tree; shipped layouts accept only click/look fields (not structure)."
+      },
+      {
+        "name": "layout.toggle",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          }
+        ],
+        "about": "Hide or show a layout node."
+      },
+      {
+        "name": "layout.show",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          }
+        ],
+        "about": "Show a layout node."
+      },
+      {
+        "name": "layout.hide",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          }
+        ],
+        "about": "Hide a layout node."
+      },
+      {
+        "name": "layout.resize",
+        "args": [
+          {
+            "name": "id",
+            "required": true
+          },
+          {
+            "name": "px",
+            "required": false
+          },
+          {
+            "name": "weight",
+            "required": false
+          }
+        ],
+        "about": "Size a layout node."
+      },
+      {
+        "name": "layout.select",
+        "args": [
+          {
+            "name": "stack",
+            "required": true
+          },
+          {
+            "name": "child",
+            "required": true
+          }
+        ],
+        "about": "Show one child of a stack."
+      },
+      {
+        "name": "layout.reset",
+        "args": [
+          {
+            "name": "name",
+            "required": false
+          }
+        ],
+        "about": "Reset a shipped layout and its clicks (the old file is kept aside)."
+      },
+      {
+        "name": "mod.open",
+        "args": [
+          {
+            "name": "name",
+            "required": true
+          }
+        ],
+        "about": "Toggle a mod as the overlay its mod.json describes; calling again closes it."
+      },
+      {
+        "name": "overlay.close",
+        "args": [
+          {
+            "name": "id",
+            "required": false
+          }
+        ],
+        "about": "Close an overlay (default: the top dialog or popup)."
+      },
+      {
+        "name": "app.help",
+        "args": [],
+        "about": "Toggle the keys dialog."
+      },
+      {
+        "name": "app.welcome",
+        "args": [],
+        "about": "Show the welcome again."
+      },
+      {
+        "name": "app.whats_new",
+        "args": [],
+        "about": "Show what this release brought (it opens once by itself after an update)."
+      },
+      {
+        "name": "app.feedback",
+        "args": [
+          {
+            "name": "message",
+            "required": false
+          },
+          {
+            "name": "from",
+            "required": false
+          }
+        ],
+        "about": "Draft feedback for the person to review and send (from: person or agent)."
+      },
+      {
+        "name": "app.palette",
+        "args": [],
+        "about": "Toggle the command palette: every command by name, with its key; calling again closes it."
+      },
+      {
+        "name": "app.settings",
+        "args": [
+          {
+            "name": "section",
+            "required": false
+          }
+        ],
+        "about": "Open the settings (section: look, alerts, updates)."
+      },
+      {
+        "name": "app.check_updates",
+        "args": [],
+        "about": "Look for a newer Herdr and herdr-core now."
+      },
+      {
+        "name": "app.update_core",
+        "args": [],
+        "about": "Update herdr-core to its latest release of this generation; terminals keep running."
+      },
+      {
+        "name": "app.reset",
+        "args": [],
+        "about": "The escape hatch: set the shown layout and keys aside, back to the default screen."
+      },
+      {
+        "name": "app.theme",
+        "args": [
+          {
+            "name": "name",
+            "required": true
+          }
+        ],
+        "about": "Use a theme (a preset or themes/<name>.json)."
+      },
+      {
+        "name": "app.zoom_in",
+        "args": [],
+        "about": "Make everything bigger."
+      },
+      {
+        "name": "app.zoom_out",
+        "args": [],
+        "about": "Make everything smaller."
+      },
+      {
+        "name": "app.zoom_reset",
+        "args": [],
+        "about": "Back to normal size."
+      },
+      {
+        "name": "app.update",
+        "args": [],
+        "about": "Restart into the update Herdr downloaded (your terminals keep running)."
+      },
+      {
+        "name": "app.quit",
+        "args": [],
+        "about": "Quit (macOS)."
+      },
+      {
+        "name": "app.hide",
+        "args": [],
+        "about": "Hide the app (macOS)."
+      },
+      {
+        "name": "app.hide_others",
+        "args": [],
+        "about": "Hide other apps (macOS)."
+      },
+      {
+        "name": "app.show_all",
+        "args": [],
+        "about": "Show all apps (macOS)."
+      },
+      {
+        "name": "window.close",
+        "args": [],
+        "about": "Close the window (on Linux, quits)."
+      },
+      {
+        "name": "window.minimize",
+        "args": [],
+        "about": "Minimize the window."
+      },
+      {
+        "name": "window.maximize",
+        "args": [],
+        "about": "Maximize the window, or back."
+      }
+    ]
+  },
+  "elapsed_ms": 1,
+  "notes": "The command registry over the socket (same list as `herdr-app commands`)."
+}

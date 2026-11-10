@@ -1,0 +1,69 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "hc-get-after-park",
+  "channel": "hc-cli",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "argv": [
+      "hc",
+      "get",
+      "--json",
+      "t5"
+    ],
+    "via": "scripts/sandbox hc (HC_SESSION=herdr-app-<sandbox>)"
+  },
+  "reply": {
+    "exit": 0,
+    "stdout": "{\"address\":\"t5\",\"argv\":[\"sleep\",\"3600\"],\"cols\":200,\"created_ms\":1793857416836,\"cwd\":\"<sandbox>/work\",\"die_with_parent\":false,\"exit_code\":null,\"finished_ms\":null,\"foreground\":{\"argv\":[\"sleep\",\"3600\"],\"cwd\":\"<sandbox>/work\",\"name\":\"sleep\",\"pid\":436139},\"identity\":\"ghostty\",\"keep\":false,\"labels\":{\"herdr.seen\":\"0\",\"where\":\"person-space / 2\"},\"name\":null,\"notify\":true,\"parent\":null,\"pid\":436139,\"reason\":null,\"reported\":false,\"rm\":false,\"rows\":120,\"screen\":\"exact\",\"signal\":null,\"state\":\"live\",\"status\":null,\"status_ms\":null,\"template\":null,\"title\":\"\",\"turn\":0}\n",
+    "stderr": "",
+    "json": {
+      "address": "t5",
+      "argv": [
+        "sleep",
+        "3600"
+      ],
+      "cols": 200,
+      "created_ms": 1793857416836,
+      "cwd": "<sandbox>/work",
+      "die_with_parent": false,
+      "exit_code": null,
+      "finished_ms": null,
+      "foreground": {
+        "argv": [
+          "sleep",
+          "3600"
+        ],
+        "cwd": "<sandbox>/work",
+        "name": "sleep",
+        "pid": 436139
+      },
+      "identity": "ghostty",
+      "keep": false,
+      "labels": {
+        "herdr.seen": "0",
+        "where": "person-space / 2"
+      },
+      "name": null,
+      "notify": true,
+      "parent": null,
+      "pid": 436139,
+      "reason": null,
+      "reported": false,
+      "rm": false,
+      "rows": 120,
+      "screen": "exact",
+      "signal": null,
+      "state": "live",
+      "status": null,
+      "status_ms": null,
+      "template": null,
+      "title": "",
+      "turn": 0
+    }
+  },
+  "elapsed_ms": 22,
+  "notes": "The parked terminal is still alive in core, with no pane."
+}

@@ -245,7 +245,7 @@ export type RigEvent =
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
         | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string }

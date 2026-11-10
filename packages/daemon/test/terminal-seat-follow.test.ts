@@ -60,9 +60,9 @@ it.skipIf(process.platform === "win32")("keeps all four terminal tiles on their 
       await viewer(["select-layout", "-t", "=view:", "tiled"]);
     }
     const shows = async (i: number, text: string) => (await viewer(["capture-pane", "-p", "-t", panes[i]!])).includes(text);
-    // Each tile views its own seat, and none of them is a client of it.
+    // Writable tiles are sizing clients; the read-only tile remains an observer.
     for (let i = 0; i < 4; i++) await until(() => shows(i, `SEAT${i}`));
-    expect(await seats(["list-clients", "-F", "#{client_tty}"])).toBe("");
+    expect((await seats(["list-clients", "-F", "#{session_name}"])).split("\n").sort()).toEqual(names.slice(0, 3));
     expect((await adapter.killSession(names[1]!)).ok).toBe(true);
     await create(1, "REPLACED_SEAT1");
     await until(() => shows(1, "REPLACED_SEAT1"));
@@ -139,7 +139,7 @@ it.skipIf(process.platform === "win32").each([false, true])("a read-only tile st
 it.skipIf(process.platform === "win32")("stops showing a session whose seat identity changed in place", async () => {
   await fixture(async ({ socket, seats, viewer }) => {
     await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);
-    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", true, 2).map(shellQuote).join(" ");
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
     await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
     await seats(["set-environment", "-t", "=seat", "OPENRIG_NODE_ID", "DIFFERENT", ";", "send-keys", "-t", "=seat:", "-l", "OTHER-SEAT"]);
@@ -148,7 +148,7 @@ it.skipIf(process.platform === "win32")("stops showing a session whose seat iden
   });
 });
 
-it.skipIf(process.platform === "win32")("a detach returns a tile someone typed in to viewing its seat", async () => {
+it.skipIf(process.platform === "win32")("an ordinary detach ends the sizing tile while preserving its seat", async () => {
   await fixture(async ({ socket, seats, viewer }) => {
     await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);
     const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
@@ -159,9 +159,9 @@ it.skipIf(process.platform === "win32")("a detach returns a tile someone typed i
     await until(async () => (await seats(["capture-pane", "-p", "-t", "=seat:"])).includes("typed"));
     await seats(["detach-client", "-s", "=seat"]);
     await until(async () => (await seats(["list-clients", "-F", "#{session_name}"])) === "");
-    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("typed"));
-    expect(await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])).toBe("0");
-    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("No replacement");
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await seats(["has-session", "-t", "=seat"])).toBe("");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).toContain("reopen the view");
   });
 });
 

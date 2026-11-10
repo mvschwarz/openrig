@@ -35,6 +35,31 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    await adapter.resume("seat@rig", "claude_id", "same", "/repo", "floor", undefined, undefined, "node",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native/claude", undefined, undefined,
+      { warnings: ["capture unavailable"] });
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--permission-mode acceptEdits"));
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--resume 'same'"));
+  });
+
+  it("an in-place provider continuation keeps custom settings, config dir and model", async () => {
+    const tmux = mockTmux();
+    tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const nativeCommand = vi.fn(() => "retained-launch");
+    const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
+    const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
+    const launch = { args: ["--settings", "/custom rules/settings.json", "--model", "opus", "--permission-mode", "auto", "--name", "seat@rig"],
+      configDir: "/custom config", warnings: [] };
+    await adapter.resume("seat@rig", "claude_id", "same-conversation", "/repo", "auto", "sonnet", "auto", "node",
+      "high", undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native/claude", undefined, undefined, launch);
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
+    expect(nativeCommand).toHaveBeenCalledWith(["--settings", "/custom rules/settings.json", "--model", "opus", "--name", "seat@rig", "--effort", "high", "--permission-mode", "auto", "--resume", "same-conversation"], { OPENRIG_RESUME_LAUNCH: "same-conversation" });
+    expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));

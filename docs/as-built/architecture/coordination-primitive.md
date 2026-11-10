@@ -237,7 +237,9 @@ The sweep reports six finding kinds. Its custody check covers closures that
 name a successor qitem or a seat (`closure_reason = handed_off_to`) in the last
 24 hours, plus older closures with open findings. A seat target is satisfied by
 a local successor carrying this row's lineage, and any target by a
-`custody-verified: <target> …` note on the closed row. A new custody finding for
+`custody-verified:` note on the closed row: per note, its first word that names one
+of the row's targets exactly (or a comma list of them) is what it verifies, and later
+mentions don't count; the finding prints each target's note. A new custody finding for
 a human destination goes to the agent that closed the item, using the closing
 transition from active or archived history. Later notes and notification
 receipts do not change that owner. If the closing actor is missing, human, system
@@ -278,7 +280,13 @@ canceled, no-follow-on, escalation, superseded}`. The reasons
 `closure_target` (`:86`):
 
 - `handed_off_to` — work continues with a different seat (`closure_target` =
-  new owner).
+  new owner). `rig queue show` on such a row names the row the handoff made in
+  `successors` (rows whose `handedOffFrom` is this row, and a local row its
+  closure target names), or says in `successorNote` why none is named. A
+  cross-host successor is named as recorded (`<id>@<host>`); nothing stored
+  changes. Past 20 such rows the newest 20 are named, with
+  `successorsTruncated: true`. A scoped MCP caller doesn't get these fields;
+  `rig_queue_show`'s scope-checked `successor` answers it instead.
 - `blocked_on` — an active `state=blocked` park record, rejected with `state=done`.
   To wait for a qitem, use `rig queue block <id> --on <child>` or
   `rig queue update <id> --state blocked --blocked-on <child>`; the item returns

@@ -44,7 +44,7 @@ function clearEnv(): () => void {
     // its custom home into default-path resolution; UNSETTING it would fall through
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_TERMINAL_FIXED_GEOMETRY", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -188,6 +188,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.tmux_server",
       "terminal.history_limit",
+      "terminal.fixed_geometry",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",

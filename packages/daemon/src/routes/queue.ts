@@ -81,6 +81,39 @@ export function isAttentionItem(q: { tier: string | null; destinationSession: st
 }
 
 
+/** A row a handoff of this one made: the rows naming it as `handedOffFrom`, and a local row its closure target names. */
+export interface HandoffSuccessor { qitemId: string; destinationSession: string; state: QueueState; via: "handedOffFrom" | "closureTarget" }
+
+/** #2794: a handed-off row records its new owner as the closure target, not the row the handoff made. This names that row
+ *  from what's already stored: the successor's own `handedOffFrom`, or a local row id in the closure target. A cross-host
+ *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
+ *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
+export const HANDOFF_SUCCESSOR_LIMIT = 20;
+export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+  try {
+    // Newest first, one past the bound so a cut list is known.
+    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
+    const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
+      .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
+      .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
+    const target = item.closureTarget;
+    if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
+      const named = repo.getById(target);
+      if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
+    }
+    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
+    return {
+      successors,
+      successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
+        ? `It was handed to another host; its successor there is ${target}. This daemon has no copy.`
+        : "No row on this daemon was made by this handoff.",
+    };
+  } catch {
+    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+  }
+}
+
 export function queueRoutes(): Hono {
   const app = new Hono();
 
@@ -1281,7 +1314,8 @@ export function queueRoutes(): Hono {
         : undefined;
 
     if (!attention) {
-      const items = getRepo(c).list({
+      const repo = getRepo(c);
+      const items = repo.list({
         destinationSession,
         sourceSession,
         state,
@@ -1295,6 +1329,19 @@ export function queueRoutes(): Hono {
         updatedSince,
         sortByUpdated: c.req.query("sort") === "updated",
       });
+      // A seat that lists its own active inbox is checking in; the stuck sweep reads that for hosted members that pick up
+      // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows, a read of
+      // only what the seat sent (`as` and `sourceSession` both the seat, no destination) and the attention view aren't.
+      // A follow-through read (`handedOffFrom`, no destination) returns the seat's inbox only when the row was handed to
+      // it; one the seat handed on returns only what it sent, so it counts only when it returned a pending row addressed
+      // to the seat. A check-in proves the seat was reading, never that it saw or took any row.
+      const sender = transportSenderSession(c);
+      const named = [destinationSession, asSession].filter((s): s is string => !!s);
+      const sentOnly = !destinationSession && !!sender && ((!!sourceSession && repo.isSameSession(sender, sourceSession))
+        || (!!handedOffFrom && !items.some((item) => item.state === "pending" && repo.isSameSession(sender, item.destinationSession))));
+      if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
+        repo.recordInboxCheckIn(sender);
+      }
       return c.json(items);
     }
 
@@ -1464,6 +1511,8 @@ export function queueRoutes(): Hono {
         actorSession: closing.actorSession,
         transitionNote: closing.transitionNote,
       } } : {}),
+      // #2794: a handed-off row names the row its handoff made (read only; nothing stored changes).
+      ...(item.state === "handed-off" || item.closureReason === "handed_off_to" ? handoffSuccessors(repo, item) : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });

@@ -663,8 +663,8 @@ export class QueueTransitionLog {
     );
   }
 
-  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
-    return this.getRelayOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string, deliveryId?: string): boolean {
+    return this.getRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId) !== null;
   }
 
 /** The latest owner-notification episode per ACTIVE queue row, in queue order. One query
@@ -756,11 +756,19 @@ export class QueueTransitionLog {
     return receipts;
   }
 
-  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
+  getRelayOwnerNotificationReceipt(
+    qitemId: string,
+    notificationKey?: string,
+    deliveryId?: string,
+  ): RelayOwnerNotificationReceipt | null {
     for (const parsed of this.listRelayOwnerNotificationReceipts(qitemId)) {
-      if (notificationKey === undefined || parsed.notificationKey === notificationKey) {
-        return parsed;
+      if (notificationKey !== undefined && parsed.notificationKey !== notificationKey) {
+        continue;
       }
+      if (deliveryId !== undefined && parsed.deliveryId !== deliveryId) {
+        continue;
+      }
+      return parsed;
     }
     return null;
   }
@@ -792,6 +800,30 @@ export class QueueTransitionLog {
         continue;
       }
       if (parsed.replyRefHash === fullHash) {
+        return { qitemId: row.qitem_id, ...parsed };
+      }
+    }
+    return null;
+  }
+
+  findRelayOwnerNotificationReceiptByDeliveryId(
+    deliveryId: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    const trimmed = deliveryId.trim();
+    if (!trimmed) return null;
+    const encoded = encodeReceiptToken(trimmed);
+    if (!encoded) return null;
+    const rows = this.db
+      .prepare(
+        `SELECT qitem_id, transition_note FROM ${this.historySource}
+          WHERE transition_note LIKE 'relay-owner-notification-accepted %'
+            AND instr(' ' || transition_note || ' ', ' delivery_id=' || ? || ' ') > 0
+          ORDER BY transition_id DESC`,
+      )
+      .all(encoded) as Array<{ qitem_id: string; transition_note: string }>;
+    for (const row of rows) {
+      const parsed = parseRelayOwnerNotificationAccepted(row.transition_note);
+      if (parsed && parsed.deliveryId === trimmed) {
         return { qitemId: row.qitem_id, ...parsed };
       }
     }

@@ -33,11 +33,112 @@ describe("compose layout", () => {
     expect(composeLayout("寛".repeat(90), 40).rows).toBe(5);
   });
 
+  it("measures a ZWJ family emoji as one two-cell grapheme at the wrap column", () => {
+    // Width 4: "abc" fills columns 0-2; the family emoji is one grapheme taking two
+    // cells, does not fit the last column, and wraps whole — two rows, not three.
+    expect(composeLayout("abc\u{1F468}\u200D\u{1F469}\u200D\u{1F467}", 4))
+      .toEqual({ rows: 2, caretRow: 1, caretColumn: 2 });
+  });
+
+  it("advances a tab to the next tab stop, not by zero cells", () => {
+    expect(composeLayout("ab\tc", 40)).toEqual({ rows: 1, caretRow: 0, caretColumn: 9 });
+  });
+
   it("starts a new row at an explicit newline and puts the caret on that row", () => {
     expect(composeLayout("line1\nab", 40, 6)).toEqual({ rows: 2, caretRow: 1, caretColumn: 0 });
     expect(composeLayout("line1\nab", 40, 8)).toEqual({ rows: 2, caretRow: 1, caretColumn: 2 });
   });
 });
+
+
+/** A terminal double that models tmux's reflow: soft-wrapped rows join on widening,
+ *  paragraphs split on narrowing, and the cursor stays on its character. An ASCII-width
+ *  model, which is all these tests need. */
+export class ReflowScreen {
+  private rows: { text: string; soft: boolean }[] = [{ text: "", soft: false }];
+  private row = 0;
+  private col = 0;
+  columns: number;
+  private handlers = new Set<() => void>();
+  private view: object | null = null;
+  constructor(width: number) { this.columns = width; }
+  terminal(): NodeJS.WriteStream {
+    if (this.view) return this.view as unknown as NodeJS.WriteStream;
+    const self = this;
+    this.view = {
+      isTTY: true,
+      write: (data: string | Buffer) => self.write(typeof data === "string" ? data : data.toString("utf8")),
+      on: (_event: string, handler: () => void) => { self.handlers.add(handler); },
+      get columns() { return self.columns; },
+    };
+    return this.view as unknown as NodeJS.WriteStream;
+  }
+  private ensure(row: number, soft: boolean) {
+    while (this.rows.length <= row) this.rows.push({ text: "", soft: false });
+    if (row > 0) this.rows[row]!.soft = soft;
+  }
+  private place(ch: string) {
+    if (this.col >= this.columns) { this.row += 1; this.col = 0; }
+    // A row reached by wrapping continues the paragraph above; one reached by a
+    // newline was created hard by the \n handler.
+    while (this.rows.length <= this.row) this.rows.push({ text: "", soft: this.row > 0 });
+    const line = this.rows[this.row]!;
+    this.rows[this.row] = { ...line, text: line.text.padEnd(this.col, " ").slice(0, this.col) + ch + line.text.slice(this.col + 1) };
+    this.col += 1;
+  }
+  write(text: string) {
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i]!;
+      if (ch === "\u001b") {
+        const match = /^\u001b\[\??(\d*)([A-Za-z])/.exec(text.slice(i));
+        if (match) {
+          const count = match[1] ? Number(match[1]) : 1;
+          if (match[2] === "A") this.row = Math.max(0, this.row - count);
+          else if (match[2] === "B") this.row += count;
+          else if (match[2] === "C") this.col += count;
+          else if (match[2] === "K" && count === 2) this.rows[this.row] = { ...this.rows[this.row]!, text: "" };
+          i += match[0].length - 1;
+        } else i += 1;
+        continue;
+      }
+      if (ch === "\r") { this.col = 0; continue; }
+      if (ch === "\n") { this.row += 1; this.ensure(this.row, false); this.col = 0; continue; }
+      this.place(ch);
+    }
+  }
+  /** Reflow to a new width the way tmux does, keeping the cursor on its character,
+   *  then tell the compositor the terminal resized. */
+  reflowTo(width: number) {
+    let start = this.row;
+    while (start > 0 && this.rows[start]?.soft) start -= 1;
+    let paragraph = 0;
+    for (let i = 0; i < start; i += 1) if (!this.rows[i]?.soft) paragraph += 1;
+    let offset = this.col;
+    for (let i = start; i < this.row; i += 1) offset += this.rows[i]?.text.length ?? 0;
+    const paragraphs: string[] = [];
+    let joined: string | null = null;
+    for (const line of this.rows) {
+      if (line.soft && joined !== null) joined += line.text;
+      else { if (joined !== null) paragraphs.push(joined); joined = line.text; }
+    }
+    if (joined !== null) paragraphs.push(joined);
+    const rendered: { text: string; soft: boolean }[] = [];
+    const startRow: number[] = [];
+    paragraphs.forEach(text => {
+      startRow.push(rendered.length);
+      if (text === "") { rendered.push({ text: "", soft: false }); return; }
+      for (let i = 0; i < text.length; i += width) rendered.push({ text: text.slice(i, i + width), soft: i > 0 });
+    });
+    this.rows = rendered;
+    const text = paragraphs[paragraph] ?? "";
+    const clamped = Math.min(offset, text.length);
+    this.row = (startRow[paragraph] ?? 0) + Math.floor(clamped / width);
+    this.col = clamped % width;
+    this.columns = width;
+    for (const handler of this.handlers) handler();
+  }
+  lines(): string[] { return this.rows.map(line => line.text.replace(/ +$/, "")); }
+}
 
 // ── The compositor's transcript contract ─────────────────────────────────────
 
@@ -80,10 +181,11 @@ describe("pane compositor", () => {
     expect(text().slice(before)).toBe("plain tail\n");
   });
 
-  it("falls back to plain output when the terminal width is unknown", () => {
+  it("prints nothing itself when the width is unknown: the caller's transcript copy stands alone", () => {
     const { output, text } = paneOut(null);
     const pane = createPaneCompositor(output);
     pane.attach(() => "draft", () => output.write("draft"), () => 0);
+    pane.line("[pi-runner] ERROR no width to pin into");
     pane.diagnostic("[pi-runner] ERROR no width to pin into");
     expect(text()).toBe("[pi-runner] ERROR no width to pin into\n");
   });
@@ -96,16 +198,37 @@ describe("pane compositor", () => {
     expect(text()).toBe("[pi-runner] READY session=/state/s.jsonl\n[pi-runner] EXITED pi exited (code 0)\n");
   });
 
-  it("erases with the wider of the recorded and recomputed rows on a resize", () => {
-    const { output, text } = paneOut(120);
+  it("narrows without leaving a stale wrapped status behind, and keeps the transcript above", () => {
+    const term = new ReflowScreen(120);
+    const pane = createPaneCompositor(term.terminal());
+    pane.line("SENTINEL-ABOVE");
+    pane.diagnostic("S".repeat(110)); // a 110-cell status: one row at 120, two at 80
+    term.reflowTo(80); // tmux reflows; the cursor keeps its character
+    const lines = term.lines();
+    expect(lines.filter(line => line.includes("SENTINEL-ABOVE"))).toHaveLength(1);
+    // The stale first-80-cells copy of the wrapped status must be gone.
+    expect(lines.some(line => line === "S".repeat(80))).toBe(false);
+    // The repainted pin is clipped to the new width instead.
+    expect(lines.some(line => line === "S".repeat(79) + "\u2026")).toBe(true);
+  });
+
+  it("widens a wrapped draft without erasing the transcript line above it", () => {
+    const term = new ReflowScreen(40);
+    const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false,
+      setRawMode: vi.fn(function (this: { isRaw: boolean }, value: boolean) { this.isRaw = value; }) });
+    const output = term.terminal();
     const pane = createPaneCompositor(output);
-    const draft = "d".repeat(100); // one row at width 120, three at width 40
-    pane.attach(() => draft, () => output.write(draft), () => 0);
-    pane.refresh();
-    expect(text().match(/\u001b\[2K/g) ?? []).toHaveLength(0);
-    Object.assign(output, { columns: 40 });
-    output.emit("resize");
-    expect(text().match(/\u001b\[2K/g) ?? []).toHaveLength(3);
+    const editor = createRunnerInput(input as unknown as NodeJS.ReadStream, output, () => {}, pane);
+    try {
+      pane.line("SENTINEL-ABOVE");
+      input.write("d".repeat(90)); // three draft rows at width 40
+      input.write("\u001b[D".repeat(45)); // caret mid-draft
+      term.reflowTo(120); // the draft joins into one row; the caret keeps its character
+      const lines = term.lines();
+      expect(lines.filter(line => line.includes("SENTINEL-ABOVE"))).toHaveLength(1);
+      // One draft row repainted at the new width — not three, and not the sentinel.
+      expect(lines.filter(line => line.replace(/ /g, "").startsWith("dddd")).length).toBe(1);
+    } finally { editor.close(); }
   });
 });
 
@@ -187,14 +310,33 @@ describe("compose line through the real editor", () => {
     } finally { t.editor.close(); }
   });
 
-  it("flushes a held streamed tail when the draft is killed (Ctrl-U)", () => {
+  it("flushes a held streamed tail verbatim when the draft is killed (Ctrl-U)", () => {
     const t = terminal();
     try {
       t.input.write("abc");
       t.pane.transcript("an unfinished streamed tail");
-      expect(t.screen()).not.toContain("an unfinished streamed tail\n");
-      t.input.write("\u0015"); // kill line: the draft goes away, the tail is written
-      expect(t.screen()).toContain("an unfinished streamed tail\n");
+      expect(t.screen()).not.toContain("an unfinished streamed tail");
+      t.input.write("\u0015"); // kill line: the draft goes away, the tail is written as-is
+      expect(t.screen()).toContain("an unfinished streamed tail");
+    } finally { t.editor.close(); }
+  });
+
+  it("joins a flushed tail with the next delta instead of splitting mid-word", () => {
+    const t = terminal();
+    try {
+      t.input.write("abc");
+      t.pane.transcript("Hello wor");
+      t.input.write("\u0015");
+      t.pane.transcript("ld\n");
+      expect(t.screen()).toContain("Hello world");
+    } finally { t.editor.close(); }
+  });
+
+  it("keeps coalesced edit keys and text ordered with the compositor attached", () => {
+    const t = terminal();
+    try {
+      t.input.write("ac\u001b[Db\u00e9\u{1F98A}\r");
+      expect(t.blocks).toEqual(["ab\u00e9\u{1F98A}c"]);
     } finally { t.editor.close(); }
   });
 

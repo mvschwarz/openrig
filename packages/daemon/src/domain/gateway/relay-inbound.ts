@@ -13,13 +13,19 @@ import {
 } from "./relay-config.js";
 import {
   RELAY_PROTOCOL_VERSION,
+  buildRelayExpectedReceipts,
   decodeRelayReplyRef,
   encodeRelayReplyRef,
   findPendingRelayReplyRef,
   hashRelayConnectorRef,
+  relayStatePaths,
+  validateRelayOutboundEnvelope,
+  type RelayOutboundEnvelope,
+  type RelayPayloadCarry,
   type RelayReplyRefPayload,
   type RelayReplyRefToken,
 } from "./relay-outbound.js";
+import { DispatchBuffer } from "./dispatch-buffer.js";
 import { SeenStore, nodeStateFs, type StateFsOps } from "./slack/state-store.js";
 import type { RelayOwnerNotificationReceipt } from "../queue-transition-log.js";
 import type { QueueRepository } from "../queue-repository.js";
@@ -54,6 +60,17 @@ export interface RelayInboundRequestInput {
   rawBody: string;
 }
 
+export interface RelayOutboxListInput {
+  authorizationHeader: string | undefined;
+  limitParam?: string | undefined;
+}
+
+export interface RelayOutboxAckInput {
+  authorizationHeader: string | undefined;
+  rawBody: string;
+  releaseOutboundKey?: (key: string) => void;
+}
+
 export interface RelayInboundResponse {
   status: number;
   body: Record<string, unknown>;
@@ -72,6 +89,8 @@ export interface RelayInboundHandlerDeps {
 
 export interface RelayInboundHandler {
   handle(input: RelayInboundRequestInput): Promise<RelayInboundResponse>;
+  listOutbox?(input: RelayOutboxListInput): Promise<RelayInboundResponse>;
+  ackOutbox?(input: RelayOutboxAckInput): Promise<RelayInboundResponse>;
 }
 
 /**
@@ -147,6 +166,14 @@ function extractBearerToken(header: string | undefined): string | null {
   const match = /^Bearer\s+(\S+)$/.exec(header.trim());
   if (!match || !match[1]) return null;
   return match[1];
+}
+
+function parseAttemptedConnectorRef(status: string | undefined): string | null {
+  if (typeof status !== "string" || !status.startsWith("attempted:")) return null;
+  const rest = status.slice("attempted:".length);
+  const lastColon = rest.lastIndexOf(":");
+  if (lastColon <= 0) return null;
+  return rest.slice(0, lastColon);
 }
 
 function parseInboundEnvelope(
@@ -522,13 +549,77 @@ function strictRelayStateFs(base: StateFsOps = nodeStateFs): StateFsOps {
 }
 
 export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayInboundHandler {
+  const rawStateFs = deps.stateFs ?? nodeStateFs;
+  const { attemptedPath, deliveredPath } = relayStatePaths(deps.home);
   const seenPath = join(deps.home, "state", RELAY_INBOUND_SEEN_FILE);
-  const seenStore = new SeenStore(seenPath, strictRelayStateFs(deps.stateFs ?? nodeStateFs));
+  const seenStore = new SeenStore(seenPath, strictRelayStateFs(rawStateFs));
+  const attemptedStore = new SeenStore(attemptedPath, rawStateFs);
+  const deliveredStore = new SeenStore(deliveredPath, rawStateFs);
+  const outboundSeenStore = new SeenStore(join(deps.home, "state", "slack-outbound-seen.jsonl"), rawStateFs);
   const inFlightByKey = new Map<string, Promise<RelayInboundResponse>>();
 
   const loadEntities =
     deps.loadEntities ??
     (() => loadHumanRegistry(deps.home, { readOnly: true }));
+
+  const errResponse = (
+    status: number,
+    error: string,
+    message: string,
+    extra?: Record<string, unknown>,
+  ): RelayInboundResponse => ({
+    status,
+    body: { error, ...extra, message },
+  });
+
+  const authenticateRequest = (
+    authorizationHeader: string | undefined,
+    surfaceLabel: string,
+  ):
+    | { ok: true; connectorRef: string; entities: HumanFragment[] }
+    | { ok: false; response: RelayInboundResponse } => {
+    const bearerToken = extractBearerToken(authorizationHeader);
+    if (!bearerToken) {
+      return {
+        ok: false,
+        response: errResponse(401, "unauthorized", `Missing or malformed Authorization: Bearer token for ${surfaceLabel}`),
+      };
+    }
+
+    let entities: HumanFragment[] | null;
+    try {
+      entities = registeredPeople(loadEntities());
+    } catch {
+      entities = null;
+    }
+    if (entities === null) {
+      return {
+        ok: false,
+        response: errResponse(
+          503,
+          "human_registry_unavailable",
+          `${surfaceLabel.charAt(0).toUpperCase()}${surfaceLabel.slice(1)} authentication is unavailable because human registry cannot be read`,
+        ),
+      };
+    }
+
+    const profiles = loadRelayProfiles(deps.home, { entities });
+    const auth = authenticateRelayInboundToken(profiles, bearerToken);
+    if (!auth.ok) {
+      return {
+        ok: false,
+        response: errResponse(401, "unauthorized", "Invalid or unready relay inbound bearer token", {
+          reason: auth.reason,
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      connectorRef: auth.profile.connectorRef,
+      entities,
+    };
+  };
 
   const runSerialized = async (
     eventKey: string,
@@ -552,47 +643,9 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
   return {
     async handle(input: RelayInboundRequestInput): Promise<RelayInboundResponse> {
       // 1. Require explicit Bearer token; missing/unready never bypasses authentication
-      const bearerToken = extractBearerToken(input.authorizationHeader);
-      if (!bearerToken) {
-        return {
-          status: 401,
-          body: {
-            error: "unauthorized",
-            message: "Missing or malformed Authorization: Bearer token for relay inbound",
-          },
-        };
-      }
-
-      let entities: HumanFragment[] | null;
-      try {
-        entities = registeredPeople(loadEntities());
-      } catch {
-        entities = null;
-      }
-      if (entities === null) {
-        return {
-          status: 503,
-          body: {
-            error: "human_registry_unavailable",
-            message: "Relay inbound authentication is unavailable because human registry cannot be read",
-          },
-        };
-      }
-
-      const profiles = loadRelayProfiles(deps.home, { entities });
-      const auth = authenticateRelayInboundToken(profiles, bearerToken);
-      if (!auth.ok) {
-        return {
-          status: 401,
-          body: {
-            error: "unauthorized",
-            reason: auth.reason,
-            message: "Invalid or unready relay inbound bearer token",
-          },
-        };
-      }
-
-      const authenticatedConnectorRef = auth.profile.connectorRef;
+      const auth = authenticateRequest(input.authorizationHeader, "relay inbound");
+      if (!auth.ok) return auth.response;
+      const { connectorRef: authenticatedConnectorRef, entities } = auth;
 
       // 2. Parse and validate closed JSON envelope
       const parsedEnv = parseInboundEnvelope(input.rawBody);
@@ -891,6 +944,253 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
             },
           };
         }
+      });
+    },
+
+    async listOutbox(input: RelayOutboxListInput): Promise<RelayInboundResponse> {
+      const auth = authenticateRequest(input.authorizationHeader, "relay outbox");
+      if (!auth.ok) return auth.response;
+      const { connectorRef: authenticatedConnectorRef } = auth;
+
+      let limit = 50;
+      if (input.limitParam !== undefined && input.limitParam !== null && input.limitParam !== "") {
+        const rawLimit = String(input.limitParam).trim();
+        const parsedLimit = /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN;
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 200) {
+          return errResponse(400, "invalid_limit", "limit must be an integer between 1 and 200");
+        }
+        limit = parsedLimit;
+      }
+
+      let pending: ReturnType<DispatchBuffer["pendingStrict"]>;
+      try {
+        pending = new DispatchBuffer(deps.home).pendingStrict();
+      } catch {
+        return errResponse(503, "dispatch_buffer_unavailable", "Relay outbound dispatch buffer is unreadable");
+      }
+
+      let attemptedMap: Map<string, string>;
+      try {
+        attemptedMap = attemptedStore.statuses();
+        deliveredStore.statuses();
+      } catch {
+        return errResponse(503, "seen_store_unavailable", "Relay outbound seen store is unreadable");
+      }
+
+      const deliveries: RelayOutboundEnvelope[] = [];
+      for (const decision of pending) {
+        if (deliveries.length >= limit) break;
+        const p =
+          decision.payload && typeof decision.payload === "object"
+            ? (decision.payload as RelayPayloadCarry)
+            : null;
+        if (!p || p.relayConnectorRef !== authenticatedConnectorRef) continue;
+        if (!attemptedMap.has(decision.decisionId)) continue;
+        if (!p.relayEnvelope) {
+          return errResponse(
+            503,
+            "dispatch_buffer_unavailable",
+            `Pending relay decision ${decision.decisionId} is missing frozen relayEnvelope`,
+          );
+        }
+        const valid = validateRelayOutboundEnvelope(p.relayEnvelope);
+        if (!valid.ok) {
+          return errResponse(
+            503,
+            "dispatch_buffer_unavailable",
+            `Pending relay envelope for ${decision.decisionId} is invalid: ${valid.error}`,
+          );
+        }
+        deliveries.push(valid.envelope);
+      }
+
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          connectorRef: authenticatedConnectorRef,
+          deliveries,
+        },
+      };
+    },
+
+    async ackOutbox(input: RelayOutboxAckInput): Promise<RelayInboundResponse> {
+      const auth = authenticateRequest(input.authorizationHeader, "relay outbox ack");
+      if (!auth.ok) return auth.response;
+      const { connectorRef: authenticatedConnectorRef } = auth;
+
+      let parsedBody: unknown;
+      try {
+        parsedBody = JSON.parse(input.rawBody);
+      } catch {
+        return errResponse(400, "invalid_json", "Request body is not valid JSON");
+      }
+
+      if (
+        !parsedBody ||
+        typeof parsedBody !== "object" ||
+        Array.isArray(parsedBody) ||
+        Object.getPrototypeOf(parsedBody) !== Object.prototype
+      ) {
+        return errResponse(400, "invalid_envelope", "Outbox ack payload must be a JSON object");
+      }
+
+      const bodyObj = parsedBody as Record<string, unknown>;
+      const unknownKeys = Object.keys(bodyObj).filter((k) => k !== "deliveryId");
+      if (unknownKeys.length > 0) {
+        return errResponse(400, "invalid_envelope", `Unknown outbox ack field(s): ${unknownKeys.join(", ")}`);
+      }
+
+      const rawDeliveryId = bodyObj.deliveryId;
+      // Same rule as validateRelayOutboundEnvelope: every id the outbox can list is acknowledgeable (#2742).
+      if (typeof rawDeliveryId !== "string" || rawDeliveryId.trim().length === 0) {
+        return errResponse(400, "invalid_envelope", "deliveryId must be a non-empty string");
+      }
+      const deliveryId = rawDeliveryId;
+
+      return runSerialized(`ack:${deliveryId}`, async () => {
+        let pending: ReturnType<DispatchBuffer["pendingStrict"]>;
+        try {
+          pending = new DispatchBuffer(deps.home).pendingStrict();
+        } catch {
+          return errResponse(503, "dispatch_buffer_unavailable", "Relay outbound dispatch buffer is unreadable");
+        }
+
+        let attemptedMap: Map<string, string>;
+        let deliveredMap: Map<string, string>;
+        let outboundSeenMap: Map<string, string>;
+        try {
+          attemptedMap = attemptedStore.statuses();
+          deliveredMap = deliveredStore.statuses();
+          outboundSeenMap = outboundSeenStore.statuses();
+        } catch {
+          return errResponse(503, "seen_store_unavailable", "Relay outbound seen store is unreadable");
+        }
+
+        const markLocalGuards = (seenKey: string | null): RelayInboundResponse | null => {
+          try {
+            if (seenKey) {
+              if (!outboundSeenMap.has(seenKey)) {
+                outboundSeenStore.mark(seenKey, "relay-accepted");
+              }
+              input.releaseOutboundKey?.(seenKey);
+            }
+            if (!deliveredMap.has(deliveryId)) {
+              deliveredStore.mark(deliveryId, "delivered");
+            }
+            return null;
+          } catch (err) {
+            return errResponse(503, "seen_store_unavailable", (err as Error).message || "Relay outbound seen store update failed");
+          }
+        };
+
+        const decision = pending.find((d) => {
+          const p = d.payload && typeof d.payload === "object" ? (d.payload as RelayPayloadCarry) : null;
+          return d.decisionId === deliveryId && p?.relayConnectorRef === authenticatedConnectorRef;
+        });
+
+        if (decision && attemptedMap.has(decision.decisionId)) {
+          const p = decision.payload as RelayPayloadCarry;
+          if (!p.relayEnvelope) {
+            return errResponse(404, "unknown_delivery", "deliveryId does not match a relay outbound delivery");
+          }
+          const valid = validateRelayOutboundEnvelope(p.relayEnvelope);
+          if (!valid.ok) {
+            return errResponse(503, "dispatch_buffer_unavailable", `Pending relay envelope for ${deliveryId} is invalid: ${valid.error}`);
+          }
+
+          const expectedReceipts = buildRelayExpectedReceipts(
+            decision,
+            p,
+            authenticatedConnectorRef,
+            valid.envelope,
+          );
+
+          let allReceiptsPresentBefore = expectedReceipts.length > 0;
+          try {
+            for (const r of expectedReceipts) {
+              if (!deps.queueRepo.hasRelayOwnerNotificationReceipt(r.qitemId, r.notificationKey)) {
+                allReceiptsPresentBefore = false;
+                break;
+              }
+            }
+          } catch {
+            return errResponse(503, "queue_store_unavailable", "Relay outbox ack failed because queue transition store is unavailable");
+          }
+
+          const alreadyAccepted = allReceiptsPresentBefore && deliveredMap.has(deliveryId);
+
+          try {
+            for (const info of expectedReceipts) {
+              deps.queueRepo.recordRelayOwnerNotificationAccepted({
+                qitemId: info.qitemId,
+                notificationKey: info.notificationKey,
+                deliveryId: info.deliveryId,
+                connectorRef: info.connectorRef,
+                replyRef: info.replyRef,
+                replyRefHash: info.refHash,
+                revision: info.revision,
+                episodeKey: info.episodeKey,
+                level: info.level,
+                kind: info.kind,
+                humanIntent: info.humanIntent,
+                closeUpdate: !info.digestId,
+                ...(info.digestId ? { digest: info.digestId } : {}),
+              });
+            }
+          } catch (err) {
+            return errResponse(503, "receipt_write_failed", (err as Error).message || "Relay acceptance receipt write failed");
+          }
+
+          const guardErr = markLocalGuards(p.qitemId && !p.deliveryDigestPost ? (p.notificationKey ?? p.qitemId) : null);
+          if (guardErr) return guardErr;
+
+          try {
+            new DispatchBuffer(deps.home).ack(deliveryId);
+          } catch (err) {
+            return errResponse(503, "dispatch_buffer_unavailable", (err as Error).message || "Relay dispatch buffer ack failed");
+          }
+
+          return {
+            status: 200,
+            body: { ok: true, deliveryId, connectorRef: authenticatedConnectorRef, alreadyAccepted },
+          };
+        }
+
+        // Not in DispatchBuffer for this connector: answer duplicate or unknown acks from the seen stores first
+        const attemptedConnector = parseAttemptedConnectorRef(attemptedMap.get(deliveryId));
+        if (attemptedConnector !== null && attemptedConnector !== authenticatedConnectorRef) {
+          return errResponse(404, "unknown_delivery", "deliveryId is not pending or previously accepted for this relay profile");
+        }
+        if (attemptedConnector === authenticatedConnectorRef && deliveredMap.has(deliveryId)) {
+          return {
+            status: 200,
+            body: { ok: true, deliveryId, connectorRef: authenticatedConnectorRef, alreadyAccepted: true },
+          };
+        }
+        if (attemptedConnector === null && !deliveredMap.has(deliveryId)) {
+          return errResponse(404, "unknown_delivery", "deliveryId is not pending or previously accepted for this relay profile");
+        }
+
+        // Fallback when local seen state is partial: check durable accepted receipts (live + archive)
+        let receipt: (RelayOwnerNotificationReceipt & { qitemId: string }) | null = null;
+        try {
+          receipt = deps.queueRepo.findRelayOwnerNotificationReceiptByDeliveryId?.(deliveryId) ?? null;
+        } catch {
+          return errResponse(503, "queue_store_unavailable", "Relay outbox ack receipt lookup failed because queue transition store is unavailable");
+        }
+
+        if (receipt !== null && (!receipt.connectorRef || receipt.connectorRef === authenticatedConnectorRef)) {
+          const seenKey = receipt.notificationKey && !receipt.digest ? receipt.notificationKey : null;
+          const guardErr = markLocalGuards(seenKey);
+          if (guardErr) return guardErr;
+          return {
+            status: 200,
+            body: { ok: true, deliveryId, connectorRef: authenticatedConnectorRef, alreadyAccepted: true },
+          };
+        }
+
+        return errResponse(404, "unknown_delivery", "deliveryId is not pending or previously accepted for this relay profile");
       });
     },
   };

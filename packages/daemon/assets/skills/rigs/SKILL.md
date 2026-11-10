@@ -100,7 +100,10 @@ person needs in their project or home folder and name that path.
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
   background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for a provider that's
-  already running, not the first desktop window, and each such open adds a new workspace.
+  already running, not the first desktop window, and each such open adds a new workspace. `--provider herdr-app` opens
+  the view in the herdr-app window you run it in (it adds OpenRig's mods there first). Inside a herdr-app
+  terminal, plain `rig terminal open <view>` does the same when that window is answering. `--window` always asks for a
+  new desktop window.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
   person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
   known account. If you only know an HTTP daemon address, ask for the SSH details rather than inventing them. Then

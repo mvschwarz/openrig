@@ -167,6 +167,24 @@ describe("same-daemon escalation routes (#605)", () => {
     expect(finding.body).toContain("escalates_to unavailable");
   });
 
+  it("sends a seat's finding to its own fallback, not the newest of several delegates_to parents, and to a declared escalates_to (#2840)", async () => {
+    const qa = seat("lane", "check.qa", "qa@lane");
+    const first = seat("lane", "build.one", "builder-one@lane");
+    const newest = seat("lane", "build.two", "builder-two@lane");
+    rigs.addEdge(qa.rig.id, first.node.id, qa.node.id, "delegates_to");
+    rigs.addEdge(qa.rig.id, newest.node.id, qa.node.id, "delegates_to");
+    const original = await work(qa.session);
+    expect((await sweep()).outcome).toBe("findings");
+    const finding = queue.list({ limit: 100 }).find(r => r.tags?.includes(`stuck-sweep:unclaimed-obligation:${original.qitemId}`))!;
+    expect(finding.destinationSession).toBe(qa.session);
+    expect(finding.body).toContain("delegates_to ambiguous: 2 declared parents");
+    expect(resolve(qa.session)).toMatchObject({ outcome: "ambiguous", owner: null });
+
+    seat("coord", "review.advisor", "advisor@coord");
+    rigs.addEdge(qa.rig.id, qa.node.id, "advisor@coord", "escalates_to");
+    expect(resolve(qa.session)).toMatchObject({ outcome: "routed", owner: "advisor@coord" });
+  });
+
   it("the real wake ladder creates the aggregate for the other rig and attempts its delivery", async () => {
     const a = seat("a", "top.lead", "lead@a");
     const b = seat("b", "top.lead", "lead@b");

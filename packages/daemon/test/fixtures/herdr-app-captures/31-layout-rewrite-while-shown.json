@@ -1,0 +1,56 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "layout-rewrite-while-shown",
+  "channel": "file",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "path": "<app-home>/layouts/rig.json",
+    "write": "atomic rename, child view-2"
+  },
+  "reply": {
+    "json": {
+      "id": "rig-work",
+      "type": "stack",
+      "active": "main"
+    }
+  },
+  "elapsed_ms": null,
+  "notes": "OpenRig rewrites rig.json while it is shown, and the selected child (view-1) is no longer in it. Recorded: the stack on disk 1.5 s later and the window's status.",
+  "context": {
+    "status_before": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb-capture-view",
+      "focused_pane": "ped84f31abb6722ac93a0ef90658e3055",
+      "layout": "rig",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    }
+  },
+  "effect": {
+    "status": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb-capture-view",
+      "focused_pane": "ped84f31abb6722ac93a0ef90658e3055",
+      "layout": "rig",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    }
+  }
+}

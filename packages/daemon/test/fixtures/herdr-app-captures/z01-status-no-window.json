@@ -1,0 +1,18 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "status-no-window",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:44:08Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"status\": true}\n"
+  },
+  "reply": {
+    "transport_error": "FileNotFoundError: errno 2",
+    "line": null
+  },
+  "elapsed_ms": 0,
+  "notes": "Sent after `scripts/sandbox down`: the socket file is gone, so connect fails. Liveness = false."
+}

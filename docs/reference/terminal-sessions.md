@@ -76,11 +76,47 @@ then show the new session with the original read-only setting. This uses the
 shared tile command for Herdr, cmux, Rex and plain tmux, including SSH tiles.
 In-place handover and restart keep showing the same session.
 
-Detaching a tile you typed in returns it to showing the seat. A different seat
-under the old name is never followed. If no replacement returns in time, or a
+Writable tiles attach immediately, as in 0.7.10. Their visible terminal sizes
+the agent's PTY under tmux's normal client sizing policy, and resizing the
+terminal reflows new output. Read-only tiles remain observers: they neither
+resize nor type into another seat. An ordinary tmux detach ends the writable
+tile without stopping the agent. A replacement with a different managed seat
+identity is not followed. If no replacement returns in time, or a
 session has no managed identity, reopen the rig view with
 `rig terminal open rig:<name> --window` (or your explicit provider). Views
 opened before this change must be closed and reopened to get this behavior.
+
+As in published 0.7.10, Enter or Ctrl-C typed while a new writable tile is still
+attaching can close that viewer. The agent keeps running; reopen the view.
+Once attached, keys and paste use native tmux input handling.
+
+## Sizing and older views
+
+Use tmux's inherited `window-size latest` policy for the terminal most recently
+used to control sizing. OpenRig does not change a person's global tmux policy.
+A deliberate `window-size manual` setting remains an explicit fixed-size choice.
+OpenRig's temporary layout and readable-capture pins release by unsetting the
+window's local `window-size` option; they do not restore an old local override.
+With the last pin released, the window inherits the global policy again.
+
+Browser terminals do not pin the agent's PTY by default. For an explicit fixed
+90-by-27 browser terminal, use `rig config set terminal.fixed_geometry true`.
+Set it to `false` to return to the default. This applies to newly created browser
+brokers after existing browser subscribers disconnect; it does not configure
+native Herdr tiles. A temporary readable capture uses
+`rig capture <seat> --readable` or `--size <columns>x<rows>` and releases its pin
+when the capture finishes. It does not unset a manually fixed window it did not
+pin.
+
+Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
+pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
+argv cannot change that running client. Close only the owned Herdr viewer pane
+and open a fresh view with `rig terminal open <view> --provider herdr`; the
+agent's tmux session and conversation keep running. For a retained `--follow`
+canvas, first select `--no-follow`, then close its owned viewer panes and open
+a fresh ordinary view. Continuing that old following canvas is not an automatic
+live-client migration. Existing 0.7.10 sizing clients and read-only viewers do
+not need this step.
 
 ## Desktop windows and previews
 
@@ -152,6 +188,10 @@ doesn't confirm a session create or a page, for example because its reply
 timed out, OpenRig closes nothing: the result says `rex_outcome_unknown`, or
 adds a note when other pages opened, and names the session to check in Rex
 before retrying. `rig terminal status` gives Rex about a second to answer.
+
+## herdr-app
+
+`--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering (finding the socket file is how OpenRig guesses you are in a herdr-app window, and whether the window is reachable is checked by asking it). `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
 
 ## HTTP API
 

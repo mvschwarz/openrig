@@ -266,6 +266,18 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
   "parked-with-evidence": "blocked",
 };
 
+/** The bucket a slice's frontmatter `status:` word falls in, as `GET /api/slices` reports it (sdlc-conventions.md A2). */
+export function sliceStatusBucket(raw: string | undefined): SliceStatus {
+  if (!raw) return "draft";
+  const normalized = raw.toLowerCase().trim();
+  if (STATUS_TO_BUCKET[normalized]) return STATUS_TO_BUCKET[normalized];
+  // Heuristic fallbacks.
+  if (normalized.includes("done") || normalized.includes("ship") || normalized.includes("close")) return "done";
+  if (normalized.includes("block") || normalized.includes("park")) return "blocked";
+  if (normalized.includes("draft") || normalized.includes("pending")) return "draft";
+  return "active";
+}
+
 export class SliceIndexer {
   readonly projectId?: string;
   readonly missionId?: string;
@@ -765,14 +777,7 @@ export class SliceIndexer {
   }
 
   private mapStatus(raw: string | undefined): SliceStatus {
-    if (!raw) return "draft";
-    const normalized = raw.toLowerCase().trim();
-    if (STATUS_TO_BUCKET[normalized]) return STATUS_TO_BUCKET[normalized];
-    // Heuristic fallbacks.
-    if (normalized.includes("done") || normalized.includes("ship") || normalized.includes("close")) return "done";
-    if (normalized.includes("block") || normalized.includes("park")) return "blocked";
-    if (normalized.includes("draft") || normalized.includes("pending")) return "draft";
-    return "active";
+    return sliceStatusBucket(raw);
   }
 
   private matchQitems(sliceName: string, served: Set<string> | null): string[] {

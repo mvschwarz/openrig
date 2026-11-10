@@ -127,6 +127,7 @@ Keys:
                          POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
                          If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
+  terminal.fixed_geometry  use 90x27 web geometry while subscribed (default off; other viewers share the pinned size)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   terminal.tmux_server   inherit the launching server, or isolated per OpenRig home (restart required)
   terminal.history_limit rows of tmux scrollback per pane in the ~/.tmux.conf block rig setup writes (2000-1000000; default 10000).
