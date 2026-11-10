@@ -22,6 +22,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough, Writable } from "node:stream";
+import stringWidth from "string-width";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -71,54 +72,59 @@ export function preparePiAccount(agentDir: string, accountHome: string | undefin
 // Use Node's line editor in raw mode, with only paste framing handled here.
 export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 
-// ── Terminal cell width ────────────────────────────────────────────────────
-// A terminal lays out grapheme clusters, not UTF-16 code units: CJK and emoji occupy two cells,
-// combining marks and format characters none. Row and caret math that counts String#length
-// under-erases on wide text and floods the pane with stale draft rows.
-const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff],
-  [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe10, 0xfe19],
-  [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f000, 0x1f02f], [0x1f0a0, 0x1f0ff],
-  [0x1f100, 0x1f1ff], [0x1f200, 0x1f2ff], [0x1f300, 0x1f5ff], [0x1f600, 0x1f64f],
-  [0x1f680, 0x1f6ff], [0x1f700, 0x1f77f], [0x1f780, 0x1f7ff], [0x1f800, 0x1f8ff],
-  [0x1f900, 0x1f9ff], [0x1fa00, 0x1faff], [0x20000, 0x3fffd],
-];
-const GRAPHEMES = (() => {
-  try {
-    return new Intl.Segmenter(undefined, { granularity: "grapheme" });
-  } catch {
-    return null;
+// ── The compose region's physical layout ──────────────────────────────────────────
+// One layout model for painting, erasing and the caret: cells fill terminal rows
+// greedily, a wide character that no longer fits wraps whole to the next row, and
+// an explicit newline starts one. Every row the compositor paints or erases, and
+// the caret it places, derives from here — measured with the daemon's string-width.
+
+/** Where a compose region sits on screen, and where its caret lands. */
+export interface ComposeLayout { rows: number; caretRow: number; caretColumn: number; }
+
+export function composeLayout(text: string, width: number, caret = text.length): ComposeLayout {
+  if (!text) return { rows: 0, caretRow: 0, caretColumn: 0 };
+  if (width <= 0) return { rows: text.split("\n").length, caretRow: 0, caretColumn: 0 };
+  let row = 0;
+  let column = 0;
+  let caretRow = 0;
+  let caretColumn = 0;
+  let index = 0;
+  const place = () => { caretRow = row; caretColumn = column; };
+  for (const character of text) {
+    if (index === caret) place();
+    if (character === "\n") {
+      row += 1;
+      column = 0;
+    } else {
+      const cells = Math.max(0, stringWidth(character));
+      if (column + cells > width) {
+        row += 1;
+        column = 0;
+      }
+      column += cells;
+    }
+    index += character.length;
   }
-})();
-const ZERO_WIDTH = /^[\p{Mn}\p{Me}\p{Cf}\u200b-\u200f\u2060\ufe0f]+$/u;
-export function graphemesOf(text: string): string[] {
-  return GRAPHEMES ? Array.from(GRAPHEMES.segment(text), (part) => part.segment) : Array.from(text);
-}
-export function cellWidth(segment: string): number {
-  if (!segment || ZERO_WIDTH.test(segment)) return 0;
-  const code = segment.codePointAt(0);
-  if (code === undefined) return 0;
-  return WIDE_RANGES.some(([low, high]) => code >= low && code <= high) ? 2 : 1;
-}
-export function textCells(text: string): number {
-  let cells = 0;
-  for (const segment of graphemesOf(text)) cells += cellWidth(segment);
-  return cells;
+  if (index === caret) place();
+  return { rows: row + 1, caretRow, caretColumn };
 }
 
-// ── Pane live region (compose + status) ────────────────────────────────────
+// ── Pane live region (compose + status) ────────────────────────────────────────
 // A seat pane is a plain terminal: one bottom live region holds the operator's draft
 // and the runner's status line, and is erased and repainted around every transcript
 // write. Nothing else may write at the cursor, or a draft freezes into scrollback and
-// streamed text fuses with it mid-word.
+// streamed text fuses with it mid-word. When the terminal's width is unknown the
+// compositor places nothing — the pane falls back to plain output, and the draft,
+// though still editable, is not drawn.
 
 /** The live region a pane host repaints around transcript writes. */
 export interface PaneCompositor {
   /** Bind the line editor the compose line renders from. */
   attach(read: () => string, redraw: () => void, caretUp?: () => number): void;
-  /** Unbind the editor; the live region is dropped. */
+  /** Unbind the editor; any held streamed tail is flushed and the live region is dropped. */
   detach(): void;
-  /** A keystroke changed the draft: repaint the live region from readline's state. */
+  /** A keystroke changed the draft: repaint the live region from readline's state. A
+   *  draft that just went away flushes a held streamed tail first, as plain output would. */
   refresh(): void;
   /** Streamed model text: verbatim while no live region exists; once a draft or a
    *  status line is on the bottom, complete lines go above the region and an
@@ -129,7 +135,8 @@ export interface PaneCompositor {
   /** A keypress is about to echo: close an open transcript line first, or the echo
    *  and the next streamed deltas would land on top of it. */
   beforeInput(): void;
-  /** Runner diagnostics belong on the pinned status line, not in the transcript. */
+  /** Pin the latest diagnostic on the status line. The transcript copy is the caller's;
+   *  this pin is never the only copy. */
   diagnostic(text: string): void;
   /** Drop a pinned status line. */
   clearStatus(): void;
@@ -148,25 +155,18 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
   let openLine = false;
   let screenRows = 0;
   let readCaretUp: (() => number) | null = null;
+  const widthKnown = () => typeof out.columns === "number" && out.columns > 0;
   const composeText = () => (readInput && redrawLine ? readInput() : "");
   const composeRows = () => {
     const text = composeText();
-    if (!text) return 0;
-    const width = typeof out.columns === "number" && out.columns > 0 ? out.columns : 0;
-    if (!width) return text.split("\n").length;
-    return text.split("\n").reduce((rows, line) => rows + Math.max(1, Math.ceil(textCells(line) / width)), 0);
+    return text && widthKnown() ? composeLayout(text, out.columns).rows : 0;
   };
   const clip = (text: string) => {
     const flat = text.replace(/[\r\n\t]+/g, " ").trimEnd();
-    const width = typeof out.columns === "number" && out.columns > 0 ? out.columns : 0;
-    if (!width || textCells(flat) < width) return flat;
-    let used = 0;
-    let clipped = "";
-    for (const segment of graphemesOf(flat)) {
-      const cells = cellWidth(segment);
-      if (used + cells > width - 1) break;
-      clipped += segment;
-      used += cells;
+    if (!widthKnown() || stringWidth(flat) < out.columns) return flat;
+    let clipped = flat;
+    while (clipped && stringWidth(clipped) + 1 > out.columns - 1) {
+      clipped = Array.from(clipped).slice(0, -1).join("");
     }
     return `${clipped}\u2026`;
   };
@@ -176,7 +176,8 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     if (sequence) out.write(sequence);
   };
   /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
-   *  to the terminal, so nothing else can change these rows behind the compositor's back. */
+   *  to the terminal, so nothing else can change these rows behind the compositor's back —
+   *  except a reflow, which the resize handler owns. */
   const paint = () => {
     if (status !== null) {
       out.write(clip(status));
@@ -193,6 +194,12 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     eraseLines(screenRows);
     screenRows = 0;
   };
+  const flushHeld = () => {
+    if (!held) return;
+    out.write(held.endsWith("\n") ? held : `${held}\n`);
+    held = "";
+    openLine = false;
+  };
   const writeVerbatim = (text: string) => {
     out.write(text);
     openLine = !text.endsWith("\n");
@@ -202,6 +209,18 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     out.write(text.endsWith("\n") ? text : `${text}\n`);
     paint();
   };
+  // A tile attaching or detaching reflows the pane. Erase with the wider of the recorded
+  // and the recomputed row counts — the old paint may now wrap wider or narrower — then
+  // repaint at the new width. Conservative on purpose: never leave a stale region row.
+  const onResize = () => {
+    const recomputed = (status !== null ? 1 : 0) + composeRows();
+    const down = readCaretUp ? readCaretUp() : 0;
+    if (down > 0) out.write(`\u001b[${down}B`);
+    eraseLines(Math.max(screenRows, recomputed));
+    screenRows = 0;
+    paint();
+  };
+  out.on("resize", onResize);
   const pane: PaneCompositor = {
     attach(read, redraw, caretUp) {
       readInput = read;
@@ -209,15 +228,17 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       readCaretUp = caretUp ?? null;
     },
     detach() {
+      eraseScreen();
+      flushHeld();
       readInput = null;
       redrawLine = null;
       readCaretUp = null;
-      held = "";
       openLine = false;
       screenRows = 0;
     },
     refresh() {
       eraseScreen();
+      if (held && !composeText()) flushHeld();
       paint();
     },
     transcript(text) {
@@ -248,6 +269,11 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       openLine = false;
     },
     diagnostic(text) {
+      // Without a known width there is no region to pin into: plain output instead.
+      if (!widthKnown()) {
+        pane.line(text);
+        return;
+      }
       if (openLine) {
         out.write("\n");
         openLine = false;
@@ -265,10 +291,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     beforeSubmit() {
       eraseScreen();
       openLine = false;
-      if (held) {
-        out.write(held.endsWith("\n") ? held : `${held}\n`);
-        held = "";
-      }
+      flushHeld();
     },
     repaint() {
       paint();
@@ -283,10 +306,16 @@ export function createRunnerInput(
   onSubmit: (block: string) => void,
   pane?: PaneCompositor,
 ): readline.Interface {
+  const say = (text: string) => {
+    if (pane) {
+      pane.line(text);
+      pane.diagnostic(text);
+    } else {
+      output.write(`${text}\n`);
+    }
+  };
   const reject = () => {
-    const text = "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.";
-    if (pane) pane.diagnostic(text);
-    else output.write(`${text}\n`);
+    say("[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.");
   };
   const submit = (block: string) => {
     if (Buffer.byteLength(block) > MAX_PI_INPUT_BYTES) reject();
@@ -308,18 +337,15 @@ export function createRunnerInput(
   const renderCompose = () => {
     const text = `${editor.line ?? ""}`;
     if (!text) return;
-    output.write(text);
     const width = typeof output.columns === "number" && output.columns > 0 ? output.columns : 0;
+    output.write(text);
     if (!width) return;
     const cursor = Math.max(0, Math.min(Number(editor.cursor) || 0, text.length));
-    const cursorCells = textCells(text.slice(0, cursor));
-    const rows = Math.max(1, Math.ceil(textCells(text) / width));
-    const targetRow = Math.min(rows - 1, Math.floor(cursorCells / width));
-    const targetCol = cursorCells % width;
-    caretUp = rows - 1 - targetRow;
+    const layout = composeLayout(text, width, cursor);
+    caretUp = layout.rows - 1 - layout.caretRow;
     if (caretUp > 0) output.write(`\u001b[${caretUp}A`);
     output.write("\r");
-    if (targetCol > 0) output.write(`\u001b[${targetCol}C`);
+    if (layout.caretColumn > 0) output.write(`\u001b[${layout.caretColumn}C`);
   };
   pane?.attach(() => `${editor.line ?? ""}`, renderCompose, () => caretUp);
 
@@ -346,19 +372,6 @@ export function createRunnerInput(
   const clear = () => setLine("", 0);
   const consume = (text: string) => {
     if (paste === null) {
-      const submitAt = pane ? text.search(/[\r\n]/) : -1;
-      if (submitAt >= 0 && pane) {
-        pane.beforeInput();
-        if (submitAt > 0) keys.write(text.slice(0, submitAt));
-        const submitted = `${editor.line ?? ""}`;
-        pane.beforeSubmit();
-        Object.assign(editor, { line: "", cursor: 0 });
-        if (submitted.trim()) submit(submitted);
-        else pane.repaint();
-        const rest = text.slice(submitAt + 1);
-        if (rest) consume(rest);
-        return;
-      }
       pane?.beforeInput();
       keys.write(text);
     } else if (!discarded) {
@@ -392,8 +405,7 @@ export function createRunnerInput(
         paste = null;
         discarded = false;
         clear();
-        if (pane) pane.diagnostic("[pi-runner] input cleared");
-        else output.write("\n[pi-runner] input cleared\n");
+        say("[pi-runner] input cleared");
         onSubmit("/abort");
       } else if (paste === null) {
         paste = "";
@@ -420,7 +432,10 @@ export function createRunnerInput(
   output.write("\u001b[?2004h");
   input.on("data", receive);
   input.once("end", end);
-  editor.on("line", submit);
+  editor.on("line", (line) => {
+    pane?.beforeSubmit();
+    submit(line);
+  });
   editor.once("close", () => {
     input.removeListener("data", receive);
     input.removeListener("end", end);
@@ -582,8 +597,8 @@ export interface RunnerIo {
   mirrorLine(line: string): void;
   /** Append raw text to the current pane line (streamed deltas). */
   mirrorAppend(text: string): void;
-  /** Print a runner diagnostic on the pane's status line instead of the transcript,
-   *  when the pane provides one. Falls back to mirrorLine. */
+  /** Pin a copy of a diagnostic on the pane's status line, when the pane provides one.
+   *  The transcript copy is written by the caller; this pin is never the only copy. */
   diagnostic?(text: string): void;
   /** Drop a pinned status line at the start of a new agent turn. */
   clearStatus?(): void;
@@ -1068,10 +1083,11 @@ export class RunnerCore {
     this.attentionIsLatest = false;
   }
 
-  /** Runner diagnostics belong on the pane's status line; an io without one keeps them in the transcript. */
+  /** A diagnostic stays in the transcript — the readiness probe and the operator both read
+   *  it there; a pane with a status line pins the latest one as a convenience copy. */
   private diag(text: string): void {
-    if (this.io.diagnostic) this.io.diagnostic(text);
-    else this.io.mirrorLine(text);
+    this.io.mirrorLine(text);
+    this.io.diagnostic?.(text);
   }
 
   private handleEvent(event: Record<string, unknown>): void {
@@ -1647,6 +1663,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
   const pane = createPaneCompositor(process.stdout);
+  // Diagnostics stay in the transcript — the pane's readiness probe greps it, and people
+  // and agents read the history there; the status line only pins the latest copy.
+  const paneDiag = (text: string) => {
+    pane.line(text);
+    pane.diagnostic(text);
+  };
 
   const chargeLookup = new OpenRouterChargeLookup({
     fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
@@ -1666,7 +1688,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       }, () => false as const).finally(() => clearTimeout(timeout));
     },
     schedule: (fn, ms) => { setTimeout(fn, ms).unref(); },
-    notice: (line) => { pane.diagnostic(line); },
+    notice: (line) => { paneDiag(line); },
   });
 
   // One activity post at a time: the daemon reads its newest record by arrival, so a beat still in flight when a turn
@@ -1772,7 +1794,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (!line.trim()) return;
-    pane.diagnostic(`[${runtime}:err] ${line}`);
+    paneDiag(`[${runtime}:err] ${line}`);
     stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
@@ -1786,7 +1808,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       });
       if (detail) {
         reportedPiCapability = true;
-                pane.diagnostic(`[pi-runner] ${detail}`);
+        paneDiag(`[pi-runner] ${detail}`);
       }
     }
   });
@@ -1794,7 +1816,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (runtime === "pi") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : "pi"}: ${err.message}`);
+      paneDiag(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : "pi"}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();
@@ -1821,7 +1843,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
-      console.error(transportUp
+      paneDiag(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
         : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
@@ -1830,7 +1852,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.exitCode = code ?? 1;
   };
   child.on("error", (err) => {
-    console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
+    paneDiag(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
   // "close" fires once OMP's stdio is drained, so its stderr is in the tail
