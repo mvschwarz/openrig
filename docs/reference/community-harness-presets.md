@@ -193,6 +193,37 @@ one at a time and in order, without making the agent wait. It finds the address 
 - **A runner's full duties** (liveness, input, cancellation and permissions) are in the draft
   [harness and runner contract](harness-runner-contract.md).
 
+## Pi-compatible RPC harnesses (`protocol: pi-rpc`)
+
+For a community harness that is a fork of Pi or speaks Pi's CLI and JSONL RPC protocol (such as OmO Native on senpi or Prime Agent), set `protocol: pi-rpc`.
+
+```yaml
+format: 1
+name: omo
+command: omo
+maintainer: Your name or team
+protocol: pi-rpc
+resume: true                   # only after you've checked a real reopen
+limits:
+  - checked with omo 5.1.48 (senpi engine 2026.10.25-2)
+```
+
+- **OpenRig runs the harness through its existing Pi runner.** Instead of screen scraping, the harness runs under `pi-runner` inside the seat's pane. The runner provides input buffering, paste framing, prompt/steer RPC queueing, clean transcript mirroring, and typed activity hook reporting to the daemon.
+- **`command` is the executable.** OpenRig resolves `command` (e.g. `omo` or `/usr/local/bin/senpi`) against the seat pane's environment, resolving symlinks and version-manager shims (such as `mise`) safely.
+- **Session identity and resume come from the runner.** Transcripts and sessions are persisted as JSONL files under `$OPENRIG_HOME/state/pi/<session>/sessions/`, and the fork's `get_state` reports the session file, so `launch_result` and `names_conversation` aren't needed.
+  - **With `resume: true`** declared, resuming or restoring a seat continues that exact session file via `--session <file>`. Without it, the preset is launch-only; a restore that would resume its saved conversation waits for a fresh-start decision.
+  - **A fork that reports no session file** reads as needing attention, and the launch doesn't read ready.
+  - **A resume that comes up on another session file** is refused, and that file's identity isn't recorded, so the seat keeps the one it asked for. The seat reads as needing attention.
+- **Launch arguments a fork must accept.** When spawned under `pi-runner`, the executable named by `command` must accept Pi's core CLI arguments:
+  - `--mode rpc`
+  - `--session-dir <dir>`
+  - `--name <session-name>`
+  - `--approve` or `--no-approve` (depending on seat trust)
+  - And conditionally when configured or resuming/forking: `--model <provider/id>`, `--thinking <level>`, `--session <sessionFile>`, or `--fork <sessionFile>`.
+  Forks that reject these flags cannot currently run with `protocol: pi-rpc`.
+- **Skills, guidance, and model passthrough.** Skills are projected into `<agentDir>/skills/` and managed guidance into `AGENTS.md`. For a fork that reads Pi's variables (`PI_CODING_AGENT_DIR`, etc.), declared models are passed as `--model provider/id` with provider API key allowlisting, and effort is passed as `--thinking <level>`. Usage is not reported for a fork, and extension dialogs are handled as Pi's (cancelled when an extension requests interactive confirmation in a managed pane).
+- **Mutual exclusions:** `protocol: pi-rpc` manages session identity and activity through the Pi runner; it cannot be combined with `runner: true`, `launch_result: true`, `names_conversation: true`, `startup_assisted: true`, or `first_input: true`.
+
 ## An example: Hermes
 
 [`community-harness-examples/hermes/`](community-harness-examples/hermes/) has a preset and a small launcher for Hermes

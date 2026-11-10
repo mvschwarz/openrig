@@ -615,6 +615,8 @@ export interface AgentActivity {
   hookAgentId?: string | null;
   /** Recorded on a hook for a session launched for a community runner (its launch fact, not the hook's claim). */
   communityRunner?: boolean;
+  /** That runner is OpenRig's hosted Pi-protocol runner for a `protocol: pi-rpc` preset (its launch fact). */
+  piRpc?: boolean;
 
   state: AgentActivityState;
   reason: string;

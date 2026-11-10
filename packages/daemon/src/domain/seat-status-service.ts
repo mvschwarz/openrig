@@ -4,7 +4,7 @@ import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
-import { sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
@@ -205,7 +205,7 @@ export class SeatStatusService {
     const db = this.rigRepo.db;
     const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
       .get(nodeId) as { community_runner: number | null } | undefined;
-    return row?.community_runner === 1;
+    return recordedRunner(row?.community_runner);
   }
 
   private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {

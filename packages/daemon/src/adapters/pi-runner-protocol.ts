@@ -201,7 +201,7 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime | string; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
@@ -245,7 +245,9 @@ export interface PiRunnerLaunchOpts {
   /** Explicit prepared account, never inferred from the shell environment. */
   accountHome?: string;
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
+  /** Custom executable to spawn inside the runner (e.g. for Pi-fork community harnesses). */
+  command?: string;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -296,8 +298,13 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     "--launch-id", shellQuote(opts.launchId),
     ...(opts.runtime === "omp"
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : [`--${opts.trust}`]),
+      : (opts.runtime && opts.runtime !== "pi"
+        ? ["--runtime", shellQuote(opts.runtime), `--${opts.trust}`]
+        : [`--${opts.trust}`])),
   ];
+  if (opts.command) {
+    parts.push("--command", shellQuote(opts.command));
+  }
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
@@ -336,7 +343,7 @@ export function buildPiChildArgs(opts: {
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
 }): string[] {
   const args = [
     "--mode", "rpc",

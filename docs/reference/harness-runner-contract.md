@@ -39,14 +39,19 @@ This chapter covers **which agent runs in a seat and how OpenRig talks to it**. 
 sandbox, another machine) is the [execution platform chapter](execution-platform-contract.md). The two are separate on purpose:
 the same harness can run in many places, and one place can host many harnesses.
 
-## 1. Plain preset or runner preset?
+## 1. Plain preset, runner preset, or OpenRig-hosted protocol runner?
 
-| | Plain community preset | Runner preset (`runner: true`) |
-|---|---|---|
-| **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) |
-| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input |
-| **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt |
-| **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably |
+| | Plain community preset | Runner preset (`runner: true`) | OpenRig-hosted protocol runner (`protocol: pi-rpc`) |
+|---|---|---|---|
+| **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) | OpenRig's own Pi runner, which starts your binary (`command`) in Pi's RPC mode |
+| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
+| **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt; a message sent mid-turn waits | Pi's input: a submitted block is a prompt, a message sent while busy steers the current turn, `/followup` queues after it and `/abort` cancels it |
+| **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably | Your harness is a Pi fork, or speaks Pi's CLI and JSONL RPC protocol |
+
+**For the third shape, you promise your binary's Pi-RPC compatibility at a version you name in `limits`.** OpenRig doesn't
+test each fork. It can't be combined with `runner`, `launch_result`, `names_conversation`, `startup_assisted` or
+`first_input`. The flags it must accept are in
+[Pi-compatible RPC harnesses](community-harness-presets.md#pi-compatible-rpc-harnesses-protocol-pi-rpc).
 
 **If your harness works well as a terminal app, a plain preset is enough. Use a runner only when you can report state
 honestly.** A runner that guesses is worse than a quiet screen read as unknown.
