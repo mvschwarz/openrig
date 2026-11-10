@@ -854,13 +854,16 @@ export class ClaudeCompactionEnforcer {
 
   /** The restore step OpenRig owes this seat next, or null. After a /compact whose outcome is unknown (see
    *  `afterUncertainCompact`) it also gives what the input box last read (`not_checked` before the first check) and
-   *  whether the step is held for it. */
-  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string; lastDelivery?: RestoreDeliveryAttempt } | null {
+   *  whether the step is held for it. It names the attempt's restore map, which a person's restore notice leaves out. */
+  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string; lastDelivery?: RestoreDeliveryAttempt; mapPath?: string } | null {
     const stage = this.pendingPostCompactRestore.get(sessionName);
     if (!stage) return null;
-    const lastDelivery = this.records.get(sessionName)?.record.lastDelivery;
+    const record = this.records.get(sessionName)?.record;
+    const lastDelivery = record?.lastDelivery;
     const failed = !!lastDelivery && lastDelivery.failures > 0;
-    const last = lastDelivery ? { lastDelivery } : {};
+    // The map the restore request names: under --skip-map only one the seat completed anyway, never a path with no map.
+    const mapPath = this.restoreCarry.get(sessionName)?.skipMap ? this.restoreMapFields(sessionName).attemptMapPath : record?.mapPath;
+    const last = { ...(lastDelivery ? { lastDelivery } : {}), ...(mapPath ? { mapPath } : {}) };
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
     const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
       ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
