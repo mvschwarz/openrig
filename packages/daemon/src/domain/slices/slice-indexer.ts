@@ -54,6 +54,14 @@ function zeroQueueCounts(): SliceQueueCounts {
   };
 }
 
+function canonicalPhysicalPath(absPath: string): string | null {
+  try {
+    return fs.realpathSync(absPath);
+  } catch {
+    return null;
+  }
+}
+
 function parseTypedQueueScope(rawTags: string | null | undefined): {
   projects: Set<string>;
   missions: Set<string>;
@@ -617,16 +625,34 @@ export class SliceIndexer {
     const targetsBySliceToken = new Map<string, TargetScope[]>();
     const visibleCountsByPath = new Map<string, SliceQueueCounts | null>();
     const projectIdsByPath = new Map<string, string | null>();
+    const canonicalPathsByInput = new Map<string, string | null>();
+    let physicalIdentityComplete = true;
+    const canonicalizeCountPath = (slicePath: string): string | null => {
+      const inputPath = path.resolve(slicePath);
+      if (!canonicalPathsByInput.has(inputPath)) {
+        canonicalPathsByInput.set(inputPath, canonicalPhysicalPath(slicePath));
+      }
+      return canonicalPathsByInput.get(inputPath) ?? null;
+    };
     const projectForPath = (slicePath: string): string | null => {
-      const physicalPath = path.resolve(slicePath);
+      const physicalPath = canonicalizeCountPath(slicePath);
+      if (!physicalPath) {
+        physicalIdentityComplete = false;
+        return null;
+      }
       if (!projectIdsByPath.has(physicalPath)) {
-        projectIdsByPath.set(physicalPath, resolveProjectId(slicePath));
+        projectIdsByPath.set(physicalPath, resolveProjectId(physicalPath));
       }
       return projectIdsByPath.get(physicalPath) ?? null;
     };
 
     for (const entry of entries) {
-      const physicalPath = path.resolve(entry.slicePath);
+      const physicalPath = canonicalizeCountPath(entry.slicePath);
+      if (!physicalPath) {
+        physicalIdentityComplete = false;
+        result.set(entry.slicePath, null);
+        continue;
+      }
       const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
       const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
       if (!visibleCountsByPath.has(physicalPath)) {
@@ -635,6 +661,10 @@ export class SliceIndexer {
         visibleCountsByPath.set(physicalPath, null);
       }
       result.set(entry.slicePath, visibleCountsByPath.get(physicalPath) ?? null);
+    }
+    if (!physicalIdentityComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
     }
     if (candidateOptions.complete === false) {
       for (const slicePath of result.keys()) result.set(slicePath, null);
@@ -658,8 +688,24 @@ export class SliceIndexer {
     // first visible location that happens to share its directory name.
     const locationsByPath = new Map<string, SliceLocation>();
     for (const location of candidateLocations) {
-      const physicalPath = path.resolve(location.slicePath);
+      const physicalPath = canonicalizeCountPath(location.slicePath);
+      if (!physicalPath) {
+        candidateScanComplete = false;
+        continue;
+      }
       if (!locationsByPath.has(physicalPath)) locationsByPath.set(physicalPath, location);
+    }
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+    const missionIdsByPhysicalPath = this.missionIdAliasesForCounting(
+      candidateOptions.additionalSliceRoots ?? [],
+      () => { candidateScanComplete = false; },
+    );
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
     }
     const candidateNames = new Set([...locationsByPath.values()].map((location) => location.name));
     const sliceIdsByPath = new Map<string, string | null>();
@@ -674,9 +720,18 @@ export class SliceIndexer {
     }
 
     for (const [physicalPath, location] of locationsByPath) {
-      const missionKeys = new Set(location.missionId
-        ? this.missionTagKeys(location.missionId, location.slicePath)
-        : []);
+      const missionKeys = new Set<string>();
+      if (location.missionId) {
+        const missionPath = this.missionPathOfSlice(location.missionId, location.slicePath);
+        const canonicalMissionPath = missionPath ? canonicalizeCountPath(missionPath) : null;
+        if (!canonicalMissionPath) {
+          candidateScanComplete = false;
+          continue;
+        }
+        missionKeys.add(location.missionId);
+        const missionId = missionIdsByPhysicalPath.get(canonicalMissionPath);
+        if (missionId) missionKeys.add(missionId);
+      }
       const sliceKeys = new Set<string>([location.name]);
       const sliceId = sliceIdsByPath.get(physicalPath);
       if (sliceId && !candidateNames.has(sliceId) && pathsBySliceId.get(sliceId)?.size === 1) {
@@ -694,6 +749,10 @@ export class SliceIndexer {
         if (list) list.push(target);
         else targetsBySliceToken.set(token, [target]);
       }
+    }
+    if (!candidateScanComplete || !physicalIdentityComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
     }
 
     if (targetsBySliceToken.size === 0) return result;
@@ -845,6 +904,58 @@ export class SliceIndexer {
     if (path.basename(slicesDir) !== "slices") return null;
     const missionDir = path.dirname(slicesDir);
     return path.basename(missionDir) === missionId ? path.resolve(missionDir) : null;
+  }
+
+  private missionIdAliasesForCounting(
+    additionalRoots: readonly string[],
+    onReadError: () => void,
+  ): Map<string, string> {
+    const missionNames = new Set<string>();
+    const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
+    const claims = new Map<string, Set<string>>();
+    const seenRoots = new Set<string>();
+    for (const configuredRoot of this.sliceRoots(additionalRoots)) {
+      let root: string;
+      try {
+        root = fs.realpathSync(configuredRoot);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
+        continue;
+      }
+      if (seenRoots.has(root)) continue;
+      seenRoots.add(root);
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(root, entry.name);
+        if (!this.isDirectory(path.join(entryPath, "slices"), onReadError)) continue;
+        const missionPath = canonicalPhysicalPath(entryPath);
+        if (!missionPath) {
+          onReadError();
+          continue;
+        }
+        missionNames.add(entry.name);
+        const id = this.readSliceId(entryPath);
+        missions.push({ name: entry.name, missionPath, id });
+        if (id) {
+          const claimants = claims.get(id) ?? new Set<string>();
+          claimants.add(entry.name);
+          claims.set(id, claimants);
+        }
+      }
+    }
+    const idByPath = new Map<string, string>();
+    for (const { name, missionPath, id } of missions) {
+      const validId = id && !missionNames.has(id) && claims.get(id)?.size === 1 ? id : null;
+      if (validId) idByPath.set(missionPath, validId);
+    }
+    return idByPath;
   }
 
   private missionIdAliases(): MissionIdAliases {
