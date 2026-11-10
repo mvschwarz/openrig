@@ -211,9 +211,9 @@ limits:
 - **OpenRig runs the harness through its existing Pi runner.** Instead of screen scraping, the harness runs under `pi-runner` inside the seat's pane. The runner provides input buffering, paste framing, prompt/steer RPC queueing, clean transcript mirroring, and typed activity hook reporting to the daemon.
 - **`command` is the executable.** OpenRig resolves `command` (e.g. `omo` or `/usr/local/bin/senpi`) against the seat pane's environment, resolving symlinks and version-manager shims (such as `mise`) safely.
 - **Session identity and resume come from the runner.** Transcripts and sessions are persisted as JSONL files under `$OPENRIG_HOME/state/pi/<session>/sessions/`, and the fork's `get_state` reports the session file, so `launch_result` and `names_conversation` aren't needed.
-  - **With `resume: true`** declared, resuming or restoring a seat continues that exact session file via `--session <file>`. Without it, a restore starts fresh.
+  - **With `resume: true`** declared, resuming or restoring a seat continues that exact session file via `--session <file>`. Without it, the preset is launch-only; a restore that would resume its saved conversation waits for a fresh-start decision.
   - **A fork that reports no session file** reads as needing attention, and the launch doesn't read ready.
-  - **A resume that comes up on another session file** is refused, and that file's identity isn't recorded, so the seat keeps the one it asked for.
+  - **A resume that comes up on another session file** is refused, and that file's identity isn't recorded, so the seat keeps the one it asked for. The seat reads as needing attention.
 - **Launch arguments a fork must accept.** When spawned under `pi-runner`, the executable named by `command` must accept Pi's core CLI arguments:
   - `--mode rpc`
   - `--session-dir <dir>`

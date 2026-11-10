@@ -670,8 +670,10 @@ export class RunnerCore {
       }
       this.writeSidecar({});
       if (this.resumedElsewhere()) {
-        // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below).
+        // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
+        // seat asks for attention rather than beating idle on a session nothing records.
         this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
+        this.raiseAttention("runtime_error");
         return;
       }
       if (!wasReady) {

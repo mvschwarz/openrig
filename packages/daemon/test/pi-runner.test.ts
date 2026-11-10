@@ -198,7 +198,7 @@ describe("idle heartbeat", () => {
     expect(c.f.activity.filter(a => a.hookEvent !== "Stop")).toSatisfy((rest: Record<string, unknown>[]) => rest.every(a => !("livenessSeconds" in a)));
   });
 
-  it("is a Pi-only behaviour", () => {
+  it("is not an OMP behaviour", () => {
     const c = clocked("omp");
     ready(c.core);
     c.core.heartbeat();
@@ -290,7 +290,7 @@ describe("streaming heartbeat", () => {
     expect(c.beats()).toEqual([]);
   });
 
-  it("is a Pi-only behaviour", () => {
+  it("is not an OMP behaviour", () => {
     const c = clocked("omp");
     ready(c.core);
     c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));

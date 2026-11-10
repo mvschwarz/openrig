@@ -191,10 +191,11 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
     body: JSON.stringify(payload),
   });
   const pending: Promise<Response>[] = [];
+  const posts: Array<Record<string, unknown>> = [];
   const runner = (requestedSessionFile?: string) => new RunnerCore({
     sendRpc() {}, mirrorLine() {}, mirrorAppend() {}, writeSidecar() {},
     now: () => clock,
-    postActivity(payload) { pending.push(Promise.resolve(post(payload))); },
+    postActivity(payload) { posts.push(payload as Record<string, unknown>); pending.push(Promise.resolve(post(payload))); },
   }, { nodeId: "fork-node", sessionName: "worker@fork-test", generation: "fork-current" },
   { runtime: opts.runtime, ...(requestedSessionFile ? { requestedSessionFile } : {}) });
   const getState = (core: RunnerCore, sessionFile: string | null) => core.handlePiLine(JSON.stringify({
@@ -202,7 +203,7 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
   const settle = () => Promise.all(pending.splice(0));
   const token = () => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = 1").get();
   const latest = () => store.getLatestForNode({ nodeId: "fork-node", sessionName: "worker@fork-test" });
-  return { post, runner, getState, settle, token, latest };
+  return { post, runner, getState, settle, token, latest, posts };
 }
 
 describe("a protocol: pi-rpc fork's identity and attention", () => {
@@ -220,16 +221,18 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     expect(f.token()).toEqual({ resume_type: "community:dsh", resume_token: "launcher-conv-1" });
   });
 
-  it("a resume of A that comes up on B never reports B, so A stays stored before and after", async () => {
+  it("a resume of A that comes up on B never reports B, so A stays stored before and after, and the seat asks for attention", async () => {
     const f = forkFixture({ runtime: "omo", agentRunner: 2, token: { type: "community:omo", value: "/fixture/omo/a.jsonl", provenance: "hook" } });
     const core = f.runner("/fixture/omo/a.jsonl");
     f.getState(core, "/fixture/omo/b.jsonl");
-    expect(await f.settle()).toEqual([]);
+    await f.settle();
     expect(f.token()).toEqual({ resume_type: "community:omo", resume_token: "/fixture/omo/a.jsonl" });
-    // A later get_state (the runner keeps polling) still reports B: still nothing posted, A still stored.
+    // A second get_state reply still reports B: still no identity, A still stored, and the attention isn't raised twice.
     f.getState(core, "/fixture/omo/b.jsonl");
-    expect(await f.settle()).toEqual([]);
+    await f.settle();
     expect(f.token()).toEqual({ resume_type: "community:omo", resume_token: "/fixture/omo/a.jsonl" });
+    expect(f.posts.map((p) => [p.hookEvent, p.subtype])).toEqual([["Notification", "runtime_error"]]);
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
   });
 
   it("a fork that reports no session file is served as needing input; a preset runner's runtime_error stays unknown", async () => {
