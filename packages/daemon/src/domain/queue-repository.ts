@@ -875,8 +875,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+/** waiting: false skips the waiting view of each row (the stuck sweep's own reads); the default builds it. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -4535,7 +4536,9 @@ export class QueueRepository {
     return rows.map((row) => this.rowToItem(row));
   }
 
-  getById(qitemId: string): QueueItem | null {
+  /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:
+   *  it never changes what another read returns. */
+  getById(qitemId: string, opts?: { waiting?: boolean }): QueueItem | null {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
@@ -4543,7 +4546,7 @@ export class QueueRepository {
     // OPR.0.5.6.14 — the row FACE answers "did it reach them" in one read for
     // gateway-routed rows; null for pane-bound (absence-governed, no key lies).
     // The same projection as a listing's, for one row: one read of its owner notifications and ledger.
-    const item = this.projectRows([row], true)[0]!;
+    const item = this.projectRows([row], opts?.waiting !== false)[0]!;
     return {
       ...item,
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
@@ -4897,7 +4900,7 @@ export class QueueRepository {
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
+    const items = rows.map((r) => this.rowToItem(r, !opts?.compact && opts?.waiting !== false));
     return opts?.compact ? items.map(compactRow) : items;
   }
 
@@ -5003,7 +5006,7 @@ export class QueueRepository {
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
     for (const r of rows) {
-      const item = this.rowToItem(r, !opts?.compact);
+      const item = this.rowToItem(r, !opts?.compact && opts?.waiting !== false);
       const ledger = this.deliveryOutcomeFor(item.qitemId);
       if (ledger?.outcome === "posted" || ledger?.outcome === "accepted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {

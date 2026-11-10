@@ -439,7 +439,7 @@ function deliveryResolutionEvidence(
   qitemId: string,
   now: Date,
 ): string | null {
-  const row = deps.queueRepo.getById(qitemId);
+  const row = deps.queueRepo.getById(qitemId, { waiting: false });
   if (!row) return null;
   if (["done", "failed", "denied", "canceled", "handed-off"].includes(row.state)) {
     return `source closed (${row.state})`;
@@ -650,6 +650,10 @@ function backlogRowsOf(body: string): Set<string> | null {
  *  for its whole length (seconds on a queue of tens of thousands of rows, with healthz and every request waiting);
  *  every this many rows it now lets timers and requests run. */
 export const STUCK_SWEEP_YIELD_EVERY_ROWS = 50;
+/** ...or after this many milliseconds of work since the last yield, whichever comes first: a stretch of slow rows (or
+ *  of awaited writes that resolve by microtasks alone) holds the loop no longer than this. The clock restarts after the
+ *  yield, so the time others run during it does not count against the next stretch. */
+export const STUCK_SWEEP_YIELD_AFTER_MS = 50;
 
 export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepResult> {
   const log = deps.log ?? ((line: string) => console.error(line));
@@ -671,10 +675,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // `if (dueToYield()) await yieldLoop();` and never a bare await per row: even an await that does not yield lets
     // queued microtasks (other requests' continuations) run and write between two rows the snapshot still covers.
     let rowsSinceYield = 0;
-    const dueToYield = (): boolean => ++rowsSinceYield >= STUCK_SWEEP_YIELD_EVERY_ROWS;
+    let lastYieldAt = performance.now();
+    const dueToYield = (): boolean =>
+      ++rowsSinceYield >= STUCK_SWEEP_YIELD_EVERY_ROWS || performance.now() - lastYieldAt >= STUCK_SWEEP_YIELD_AFTER_MS;
     const yieldLoop = async (): Promise<void> => {
       rowsSinceYield = 0;
       await new Promise<void>((resolve) => setImmediate(resolve));
+      lastYieldAt = performance.now();
       othersMayHaveRun();
     };
     const suppressionMinutes = deps.ladderSuppressionMinutes ?? resolveLadderSuppressionMinutes();
@@ -725,7 +732,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // S04 seam — a claimed row with no later motion past the pickup threshold. The
     // pickup module remains the ONE derivation rule; this only enumerates and routes.
     const stalledCandidate = (qitemId: string): Candidate | null => {
-      const row = indexed(() => deps.queueRepo.getById(qitemId));
+      const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
       if (!row || isFindingRow(row)) return null;
       if ((row.state !== "pending" && row.state !== "in-progress") || !row.claimedAt) return null;
       const stalled = stalledPickupFinding(row);
@@ -754,7 +761,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const notice = job ? queueWaitNotice(job.spec_yaml) : null;
       if (!notice || now.getTime() - Date.parse(notice.at) <= resolvePickupThresholdMinutes() * 60_000) return null;
       const binding = deps.db.prepare("SELECT qitem_id FROM queue_transition_wakes WHERE wake_ref = ? AND phase = 'armed' ORDER BY transition_id DESC LIMIT 1").get(jobId) as { qitem_id: string } | undefined;
-      const row = binding ? indexed(() => deps.queueRepo.getById(binding.qitem_id)) : null;
+      const row = binding ? indexed(() => deps.queueRepo.getById(binding.qitem_id, { waiting: false })) : null;
       if (!row || row.state !== "blocked" || deps.queueRepo.getParkWakeStatus(row.qitemId)?.ref !== jobId) return null;
       const response = lastMeaningfulTransition(deps.db, row.qitemId);
       if (response && Date.parse(response.at) > Date.parse(notice.at)) return null;
@@ -768,7 +775,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // The parked policy stops repeating a positively no-input failure. Unhealthy blocked rows
     // have no retry ladder: the same sweep/recovery route owns their actionable disposition.
     const parkedCandidate = (qitemId: string): Candidate | null => {
-      const row = indexed(() => deps.queueRepo.getById(qitemId));
+      const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
       if (!row || isFindingRow(row)) return null;
       if (row.state !== "blocked" || !startsWithCI(row.lastNudgeResult, "failed:")) return null;
       const wake = deps.queueRepo.getParkWakeStatus(qitemId);
@@ -856,14 +863,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
               : `${failure} and nothing retried it`,
       };
     };
-    const undeliveredNow = (qitemId: string): QueueItem | undefined => indexed(() => deps.queueRepo.findUndelivered({ qitemId }))[0];
+    const undeliveredNow = (qitemId: string): QueueItem | undefined => indexed(() => deps.queueRepo.findUndelivered({ qitemId, waiting: false }))[0];
 
     // The A1 net — created-with-destination rows carrying real obligations, unclaimed past
     // the config-keyed age. Parks (state=blocked) legitimately wait and never appear here;
     // failed-nudge rows already surfaced in half 2; laddered rows are S01's.
     const cutoff = new Date(now.getTime() - ageMinutes * 60_000).toISOString();
     const unclaimedCandidate = (qitemId: string, recordSuppression: boolean): Candidate | null => {
-      const row = indexed(() => deps.queueRepo.getById(qitemId));
+      const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
       if (!row || isFindingRow(row)) return null;
       // The query's own predicate, on the row as it is now.
       if (row.state !== "pending" || row.claimedAt || !row.destinationSession || row.tsCreated > cutoff
@@ -946,7 +953,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     /** `recheck`: read live without the lent indexes, and don't log the registry fallback a second time. */
     const custodyCandidate = (qitemId: string, hasSuccessor: (source: string, target: string) => boolean, recheck = false): Candidate | null => {
       // A recheck reads live, without the lent indexes: one row's own queries cost less than a rebuilt successor index.
-      const row = recheck ? deps.queueRepo.getById(qitemId) : indexed(() => deps.queueRepo.getById(qitemId));
+      const row = recheck ? deps.queueRepo.getById(qitemId, { waiting: false }) : indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
       if (!row || isFindingRow(row)) return null;
       // The query's own predicate, on the row as it is now.
       const closed = row.state === "done" || row.state === "canceled"
@@ -977,7 +984,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             );
           }
           if (target === row.qitemId) return true;
-          return !indexed(() => deps.queueRepo.getById(target));
+          return !indexed(() => deps.queueRepo.getById(target, { waiting: false }));
         }
         try {
           return !hasSuccessor(row.qitemId, target);
@@ -1014,7 +1021,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const freshCandidate = (kind: StuckFindingKind, id: string, jobId?: string): Candidate | null => {
       switch (kind) {
         case "overdue-claim": {
-          const row = deps.queueRepo.findOverdue({ now: nowIso, qitemId: id })[0];
+          const row = deps.queueRepo.findOverdue({ now: nowIso, qitemId: id, waiting: false })[0];
           return row ? overdueCandidate(row) : null;
         }
         case "stalled-after-claim": return stalledCandidate(id);
@@ -1056,9 +1063,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // The rows each rule looks at. The id lists are judged on a fresh getById per row; the two finders return whole
     // rows, which are read again by id once other code may have run since the list was read.
     let listedAt = othersRan;
-    for (const listed of indexed(() => deps.queueRepo.findOverdue({ now: nowIso }))) {
+    for (const listed of indexed(() => deps.queueRepo.findOverdue({ now: nowIso, waiting: false }))) {
       if (dueToYield()) await yieldLoop();
-      const row = listedAt !== othersRan ? indexed(() => deps.queueRepo.findOverdue({ now: nowIso, qitemId: listed.qitemId }))[0] : listed;
+      const row = listedAt !== othersRan ? indexed(() => deps.queueRepo.findOverdue({ now: nowIso, qitemId: listed.qitemId, waiting: false }))[0] : listed;
       const c = row ? overdueCandidate(row) : null;
       if (!c) continue;
       candidates.push(c);
@@ -1093,7 +1100,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     }
 
     listedAt = othersRan;
-    for (const listed of indexed(() => deps.queueRepo.findUndelivered())) {
+    for (const listed of indexed(() => deps.queueRepo.findUndelivered({ waiting: false }))) {
       if (dueToYield()) await yieldLoop();
       let row = listedAt !== othersRan ? undeliveredNow(listed.qitemId) : listed;
       if (!row || isFindingRow(row)) continue;
@@ -1304,7 +1311,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         if (rows) rows.push(c); else unclaimedBacklog.set(backlogKey, [c]);
         continue;
       }
-      const sharedRow = shared ? indexed(() => deps.queueRepo.getById(shared.qitemId)) : null;
+      const sharedRow = shared ? indexed(() => deps.queueRepo.getById(shared.qitemId, { waiting: false })) : null;
       // A later accepted deadline can expire after the previous finding closed.
       // Its newer time is fresh evidence even when the pickup candidate wins this row.
       // An OPEN recovery still owns custody.
@@ -1468,7 +1475,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const listedNow = new Set(rows.map((c) => c.row.qitemId));
         const stoodFor = backlogRowsOf(last.body);
         const still = [...(stoodFor ?? [])].filter((id) => !listedNow.has(id)).flatMap((id): BacklogRow[] => {
-          const row = indexed(() => deps.queueRepo.getById(id));
+          const row = indexed(() => deps.queueRepo.getById(id, { waiting: false }));
           // Gone, someone else's now, resolved at its source, or held by a finding or recovery of its own: one actually
           // written, so a create that failed this pass leaves the row here.
           if (!row || row.destinationSession !== seat || recoveries.find(id)
@@ -1563,7 +1570,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (suppressedTags.has(dedupTag)) continue;
       // #2661: a claim working only on a grace (a background shell, a pending managed restore) is not resolved: the
       // grace stops new detection, and an open stall recovery stays open, so the ceiling's expiry stays actionable.
-      if (kind === "stalled-after-claim" && stuckId && deps.queueRepo.getById(stuckId)?.pickup?.grace) continue;
+      if (kind === "stalled-after-claim" && stuckId && deps.queueRepo.getById(stuckId, { waiting: false })?.pickup?.grace) continue;
       let resolution = "no longer detected";
       if (stuckId && (kind === "undelivered-wake" || kind === "undelivered-human-notice" || kind === "unclaimed-obligation")) {
         const evidence = deliveryResolutionEvidence(deps, kind, stuckId, now);
