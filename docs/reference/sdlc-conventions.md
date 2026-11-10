@@ -164,7 +164,10 @@ slice marked `complete` counts as `active`. A slice with no `status:` counts as
 When the owning scope selects `proofPolicy.judges`, use `rig proof judge` to
 record an attributed accept, reject or withdraw decision on a contract item,
 and `rig proof show` to read derived readiness up through slice, mission and
-project. The nearest slice, mission or project policy selects authorized judges;
+project. The nearest slice, mission or project policy selects authorized judges.
+By default an item's latest judgment from any of them decides it; with
+`proofPolicy.everyJudge: true`, every listed judge's own current accept is
+required, and `rig proof show` lists each judge's own latest judgment either way.
 `rig proof --help` describes setup, selectors and evidence requirements. In a
 multi-project workspace catalog, name the project with `--project <id>` or a
 `<id>:` scope prefix (`alpha:m0/slices/01-t001`); unqualified scopes use the
