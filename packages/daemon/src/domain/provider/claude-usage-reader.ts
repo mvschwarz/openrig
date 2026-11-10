@@ -112,6 +112,7 @@ export function collectClaudeSignalsFromProviderUsageDirectory(
   legacyDirectory?: string,
 ): ProviderSignal[] {
   const seats = new Map<string, ClaudeSeatRef>();
+  const unreadableFiles = new Set<string>();
   for (const candidateDirectory of [directory, legacyDirectory]) {
     if (!candidateDirectory) continue;
     try {
@@ -122,10 +123,16 @@ export function collectClaudeSignalsFromProviderUsageDirectory(
           if (typeof parsed.seatSession === "string") {
             seats.set(parsed.seatSession, { seatSession: parsed.seatSession });
           }
-        } catch { /* malformed cache cannot create a usable cache signal */ }
+        } catch {
+          // A cache file that exists but cannot be read or parsed still names its seat in the
+          // filename (telemetrySidecarFilename sanitizes the same seat name). Keep it in the
+          // seat list so the reader reports an unreadable cache instead of the file vanishing.
+          unreadableFiles.add(file.slice(0, -".json".length));
+        }
       }
     } catch { /* absent cache directory */ }
   }
+  for (const seatSession of unreadableFiles) seats.set(seatSession, { seatSession });
 
   const readFrom = (candidateDirectory: string, seatSession: string): string | null => {
     try {

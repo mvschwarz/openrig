@@ -131,3 +131,21 @@ describe("0.5.8 provider-usage compatibility bridge", () => {
   });
 });
 
+describe("collectClaudeSignalsFromProviderUsageDirectory — a malformed-only cache stays visible", () => {
+  it("reports unreadable_cache for a seat known only from a malformed file's name", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "provider-unreadable-"));
+    const directory = path.join(home, "state", "provider-usage");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "broken@rig.json"), "{ not json");
+    try {
+      const signals = collectClaudeSignalsFromProviderUsageDirectory(directory, () => ASOF);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.seatSession).toBe("broken@rig");
+      expect(signals[0]!.sourceClass).toBe("unknown");
+      expect(signals[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
+      expect(signals[0]!.usedPercent).toBeUndefined();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
