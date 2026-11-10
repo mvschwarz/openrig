@@ -15,12 +15,14 @@ In your project folder, add OpenRig's `rigs` skill to the agent you use:
 npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent claude-code
 # Codex
 npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent pi
 ```
 
 For a new install, use the latest release's tag, for example `v0.7.5`. If OpenRig is already installed, use the tag
 that matches `rig --version`, or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
-installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
-you want built.
+installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already open),
+and say what you want built.
 
 The skill has your agent work through the steps below in order. It says what it will run and change before it runs
 it, and it asks before installing anything on your system. It finishes when you're talking to the operator.

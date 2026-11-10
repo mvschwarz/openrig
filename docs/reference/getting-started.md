@@ -192,9 +192,12 @@ npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/r
 
 # Codex
 npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent codex
+
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent pi
 ```
 
-These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
+The Claude Code and Codex lines are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 
 **One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
