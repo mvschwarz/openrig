@@ -154,7 +154,8 @@ rig context recap-write --file <draft.md>
 
 - Without `--rig` and `--seat` it writes the calling seat's recap (from `OPENRIG_SESSION_NAME`).
   For another seat, `--seat` is its folder under `rigs/<rig>/seats/`, the part of its session
-  name before `@`. A logical id (`pod.member`) maps to that folder.
+  name before `@`. A seat's recorded logical id or member id maps to its folder when the daemon
+  can check it against the rig's seats.
 - The command reads `topology.root` and doesn't need the daemon.
 - Each write moves the previous recap into the seat's `recap-superseded/` chain,
   which later rebuilds list as history. Write through this command, not a file tool, so

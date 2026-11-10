@@ -35,6 +35,13 @@ function lifecycleDeps(port: number): LifecycleDeps {
 
 const daemonDeps = (port: number): StatusDeps => ({ lifecycleDeps: lifecycleDeps(port), clientFactory: (url) => new DaemonClient(url) });
 
+/** No daemon state file and nothing answering: the CLI reads the daemon as stopped. */
+const noDaemon: StatusDeps = {
+  lifecycleDeps: { ...lifecycleDeps(0), readFile: vi.fn(() => null), exists: vi.fn(() => false), isProcessAlive: vi.fn(() => false),
+    fetch: vi.fn(async () => { throw new Error("connect ECONNREFUSED"); }) },
+  clientFactory: () => { throw new Error("no daemon in this test"); },
+};
+
 async function runRecapWrite(argv: string[], deps?: StatusDeps): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
   const errLogs: string[] = [];
@@ -48,7 +55,8 @@ async function runRecapWrite(argv: string[], deps?: StatusDeps): Promise<{ logs:
   try {
     const program = new Command();
     program.exitOverride();
-    program.addCommand(contextCommand(deps));
+    // No test reaches a real daemon: without deps, the daemon reads as stopped.
+    program.addCommand(contextCommand(deps ?? noDaemon));
     await program.parseAsync(["node", "rig", "context", ...argv]);
   } catch { /* commander exitOverride */ } finally {
     exitCode = process.exitCode;
@@ -232,7 +240,9 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
       const res = await runRecapWrite(["recap-write", "--rig", "r1", "--seat", "s1", "--file", recap], daemonDeps(port));
 
       expect(res.exitCode ?? 0).toBe(0);
-      expect(received).toEqual([{ method: "POST", url: "/api/context-packs/seat-recap",
+      // The named seat is looked up first (reads only); the one write is the daemon's recap write.
+      expect(received.filter((request) => request.method !== "POST").every((request) => request.method === "GET")).toBe(true);
+      expect(received.filter((request) => request.method === "POST")).toEqual([{ method: "POST", url: "/api/context-packs/seat-recap",
         body: { rig: "r1", seat: "s1", content: "## Recent Decisions\nchose the daemon because the seat can't write here" } }]);
       expect(res.logs.join("\n")).toBe(`Recap written: /daemon/topology/rigs/r1/seats/s1/RECAP.md (1 superseded predecessor retained), by the daemon at http://127.0.0.1:${port}`);
       expect(res.errLogs.join("\n")).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
@@ -301,8 +311,22 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
 });
 
 // Every recap reader uses seats/<the part of the session name before @>, so a recap written under a member id or a
-// logical id was left where nothing reads it (Web Studio had lead, editorial.lead and editorial-lead for one seat).
+// logical id was left where nothing reads it (one seat had lead, editorial.lead and editorial-lead). A name maps only by
+// the rig's recorded seats, never by its spelling: a suffix or a dot isn't identity.
 describe("rig context recap-write — the seat folder every reader uses", () => {
+  /** The rig's seats as the daemon records them (pod.member logical ids; custom.name is a self-attached session). */
+  const recorded = [
+    { logicalId: "editorial.lead", podNamespace: "editorial", canonicalSessionName: "editorial-lead@web-studio" },
+    { logicalId: "ux.designer", podNamespace: "ux", canonicalSessionName: "ux-designer@web-studio" },
+    { logicalId: "research.dev-qa", podNamespace: "research", canonicalSessionName: "research-dev-qa@web-studio" },
+    { logicalId: "dev.qa", podNamespace: "dev", canonicalSessionName: "dev-qa@web-studio" },
+    { logicalId: "custom", podNamespace: null, canonicalSessionName: "custom.name@web-studio" },
+  ];
+  const withSeats: StatusDeps = { lifecycleDeps: lifecycleDeps(4242), clientFactory: (() => ({
+    get: async (path: string) => path === "/api/ps" ? { status: 200, data: [{ rigId: "rig-1", name: "web-studio" }] }
+      : path === "/api/rigs/rig-1/nodes" ? { status: 200, data: recorded } : { status: 404, data: {} },
+  })) as never };
+
   async function inTopology(session: string | undefined, run: (tmp: string, seats: string, recap: string) => Promise<void>) {
     const tmp = mkdtempSync(join(tmpdir(), "recap-seat-"));
     const saved = { root: process.env["OPENRIG_TOPOLOGY_ROOT"], session: process.env["OPENRIG_SESSION_NAME"], legacy: process.env["RIGGED_SESSION_NAME"] };
@@ -311,8 +335,7 @@ describe("rig context recap-write — the seat folder every reader uses", () => 
       if (session === undefined) delete process.env["OPENRIG_SESSION_NAME"]; else process.env["OPENRIG_SESSION_NAME"] = session;
       delete process.env["RIGGED_SESSION_NAME"];
       const seats = join(tmp, "topology", "rigs", "web-studio", "seats");
-      mkdirSync(join(seats, "editorial-lead"), { recursive: true });
-      mkdirSync(join(seats, "ux-designer"), { recursive: true });
+      for (const folder of ["editorial-lead", "ux-designer", "research-dev-qa", "dev-qa", "custom.name"]) mkdirSync(join(seats, folder), { recursive: true });
       const recap = join(tmp, "recap.md");
       writeFileSync(recap, "## Recent Decisions\nchose X because Y");
       await run(tmp, seats, recap);
@@ -323,38 +346,68 @@ describe("rig context recap-write — the seat folder every reader uses", () => 
       rmSync(tmp, { recursive: true, force: true });
     }
   }
+  const folders = (seats: string) => readdirSync(seats).sort();
+  const standard = ["custom.name", "dev-qa", "editorial-lead", "research-dev-qa", "ux-designer"];
 
   it.each([
     { name: "no --rig or --seat: this seat", args: [] as string[], note: undefined },
-    { name: "this seat's member id", args: ["--seat", "lead"], note: "--seat lead names this seat (editorial-lead@web-studio), so the recap goes to seats/editorial-lead" },
-    { name: "this seat's logical id", args: ["--seat", "editorial.lead"], note: "--seat editorial.lead names this seat" },
+    { name: "this seat's member id", args: ["--seat", "lead"], note: "--seat lead is the member id of editorial-lead@web-studio, so the recap goes to seats/editorial-lead" },
+    { name: "this seat's logical id", args: ["--seat", "editorial.lead"], note: "--seat editorial.lead is the logical id of editorial-lead@web-studio" },
     { name: "the folder itself", args: ["--rig", "web-studio", "--seat", "editorial-lead"], note: undefined },
   ])("a seat writing its own recap lands in seats/editorial-lead ($name)", async ({ args, note }) => {
     await inTopology("editorial-lead@web-studio", async (tmp, seats, recap) => {
-      const res = await runRecapWrite(["recap-write", ...args, "--file", recap]);
+      const res = await runRecapWrite(["recap-write", ...args, "--file", recap], withSeats);
       expect(res.exitCode ?? 0).toBe(0);
       expect(readFileSync(join(seats, "editorial-lead", "RECAP.md"), "utf-8")).toContain("chose X because Y");
       // The handover's own reader finds it, from the session name alone.
       expect(resolveAuthoredRecapPointer("editorial-lead@web-studio", join(tmp, "topology"))).toMatchObject({ address: "seat:RECAP.md" });
-      expect(readdirSync(seats).sort()).toEqual(["editorial-lead", "ux-designer"]);
+      expect(folders(seats)).toEqual(standard);
       if (note) expect(res.errLogs.join("\n")).toContain(note);
       else expect(res.errLogs.join("\n")).not.toContain("Note:");
     });
   });
 
-  it("another seat's logical id maps to its folder; a name that matches no folder still writes, and says where recaps are read", async () => {
-    await inTopology("editorial-lead@web-studio", async (_tmp, seats, recap) => {
-      const logical = await runRecapWrite(["recap-write", "--seat", "ux.designer", "--file", recap]);
-      expect(logical.exitCode ?? 0).toBe(0);
-      expect(existsSync(join(seats, "ux-designer", "RECAP.md"))).toBe(true);
-      expect(existsSync(join(seats, "ux.designer"))).toBe(false);
-      expect(logical.errLogs.join("\n")).toContain("--seat ux.designer is a logical id, so the recap goes to seats/ux-designer");
+  it("another seat's exact folder is never mistaken for the caller, even when the caller's folder ends with it", async () => {
+    await inTopology("research-dev-qa@web-studio", async (_tmp, seats, recap) => {
+      const res = await runRecapWrite(["recap-write", "--seat", "dev-qa", "--file", recap], withSeats);
+      expect(res.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "dev-qa", "RECAP.md"))).toBe(true);
+      expect(existsSync(join(seats, "research-dev-qa", "RECAP.md"))).toBe(false);
+      expect(res.errLogs.join("\n")).not.toContain("Note:");
+    });
+  });
 
-      const bare = await runRecapWrite(["recap-write", "--seat", "designer", "--file", recap]);
-      expect(bare.exitCode ?? 0).toBe(0);
-      expect(existsSync(join(seats, "designer", "RECAP.md"))).toBe(true);
-      expect(bare.errLogs.join("\n")).toContain("seats/designer didn't exist in rig web-studio, so this write created it.");
-      expect(bare.errLogs.join("\n")).toContain("seats/ux-designer exists.");
+  it.each(["custom.name@web-studio", "editorial-lead@web-studio"])("a dotted seat folder is used as given, not rewritten to a hyphen (caller %s)", async (session) => {
+    await inTopology(session, async (_tmp, seats, recap) => {
+      const res = await runRecapWrite(["recap-write", "--seat", "custom.name", "--file", recap], withSeats);
+      expect(res.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "custom.name", "RECAP.md"))).toBe(true);
+      expect(folders(seats)).toEqual(standard);
+    });
+  });
+
+  it("another seat's recorded logical or member id maps to its folder; a name no seat has still writes, and says so", async () => {
+    await inTopology("editorial-lead@web-studio", async (_tmp, seats, recap) => {
+      const logical = await runRecapWrite(["recap-write", "--seat", "ux.designer", "--file", recap], withSeats);
+      expect(existsSync(join(seats, "ux-designer", "RECAP.md"))).toBe(true);
+      expect(logical.errLogs.join("\n")).toContain("--seat ux.designer is the logical id of ux-designer@web-studio");
+      const member = await runRecapWrite(["recap-write", "--seat", "designer", "--file", recap], withSeats);
+      expect(member.errLogs.join("\n")).toContain("--seat designer is the member id of ux-designer@web-studio");
+      expect(folders(seats)).toEqual(standard);
+
+      const unknown = await runRecapWrite(["recap-write", "--seat", "nobody", "--file", recap], withSeats);
+      expect(unknown.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "nobody", "RECAP.md"))).toBe(true);
+      expect(unknown.errLogs.join("\n")).toContain("seats/nobody didn't exist in rig web-studio, so this write created it.");
+    });
+  });
+
+  it("when the daemon can't be asked, a name is written as given and the note says it wasn't checked", async () => {
+    await inTopology("editorial-lead@web-studio", async (_tmp, seats, recap) => {
+      const res = await runRecapWrite(["recap-write", "--seat", "lead", "--file", recap]);
+      expect(res.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "lead", "RECAP.md"))).toBe(true);
+      expect(res.errLogs.join("\n")).toContain("the name couldn't be checked against the rig's seats");
     });
   });
 
@@ -366,7 +419,7 @@ describe("rig context recap-write — the seat folder every reader uses", () => 
       const noSeat = await runRecapWrite(["recap-write", "--rig", "web-studio", "--file", recap]);
       expect(noSeat.exitCode).toBe(1);
       expect(noSeat.errLogs.join("\n")).toContain("Name the seat with --seat");
-      expect(readdirSync(seats).sort()).toEqual(["editorial-lead", "ux-designer"]);
+      expect(folders(seats)).toEqual(standard);
     });
   });
 });

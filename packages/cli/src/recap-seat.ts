@@ -1,14 +1,18 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parseSessionName } from "./session-name.js";
 
-/** Where `rig context recap-write` writes a recap: `rigs/<rig>/seats/<seat>`, where `<seat>` is the folder every recap
- *  reader uses, the part of the seat's session name before `@`. Without --rig or --seat it's the calling seat
- *  (OPENRIG_SESSION_NAME). The calling seat's own member id or logical id, and any logical id (`pod.member`; pod and
- *  member ids have no dots), map to that folder, so a recap isn't left under a name nothing reads. Any other name is
- *  written as given. The notes say what was mapped, or that a new folder may not be the one OpenRig reads. */
-export function resolveRecapSeat(opts: { rig?: string; seat?: string; sessionName?: string; topologyRoot: string }):
-  { rig: string; seat: string; notes: string[] } | { error: string } {
+/** One of the rig's seats as the daemon records it: its logical id, its member id within its pod, and its folder, the
+ *  part of its session name before `@`, which every recap reader uses. */
+export interface RigSeat { logicalId: string; member: string; folder: string }
+
+/** Where `rig context recap-write` writes a recap: `rigs/<rig>/seats/<seat>`. Without --rig or --seat it's the calling
+ *  seat's folder (OPENRIG_SESSION_NAME). A name that is a seat's folder, or the caller's own, is used as given. Another
+ *  name maps to a seat's folder only when it is exactly one seat's recorded logical id or member id in the rig's seats,
+ *  so neither a suffix nor a dot is taken as identity. When the seats can't be read, or nothing matches, the name is
+ *  written as given and a note says what was and wasn't checked. Nothing is refused. */
+export function resolveRecapSeat(opts: { rig?: string; seat?: string; sessionName?: string; topologyRoot: string;
+  seats?: RigSeat[] | { unavailable: string } }): { rig: string; seat: string; notes: string[] } | { error: string } {
   const own = opts.sessionName ? parseSessionName(opts.sessionName) : undefined;
   const ownRig = own?.kind === "canonical" ? own.rig : undefined;
   const rig = opts.rig ?? ownRig;
@@ -19,17 +23,20 @@ export function resolveRecapSeat(opts: { rig?: string; seat?: string; sessionNam
     return { rig, seat: self, notes: [] };
   }
   const given = opts.seat;
-  const logical = /^[^.]+\.[^.]+$/.test(given) ? given.replace(".", "-") : undefined;
-  if (self && given !== self && (logical === self || self.endsWith(`-${given}`))) {
-    return { rig, seat: self, notes: [`--seat ${given} names this seat (${opts.sessionName}), so the recap goes to seats/${self}, the folder OpenRig reads its recap from.`] };
+  if (given === self) return { rig, seat: given, notes: [] };
+  const fresh = !existsSync(join(opts.topologyRoot, "rigs", rig, "seats", given));
+  const where = "OpenRig reads a seat's recap from the folder named by the part of its session name before @.";
+  if (!opts.seats || "unavailable" in opts.seats) {
+    const why = opts.seats && "unavailable" in opts.seats ? ` (${opts.seats.unavailable})` : "";
+    return { rig, seat: given, notes: fresh ? [`seats/${given} didn't exist in rig ${rig}, so this write created it, and the name couldn't be checked against the rig's seats${why}. ${where}`] : [] };
   }
-  if (logical) {
-    return { rig, seat: logical, notes: [`--seat ${given} is a logical id, so the recap goes to seats/${logical}, the folder OpenRig reads that seat's recap from (the part of its session name before @).`] };
+  if (opts.seats.some((seat) => seat.folder === given)) return { rig, seat: given, notes: [] };
+  const matches = opts.seats.filter((seat) => seat.logicalId === given || seat.member === given);
+  if (matches.length === 1) {
+    const [seat] = matches;
+    const kind = seat!.logicalId === given ? "logical id" : "member id";
+    return { rig, seat: seat!.folder, notes: [`--seat ${given} is the ${kind} of ${seat!.folder}@${rig}, so the recap goes to seats/${seat!.folder}, the folder OpenRig reads its recap from.`] };
   }
-  const seatsDir = join(opts.topologyRoot, "rigs", rig, "seats");
-  if (existsSync(join(seatsDir, given))) return { rig, seat: given, notes: [] };
-  let likely: string[] = [];
-  try { likely = readdirSync(seatsDir).filter((name) => name.endsWith(`-${given}`)); } catch { /* no seats folder yet */ }
-  const hint = likely.length ? ` ${likely.map((name) => `seats/${name}`).join(", ")} ${likely.length === 1 ? "exists" : "exist"}.` : "";
-  return { rig, seat: given, notes: [`seats/${given} didn't exist in rig ${rig}, so this write created it. OpenRig reads a seat's recap from the folder named by the part of its session name before @.${hint}`] };
+  const named = matches.length ? ` It's the logical or member id of ${matches.map((seat) => `seats/${seat.folder}`).join(" and ")}, so it wasn't mapped; name one of them.` : "";
+  return { rig, seat: given, notes: [`seats/${given} ${fresh ? `didn't exist in rig ${rig}, so this write created it` : `isn't one of rig ${rig}'s seat folders`}. ${where}${named}`] };
 }
