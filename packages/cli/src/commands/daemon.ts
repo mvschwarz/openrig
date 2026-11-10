@@ -267,7 +267,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         // need a kernel-ready signal opt in here.
         if (opts.waitForKernel) {
           const { waitForKernelReady, skippedKernelMessage } = await import("../daemon-lifecycle.js");
-          const { kernelSeatsNeedingAttention } = await import("../seat-attention.js");
+          const { attentionLines, checkKernelAttention } = await import("../seat-attention.js");
           const { DaemonClient } = await import("../client.js");
           const timeoutMs = opts.waitForKernelMs && /^\d+$/.test(opts.waitForKernelMs)
             ? parseInt(opts.waitForKernelMs, 10)
@@ -275,9 +275,8 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           const baseUrl = `http://${formatDaemonHostForUrl(state.host ?? "127.0.0.1")}:${state.port}`;
           const result = await waitForKernelReady(baseUrl, timeoutMs);
           // A kernel seat held at a startup prompt or sign-in keeps the kernel short of ready: name it and why.
-          const held = result.kernelState !== "ready" && result.kernelState !== "skipped"
-            ? await kernelSeatsNeedingAttention(new DaemonClient(baseUrl)) : [];
-          const heldLines = held.map(({ seat, reason }) => `  ${seat} is waiting on a person: ${reason}. Read it with: rig capture ${seat}`);
+          const heldLines = result.kernelState !== "ready" && result.kernelState !== "skipped"
+            ? attentionLines(await checkKernelAttention(new DaemonClient(baseUrl)), "pane").map(line => `  ${line}`) : [];
           if (result.ok) {
             console.log(`Kernel ${result.kernelState}; variant=${result.variant ?? "(none)"}`);
             for (const line of heldLines) console.log(line);

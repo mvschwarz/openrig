@@ -11,7 +11,7 @@ import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-att
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
 
-interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
+interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; host?: string }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
@@ -540,7 +540,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
     }
-    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+    const remote = composed.opened.flatMap(pane => pane.host ? [{ seat: pane.seat, host: pane.host }] : []);
+    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), ...(remote.length ? { remote } : {}), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {
     if (windowAttempted && /-1743\b/.test(`${(err as Error).message} ${(err as { stderr?: string }).stderr ?? ""}`)) {
       windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");

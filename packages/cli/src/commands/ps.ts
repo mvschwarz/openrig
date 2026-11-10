@@ -716,11 +716,14 @@ function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
-/** Why a seat that needs attention does, in full: the reason the REASON column shortens. */
+/** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
+ *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    ?? n.agentActivity?.reason ?? `startup ${n.startupStatus ?? "unknown"}`;
+    ?? (n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null : null)
+    ?? (n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null)
+    ?? "reason unavailable";
 }
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {

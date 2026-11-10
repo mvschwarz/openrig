@@ -24,7 +24,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
-import { seatsNeedingAttention } from "../seat-attention.js";
+import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -74,6 +74,8 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
+  /** Opened seats on another host, with that host. */
+  remote?: Array<{ seat: string; host: string }>;
   absent: { seat: string; host: string | null; reason: string }[];
   degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
   pages: number;
@@ -136,13 +138,16 @@ function humanOpen(r: OpenViewResult): string {
   return lines.join("\n");
 }
 
-/** Names the opened seats that are waiting on a person (a startup prompt, a sign-in), so a held seat doesn't read as
- *  an open that failed for no reason. Only seats the result names are checked. */
+/** Names the opened seats that need attention (a startup prompt, a sign-in, a failed start), so a held seat doesn't
+ *  read as an open that failed for no reason. Local seats are checked on this daemon; a seat on another host is
+ *  reported unchecked, never matched to a local seat of the same name. */
 async function withHeldSeats(client: DaemonClient, r: OpenViewResult): Promise<OpenViewResult> {
-  const held = await seatsNeedingAttention(client, [...new Set([...r.opened, ...r.degraded.map(d => d.seat), ...(r.following?.tiles.map(t => t.seat) ?? [])])]);
-  if (held.length === 0) return r;
-  return { ...r, notes: [...(r.notes ?? []), ...held.map(({ seat, reason }) =>
-    `${seat} is waiting on a person: ${reason}. Answer it in its tile, or read it with: rig capture ${seat}`)] };
+  const remote = new Map((r.remote ?? []).map(({ seat, host }) => [seat, host]));
+  const seats = [...new Set([...r.opened, ...(r.following?.tiles.map(t => t.seat) ?? [])])];
+  const check = await checkSeatAttention(client, seats.filter(seat => !remote.has(seat)));
+  for (const [seat, host] of remote) check.unknown.push({ seat, why: `it's on host ${host}, which this daemon doesn't check` });
+  const lines = attentionLines(check, "tile");
+  return lines.length ? { ...r, notes: [...(r.notes ?? []), ...lines] } : r;
 }
 
 /** A successful existing-workspace selection also needs no new panes. */

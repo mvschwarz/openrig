@@ -259,7 +259,7 @@ describe("rig status", () => {
       }
     });
 
-    it("names a kernel seat waiting on a person, and why, under a partial_ready kernel (D#52)", async () => {
+    it("names a kernel seat that needs attention, and why, under a partial_ready kernel (D#52)", async () => {
       const held = createDaemonServer([], { available: false }, {
         code: 200,
         body: { kernel_state: "partial_ready", agents: [
@@ -288,13 +288,13 @@ describe("rig status", () => {
         human.addCommand(statusCommand(deps()));
         const output = (await captureLogs(() => human.parseAsync(["node", "rig", "status"]))).join("\n");
         expect(output).toContain("Kernel: partial_ready");
-        expect(output).toContain("  advisor-lead@kernel is waiting on a person: Startup requires attention: Login expired · Please run /login. Read it with: rig capture advisor-lead@kernel");
-        expect(output).not.toContain("operator-agent@kernel is waiting");
+        expect(output).toContain("  advisor-lead@kernel needs attention: Startup requires attention: Login expired · Please run /login. Look at it with: rig capture advisor-lead@kernel");
+        expect(output).not.toContain("operator-agent@kernel needs attention");
         const json = new Command();
         json.addCommand(statusCommand(deps()));
         const parsed = JSON.parse((await captureLogs(() => json.parseAsync(["node", "rig", "status", "--json"]))).join("\n"));
-        expect(parsed.kernel.waitingOnPerson).toEqual([
-          { seat: "advisor-lead@kernel", reason: "Startup requires attention: Login expired · Please run /login" }]);
+        expect(parsed.kernel.attention).toEqual({ unknown: [], attention: [
+          { seat: "advisor-lead@kernel", reason: "Startup requires attention: Login expired · Please run /login", waitingOnPerson: false }] });
       } finally {
         await held.close();
       }

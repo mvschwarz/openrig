@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { waitForKernelReady, type KernelReadyResult } from "../src/daemon-lifecycle.js";
 import { daemonCommand } from "../src/commands/daemon.js";
-import { kernelSeatsNeedingAttention } from "../src/seat-attention.js";
+import { checkKernelAttention } from "../src/seat-attention.js";
 
 vi.mock("../src/daemon-lifecycle.js", async (original) => {
   const actual = await original<typeof import("../src/daemon-lifecycle.js")>();
@@ -16,7 +16,10 @@ vi.mock("../src/daemon-lifecycle.js", async (original) => {
   };
 });
 // The held-seat read goes to the daemon this start reports; never a real one from a test.
-vi.mock("../src/seat-attention.js", () => ({ kernelSeatsNeedingAttention: vi.fn(async () => []) }));
+vi.mock("../src/seat-attention.js", async (original) => ({
+  ...await original<typeof import("../src/seat-attention.js")>(),
+  checkKernelAttention: vi.fn(async () => ({ attention: [], unknown: [] })),
+}));
 vi.mock("../src/system-preflight.js", () => ({ SystemPreflight: class { run = async () => ({ ready: true, checks: [] }); }, quietPreflightExec: async () => "" }));
 let home: string;
 let errors: string[];
@@ -26,7 +29,7 @@ beforeEach(() => {
   vi.stubEnv("OPENRIG_HOME", home);
   errors = [];
   logs = [];
-  vi.mocked(kernelSeatsNeedingAttention).mockResolvedValue([]);
+  vi.mocked(checkKernelAttention).mockResolvedValue({ attention: [], unknown: [] });
   vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.join(" ")); });
   vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errors.push(args.join(" ")); });
 });
@@ -64,16 +67,18 @@ it("a kernel still booting at the deadline keeps the timeout and its fix", async
   expect(process.exitCode).toBe(1);
 });
 
-it("a partial_ready kernel names the seat waiting on a person and why (D#52)", async () => {
-  vi.mocked(kernelSeatsNeedingAttention).mockResolvedValue([
-    { seat: "advisor-lead@kernel", reason: "Startup requires attention: Login expired · Please run /login" }]);
+it("a partial_ready kernel names the seat that needs attention and why, and any it couldn't check (D#52)", async () => {
+  vi.mocked(checkKernelAttention).mockResolvedValue({
+    attention: [{ seat: "advisor-lead@kernel", reason: "Startup requires attention: Login expired · Please run /login", waitingOnPerson: false }],
+    unknown: [{ seat: "queue-worker@kernel", why: "not in kernel's seats on this daemon" }] });
   await startWaiting({ ok: true, kernelState: "partial_ready", variant: "claude-only" });
   expect(logs).toContain("Kernel partial_ready; variant=claude-only");
-  expect(logs).toContain("  advisor-lead@kernel is waiting on a person: Startup requires attention: Login expired · Please run /login. Read it with: rig capture advisor-lead@kernel");
+  expect(logs).toContain("  advisor-lead@kernel needs attention: Startup requires attention: Login expired · Please run /login. Look at it with: rig capture advisor-lead@kernel");
+  expect(logs).toContain("  Couldn't check whether queue-worker@kernel needs attention: not in kernel's seats on this daemon.");
   expect(process.exitCode).toBeUndefined();
 });
 
 it("a ready kernel asks nothing more of the daemon", async () => {
   await startWaiting({ ok: true, kernelState: "ready", variant: "claude-only" });
-  expect(kernelSeatsNeedingAttention).not.toHaveBeenCalled();
+  expect(checkKernelAttention).not.toHaveBeenCalled();
 });

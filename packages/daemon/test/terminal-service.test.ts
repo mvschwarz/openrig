@@ -93,6 +93,9 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
       const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
       expect(result.ok).toBe(true);
       expect(result.code).toBeUndefined();
+      // The remote tile keeps its host, so a consumer never mistakes it for a local seat of the same name.
+      expect(herdr.lastView!.opened[0]!.host).toBe("edge");
+      expect(result.remote).toEqual([{ seat: "worker@edge", host: "edge" }]);
       const command = herdr.lastView!.opened[0]!.paneCommand;
       if (mode === "isolated") {
         expect(command).toBe("ssh -t 'fixture' 'env OPENRIG_HOST_SELECTED=local rig terminal attach --read-only -- '\"'\"'worker@edge'\"'\"''");

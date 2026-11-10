@@ -309,6 +309,15 @@ describe("desktop terminal view", () => {
     expect(f.deps.launch).not.toHaveBeenCalled();
   });
 
+  it("names an opened tile's other host, so its seat isn't mistaken for a local one of the same name", async () => {
+    const f = fixture({ herdr: false });
+    const tile = composeView("kernel", [{ seat: "advisor", label: "advisor", tmuxSession: "advisor", host: "edge", readOnly: false, alive: true }],
+      { resolveHost: id => ({ id, transport: "ssh", target: "fixture" }) as never }).opened[0]!;
+    Object.assign(f.preview.composed.opened[1]!, tile);
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: true, opened: ["tui", "advisor", "operator"], remote: [{ seat: "advisor", host: "edge" }] });
+  });
+
   it("creates only a new tmux viewer with the composed three-column ordering", async () => {
     const f = fixture({ herdr: false });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
