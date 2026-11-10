@@ -164,9 +164,17 @@ function forkFixture(opts: { runtime: string; agentRunner: number; token?: { typ
   db.prepare(`INSERT INTO sessions (id, node_id, session_name, agent_app, agent_runner, resume_type, resume_token, resume_provenance)
     VALUES (1, 'fork-node', 'worker@fork-test', ?, ?, ?, ?, ?)`)
     .run(opts.runtime, opts.agentRunner, opts.token?.type ?? null, opts.token?.value ?? null, opts.token?.provenance ?? null);
-  const eventBus = { emit(event: RigEvent) { return event; } } as EventBus;
+  // Activity is read back from the events table, and only with a resolvable current generation.
+  const insertEvent = db.prepare("INSERT INTO events (node_id, type, payload) VALUES (?, ?, ?)");
+  const eventBus = { emit(event: RigEvent) {
+    const e = event as RigEvent & { nodeId?: string; sessionName?: string; activity?: unknown };
+    insertEvent.run(e.nodeId ?? null, event.type, JSON.stringify(e.activity ? { sessionName: e.sessionName, activity: e.activity } : event));
+    return event;
+  } } as EventBus;
   const registry = new SessionRegistry(db);
-  const store = new AgentActivityStore({ db, eventBus });
+  const store = new AgentActivityStore({ db, eventBus,
+    resolveOccupantGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (nodeId, generation) => registry.isOccupantGenerationRegistered(nodeId, generation) });
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("agentActivityStore" as never, store as never);
@@ -230,6 +238,7 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     const own = forkFixture({ runtime: "dsh", agentRunner: 1 });
     await own.post({ runtime: "dsh", nodeId: "fork-node", sessionName: "worker@fork-test", generation: "fork-current",
       hookEvent: "Notification", subtype: "runtime_error", occurredAt: "2026-11-09T16:20:00.000Z" });
+    expect(own.latest()).toMatchObject({ rawSubtype: "runtime_error" });
     expect(own.latest()?.state).not.toBe("needs_input");
   });
 });

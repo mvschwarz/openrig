@@ -391,7 +391,7 @@ describe("PiCommunityRuntimeAdapter", () => {
       const envWrap = vi.fn(async (_session: string, cmd: string, _ctx: unknown) => `/usr/bin/wrapped ${cmd}`);
       const piAdapterWithEnv = new PiRuntimeAdapter({
         ...f.piAdapter.getCommunityDeps(),
-        seatLaunchEnvironment: { command: envWrap } as any,
+        seatLaunchEnvironment: { command: envWrap, accountHome: () => undefined } as any,
       });
       const adapter = PiCommunityRuntimeAdapter.fromPiAdapter(piAdapterWithEnv, "omo", preset);
       const sessionName = "omo-seat@rig";
