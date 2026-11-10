@@ -24,10 +24,8 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
   const paste = async (text: string) => { await tmux(view, "set-buffer", "-b", "p", text); await tmux(view, "paste-buffer", "-p", "-b", "p", "-t", "v1"); };
   const until = async (check: () => Promise<boolean>, ms = 8_000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await check()) return true; await new Promise((r) => setTimeout(r, 100)); } return false; };
   const gateAt = (path: string, seconds = 3_600) => ({ path, until: Math.floor(Date.now() / 1000) + seconds, expired: "WINDOW-PASSED: reopen it with rig terminal open rig:demo" });
-  // Which tile runs in the viewer, and whether it's ready: a process under the viewer's pane whose own argv starts with a
-  // tile script (the wrapper's argv carries both scripts as arguments, so it never matches). The read-only tile is ready
-  // once it loops in its view (a sleep child, after its stty -echo); the writable one once it waits on its input (a dd
-  // child, after raw mode and paste framing are on).
+  // The read-only tile is ready once its own script loops in its view (a sleep child, after stty -echo).
+  // The writable tile is ready once a native tmux client under this viewer is attached to the seat server.
   const tileReady = async (kind: "read-only" | "writable") => {
     const pid = (await tmux(view, "display-message", "-p", "-t", "v1", "#{pane_pid}")).stdout.trim();
     const procs = (await run("ps", ["-e", "-ww", "-o", "pid=,ppid=,args="])).stdout.split("\n")
@@ -35,10 +33,12 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
       .map(([, p, pp, args]) => ({ pid: p!, ppid: pp!, args: args! }));
     const under = new Set([pid]);
     for (let grew = true; grew;) { grew = false; for (const p of procs) if (under.has(p.ppid) && !under.has(p.pid)) { under.add(p.pid); grew = true; } }
-    const marker = kind === "writable" ? "while use" : "stty -echo -isig -ixon";
-    const tile = procs.find((p) => under.has(p.pid) && p.args.startsWith("/bin/sh -c umask 077") && p.args.includes(marker));
-    const waits = kind === "writable" ? /^dd / : /^sleep /;
-    return !!tile && procs.some((p) => p.ppid === tile.pid && waits.test(p.args));
+    if (kind === "writable") {
+      const attached = (await tmux(seat, "list-clients", "-F", "#{client_pid}")).stdout.trim().split("\n");
+      return attached.some((clientPid) => under.has(clientPid));
+    }
+    const tile = procs.find((p) => under.has(p.pid) && p.args.startsWith("/bin/sh -c umask 077") && p.args.includes("stty -echo -isig -ixon"));
+    return !!tile && procs.some((p) => p.ppid === tile.pid && /^sleep /.test(p.args));
   };
   const start = async (argv: string[]) => {
     await tmux(view, "-f", "/dev/null", "new-session", "-d", "-s", "v1", "-x", "80", "-y", "20", ...argv);
@@ -83,8 +83,7 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
     await paste("AFTER-PASTE");
     expect(await until(async () => (await shown()).includes("AFTER-PASTE"))).toBe(true);
     expect(await shown()).not.toMatch(/BEFORE/); // dropped, never delivered late
-    // The viewer's own writable tile attaches. The tile puts a paste into the pane first and attaches after, so the
-    // client can show up a moment after the text.
+    // The viewer's own native writable client stays attached.
     expect(await until(async () => (await clients()).length === 1)).toBe(true);
   }, 30_000);
 
