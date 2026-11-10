@@ -33,7 +33,14 @@ console.error("ABI native detail");
 process.exitCode = Number(process.env.ABI_EXIT || 0);
 `);
   const write = (file, body) => fs.writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  write(path.join(bin, "node"), 'printf "node:%s\\n" "$*" >>"$TEST_LOG"; if [ "$1" = --version ]; then printf "v22.22.1\\n"; else exec "$TEST_NODE" "$@"; fi');
+  write(path.join(bin, "node"), `
+if [ "$1" = -e ]; then
+  printf 'node:canonical-paths\\n' >>"$TEST_LOG"
+  if [ -n "$REALPATH_EXIT" ]; then exit "$REALPATH_EXIT"; fi
+else
+  printf 'node:%s\\n' "$*" >>"$TEST_LOG"
+fi
+if [ "$1" = --version ]; then printf 'v22.22.1\\n'; else exec "$TEST_NODE" "$@"; fi`);
   write(path.join(bin, "npm"), `
 printf 'npm:%s\n' "$*" >>"$TEST_LOG"
 case "$*" in
@@ -114,7 +121,7 @@ test("installed rig wins over stale PATH and a prefix containing spaces works", 
   const f = fixture(t);
   const r = f.run();
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup"]);
+  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup", "node:canonical-paths"]);
   assert.match(r.stdout, /choose providers, then rig up/);
   assert.match(r.stderr, /setup native error/);
 });
@@ -257,4 +264,30 @@ test("an incomplete setup still gives the PATH fix and preserves its exit", t =>
   assert.match(r.stderr, /INSTALLED, SETUP NOT COMPLETE/);
   assert.match(r.stdout, /PATH needs attention/);
   assert.ok(!r.stdout.includes("Follow the next steps"));
+});
+
+for (const kind of ["directory", "executable"]) test(`a symlinked ${kind} on PATH resolves to the installed rig without a warning`, t => {
+  const f = fixture(t);
+  const alias = path.join(f.dir, "current link");
+  if (kind === "directory") fs.symlinkSync(path.join(f.prefix, "bin"), alias, "dir");
+  else {
+    fs.mkdirSync(alias);
+    fs.symlinkSync(path.join(f.prefix, "bin", "rig"), path.join(alias, "rig"));
+  }
+  f.env.PATH = `${alias}:${f.env.PATH}`;
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /PATH check: installed rig is available/);
+  assert.ok(!r.stdout.includes("PATH needs attention"), r.stdout);
+});
+
+for (const samePath of [true, false]) test(`failed canonical lookup keeps the string comparison (same path: ${samePath})`, t => {
+  const f = fixture(t, { REALPATH_EXIT: "47" });
+  if (samePath) f.env.PATH = `${f.prefix}/bin:${f.env.PATH}`;
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.includes("PATH needs attention"), !samePath);
+  assert.equal(r.stdout.includes("PATH check: installed rig is available"), samePath);
+  assert.equal(f.calls().includes("node:canonical-paths"), !samePath);
+  assert.ok(!r.stderr.includes("canonical"));
 });

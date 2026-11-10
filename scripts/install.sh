@@ -24,7 +24,13 @@ install_step() {
 # Check the incoming PATH, not the prefix added for this installer's children.
 install_path_hint() {
   install_visible=$(PATH="$install_incoming_path" command -v rig 2>/dev/null) || install_visible=
-  if [ "$install_visible" = "$install_rig" ]; then
+  if [ "$install_visible" = "$install_rig" ] ||
+    { [ -n "$install_visible" ] && node -e '
+      try {
+        const fs = require("node:fs");
+        process.exit(fs.realpathSync(process.argv[1]) === fs.realpathSync(process.argv[2]) ? 0 : 1);
+      } catch { process.exit(1); }
+    ' "$install_visible" "$install_rig" 2>/dev/null; }; then
     printf '\nPATH check: installed rig is available at %s\n' "$install_visible"
     return 0
   fi
