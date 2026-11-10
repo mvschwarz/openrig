@@ -73,13 +73,17 @@ async function run(): Promise<void> {
   });
   const view = createViewState({ instanceId, getSnapshot: () => snapshot, timeZoneWarning: "Reading configured timezone…" });
   let startupHeaders: () => Record<string, string> = () => ({});
+  let actionHeaders: () => Record<string, string> = () => ({});
   if (cliEntry) {
     try {
       const cli = await import(pathToFileURL(join(dirname(cliEntry), "client.js")).href);
       startupHeaders = cli.terminalAuthHeaders;
+      // Answering an ask is operator-gated: the daemon's operator bearer when one is configured, else the terminal
+      // credential as before (a CLI without the helper keeps that).
+      actionHeaders = typeof cli.operatorAuthHeaders === "function" ? () => cli.operatorAuthHeaders() : cli.terminalAuthHeaders;
     } catch { /* the startup read will expose an unavailable/unauthorized prerequisite */ }
   }
-  const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders });
+  const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders, actionHeaders });
   let startup: StartupController | null = null;
   let nativeAttached = false;
   let launching = false;

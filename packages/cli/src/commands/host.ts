@@ -29,7 +29,7 @@ import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, operatorAuthHeaders } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
 
@@ -884,8 +884,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       if (!opts.json) {
         console.log(`Pairing code: ${issued.code}`);
         console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
-        console.log("On the target, its person approves it by answering the pairing request with Approve: in the TUI (rig tui, then attention), on Steering, or with Slack's Approve button. On a 0.7.11 or later target a typed reply doesn't approve; on an older target any typed reply approves.");
-        console.log(`From an agent seat on the target instead: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on --resolution approve (it needs a managed seat; a plain terminal is refused).`);
+        console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
+        console.log(`On a 0.7.11 or later target, anyone at its terminal with its operator bearer token can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}), with OPENRIG_AUTH_BEARER_TOKEN set or --bearer <token>.`);
       }
 
       // A note names the bound actually used so a clamped value is not silently absorbed.
@@ -958,6 +958,44 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       console.log(`Paired. Host '${id}' registered (${targetBase}, bearer_file ${tokenPath}).`);
       printHostNextSteps(added.entry);
     });
+
+  // The explicit decision on a pairing request made to THIS host: run by the agent that reads the person's answer, or by
+  // a person at a terminal here. One decision per request; the daemon records who made it.
+  for (const decision of ["approve", "deny"] as const) {
+    cmd
+      .command(decision)
+      .description(decision === "approve"
+        ? "Approve a pairing request made to this host: the requesting machine receives this host's token"
+        : "Deny a pairing request made to this host: nothing is handed over")
+      .argument("<request>", "The pairing code, or the request's approval row id")
+      .option("--bearer <token>", "This daemon's operator bearer token (or set OPENRIG_AUTH_BEARER_TOKEN); pairing targets always have one")
+      .option("--json", "JSON output")
+      .action(async (request: string, opts: { bearer?: string; json?: boolean }) => {
+        type Decided = { ok?: boolean; error?: string; message?: string; code?: string; requester?: string; by?: string };
+        // The decision is gated by the operator bearer (OPENRIG_AUTH_BEARER_TOKEN), as rig queue resolve and rig mode are.
+        let res: { status: number; data: Decided };
+        try {
+          res = await new DaemonClient().post<Decided>("/api/hosts/pair-decision", { request: request.trim(), decision },
+            { headers: operatorAuthHeaders(opts.bearer) });
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.json) console.log(JSON.stringify(res.data));
+        if (res.status !== 200 || !res.data?.ok) {
+          if (!opts.json) console.error(res.status === 401
+            ? `This daemon refused the decision without its operator bearer token. Set OPENRIG_AUTH_BEARER_TOKEN to the token this daemon runs with, or pass --bearer <token>. Nothing was decided.`
+            : res.data?.message ?? res.data?.error ?? `the pairing decision failed (HTTP ${res.status})`);
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.json) return;
+        console.log(decision === "approve"
+          ? `Approved pairing ${res.data.code} from ${res.data.requester}, as ${res.data.by}. The requesting machine receives this host's token when it next checks.`
+          : `Denied pairing ${res.data.code} from ${res.data.requester}, as ${res.data.by}. Nothing was handed over.`);
+      });
+  }
 
   cmd
     .command("list")
