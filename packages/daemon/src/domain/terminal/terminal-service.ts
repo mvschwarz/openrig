@@ -100,6 +100,8 @@ export interface TerminalPreview {
   task?: TaskMembership;
   capabilities: { ensureViewer: boolean };
   viewDescriptor?: ViewDescriptor;
+  /** The composed view's remote tiles with their hosts; complete, so empty means every opened seat is local. */
+  remote: Array<{ seat: string; host: string }>;
 }
 
 /** The `rig terminal views` payload: saved views + the live rig names you can open. */
@@ -163,6 +165,11 @@ export interface TerminalServiceDeps {
    * absolute path is used; anything else, or no resolver, keeps the bare `tmux` token.
    */
   resolveLocalTmux?(): Promise<string | null> | string | null;
+}
+
+/** The opened seats on another host, from the composed tiles: the complete list, so empty means all local. */
+function remoteOpened(composed: ComposedView, opened?: readonly string[]): Array<{ seat: string; host: string }> {
+  return composed.opened.flatMap(pane => pane.host && (!opened || opened.includes(pane.seat)) ? [{ seat: pane.seat, host: pane.host }] : []);
 }
 
 /** Build the one shared result shape for a pre-provider failure (view/provider not found). */
@@ -233,7 +240,7 @@ export class TerminalService {
     if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed before the snapshot; refresh its preview.");
     const note = `Snapshot: this view will not track later owner changes. ${result.error ?? "Live following is unsupported."}`;
     const snapshot = await selected.provider.openView({ ...composed, opened: composed.opened.map(p => this.viewerPane(p)), spaceLabel: `Snapshot: ${composed.task.name}` });
-    return { ...snapshot, following: result.following, task: composed.task,
+    return { ...snapshot, following: result.following, task: composed.task, remote: remoteOpened(composed, snapshot.opened),
       ...(selected.session !== undefined ? { session: selected.session } : {}),
       viewDescriptor: { kind: "fixed", name: composed.task.name }, notes: [...(snapshot.notes ?? []), note] };
   }
@@ -257,7 +264,8 @@ export class TerminalService {
         { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
     };
     const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent, membershipError);
-    return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
+    // Following resolves local task owners only, so its remote list is empty unless a composed tile says otherwise.
+    return { ...result, remote: composed ? remoteOpened(composed, result.opened) : [], ...(selected.session !== undefined ? { session: selected.session } : {}),
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
 
@@ -347,7 +355,7 @@ export class TerminalService {
     if (!composed.kernelLayout && composed.opened.some(pane => !pane.readOnly)) {
       notes.push("The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.");
     }
-    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
+    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), remote: remoteOpened(composed, result.opened), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
   }
 
   private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
@@ -395,7 +403,7 @@ export class TerminalService {
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     await this.viewerMappings(provider, composed);
     const tmux = daemonTmuxServerInfo();
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, remote: remoteOpened(composed), viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
       capabilities: { ensureViewer: !!composed.task && !!provider.ensureViewer },
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }

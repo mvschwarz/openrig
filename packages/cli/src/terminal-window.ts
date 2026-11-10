@@ -19,6 +19,8 @@ interface Preview {
   tmux?: { mode: "inherit" | "isolated" };
   status: { launch?: { socketPath: string; session?: string } };
   composed: { id: string; localTmuxServer?: readonly string[]; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; spaceLabel?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+  /** The composed view's remote tiles, complete; an older daemon's preview omits it, so their hosts are unknown. */
+  remote?: Array<{ seat: string; host: string }>;
 }
 
 export interface WindowDeps {
@@ -300,7 +302,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failed("The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.");
     }
     const launchTarget = preview.data.status.launch;
-    let { composed, planId } = preview.data;
+    let { composed, planId, remote } = preview.data;
     await assertLocalTmux(client, preview.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
     const tmuxServer = readTmuxServerArgs(composed.localTmuxServer);
     if (expectedPlan !== undefined && expectedPlan !== planId) {
@@ -320,7 +322,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         if (JSON.stringify(readTmuxServerArgs(next.data.composed.localTmuxServer)) !== JSON.stringify(tmuxServer)) {
           throw new Error("The daemon's tmux server changed while opening the window; refresh the preview before retrying.");
         }
-        ({ composed, planId } = next.data);
+        ({ composed, planId, remote } = next.data);
         if (!composed.opened.length) throw new Error("No conversations are attachable after opening the terminal.");
       }
       if (composed.kernelLayout) windowNotes.push(viewportColumns === undefined
@@ -540,7 +542,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
     }
-    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), ...(Array.isArray(remote) ? { remote } : {}), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {
     if (windowAttempted && /-1743\b/.test(`${(err as Error).message} ${(err as { stderr?: string }).stderr ?? ""}`)) {
       windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");
