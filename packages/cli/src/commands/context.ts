@@ -42,6 +42,7 @@ import {
 import { realDeps } from "./daemon.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { resolveRecapSeat } from "../recap-seat.js";
 import type { StatusDeps } from "./status.js";
 import { reconstructionCommand } from "./context-reconstruction.js";
 
@@ -786,14 +787,17 @@ Examples:
   // tree (a sandboxed seat) hands the same recap to the daemon, which owns it.
   cmd.command("recap-write")
     .description("Write this seat's authored RECAP (decisions-with-rationale) at the handover boundary; supersedes the previous recap into the seat's chain")
-    .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
-    .requiredOption("--seat <seat>", "Seat id (the seats/<seat> altitude)")
+    .option("--rig <rig>", "Rig name (the rigs/<rig> altitude; default: this seat's rig, from OPENRIG_SESSION_NAME)")
+    .option("--seat <seat>", "The seat's folder: the part of its session name before @, e.g. dev-qa (default: this seat). A logical id (dev.qa), or this seat's own member id, maps to that folder")
     .requiredOption("--file <path>", "Markdown file containing the recap content")
-    .action(async (opts: { rig: string; seat: string; file: string }) => {
+    .action(async (opts: { rig?: string; seat?: string; file: string }) => {
       try {
         const { writeSeatRecapAt, validateRecapContract } = await import("@openrig/daemon/seat-recap-store");
         const content = readFileSync(opts.file, "utf-8");
         const topologyRoot = String(new ConfigStore().resolveWithSource("topology.root").value);
+        const target = resolveRecapSeat({ rig: opts.rig, seat: opts.seat, topologyRoot,
+          sessionName: readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() });
+        if ("error" in target) { console.error(target.error); process.exitCode = 1; return; }
         for (const f of validateRecapContract(content)) {
           console.error(f.kind === "no-decisions-section"
             ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."
@@ -801,7 +805,7 @@ Examples:
         }
         let written: { path: string; superseded: number; daemonUrl?: string };
         try {
-          written = writeSeatRecapAt({ topologyRoot, rig: opts.rig, seat: opts.seat, content });
+          written = writeSeatRecapAt({ topologyRoot, rig: target.rig, seat: target.seat, content });
         } catch (err) {
           if (!WRITE_REFUSED_CODES.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
           // The daemon owns the topology tree (it primes RECAP.md at the next rebuild): it writes the same recap through
@@ -809,12 +813,13 @@ Examples:
           // that can't be reached is reported with its reason.
           console.error(`Note: this process can't write the topology tree (${(err as Error).message}), so the daemon writes the recap instead.`);
           const client = await getClient();
-          const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: opts.rig, seat: opts.seat, content });
+          const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: target.rig, seat: target.seat, content });
           if (res.status !== 200 || typeof res.data.path !== "string") throw new Error(res.data.message ?? `Daemon returned HTTP ${res.status}`);
           written = { path: res.data.path, superseded: res.data.superseded ?? 0, daemonUrl: client.baseUrl };
         }
         console.log(`Recap written: ${written.path}${written.superseded > 0 ? ` (${written.superseded} superseded predecessor${written.superseded === 1 ? "" : "s"} retained)` : ""}`
           + (written.daemonUrl ? `, by the daemon at ${written.daemonUrl}` : ""));
+        for (const note of target.notes) console.error(`Note: ${note}`);
       } catch (err) {
         // A daemon write that timed out says its outcome is unknown, so it's checked before a retry supersedes it again.
         if (!renderCaughtTransportError(err)) console.error((err as Error).message);

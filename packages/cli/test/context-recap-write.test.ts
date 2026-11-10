@@ -14,6 +14,7 @@ import { contextCommand } from "../src/commands/context.js";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { resolveAuthoredRecapPointer } from "../../daemon/src/domain/context-packs/seat-recap-store.js";
 
 /** A running daemon on `port`, as the CLI's status check sees it. */
 function lifecycleDeps(port: number): LifecycleDeps {
@@ -296,5 +297,76 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
       else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// Every recap reader uses seats/<the part of the session name before @>, so a recap written under a member id or a
+// logical id was left where nothing reads it (Web Studio had lead, editorial.lead and editorial-lead for one seat).
+describe("rig context recap-write — the seat folder every reader uses", () => {
+  async function inTopology(session: string | undefined, run: (tmp: string, seats: string, recap: string) => Promise<void>) {
+    const tmp = mkdtempSync(join(tmpdir(), "recap-seat-"));
+    const saved = { root: process.env["OPENRIG_TOPOLOGY_ROOT"], session: process.env["OPENRIG_SESSION_NAME"], legacy: process.env["RIGGED_SESSION_NAME"] };
+    try {
+      process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
+      if (session === undefined) delete process.env["OPENRIG_SESSION_NAME"]; else process.env["OPENRIG_SESSION_NAME"] = session;
+      delete process.env["RIGGED_SESSION_NAME"];
+      const seats = join(tmp, "topology", "rigs", "web-studio", "seats");
+      mkdirSync(join(seats, "editorial-lead"), { recursive: true });
+      mkdirSync(join(seats, "ux-designer"), { recursive: true });
+      const recap = join(tmp, "recap.md");
+      writeFileSync(recap, "## Recent Decisions\nchose X because Y");
+      await run(tmp, seats, recap);
+    } finally {
+      for (const [key, value] of [["OPENRIG_TOPOLOGY_ROOT", saved.root], ["OPENRIG_SESSION_NAME", saved.session], ["RIGGED_SESSION_NAME", saved.legacy]] as const) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    { name: "no --rig or --seat: this seat", args: [] as string[], note: undefined },
+    { name: "this seat's member id", args: ["--seat", "lead"], note: "--seat lead names this seat (editorial-lead@web-studio), so the recap goes to seats/editorial-lead" },
+    { name: "this seat's logical id", args: ["--seat", "editorial.lead"], note: "--seat editorial.lead names this seat" },
+    { name: "the folder itself", args: ["--rig", "web-studio", "--seat", "editorial-lead"], note: undefined },
+  ])("a seat writing its own recap lands in seats/editorial-lead ($name)", async ({ args, note }) => {
+    await inTopology("editorial-lead@web-studio", async (tmp, seats, recap) => {
+      const res = await runRecapWrite(["recap-write", ...args, "--file", recap]);
+      expect(res.exitCode ?? 0).toBe(0);
+      expect(readFileSync(join(seats, "editorial-lead", "RECAP.md"), "utf-8")).toContain("chose X because Y");
+      // The handover's own reader finds it, from the session name alone.
+      expect(resolveAuthoredRecapPointer("editorial-lead@web-studio", join(tmp, "topology"))).toMatchObject({ address: "seat:RECAP.md" });
+      expect(readdirSync(seats).sort()).toEqual(["editorial-lead", "ux-designer"]);
+      if (note) expect(res.errLogs.join("\n")).toContain(note);
+      else expect(res.errLogs.join("\n")).not.toContain("Note:");
+    });
+  });
+
+  it("another seat's logical id maps to its folder; a name that matches no folder still writes, and says where recaps are read", async () => {
+    await inTopology("editorial-lead@web-studio", async (_tmp, seats, recap) => {
+      const logical = await runRecapWrite(["recap-write", "--seat", "ux.designer", "--file", recap]);
+      expect(logical.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "ux-designer", "RECAP.md"))).toBe(true);
+      expect(existsSync(join(seats, "ux.designer"))).toBe(false);
+      expect(logical.errLogs.join("\n")).toContain("--seat ux.designer is a logical id, so the recap goes to seats/ux-designer");
+
+      const bare = await runRecapWrite(["recap-write", "--seat", "designer", "--file", recap]);
+      expect(bare.exitCode ?? 0).toBe(0);
+      expect(existsSync(join(seats, "designer", "RECAP.md"))).toBe(true);
+      expect(bare.errLogs.join("\n")).toContain("seats/designer didn't exist in rig web-studio, so this write created it.");
+      expect(bare.errLogs.join("\n")).toContain("seats/ux-designer exists.");
+    });
+  });
+
+  it("without OPENRIG_SESSION_NAME, --rig and --seat are named, not guessed", async () => {
+    await inTopology(undefined, async (_tmp, seats, recap) => {
+      const noRig = await runRecapWrite(["recap-write", "--file", recap]);
+      expect(noRig.exitCode).toBe(1);
+      expect(noRig.errLogs.join("\n")).toContain("Name the rig with --rig");
+      const noSeat = await runRecapWrite(["recap-write", "--rig", "web-studio", "--file", recap]);
+      expect(noSeat.exitCode).toBe(1);
+      expect(noSeat.errLogs.join("\n")).toContain("Name the seat with --seat");
+      expect(readdirSync(seats).sort()).toEqual(["editorial-lead", "ux-designer"]);
+    });
   });
 });

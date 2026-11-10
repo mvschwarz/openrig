@@ -106,7 +106,7 @@ You are about to lose every connection you have built. Spend this turn making th
 3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
-   `rig context recap-write --rig <rig> --seat <seat> --file <that file>`. If your world profile has a seat
+   `rig context recap-write --file <that file>`, which writes your own seat's recap. If your world profile has a seat
    recap atom, it loads this recap, and an old recap would be served as if it were current.
 4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
    - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave
@@ -172,7 +172,8 @@ is not a restore request.
 3. **Re-enter the world.** Load the post-compaction world profile your instance provides. Find it with
    `rig context list`; for a private world install, run
    `rig context profile <world-ref> --situation post-compaction --rig <rig> --seat <seat>` (the seat flags are
-   needed for its seat-scoped recap atom; take both values from `rig whoami --json`). Without a private world,
+   needed for its seat-scoped recap atom: `--rig` is your rig and `--seat` the part of your session name before `@`,
+   both from `rig whoami --json`). Without a private world,
    run `rig context profile world-public --situation post-compaction` and `rig context get onboarding-width`. This restores how the system works before you
    restore what you were doing in it. If your work belongs to a project, re-enter its declared context too:
    `rig context work-install` lists what the project declares (intent, context files, skills), so read the pieces
