@@ -353,6 +353,8 @@ the sections that were not read are `null`.
 | `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
 | `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
+| `rig host approve <request>` | — | `--bearer <token>`<br>`--json` |
+| `rig host deny <request>` | — | `--bearer <token>`<br>`--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
@@ -361,20 +363,37 @@ even when it is bound to a tailnet address and so starts without one: pairing ha
 over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
 `pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
 registered person can approve (none, or several with no default; name one with
-`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+`--human`) (`packages/daemon/src/routes/hosts.ts:324-343`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
 approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
-On the target, its person approves the request by answering its question with Approve: in the TUI (`rig tui`, then
-`attention`: open it), on Steering, or with Slack's Approve button. From an agent seat on the target,
-`rig queue update <id> --state done --closure-reason no-follow-on --resolution approve` approves. To refuse a pairing,
-answer Deny, let it expire (nothing is persisted), or `rig queue update <id> --state denied` from an agent seat.
+On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
+Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
+- **When the target has a kernel operator (`operator-agent@kernel`),** it asks. The person's answer, a click or their
+  words, comes back to it as a reply, and it decides with `rig host approve <code>` or `rig host deny <code>`. It asks
+  the person back when the answer isn't clear. The person is told once that their answer was received. If the operator
+  isn't running, the request and that receipt say so, and they name the terminal route. The request stays pending, never
+  granted or denied, until the operator decides or the request expires. If the operator doesn't pick up the answer, the
+  person is told at expiry that it didn't.
+- **When the target has no kernel operator** (or the queue can't send rows to it, or OpenRig couldn't read which; the
+  request says which), Approve and Deny decide at once. A reply in words, or with none (a file), is kept on the
+  request, and the person is asked again with a new request.
+- **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
 
-On a 0.7.11 or later target, a typed reply, even "yes", is kept as the person's words and doesn't approve: it closes the
-request, and the requester is told it was denied. An agent seat's close without `--resolution approve` denies too. On
-an older target, any typed reply on the request, or any such close, approves it.
+On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
+approval row id), run on the target from an agent seat or a plain terminal, decides it. It needs the target daemon's operator bearer
+token: an agent seat carries `OPENRIG_AUTH_BEARER_TOKEN`, and a person sets it or passes `--bearer <token>`. Without
+it the daemon answers 401, and nothing is decided. It decides once, and refuses an
+unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or already-decided (409
+`pair_request_decided`) request, including one its row already decided before the requester's next check (a click on
+a target with no kernel operator, or a refusing close). It records who decided: the seat, or `human@host` from a plain terminal. The person
+gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
+--resolution approve` on an unanswered request still approves, and any other close that carries no answer and isn't
+the person's own reply, or `--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator, run
+`rig host deny`, or let it expire (nothing is persisted). At its deadline a request's ask closes as expired, even when the requester stopped waiting, so a late click there isn't
+accepted. The decisions live in the daemon's memory, as the requests do, so a daemon restart drops an open request.
 
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
