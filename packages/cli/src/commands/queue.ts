@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
-import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
+import { sessionRigOf, isHumanSeatSessionRef, parseSessionName } from "../session-name.js";
 import { realDeps } from "./daemon.js";
 import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
@@ -890,6 +890,53 @@ function requireSeatSession(ignoredFlag: string): string | undefined {
   return undefined;
 }
 
+/** The flags `rig queue update` takes that write more than a note. `--source` records a note only (#2866). */
+const UPDATE_STATE_WRITE_FLAGS = [
+  ["state", "--state"], ["reopen", "--reopen"], ["closureReason", "--closure-reason"], ["closureTarget", "--closure-target"],
+  ["closureRequiredAt", "--closure-required-at"], ["resolution", "--resolution"], ["blockedOn", "--blocked-on"],
+  ["wakeWatchdog", "--wake-watchdog"], ["wakeAfter", "--wake-after"], ["summary", "--summary"], ["evidenceRef", "--evidence-ref"],
+] as const;
+
+/**
+ * #2866: who appends a `rig queue update` note. Inside a managed seat it is the seat (the X-OpenRig-Session header the
+ * DaemonClient stamps), whatever --source says. Outside one, a routine can name itself with --source <name>@external:
+ * it rides the body as the declared actor, which the daemon records as claimed:v1 because no header names a seat, so
+ * the note is attributed to an external actor and never to a seat, and OPENRIG_SESSION_NAME is never forged. The
+ * external path records a note only, on the local daemon (the caller refuses a --host that resolves to another host).
+ * Returns the body actor to send (undefined = the header decides), or false after printing why nothing was sent.
+ */
+function resolveUpdateActor(source: string | undefined, opts: Record<string, unknown>): { actorSession?: string } | false {
+  const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
+  // Trimmed like the DaemonClient's header (senderIdentityHeaders): a blank env is no seat, so the two never disagree.
+  const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+  if (source !== undefined) {
+    const trimmed = source.trim();
+    if (parseSessionName(trimmed).kind !== "external") {
+      return refuse(`--source must be <name>@external (got '${source}'): it names a routine outside any seat, never a seat. Nothing was sent.`);
+    }
+    const writes = UPDATE_STATE_WRITE_FLAGS.filter(([key]) => opts[key] !== undefined).map(([, flag]) => flag);
+    if (opts.note === undefined || writes.length > 0) {
+      return refuse(`--source records a note only: pass --note and nothing else that writes${writes.length > 0 ? ` (got ${writes.join(", ")})` : ""}. ` +
+        "Changing a row needs a seat. Nothing was sent.");
+    }
+    if (seat) {
+      process.stderr.write(`warning: --source ${trimmed} is ignored: this runs in the seat ${seat}, which is the note's actor.\n`);
+      return {};
+    }
+    return { actorSession: trimmed };
+  }
+  if (seat) return {};
+  const noteOnly = opts.note !== undefined && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
+  return refuse(noteOnly
+    ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set, so " +
+      "there's no seat to act as: run this from a managed seat, or add --source <name>@external to record the note as " +
+      "that external routine (claimed, never a seat). --actor is ignored: the actor is the seat's own identity."
+    : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set " +
+      "OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --actor is ignored: the actor is " +
+      "the seat's own identity. Changing a row needs a seat, and notes need a seat; an external routine can pass " +
+      "--source <name>@external for a note only.");
+}
+
 function extractRigName(sessionName: string): string | undefined {
   // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
   return sessionRigOf(sessionName);
@@ -1299,11 +1346,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
+      source?: string;
       state?: string;
       reopen?: boolean;
       closureReason?: string;
@@ -1338,11 +1387,21 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
-      if (!requireSeatSession("actor")) return;
+      // #2866: outside a seat, --source <name>@external names the routine appending a note (the declared body actor).
+      const actor = resolveUpdateActor(opts.source, opts);
+      if (!actor) return;
       const deps = getDeps();
       await withClient(deps, async (local) => {
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        if (actor.actorSession !== undefined && target.remote) {
+          // #2866: the other host would record the routine bare, indistinguishable from a routine of its own (a
+          // forwarded create stamps the origin; this path doesn't). A --host that resolves locally is fine.
+          console.error(`--source with --host ${target.remote} is not supported: that host would record ${actor.actorSession} ` +
+            "without the host it ran on. Append the note on the routine's own host. Nothing was sent.");
+          process.exitCode = 1;
+          return;
+        }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,
@@ -1356,6 +1415,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
+          ...actor,
         }, target.options);
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
