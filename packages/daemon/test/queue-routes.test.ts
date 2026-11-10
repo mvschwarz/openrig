@@ -861,6 +861,7 @@ describe("queue routes", () => {
       expect(item.closureTarget).toBe("next@r");
       expect(item.successors).toEqual([{ qitemId: created.qitemId, destinationSession: "next@r", state: "pending", via: "handedOffFrom" }]);
       expect(item).not.toHaveProperty("successorNote");
+      expect(item).not.toHaveProperty("successorsTruncated");
       // The read changes nothing stored: the closure target still names the new owner, as the docs say.
       expect(stored(source.qitemId)).toEqual({ state: "handed-off", closure_reason: "handed_off_to", closure_target: "next@r", handed_off_to: "next@r" });
     });
@@ -872,6 +873,24 @@ describe("queue routes", () => {
       expect(closed.state).toBe("done");
       queueRepo.claim({ qitemId: created.qitemId, destinationSession: "next@r" });
       expect((await show(source.qitemId)).successors).toEqual([{ qitemId: created.qitemId, destinationSession: "next@r", state: "in-progress", via: "handedOffFrom" }]);
+    });
+
+    it("past 20 successors, the newest 20 are named and successorsTruncated says the list is cut", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'next@r', handed_off_to = 'next@r' WHERE qitem_id = ?").run(source.qitemId);
+      const insert = db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, handed_off_from)
+        VALUES (?, ?, ?, 'b@r', 'next@r', 'pending', 'routine', 'x', ?)`);
+      const id = (n: number) => `qitem-succ-${String(n).padStart(2, "0")}`;
+      const add = (n: number) => { const ts = `2026-11-10T00:00:${String(n).padStart(2, "0")}.000Z`; insert.run(id(n), ts, ts, source.qitemId); };
+      for (let n = 1; n <= 20; n++) add(n);
+      const full = await show(source.qitemId);
+      expect(full.successors).toHaveLength(20);
+      expect(full).not.toHaveProperty("successorsTruncated");
+      add(21);
+      const cut = await show(source.qitemId);
+      expect(cut.successors.map((s: { qitemId: string }) => s.qitemId)).toEqual(Array.from({ length: 20 }, (_, i) => id(i + 2)));
+      expect(cut.successorsTruncated).toBe(true);
+      expect(cut).not.toHaveProperty("successorNote");
     });
 
     it("a close whose target is a local row id names that row", async () => {

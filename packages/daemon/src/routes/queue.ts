@@ -87,10 +87,14 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
 /** #2794: a handed-off row records its new owner as the closure target, not the row the handoff made. This names that row
  *  from what's already stored: the successor's own `handedOffFrom`, or a local row id in the closure target. A cross-host
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
- *  the read. */
-export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorNote?: string } {
+ *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
+export const HANDOFF_SUCCESSOR_LIMIT = 20;
+export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
-    const successors: HandoffSuccessor[] = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: 20 })
+    // Newest first, one past the bound so a cut list is known.
+    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
+    const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
       .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
     const target = item.closureTarget;
@@ -98,7 +102,7 @@ export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { suc
       const named = repo.getById(target);
       if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
     }
-    if (successors.length > 0) return { successors };
+    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
     return {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)

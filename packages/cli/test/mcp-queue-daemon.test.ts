@@ -149,6 +149,8 @@ describe("MCP queue tools on the daemon's queue routes", () => {
 
     const shown = await desk("rig_queue_show", { qitemId });
     expect(shown.data.item).toMatchObject({ state: "handed-off" });
+    // An unscoped caller gets the daemon's successor fields as they are.
+    expect(shown.data.item.successors).toEqual([{ qitemId: next, destinationSession: "qa@team", state: "pending", via: "handedOffFrom" }]);
     expect(shown.structured).toMatchObject({ successor: { qitemId: next, destinationSession: "qa@team", state: "pending" } });
     expect(shown.data.successor).toEqual((shown.structured as { successor: unknown }).successor);
     const onward = await desk("rig_queue_list", { handedOffFrom: qitemId });

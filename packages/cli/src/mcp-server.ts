@@ -305,6 +305,18 @@ function projectForExternal<T>(row: T, view: ExternalView): T {
   return fields as T;
 }
 
+/** A handed-on item as a scoped caller receives it: without the daemon's own successor fields (successors,
+ *  successorsTruncated, successorNote), which name rows and remote ids regardless of this caller's scope. Its answer is
+ *  show's scope-checked successor (successorOf). */
+function withoutDaemonSuccessors<T>(row: T): T {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const fields = { ...(row as Record<string, unknown>) };
+  delete fields.successors;
+  delete fields.successorsTruncated;
+  delete fields.successorNote;
+  return fields as T;
+}
+
 /** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own (to read),
  *  the items they own (to change), and its shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
 function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
@@ -1433,9 +1445,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const view = externalView(scope);
         let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
+        const shownItem = scope ? withoutDaemonSuccessors(item.data) : item.data;
         const data = view
-          ? { item: projectForExternal(item.data, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data }
-          : { item: item.data, transitions: transitions.data };
+          ? { item: projectForExternal(shownItem, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data }
+          : { item: shownItem, transitions: transitions.data };
         return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
