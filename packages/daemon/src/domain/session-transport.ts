@@ -4600,6 +4600,8 @@ export class SessionTransport {
     const genUuid = opts?.envelopeSender
       ? (this.sessionRegistry.currentOccupantGenerationForSession(opts.envelopeSender) ?? undefined)
       : undefined;
+    // #2895 (a): once per fan-out too: a sender `rig send` can't reach gets no `rig send` reply line.
+    const unreachable = opts?.envelopeSender ? !this.sessionRegistry.senderIsSendable(opts.envelopeSender) : false;
 
     const results: SendResult[] = [];
     for (const session of resolved.sessions) {
@@ -4609,7 +4611,7 @@ export class SessionTransport {
       // Sent stamp, so a recipient tells DM from broadcast header-alone (anti-storm). Raw paths
       // (--raw / --dangerously-interact, absent envelopeSender) still deliver unwrapped.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, { scope, stampISO, genUuid })
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, { scope, stampISO, genUuid, ...(unreachable ? { senderReachable: false } : {}) })
         : text;
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).

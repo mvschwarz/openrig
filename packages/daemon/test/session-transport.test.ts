@@ -2839,6 +2839,22 @@ describe("SessionTransport", () => {
     }
   });
 
+  it("#2895 (a): a fan-out from a sender with no session here ends with the plain note; a known sender keeps the rig send line", async () => {
+    seedCanonicalRig(); // dev-impl@my-rig
+    seedLegacyRig(); // r00-legacy-worker-a
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    await transport.broadcast({ sessions: ["dev-impl@my-rig"] }, "status", { envelopeSender: "planner@global", stampISO: "2026-08-06T17:42:09Z" });
+    await transport.broadcast({ sessions: ["dev-impl@my-rig"] }, "status", { envelopeSender: "r00-legacy-worker-a", stampISO: "2026-08-06T17:42:09Z" });
+
+    expect(sent.map((text) => text.split("\n").at(-1))).toEqual([
+      "↩ No reply by rig send: planner@global has no session.",
+      '↩ Reply: rig send r00-legacy-worker-a "..."',
+    ]);
+  });
+
   it("raw broadcast (no envelopeSender) is delivered unwrapped — no header change", async () => {
     seedCanonicalRig();
     const sent: string[] = [];

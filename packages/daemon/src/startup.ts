@@ -474,6 +474,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
+    isSenderSendable: (sender) => sessionRegistry.senderIsSendable(sender),
     resolveSessionAddresses: (sessionName) => sessionRegistry.sessionAddresses(sessionName),
     // #2575: a prompt-clear wake retry waits for a managed compaction's owed steps, as parked-owner reminders do.
     hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,

@@ -1072,6 +1072,7 @@ export class QueueRepository {
   private readonly promptRecoveryState = new Map<string, boolean>();
   private readonly promptClearRetries = new Map<string, number>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
+  private isSenderSendable?: (sender: string) => boolean;
   private readonly resolveSessionAddresses: (name: string) => string[];
   private readonly hasPendingPostCompactStage?: (sessionName: string) => boolean;
   private readonly wakeRepo: QueueWakeRepository;
@@ -1143,6 +1144,9 @@ export class QueueRepository {
        * is omitted (never forged).
        */
       resolveOccupantGeneration?: (sessionName: string) => string | null;
+      /** #2895 (a): whether `rig send <sender>` can reach this sender (startup wires SessionRegistry.senderIsSendable,
+       *  the same injected-predicate layering). Absent ⇒ the envelope keeps today's reply line. */
+      isSenderSendable?: (sender: string) => boolean;
       resolveSessionAddresses?: (name: string) => string[];
       /** True while a managed compaction still owes this seat a post-compaction step (turn boundary, restore or audit). */
       hasPendingPostCompactStage?: (sessionName: string) => boolean;
@@ -1162,6 +1166,7 @@ export class QueueRepository {
     if (opts?.transport) this.attachTransport(opts.transport);
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
+    this.isSenderSendable = opts?.isSenderSendable;
     this.resolveSessionAddresses = opts?.resolveSessionAddresses ?? ((name) => [name]);
     this.hasPendingPostCompactStage = opts?.hasPendingPostCompactStage;
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
@@ -1433,6 +1438,11 @@ export class QueueRepository {
     }
   }
 
+  /** #2895 (a): the envelope meta for a sender `rig send` can't reach; empty (today's bytes) otherwise or when unwired. */
+  private senderReach(sender: string | undefined): { senderReachable?: false } {
+    return sender && this.isSenderSendable && !this.isSenderSendable(sender) ? { senderReachable: false } : {};
+  }
+
   private recordWakeIntent(input: {
     outboxId: string;
     auditPointer: string;
@@ -1453,7 +1463,7 @@ export class QueueRepository {
       input.fromSession,
       input.toSession,
       input.bareBody,
-      { stampISO, genUuid, ...(input.qitemId ? { replyToQitem: input.qitemId } : {}) },
+      { stampISO, genUuid, ...(input.qitemId ? { replyToQitem: input.qitemId } : {}), ...this.senderReach(input.fromSession) },
     );
     const admission = this.wakeAdmission(input.auditPointer, input.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent");
     // An urgent wake's frozen body carries the line naming who marked it, so a person reading it held sees it too; the
@@ -2092,7 +2102,7 @@ export class QueueRepository {
       const genUuid = sourceSession
         ? (this.resolveOccupantGeneration?.(sourceSession) ?? undefined)
         : undefined;
-      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid, replyToQitem: qitemId });
+      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid, replyToQitem: qitemId, ...this.senderReach(sourceSession) });
     }
     const deliveryId = `guard-nudge-${qitemId}-${createHash("sha256").update(JSON.stringify([sourceSession, destinationSession, bodyOverride ?? null])).digest("hex")}`;
     const held = !committedOutboxIds ? this.outbox?.getById(deliveryId) : null;
