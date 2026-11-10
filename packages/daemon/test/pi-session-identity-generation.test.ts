@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { RunnerCore } from "../src/adapters/pi-runner.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState } from "../src/domain/agent-activity-store.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 import type { RigEvent } from "../src/domain/types.js";
@@ -260,5 +260,38 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
       hookEvent: "Notification", subtype: "runtime_error", occurredAt: "2026-11-09T16:20:00.000Z" });
     expect(own.latest()).toMatchObject({ rawSubtype: "runtime_error", stale: false });
     expect(own.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a refused prompt on a pi-rpc fork raises runtime_error, so the seat reads needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts).toContainEqual(expect.objectContaining({ hookEvent: "Notification", subtype: "runtime_error", runtime: "omo" }));
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
+    expect(hookEventState("Notification", "runtime_error", "omo", false, true)).toBe("needs_input");
+  });
+
+  it("a typed transient 429 on a pi-rpc fork is attention during the turn and clears at agent_end", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const failed = { role: "assistant", stopReason: "error", errorStatus: 429, errorMessage: "429 overloaded" };
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: failed }));
+    core.handlePiLine(JSON.stringify({ type: "turn_end", message: failed }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).toBe("idle");
+  });
+
+  it("a refused prompt on a built-in pi seat stays pane output, not attention (regression guard)", async () => {
+    const f = forkFixture({ runtime: "pi", agentRunner: 0 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts).toEqual([]);
+    expect(f.latest()?.state).not.toBe("needs_input");
   });
 });

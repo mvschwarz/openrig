@@ -672,7 +672,11 @@ export class RunnerCore {
       this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
-      if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
+      // Built-in Pi keeps its own handling; OMP and `protocol: pi-rpc`
+      // community harnesses must raise attention here because a refused
+      // prompt/steer/follow_up is the seat being unable to work at all —
+      // e.g. a missing or invalid credential.
+      if (this.runtime !== "pi" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
         this.raiseAttention("runtime_error");
       }
       return;
@@ -946,7 +950,11 @@ export class RunnerCore {
       const transient = (event.type === "message_end" || event.type === "turn_end")
         && message?.role === "assistant" && message.stopReason === "error"
         && typeof status === "number" && [408, 429, 500, 502, 503, 504, 529].includes(status);
-      if (this.runtime === "omp") {
+      // Built-in Pi leaves assistant failures as pane output; OMP and `protocol:
+      // pi-rpc` community harnesses make them attention, keeping auth/config
+      // failures (runtime_error) distinct from typed transient HTTP statuses
+      // (transient_turn_error, released at agent_end).
+      if (this.runtime !== "pi") {
         const retrySummary = event.type === "auto_retry_end" && event.success === false
           && this.retryAttempt !== null && event.attempt === this.retryAttempt
           && this.retryFailure !== null && event.finalError === this.retryFailure
