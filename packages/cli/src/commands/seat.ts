@@ -21,6 +21,8 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
+  /** What OpenRig's own refocus hook has recorded for this seat (Claude and Codex seats). */
+  refocus?: { lastRecordedAt: string | null; currentConversation: boolean | "unknown"; noIdentity?: true; detail: string };
   permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
     | { state: "request_observed" | "completed"; command: string; origin: "harness";
         source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false;
@@ -275,6 +277,7 @@ function printHuman(status: SeatStatusResponse): void {
     if (rules?.size_cut) console.log("  Suggested-rule evidence is incomplete because of size bounds.");
   }
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
+  if (status.refocus) console.log(`Refocus: ${status.refocus.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions?.account) {
