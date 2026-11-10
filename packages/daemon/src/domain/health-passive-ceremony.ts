@@ -16,6 +16,23 @@ const excluded = (tags: string[] | null | undefined) => tags?.some((t) => t === 
 const one = (values: string[]) => { const unique = [...new Set(values)]; return unique.length === 1 ? unique[0] : undefined; };
 const tagged = (tags: string[], prefix: string) => tags.filter((t) => t.startsWith(prefix)).map((t) => t.slice(prefix.length));
 
+/** Notes the daemon writes about its own queue bookkeeping, matched by prefix (an owner's note that
+ * merely quotes one still counts). `auto-unparked:` and `blocker custody moved ` are recorded under
+ * the seat that closed the blocker (queue-repository.ts), so the actor does not reveal them; park and
+ * parked-owner wakes (queue-repository.ts, policies/parked-owner-consumer.ts) are excluded under any actor. */
+const DAEMON_BOOKKEEPING_NOTE_PREFIXES = ["auto-unparked:", "blocker custody moved ", "park wake ", "parked-owner "] as const;
+
+/** The daemon's own actors: `*@system` (watchdog, queue, stuck-sweep, wake-ladder, claim, ...) and the
+ * bare `system` that releases or transfers claims when a seat's occupant changes (queue-repository.ts). */
+const isSystemActor = (actor: string) => actor === "system" || actor.endsWith("@system");
+
+/** #2762: a coordination transition is one a seat decided; system actors and daemon bookkeeping notes are not. */
+function isCoordinationTransition(t: { actorSession: string; transitionNote: string | null }): boolean {
+  if (isSystemActor(t.actorSession)) return false;
+  const note = t.transitionNote;
+  return !note || !DAEMON_BOOKKEEPING_NOTE_PREFIXES.some((prefix) => note.startsWith(prefix));
+}
+
 /** A read-only question generator. Proof files, closures and acceptance receipts
  * are material for the diagnosing agent, never an automatic outcome counter. */
 export class PassiveCeremonySource implements HealthObservationSource {
@@ -88,14 +105,16 @@ export class PassiveCeremonySource implements HealthObservationSource {
       // Its parent joins give the complete family without rescanning dormant work.
       const ids = [...members.get(lineageId)!];
       if (ids.length > 1000) throw new Error("health_passive_family_member_limit");
-      const transitions: ReturnType<QueueRepository["listTransitions"]> = [];
+      const window: ReturnType<QueueRepository["listTransitions"]> = [];
       for (const id of ids) {
-        transitions.push(...this.queue.transitionLog.listForQitemWindow(id, start, now, 10001 - transitions.length));
-        if (transitions.length > 10000) throw new Error("health_passive_transition_window_truncated");
+        window.push(...this.queue.transitionLog.listForQitemWindow(id, start, now, 10001 - window.length));
+        if (window.length > 10000) throw new Error("health_passive_transition_window_truncated");
       }
-      transitions.sort((a, b) => a.transitionId - b.transitionId);
+      window.sort((a, b) => a.transitionId - b.transitionId);
+      // Count, segment and report only what seats decided (#2762); the raw window still names the family.
+      const transitions = window.filter(isCoordinationTransition);
       if (transitions.length < p.thresholds.ceremonyTransitions) continue;
-      const rows = [...new Set(transitions.map((t) => t.qitemId))].map((id) => get(id)!);
+      const rows = [...new Set(window.map((t) => t.qitemId))].map((id) => get(id)!);
       const tags = rows.flatMap((r) => r.tags ?? []);
       let missionId = one(tagged(tags, "mission:"));
       // Normal work linkage is explicit tags. Untagged work has no invented mission.
@@ -124,21 +143,23 @@ export class PassiveCeremonySource implements HealthObservationSource {
       if (!first) throw new Error("health_passive_episode_start_unavailable");
       const boundaries = this.closedBoundaries(lineageId);
       const cuts = boundaries.map((b) => b.transitionId);
-      const segments: typeof transitions[] = [];
+      // Each closed segment keeps the end of the disposition that closed it: a disposition recorded
+      // before #2762 may cut at a transition that no longer counts, so its id is not the segment's last.
+      const segments: Array<{ segment: typeof transitions; endedAt?: string }> = [];
       let remaining = transitions;
-      for (const cut of cuts) {
-        const part = remaining.filter((t) => t.transitionId <= cut);
-        if (part.length) segments.push(part);
-        remaining = remaining.filter((t) => t.transitionId > cut);
+      for (const boundary of boundaries) {
+        const part = remaining.filter((t) => t.transitionId <= boundary.transitionId);
+        if (part.length) segments.push({ segment: part, endedAt: boundary.endedAt });
+        remaining = remaining.filter((t) => t.transitionId > boundary.transitionId);
       }
-      if (remaining.length) segments.push(remaining);
-      for (const segment of segments) {
+      if (remaining.length) segments.push({ segment: remaining });
+      for (const { segment, endedAt } of segments) {
         if (segment.length < p.thresholds.ceremonyTransitions) continue;
         const segmentFirst = segment[0]!;
         const resumed = cuts.some((cut) => cut < segmentFirst.transitionId);
         const episodeStartedAt = resumed ? segmentFirst.ts : first.ts;
         const episodeKey = resumed ? `${lineageId}:${segmentFirst.transitionId}` : lineageId;
-        const measuredEnd = boundaries.find((b) => b.transitionId === segment.at(-1)!.transitionId)?.endedAt ?? now;
+        const measuredEnd = endedAt ?? now;
         const scopeKey = healthHash({ scope, workspace });
         if (!contexts.has(scopeKey)) contexts.set(scopeKey, scope.type === "mission" || scope.type === "slice"
           ? this.context(scope, workspace, missionRoot)

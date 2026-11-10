@@ -934,7 +934,8 @@ function resolveUpdateActor(source: string | undefined, opts: Record<string, unk
     : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set " +
       "OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --actor is ignored: the actor is " +
       "the seat's own identity. Changing a row needs a seat, and notes need a seat; an external routine can pass " +
-      "--source <name>@external for a note only.");
+      "--source <name>@external for a note only. A person answering an ask addressed to them (a host pairing approval, " +
+      "say) does it in the TUI (rig tui, then attention) or in Steering, not with this command.");
 }
 
 function extractRigName(sessionName: string): string | undefined {

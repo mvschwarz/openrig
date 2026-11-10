@@ -469,6 +469,10 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
+    // D#52: the person approves in the TUI or Steering; rig queue update is named as an agent seat's way, not theirs.
+    expect(item.body).toContain("APPROVE, as the person: in the TUI (rig tui, then attention), open this request and choose Approve");
+    expect(item.body).toContain("APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on");
+    expect(item.body).toContain("DENY: let it expire (nothing is persisted)");
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
@@ -532,6 +536,23 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
 
     const second = await app.request(`/api/hosts/pair-request/${pairId}`);
     expect(second.status).toBe(404);
+  });
+
+  // Steering's Deny and Drop close the item done, with closure denied or canceled (mission-control-write-contract.ts
+  // verbToClosure); a done with any reason but no-follow-on isn't an approval. Each denies and hands nothing over.
+  it.each([
+    ["Steering's Deny", { closureReason: "denied", closureTarget: "operator denied" }],
+    ["Steering's Drop", { closureReason: "canceled", closureTarget: "not now" }],
+    ["another closure", { closureReason: "escalation", closureTarget: "ops@team" }],
+  ] as const)("%s (done, not no-follow-on) → denied, with no token, and the pairing dies", async (_label, closure) => {
+    const { pairId, approvalQitemId } = await issue();
+    await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "done", ...closure });
+    expect(repo.getById(approvalQitemId)).toMatchObject({ state: "done", closureReason: closure.closureReason });
+    const res = await app.request(`/api/hosts/pair-request/${pairId}`);
+    const body = await res.json() as { status: string; token?: string };
+    expect(body).toEqual({ status: "denied" });
+    expect(JSON.stringify(body)).not.toContain(BEARER);
+    expect((await app.request(`/api/hosts/pair-request/${pairId}`)).status).toBe(404);
   });
 
   it("deny → status denied, and the pairing dies (nothing to hand over)", async () => {

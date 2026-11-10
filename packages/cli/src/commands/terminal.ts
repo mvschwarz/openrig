@@ -24,6 +24,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
+import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -73,6 +74,8 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
+  /** Opened seats on another host, with that host: complete when sent, so its absence (an older daemon) means unknown. */
+  remote?: Array<{ seat: string; host: string }>;
   absent: { seat: string; host: string | null; reason: string }[];
   degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
   pages: number;
@@ -133,6 +136,23 @@ function humanOpen(r: OpenViewResult): string {
   for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
   for (const n of r.notes ?? []) lines.push(`  note: ${n}`);
   return lines.join("\n");
+}
+
+/** Names the opened seats that need attention (a startup prompt, a sign-in, a failed start), so a held seat doesn't
+ *  read as an open that failed for no reason. Local seats are checked on this daemon; a seat on another host, or one
+ *  whose host the result doesn't say, is reported unchecked, never matched to a local seat of the same name. */
+async function withHeldSeats(client: DaemonClient, r: OpenViewResult): Promise<OpenViewResult> {
+  const seats = [...new Set([...r.opened, ...(r.following?.tiles.map(t => t.seat) ?? [])])];
+  if (!Array.isArray(r.remote)) {
+    // An older daemon names opened seats without saying which are remote: none can be checked locally by name.
+    const lines = seats.length ? attentionLines({ attention: [], unknown: seats.map(seat => ({ seat, why: "the daemon didn't say which host each tile is on" })) }, "tile") : [];
+    return lines.length ? { ...r, notes: [...(r.notes ?? []), ...lines] } : r;
+  }
+  const remote = new Map(r.remote.map(({ seat, host }) => [seat, host]));
+  const check = await checkSeatAttention(client, seats.filter(seat => !remote.has(seat)));
+  for (const [seat, host] of remote) check.unknown.push({ seat, why: `it's on host ${host}, which this daemon doesn't check` });
+  const lines = attentionLines(check, "tile");
+  return lines.length ? { ...r, notes: [...(r.notes ?? []), ...lines] } : r;
 }
 
 /** A successful existing-workspace selection also needs no new panes. */
@@ -221,7 +241,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             herdrApp: { appHome },
             ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
           if (!Array.isArray(res.data?.opened)) { printResult(opts.json ?? false, res.data, res.status); return; }
-          printOpen(opts.json ?? false, res.data, res.status);
+          printOpen(opts.json ?? false, await withHeldSeats(client, res.data), res.status);
           return;
         }
         // Herdr's control socket can answer with no desktop client attached.
@@ -231,7 +251,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           const windowProvider = opts.provider?.trim() === "herdr-app" ? undefined : opts.provider;
           const result = await openTerminalWindow(client, view, windowProvider, deps.windowDeps, opts.expectedPlan, session, following);
           const out = ambientFallbackNote ? { ...result, notes: [...(result.notes ?? []), ambientFallbackNote] } : result;
-          printOpen(opts.json ?? false, out, 200);
+          printOpen(opts.json ?? false, await withHeldSeats(client, out), 200);
           return;
         }
         let expectedPlan = opts.expectedPlan;
@@ -256,7 +276,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           printResult(opts.json ?? false, res.data, res.status);
           return;
         }
-        printOpen(opts.json ?? false, res.data, res.status);
+        printOpen(opts.json ?? false, await withHeldSeats(client, res.data), res.status);
       });
     });
 

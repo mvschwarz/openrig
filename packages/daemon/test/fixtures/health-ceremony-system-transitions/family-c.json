@@ -1,0 +1,233 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-08, issue #2762, family C). Seat-authored note prose is replaced; daemon-generated notes are verbatim.",
+  "family": "C",
+  "lineageId": "fc-9166e2158fe3-1794139967",
+  "now": "2026-11-08T16:48:11.196Z",
+  "observationWindowSeconds": 21600,
+  "findingTransitionIds": [
+    107582,
+    107585,
+    108662,
+    108667,
+    108693,
+    108969,
+    110351,
+    110353,
+    111009,
+    111013,
+    111024,
+    111025,
+    111714,
+    111837,
+    111838,
+    111846,
+    111847,
+    111936,
+    111937,
+    111940,
+    111941
+  ],
+  "members": [
+    {
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "handedOffFrom": null,
+      "sourceSession": "coordenacao-orquestrador-tech@fabrica",
+      "destinationSession": "coordenacao-coord-2@fabrica",
+      "tags": [
+        "coordenar",
+        "mission:family-c"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 107582,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T12:12:47.474Z",
+      "state": "pending",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "created",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 107585,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T12:13:06.312Z",
+      "state": "in-progress",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 108662,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T13:02:58.813Z",
+      "state": "in-progress",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: coordenacao-coord-2@fabrica|757cca8d68176f0d#7483b7e3-f390-4f7d-b99c-78399dcce864; generation c440ade3-3cf2-4032-adb5-98b2364f7734; retention-state WyIwMU02SzhSM1BZOUZUMU1CVlE5NlFFMThHNSIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations fc-9166e2158fe3-1794139967",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 108667,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T13:03:07.781Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 108693,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T13:04:59.173Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivered: coordenacao-coord-2@fabrica|757cca8d68176f0d#7483b7e3-f390-4f7d-b99c-78399dcce864",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 108969,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T13:21:03.573Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: coordenacao-coord-2@fabrica|757cca8d68176f0d#7483b7e3-f390-4f7d-b99c-78399dcce864 (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 110351,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T14:48:08.968Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M6XM2SF8DVM0AHAAQWZ3B3ZK; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 110353,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T14:48:26.531Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111009,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T15:33:56.805Z",
+      "state": "pending",
+      "actorSession": "release-sre@fabrica",
+      "transitionNote": "auto-unparked: blocker qitem-20261108125124-826afb7e reached terminal state 'handed-off'",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111013,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T15:33:59.941Z",
+      "state": "pending",
+      "actorSession": "queue@system",
+      "transitionNote": "blocker qitem-20261108125124-826afb7e wake attempted; delivery=delivered-ack-pending",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111024,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T15:34:20.872Z",
+      "state": "in-progress",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": null,
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111025,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T15:34:21.198Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "parked on qitem-20261108153255-ba1fb917",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111714,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:28:37.554Z",
+      "state": "blocked",
+      "actorSession": "qualidade-qa-6@fabrica",
+      "transitionNote": "blocker custody moved from qitem-20261108153255-ba1fb917 to qitem-20261108162837-b143b783",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111837,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:38:08.696Z",
+      "state": "pending",
+      "actorSession": "qualidade-revisor-3@fabrica",
+      "transitionNote": "auto-unparked: blocker qitem-20261108162837-b143b783 reached terminal state 'handed-off'",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111838,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:38:09.772Z",
+      "state": "pending",
+      "actorSession": "queue@system",
+      "transitionNote": "blocker qitem-20261108162837-b143b783 wake attempted; delivery=delivered-ack-pending",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111846,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:39:03.076Z",
+      "state": "in-progress",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": null,
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111847,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:39:03.341Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "parked on qitem-20261108163852-b9a4eab3",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111936,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:47:34.387Z",
+      "state": "pending",
+      "actorSession": "build-dev-1@fabrica",
+      "transitionNote": "auto-unparked: blocker qitem-20261108163852-b9a4eab3 reached terminal state 'handed-off'",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111937,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:47:35.616Z",
+      "state": "pending",
+      "actorSession": "queue@system",
+      "transitionNote": "blocker qitem-20261108163852-b9a4eab3 wake attempted; delivery=delivered-ack-pending",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 111940,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:47:52.912Z",
+      "state": "in-progress",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": null,
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 111941,
+      "qitemId": "fc-9166e2158fe3-1794139967",
+      "ts": "2026-11-08T16:47:53.137Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "parked on qitem-20261108164752-14242618",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

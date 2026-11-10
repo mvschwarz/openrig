@@ -38,6 +38,8 @@ export interface ComposedPane {
   attachArgv?: string[];
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */
   readOnly: boolean;
+  /** Structured host id of a remote (ssh) tile; absent for a local seat. The seat name alone doesn't say which host. */
+  host?: string;
 }
 
 /** A seat that could not be tiled because it has no live/attachable session. Named, never dropped. */
@@ -128,6 +130,9 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
+  /** Opened seats on another host, with that host: `opened` names them by seat alone. Always the complete list when
+   *  this service sends it (empty when every opened seat is local), so its absence means provenance is unknown. */
+  remote?: Array<{ seat: string; host: string }>;
   absent: AbsentSeat[];
   degraded: DegradedSeat[];
   pages: number;

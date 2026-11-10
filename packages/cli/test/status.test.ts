@@ -49,9 +49,16 @@ function createDaemonServer(
   summaryData: unknown[],
   cmuxStatus: unknown,
   kernelStatus?: { code: number; body: unknown },
+  more: Record<string, unknown> = {},
 ) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, "http://localhost");
+
+    if (url.pathname in more) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(more[url.pathname]));
+      return;
+    }
 
     if (url.pathname === "/api/rigs/summary") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -249,6 +256,47 @@ describe("rig status", () => {
         expect(output).toContain("  Recovered from an earlier boot failure (bootstrap_failed at 2026-10-08T12:00:00.000Z): startup gate timed out after 30s");
       } finally {
         await recovered.close();
+      }
+    });
+
+    it("names a kernel seat that needs attention, and why, under a partial_ready kernel (D#52)", async () => {
+      const held = createDaemonServer([], { available: false }, {
+        code: 200,
+        body: { kernel_state: "partial_ready", agents: [
+          { session_name: "advisor-lead@kernel", runtime: "claude-code", startup_status: "attention_required" },
+          { session_name: "operator-agent@kernel", runtime: "claude-code", startup_status: "ready" },
+        ] },
+      }, {
+        "/api/ps": [{ rigId: "k1", rigName: "kernel" }],
+        "/api/rigs/k1/nodes": [
+          { canonicalSessionName: "advisor-lead@kernel", needsAttention: true, startupStatus: "attention_required",
+            latestError: "Startup requires attention: Login expired · Please run /login" },
+          { canonicalSessionName: "operator-agent@kernel", needsAttention: false, startupStatus: "ready", latestError: null },
+        ],
+      });
+      const heldPort = await held.listen();
+      try {
+        const deps = () => ({
+          lifecycleDeps: mockLifecycleDeps({
+            exists: vi.fn((p: string) => p === STATE_FILE),
+            readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(heldPort)) : null)),
+            fetch: vi.fn(async () => ({ ok: true })),
+          }),
+          clientFactory: (baseUrl: string) => new DaemonClient(baseUrl),
+        });
+        const human = new Command();
+        human.addCommand(statusCommand(deps()));
+        const output = (await captureLogs(() => human.parseAsync(["node", "rig", "status"]))).join("\n");
+        expect(output).toContain("Kernel: partial_ready");
+        expect(output).toContain("  advisor-lead@kernel needs attention: Startup requires attention: Login expired · Please run /login. Look at it with: rig capture advisor-lead@kernel");
+        expect(output).not.toContain("operator-agent@kernel needs attention");
+        const json = new Command();
+        json.addCommand(statusCommand(deps()));
+        const parsed = JSON.parse((await captureLogs(() => json.parseAsync(["node", "rig", "status", "--json"]))).join("\n"));
+        expect(parsed.kernel.attention).toEqual({ unknown: [], attention: [
+          { seat: "advisor-lead@kernel", reason: "Startup requires attention: Login expired · Please run /login", waitingOnPerson: false }] });
+      } finally {
+        await held.close();
       }
     });
 
