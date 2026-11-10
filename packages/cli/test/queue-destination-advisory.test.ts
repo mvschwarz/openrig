@@ -425,6 +425,32 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect.soft(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
   });
 
+  it.each(["--host", "qualified destination"] as const)(
+    "keeps own-host %s recovery advice unknown when the first identity read fails but the later match succeeds",
+    async form => {
+      const registryUrl = "http://own-host-recovery.invalid:39001";
+      const home = path.join(scratch, "cli-home-own-host-recovery");
+      fs.mkdirSync(home);
+      fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: ${source.hostId}\n    transport: http\n    url: ${registryUrl}\n`);
+      vi.stubEnv("OPENRIG_HOME", home);
+
+      const calls = await recoverOwnHost(form, observation => {
+        if (observation === 1) throw new Error("fixture first identity read is unavailable");
+        return source.hostId;
+      });
+
+      expect(calls.healthResults).toEqual(["unreadable", source.hostId]);
+      expect(calls.healthReads).toBe(2);
+      expect(calls.readbacks).toEqual([{
+        base: registryUrl,
+        url: "/api/queue/qitem-create-contract",
+      }]);
+      expect(scopeLines()).toContain("mission:missing-mission");
+      expect(scopeLines()).toMatch(/scope check outcome unavailable after response recovery/i);
+      expect(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
+    },
+  );
+
   function healthAfterMatchedRecovery(later: "different" | "null" | "unreadable") {
     return (observation: number): string | null => {
       // The target and source checks see the real host. Only the later advice read changes.
