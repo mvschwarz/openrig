@@ -417,16 +417,16 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }
 
 /** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),
- *  or, before that record lands (an identity post can arrive first), its installed preset declares `protocol: pi-rpc`.
- *  A preset's own runner (`runner: true`, agent_runner 1) never qualifies, so its launcher-reported conversation stays. */
+ *  or, only while no launch record exists (an identity post can arrive first), its installed preset declares
+ *  `protocol: pi-rpc`. Any other recorded value never qualifies: a plain launch (0) or a preset's own runner (`runner: true`,
+ *  1) keeps its own identity path, so a later preset edit can't move a launched seat onto this one. */
 function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string, runtime: string): boolean {
   if (runtime === "pi" || runtime === "omp" || runtime === "claude-code" || runtime === "codex" || runtime === "terminal") {
     return false;
   }
   if (sessionCommunityRunnerSelect(db) !== "NULL") {
     const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { runner?: number | null } | undefined;
-    if (row?.runner === AGENT_RUNNER_HOSTED_PI_RPC) return true;
-    if (recordedRunner(row?.runner)) return false;
+    if (row?.runner !== null && row?.runner !== undefined) return row.runner === AGENT_RUNNER_HOSTED_PI_RPC;
   }
   const found = loadCommunityHarnessPreset(runtime);
   return found.ok && found.preset.protocol === "pi-rpc";

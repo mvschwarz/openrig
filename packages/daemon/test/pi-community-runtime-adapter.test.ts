@@ -626,4 +626,65 @@ describe("PiCommunityRuntimeAdapter", () => {
       db.close();
     }
   });
+
+  it("a launch recorded as a plain preset (agent_runner 0) keeps off the Pi identity path after its preset is edited to pi-rpc", async () => {
+    const db = new Database(":memory:");
+    const originalOpenRigHome = process.env.OPENRIG_HOME;
+    const openrigHome = mkdtempSync(join(tmpdir(), "openrig-home-"));
+    try {
+      process.env.OPENRIG_HOME = openrigHome;
+      const harnessDir = join(openrigHome, "community-harnesses");
+      mkdirSync(harnessDir, { recursive: true });
+      // The installed preset now declares pi-rpc; the session's launch recorded a plain preset (0).
+      writeFileSync(
+        join(harnessDir, "omo.yaml"),
+        "format: 1\nname: omo\ncommand: omo\nmaintainer: OmO\nprotocol: pi-rpc\nresume: true\nlimits: []\n",
+      );
+      db.exec(`
+        CREATE TABLE nodes (id TEXT, rig_id TEXT, runtime TEXT);
+        CREATE TABLE sessions (id INTEGER PRIMARY KEY, node_id TEXT, session_name TEXT, resume_type TEXT,
+          resume_token TEXT, resume_provenance TEXT, resume_last_verified TEXT, resume_last_probe_status TEXT,
+          resume_rotated_from TEXT, resume_rotated_process TEXT, resume_launch_token TEXT,
+          agent_app TEXT, agent_runner INTEGER);
+        CREATE TABLE events (seq INTEGER PRIMARY KEY, node_id TEXT, type TEXT, payload TEXT);
+        CREATE TABLE occupant_tenures (id TEXT, node_id TEXT, generation_ordinal INTEGER,
+          generation_uuid TEXT, kind TEXT, native_session_id_at_boot TEXT, boot_at TEXT);
+        INSERT INTO nodes VALUES ('omo-node', 'rig', 'omo');
+        INSERT INTO sessions (id, node_id, session_name, agent_app, agent_runner) VALUES (1, 'omo-node', 'worker@omo-test', 'omo', 0);
+        INSERT INTO occupant_tenures VALUES ('current', 'omo-node', 1, 'omo-gen-1', 'initial', NULL, '2026-10-31');
+      `);
+      const eventBus = { emit(e: RigEvent) { return e; } } as EventBus;
+      const registry = new SessionRegistry(db);
+      const store = new AgentActivityStore({ db, eventBus });
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("agentActivityStore" as never, store as never);
+        c.set("sessionRegistry" as never, registry as never);
+        c.set("eventBus" as never, eventBus as never);
+        c.set("activityHookToken" as never, "fixture-token" as never);
+        await next();
+      });
+      app.route("/api/activity", activityRoutes);
+
+      const res = await app.request("/api/activity/hooks", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer fixture-token" },
+        body: JSON.stringify({
+          eventFamily: "session_identity", runtime: "omo", nodeId: "omo-node", sessionName: "worker@omo-test",
+          sessionId: "omo-sess-1", sessionFile: "/fixture/state/pi/worker@omo-test/sessions/001.jsonl", generation: "omo-gen-1",
+        }),
+      });
+
+      expect(await res.json()).not.toMatchObject({ provenance: "rpc" });
+      expect(db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = 1").get()).toEqual({ resume_type: null, resume_token: null });
+    } finally {
+      if (originalOpenRigHome !== undefined) {
+        process.env.OPENRIG_HOME = originalOpenRigHome;
+      } else {
+        delete process.env.OPENRIG_HOME;
+      }
+      rmSync(openrigHome, { recursive: true, force: true });
+      db.close();
+    }
+  });
 });
