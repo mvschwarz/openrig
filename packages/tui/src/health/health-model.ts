@@ -1,6 +1,6 @@
 import { DEFAULT_TIME_ZONE, displayTime } from "../time.js";
 import { sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
-import type { Action, FleetSnapshot, HealthEvidenceReference, HealthRecord } from "../types.js";
+import type { Action, FleetSnapshot, HealthCoverage, HealthEvidenceReference, HealthRecord } from "../types.js";
 import type { Token } from "../theme.js";
 
 export type HealthDisplayScope =
@@ -134,16 +134,33 @@ function unavailableReason(snap: FleetSnapshot, scope: HealthDisplayScope): stri
   return null;
 }
 
-/** A source evaluated only part of its input; its omitted items are unevaluated. */
-function partialCoverage(snap: FleetSnapshot) {
-  return (snap.health?.coverage ?? []).filter((c) => c.partial);
+type CappedCoverage = Extract<HealthCoverage, { unit: string }>;
+
+/** A source that couldn't be read this time: health is degraded, not just bounded. */
+function unavailableCoverage(snap: FleetSnapshot) {
+  return (snap.health?.coverage ?? []).filter((c) => c.partial && c.status === "unavailable");
+}
+
+/** A source that evaluated up to its limit on purpose. What it left out is unknown, never healthy,
+ *  but a busy, healthy team reaches the limit on every read, so it's shown as coverage, not as a fault. */
+function cappedCoverage(snap: FleetSnapshot): CappedCoverage[] {
+  return (snap.health?.coverage ?? []).filter((c): c is CappedCoverage => c.partial && c.status !== "unavailable");
+}
+
+function coverageSegs(snap: FleetSnapshot, degraded: boolean): Array<{ text: string; token?: Token; bold?: boolean }> {
+  const capped = cappedCoverage(snap);
+  const evaluated = capped.reduce((n, c) => n + c.evaluated, 0), total = capped.reduce((n, c) => n + c.total, 0);
+  return [
+    ...(degraded ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
+    ...(capped.length ? [{ text: ` · COVERAGE ${evaluated}/${total}`, token: "info" as const }] : []),
+  ];
 }
 
 function emptyLine(scope: HealthDisplayScope, width: number, snap: FleetSnapshot): ContentLine {
   return fitLine([
     { text: "HEALTH  ", token: "bright", bold: true },
     { text: scopedEmptyLabel(scope), token: "dim", bold: true },
-    ...(partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
+    ...coverageSegs(snap, unavailableCoverage(snap).length > 0),
     { text: " · no findings served; not a healthy verdict", token: "dim" },
   ], width);
 }
@@ -172,8 +189,8 @@ export function healthSummaryLine(snap: FleetSnapshot, scope: HealthDisplayScope
     { text: `  WARN ${counts.warning}`, token: counts.warning ? "warn" : "dim", bold: counts.warning > 0 },
     ...(!compact ? [{ text: `  INFO ${counts.info}`, token: counts.info ? "info" as const : "dim" as const }] : []),
     ...(indeterminate > 0 ? [{ text: ` · Unknown ${indeterminate}`, token: "warn" as const, bold: true }] : []),
-    // PARTIAL precedes the variable-length summary so a narrow line cannot truncate it away.
-    ...(snap.health?.truncated || partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
+    // PARTIAL and COVERAGE precede the variable-length summary so a narrow line cannot truncate them away.
+    ...coverageSegs(snap, !!snap.health?.truncated || unavailableCoverage(snap).length > 0),
     ...(categoryText ? [{ text: compact ? ` · TYPE ${categoryText}` : ` · BY TYPE ${categoryText}`, token: "bright" as const }] : []),
     { text: ` · ${stateLabel(top)} ${top.summary}`, token: tokenFor(top) },
   ], width, { type: "tab", tab: "health" });
@@ -213,11 +230,14 @@ export function healthListLines(snap: FleetSnapshot, scope: HealthDisplayScope, 
   if (unavailable) return wrapDetailLines([{ text: `HEALTH  Unknown · ${unavailable}` }], width);
   const records = healthRecordsForScope(snap, scope);
   // Wrap the complete page explanation; compact summary callers still fit one line.
-  const coverageLines = wrapDetailLines(partialCoverage(snap).map((c) => ({
-    text: c.status === "unavailable"
-      ? `UNAVAILABLE · ${c.source}: ${c.reason}. This source was not assessed; the result is partial.`
-      : `PARTIAL · ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit}; ${c.omitted} omitted were not evaluated and are not healthy`,
-  })), width).map(line => ({ ...line, segs: [{ text: line.text, token: "warn" as const, bold: true }] }));
+  const coverageLines = [
+    ...wrapDetailLines(unavailableCoverage(snap).map((c) => ({
+      text: `UNAVAILABLE · ${c.source}: ${"reason" in c ? c.reason : "unreadable"}. This source was not assessed; the result is partial.`,
+    })), width).map(line => ({ ...line, segs: [{ text: line.text, token: "warn" as const, bold: true }] })),
+    ...wrapDetailLines(cappedCoverage(snap).map((c) => ({
+      text: `COVERAGE · ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit} (limit ${c.limit}; ${c.order}); the other ${c.omitted} weren't evaluated, so they're unknown, not healthy`,
+    })), width).map(line => ({ ...line, segs: [{ text: line.text, token: "info" as const }] })),
+  ];
   if (records.length === 0) return wrapDetailLines([emptyLine(scope, Infinity, snap), ...coverageLines], width);
   const { wide, sevWidth, signalWidth, scopeWidth, ageWidth, confWidth, evidenceWidth } = healthColumnWidths(width);
   const columns = [
