@@ -417,7 +417,11 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     try {
       const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
       expect(text.logs.find((line) => line.includes(node.canonicalSessionName))).toMatch(new RegExp(`yes\\s+${expected}\\s*$`));
-    } finally { Object.assign(node, original); }
+    } finally {
+      // Restore the shared fixture exactly, including dropping keys it didn't have (activityState).
+      for (const key of Object.keys(node)) if (!(key in original)) Reflect.deleteProperty(node, key);
+      Object.assign(node, original);
+    }
   });
 
   it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
