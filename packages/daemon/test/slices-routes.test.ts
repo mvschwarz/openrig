@@ -50,6 +50,7 @@ import { browserBoundary } from "../src/middleware/browser-boundary.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { eraseQueue } from "../src/domain/queue-erasure.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 function buildApp(opts: { indexer: SliceIndexer; projector: SliceDetailProjector; workspaceRoot?: string; guardBrowser?: boolean }): Hono {
@@ -863,6 +864,7 @@ describe("GET /api/slices observed queue counts", () => {
   });
 
   it("uses exact comma-aware tokens and counts duplicate tag spellings once per row", async () => {
+    catalog([{ id: "alpha", root: "alpha" }]);
     addSlice("alpha", "shipping", "shared");
     row("duplicates", "pending", ["project:alpha", "project:alpha", "mission:shipping", "mission:shipping", "slice:shared", "slice:shared"]);
     row("comma-tokens", "done", [" project:alpha , mission:shipping , slice:shared "]);
@@ -872,13 +874,63 @@ describe("GET /api/slices observed queue counts", () => {
       ["project-suffix", ["project:alpha-extra", "mission:shipping", "slice:shared"]],
       ["slice-space", ["project:alpha", "mission:shipping", "slice: shared"]],
       ["slice-case", ["project:alpha", "mission:shipping", "slice:SHARED"]],
-      ["project-missing", ["mission:shipping", "slice:shared"]],
-      ["mission-missing", ["project:alpha", "slice:shared"]],
     ] as const) row(id, "failed", [...tags]);
+    row("project-missing", "failed", ["mission:shipping", "slice:shared"]);
+    row("mission-missing", "denied", ["project:alpha", "slice:shared"]);
+    row("both-missing", "canceled", ["slice:shared"]);
+    row("wrong-project", "blocked", ["project:beta", "mission:shipping", "slice:shared"]);
+    row("wrong-mission", "handed-off", ["project:alpha", "mission:support", "slice:shared"]);
     row("substring-body", "failed", null, "shared shipping project:alpha");
     const entries = await list(route().app);
-    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping" });
-    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1 });
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", status: "active", rawStatus: "active" });
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1, failed: 1, denied: 1, canceled: 1 });
+  });
+
+  it("does not assign a partially qualified row when the same mission and slice exist in two projects", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    const defaultPath = addSlice(".", "shipping", "shared", "shipped");
+    const fooPath = addSlice("projects/foo", "shipping", "shared", "active");
+    configureCatalogRoute(fooMissionsRoot);
+    row("foo-explicit", "pending", ["project:foo", "mission:shipping", "slice:shared"]);
+    row("default-explicit", "done", ["project:default", "mission:shipping", "slice:shared"]);
+    row("project-missing", "blocked", ["mission:shipping", "slice:shared"]);
+    row("both-missing", "failed", ["slice:shared"]);
+
+    const { app, indexer } = route("foo", false, fooMissionsRoot, [defaultMissionsRoot]);
+    expect(indexer.projectId).toBeUndefined();
+    const active = await list(app, "?filter=active");
+    expect(defaultPath).not.toBe(fooPath);
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: fooPath,
+      status: "active", rawStatus: "active" });
+    expect(active[0]!.queueCounts, "partial rows remain ambiguous across the hidden default-project physical slice")
+      .toEqual({ ...ZERO, pending: 1 });
+    expect(await list(app, "?filter=done")).toEqual([]);
+    authoredUnchanged();
+  });
+
+  it("does not assign a mission-less row when same-named slices exist in two missions", async () => {
+    const shippingPath = addSlice("alpha", "shipping", "shared");
+    const supportRoot = path.join(root, "alpha", "extra-missions");
+    const supportPath = path.join(supportRoot, "support", "slices", "shared");
+    write(path.join(supportRoot, "support", "SPEC.md"), "---\nid: M.SUPPORT\nstatus: active\n---\n# Support\n");
+    write(path.join(supportPath, "SPEC.md"), "---\nid: shared\nstatus: active\n---\n# Shared support\n");
+    row("shipping-explicit", "pending", ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("support-explicit", "done", ["project:alpha", "mission:support", "slice:shared"]);
+    row("mission-missing", "blocked", ["project:alpha", "slice:shared"]);
+
+    const primaryRoot = path.join(root, "alpha", "missions");
+    const { app, indexer } = route("alpha", true, primaryRoot, [supportRoot]);
+    expect(indexer.projectId).toBe("alpha");
+    const entries = await list(app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: shippingPath });
+    expect(supportPath).not.toBe(shippingPath);
+    expect(entries[0]!.queueCounts, "a mission-less row cannot choose the list's first same-name mission")
+      .toEqual({ ...ZERO, pending: 1 });
+    authoredUnchanged();
   });
 
   it("resolves unique directory and authored-id forms to one scope without multiplying rows", async () => {
@@ -1005,6 +1057,32 @@ describe("GET /api/slices observed queue counts", () => {
     expect.soft(done[0]!.queueCounts, "same route after real completion").toEqual({ ...ZERO, done: 1 });
   });
 
+  it("drops scrubbed and deleted rows from observed counts after an explicit list refresh", async () => {
+    addSlice("alpha", "shipping", "shared");
+    row("count-scrub", "done", ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("count-delete", "pending", ["project:alpha", "mission:shipping", "slice:shared"]);
+    const { app } = route();
+    const before = await list(app);
+    expect(before[0]).toMatchObject({ name: "shared", qitemCount: 2 });
+    expect(before[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1 });
+
+    const erased = await eraseQueue(db, { scope: { kind: "ids", entries: [
+      { qitemId: "count-scrub", action: "scrub" }, { qitemId: "count-delete", action: "delete" },
+    ] }, apply: true, nowIso: "2026-11-10T00:00:00.000Z" });
+    expect(erased.complete).toBe(true);
+    expect(erased.qitems.map(({ qitemId, action }) => [qitemId, action])).toEqual([
+      ["count-delete", "delete"], ["count-scrub", "scrub"],
+    ]);
+
+    const after = await list(app, "?refresh=1");
+    expect(after[0]).toMatchObject({ name: "shared", qitemCount: 0 });
+    expect(after[0]!.queueCounts).toEqual(ZERO);
+    expect(db.prepare("SELECT body, tags, content_erased_at FROM queue_items WHERE qitem_id = 'count-scrub'").get())
+      .toMatchObject({ body: "", tags: null, content_erased_at: "2026-11-10T00:00:00.000Z" });
+    expect(db.prepare("SELECT 1 FROM queue_items WHERE qitem_id = 'count-delete'").get()).toBeUndefined();
+    authoredUnchanged();
+  });
+
   it.each([
     {
       order: "default then foo",
@@ -1054,7 +1132,7 @@ describe("GET /api/slices observed queue counts", () => {
       row(`default-${name}`, "failed", ["project:default", "mission:shipping", `slice:${name}`]);
     };
     addSameNameProjectPair(names[0]!);
-    const { app, indexer } = route("foo", false, fooMissionsRoot);
+    const { app, indexer } = route("foo", false, fooMissionsRoot, [path.join(root, "missions")]);
     expect(indexer.projectId).toBeUndefined();
 
     const small = await withCatalogReadCount(() => list(app));
