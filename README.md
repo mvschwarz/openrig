@@ -33,9 +33,9 @@ npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.5/skills/rigs --sk
 npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.5/skills/rigs --skill rigs --agent pi
 ```
 
-Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP, and say what you want built. The skill
-has your agent tell you what it will run and change before it does, install OpenRig, open the OpenRig view and pass
-your goal to OpenRig's operator.
+Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was
+already open), and say what you want built. The skill has your agent tell you what it will run and change before it
+does, install OpenRig, open the OpenRig view and pass your goal to OpenRig's operator.
 
 You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex
 signed in. One provider is enough to start.
