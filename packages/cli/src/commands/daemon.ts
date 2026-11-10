@@ -95,7 +95,7 @@ export function realDeps(): LifecycleDeps {
   return {
     processLiveness,
     acquireStartLock: () => {
-      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), isProcessAlive });
+      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness });
       if (lock.archived) console.error(`A start reservation from before this boot was left behind; archived it as ${lock.archived}`);
       return lock;
     },
