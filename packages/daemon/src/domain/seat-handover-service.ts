@@ -100,7 +100,7 @@ export interface SeatHandoverMutationResult {
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
   /** #2456: the required startup files the successor started without, where a start would have failed. The seat reads as
@@ -237,7 +237,7 @@ interface SeatHandoverServiceDeps {
    * chain. Wired in production to seat-recap-store (listRecapChain) + the
    * topology.root seat layout.
    */
-  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string };
+  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string; optional?: true }> } | { emptyReason: string };
   /** OPR.0.5.5.5 — filesystem existence check for declared rebuild artifacts
    *  (the session-source-rebuild-resolver seam). Default: node:fs existsSync;
    *  tests inject. */
@@ -677,7 +677,7 @@ export class SeatHandoverService {
       const chain = this.rebuildPrimingResolver
         ? this.rebuildPrimingResolver(input.seatRef)
         : { emptyReason: "no rebuild priming resolver wired on this daemon" };
-      let primedArtifacts: Array<{ address: string; label: string }> = [];
+      let primedArtifacts: Array<{ address: string; label: string; optional?: true }> = [];
       let gaps: string[] = [];
       let emptyChainReason: string | undefined;
       if ("artifacts" in chain && chain.artifacts.length > 0) {
@@ -1024,7 +1024,7 @@ export class SeatHandoverService {
       seatRef: string;
       reason: string;
       departingSession: string;
-      primedArtifacts: Array<{ address: string; label: string }>;
+      primedArtifacts: Array<{ address: string; label: string; optional?: true }>;
       gaps: string[];
       emptyChainReason?: string;
       /** #2456: the line naming managed guidance blocks left as they are. */
@@ -1038,9 +1038,15 @@ export class SeatHandoverService {
     ];
     const startup = startupFilesSection(info.startupFiles ?? []);
     if (startup.length > 0) lines.push("", ...startup);
-    if (info.primedArtifacts.length > 0) {
+    const required = info.primedArtifacts.filter((artifact) => !artifact.optional);
+    const history = info.primedArtifacts.filter((artifact) => artifact.optional);
+    if (required.length > 0) {
       lines.push("", "Priming artifacts (read each, in order):");
-      for (const artifact of info.primedArtifacts) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      for (const artifact of required) lines.push(`- ${artifact.address} — ${artifact.label}`);
+    }
+    if (history.length > 0) {
+      lines.push("", "Older recaps, newest first (read these only if you need the seat's history):");
+      for (const artifact of history) lines.push(`- ${artifact.address} — ${artifact.label}`);
     }
     if (info.gaps.length > 0) {
       lines.push("", "Declared but MISSING on disk (known gaps, named so nothing is silently dropped):");
