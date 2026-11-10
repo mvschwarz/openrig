@@ -7,9 +7,6 @@ sock = os.path.join(root, "server")
 env = dict(os.environ, TERM="xterm-256color")
 env.pop("TMUX", None)
 clients = []
-original_modes = {}
-mode_probes = {}
-output = {}
 
 def call(*args):
     return subprocess.check_output(["tmux", "-S", sock, *args], env=env, text=True, stderr=subprocess.PIPE, timeout=3).strip()
@@ -19,35 +16,22 @@ def until(fn, label):
     while time.monotonic() < deadline:
         for proc, master, slave in clients:
             try:
-                while True:
-                    chunk = os.read(master, 65536)
-                    if not chunk: break
-                    output[master] += chunk
+                while os.read(master, 65536): pass
             except (BlockingIOError, OSError): pass
         if fn(): return
         time.sleep(.04)
     raise AssertionError(label + "; actual=" + call("display-message", "-p", "-t", "seat:", "#{window_width}x#{window_height}"))
 
-def tile(cols, rows, observe_return=False):
+def tile(cols, rows):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    original_modes[slave] = termios.tcgetattr(slave)
     def setup():
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-    command = [sock if a == "TILE_SOCKET" else a for a in argv]
-    if observe_return:
-        # Keep this test's controlling terminal alive after the tile returns. Darwin revokes a
-        # session leader's PTY on exit, so reading modes after that exit cannot prove restoration.
-        probe = os.path.join(root, "returned-modes-"+str(slave))
-        mode_probes[slave] = probe
-        command = ["/bin/sh", "-c", 'probe=$1; shift; "$@"; rc=$?; stty -g > "$probe"; read ignored; exit "$rc";', "mode-probe", probe, *command]
-    proc = subprocess.Popen(command, env=env,
+    proc = subprocess.Popen([sock if a == "TILE_SOCKET" else a for a in argv], env=env,
                             stdin=slave, stdout=slave, stderr=slave, preexec_fn=setup)
     os.set_blocking(master, False)
     clients.append((proc, master, slave))
-    output[master] = b""
     return clients[-1]
 
 def size(client, cols, rows):
@@ -73,17 +57,7 @@ try:
                 "with open("+repr(received)+",'ab',buffering=0) as out:\n while True:\n  out.write(os.read(0,65536))\n")
     call("-f", "/dev/null", "new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=reflow-fixture", "python3 -u "+program)
     call("set-option", "-g", "status", "off")
-    # Delay the first native attach to expose keys typed while metadata/client startup is in flight.
-    slow = os.path.join(root, "slow-tmux")
-    with open(slow, "w") as f:
-        f.write("#!/bin/sh\ncase \" $* \" in *\" attach \"*) if [ ! -e "+root+"/starting ]; then touch "+root+"/starting; sleep 1; fi;; esac\nexec "+shutil.which("tmux")+" \"$@\"\n")
-    os.chmod(slow, 0o700)
-    argv[5] = slow
     phone = tile(40, 24)
-    until(lambda: os.path.exists(root+"/starting"), "attach startup reached")
-    assert b"\x1b[?2004h" in output[phone[1]], "early terminal paste must be framed"
-    early = b"y\r\x03\x1b[200~first line\rsecond line\x1b[201~"
-    os.write(phone[1], early)
     observed = [check(40, 24)]
     laptop = tile(120, 35)
     observed.append(check(120, 35))
@@ -96,14 +70,14 @@ try:
     observed.append(check(132,40))
     def got():
         with open(received, "rb") as f: return f.read()
-    until(lambda: got() == early+b"pl", "early keys and paste reach the native seat exactly")
+    until(lambda: got() == b"pl", "normal native input reaches seat")
     # The first burst into a new native client, split inside UTF-8, then arrows and control keys.
-    first = tile(132, 40, observe_return=True)
+    first = tile(132, 40)
     until(lambda: len(call("list-clients", "-F", "#{client_tty}").splitlines()) == 3, "native attach ready")
     os.write(first[1], b"A"*63+b"\xc3")
     time.sleep(.3)
     os.write(first[1], b"\xa9END\x1b[A\x00\x13\x11")
-    expected = early+b"pl"+b"A"*63+b"\xc3\xa9END\x1b[A\x00\x13\x11"
+    expected = b"pl"+b"A"*63+b"\xc3\xa9END\x1b[A\x00\x13\x11"
     until(lambda: got() == expected, "first keys arrive byte-for-byte and in order")
     # Native tmux, rather than a custom first-key buffer, carries a framed paste over 256 KiB.
     data = b"\x1b[200~"+b"".join(b"line %06d of a long paste\r" % i for i in range(16000))+b"\x1b[201~"
@@ -114,18 +88,18 @@ try:
         assert time.monotonic() < deadline, "native paste must keep moving"
     expected += data
     until(lambda: got() == expected, "large paste arrives whole and framed")
+    # This is a new keypress after the paste, not part of its sub-millisecond burst.
+    # tmux's default assume-paste-time bypasses bindings for such bursts, even on
+    # a direct native attach. Respect that fixture option without changing it.
+    time.sleep((int(call("show-options", "-gv", "assume-paste-time")) + 20) / 1000)
     os.write(first[1], b"\x02\x1b[5~")
     until(lambda: call("display-message", "-p", "-t", "seat:", "#{pane_in_mode}") == "1", "prefix then PageUp enters native copy mode")
     assert got() == expected, "prefix and PageUp do not reach the agent"
-    call("send-keys", "-t", "seat:", "-X", "cancel")
-    call("detach-client", "-t", os.ttyname(first[2]))
-    until(lambda: os.path.exists(mode_probes[first[2]]), "ordinary detach ends the native tile")
-    assert termios.tcgetattr(first[2]) == original_modes[first[2]], "viewer terminal modes must be restored"
-    print(json.dumps({"earlyKeys":True,"earlyPaste":True,"restoredModes":True,"sizes":observed,"localPin":"unset","nativeInput":True,"firstKeys":True,"pasteBytes":len(data),"prefixCopyMode":True}))
+    print(json.dumps({"sizes":observed,"localPin":"unset","nativeInput":True,"firstKeys":True,"pasteBytes":len(data),"prefixCopyMode":True}))
 finally:
     subprocess.run(["tmux","-S",sock,"kill-server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for proc, master, slave in clients:
         os.close(master); os.close(slave)
         try: proc.wait(timeout=4)
-        except subprocess.TimeoutExpired: os.killpg(proc.pid, signal.SIGTERM); proc.wait(timeout=3)
+        except subprocess.TimeoutExpired: proc.terminate(); proc.wait(timeout=3)
     shutil.rmtree(root)

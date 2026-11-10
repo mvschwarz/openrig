@@ -6,7 +6,7 @@ import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
-import { earlierSizingTileAttachment, earlierTileAttachment } from "./tile-attach.js";
+import { earlierTileAttachment } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
@@ -185,7 +185,7 @@ export class HerdrViewer {
         && entry.command === entry.argv.map(shellQuote).join(" ")
         && earlierTileAttachment(entry.argv, target.attachArgv, target.readOnly)) {
         earlier = true;
-        reopen = !entry.readOnly && !earlierSizingTileAttachment(entry.argv, target.attachArgv);
+        reopen = !entry.readOnly;
       }
       if (entry && !earlier && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
         return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");

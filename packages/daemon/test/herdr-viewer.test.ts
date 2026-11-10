@@ -244,7 +244,7 @@ describe("owned Herdr viewer", () => {
   });
   it("a writable tile attaches immediately and sizes natively; a read-only tile remains an observer", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    expect(rw).toContain(`(${tileAttachArgv0710("tmux", [], "a@team", false)[2]})`);
+    expect(rw).toBe(tileAttachArgv0710("tmux", [], "a@team", false)[2]);
     expect(rw).not.toContain("ignore-size");
     expect(rw).not.toContain("use()");
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
@@ -332,10 +332,8 @@ describe("viewers kept from an earlier release", () => {
   it("keeps 0.7.10's already-sizing writable viewer unchanged", async () => {
     const f = fixture(); await f.viewer().ensure(key, f.target);
     const stored = keepFrom(f, tileAttachArgv0710, false);
-    const before = stored();
-    expect(stored().command).not.toBe(f.target.paneCommand);
+    expect(stored().command).toBe(f.target.paneCommand);
     expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
-    expect(stored()).toEqual(before);
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
   });
 

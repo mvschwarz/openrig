@@ -86,6 +86,10 @@ session has no managed identity, reopen the rig view with
 `rig terminal open rig:<name> --window` (or your explicit provider). Views
 opened before this change must be closed and reopened to get this behavior.
 
+As in published 0.7.10, Enter or Ctrl-C typed while a new writable tile is still
+attaching can close that viewer. The agent keeps running; reopen the view.
+Once attached, keys and paste use native tmux input handling.
+
 ## Sizing and older views
 
 Use tmux's inherited `window-size latest` policy for the terminal most recently
