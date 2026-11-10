@@ -273,6 +273,17 @@ configurations, as below; do not take the pin from a cached page summary.
      `npm install -g @openai/codex`. On their yes, update it, then start
      that seat again. It's context for them, not a reason to stop or change the
      team.
+   - **A Codex seat says its model isn't available to their account** (for
+     example "… not supported when using Codex with a ChatGPT account"): the
+     sign-in works, but this account can't run the model that seat was given.
+     Tell them which seat and model. If they have Claude Code, offer to move
+     just that seat with `rig seat set-runtime <seat> --runtime claude-code
+     --reason "<model> isn't available to this Codex account"` (`--dry-run`
+     first); otherwise offer a model their account can run with
+     `rig seat set-model`, then start the seat again with
+     `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it
+     reports. On their yes, do it and say what the seat runs now. The team keeps
+     its name.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
    `rig ps --nodes --rig kernel --json`. Use
