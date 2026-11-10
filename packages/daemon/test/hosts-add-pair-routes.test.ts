@@ -469,6 +469,10 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
+    // D#52: the person approves in the TUI or Steering; rig queue update is named as an agent seat's way, not theirs.
+    expect(item.body).toContain("APPROVE, as the person: in the TUI (rig tui, then attention), open this request and choose Approve");
+    expect(item.body).toContain("APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on");
+    expect(item.body).toContain("DENY: let it expire (nothing is persisted)");
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {

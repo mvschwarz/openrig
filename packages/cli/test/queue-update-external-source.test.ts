@@ -134,6 +134,8 @@ describe("#2866 rig queue update --source <name>@external (note only, external a
     expect(exit).toBe(1);
     expect(out).toContain("OPENRIG_SESSION_NAME is not set, so there's no seat to act as");
     expect(out).toContain("notes need a seat; an external routine can pass --source <name>@external");
+    // D#52: a person approving their own ask (a host pairing) is pointed at the TUI or Steering.
+    expect(out).toContain("A person answering an ask addressed to them (a host pairing approval, say) does it in the TUI (rig tui, then attention) or in Steering");
     expect(seenHeaders).toEqual([]);
     expect(repo.getByIdOrThrow(id)).toEqual(before);
   });

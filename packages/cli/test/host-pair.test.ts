@@ -81,6 +81,10 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
       expect(JSON.parse(out.join("\n"))).toMatchObject({ ok: true, entry: { id: "vps-a", transport: "http" } });
     } else {
       expect(out.join("\n")).toContain("Pairing code: 424242");
+      // The person on the target approves in the TUI or Steering; rig queue update is named as an agent seat's way.
+      expect(out.join("\n")).toContain("On the target, its person approves it in the TUI (rig tui, then attention)");
+      expect(out.join("\n")).toContain("From an agent seat on the target instead: rig queue update qitem-1 --state done --closure-reason no-follow-on");
+      expect(out.join("\n")).not.toContain("On the target: rig queue update");
       expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");
       expect(out.join("\n")).toContain("rig host doctor vps-a");
       expect(out.join("\n")).toContain("rig config set feed.subscriptions.vps-a.enabled true");

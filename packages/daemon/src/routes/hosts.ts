@@ -262,8 +262,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         body: [
           `A remote operator (${requester}) is asking to pair with this host.`,
           `Pairing code: ${code} — confirm it matches the code shown on the requesting side.`,
-          `APPROVE: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on`,
-          `DENY:    rig queue update <this-qitem-id> --state denied`,
+          `APPROVE, as the person: in the TUI (rig tui, then attention), open this request and choose Approve; Steering's Approve does the same.`,
+          `APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on (rig queue update acts as a managed seat, so it refuses in a plain terminal).`,
+          `DENY: let it expire (nothing is persisted), or from an agent seat: rig queue update <this-qitem-id> --state denied`,
           `Approval hands this daemon's bearer token to the requester (full API access).`,
           `This request expires ${describePairTtl(ttlMs)} after creation, at ${new Date(createdAt + ttlMs).toISOString().slice(0, 19).replace("T", " ")} UTC; expiry persists nothing.`,
         ].join("\n"),
