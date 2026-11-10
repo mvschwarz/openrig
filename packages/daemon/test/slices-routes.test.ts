@@ -916,6 +916,63 @@ describe("GET /api/slices observed queue counts", () => {
     authoredUnchanged();
   });
 
+  it("checks project-less rows against catalog missions roots beyond startup roots without changing the visible list", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    const defaultPath = addSlice(".", "shipping", "shared", "shipped", "SLICE.DEFAULT");
+    const fooPath = addSlice("projects/foo", "shipping", "shared", "active", "SLICE.FOO");
+    configureCatalogRoute(defaultMissionsRoot);
+    row("default-explicit", "done", ["project:default", "mission:shipping", "slice:shared"]);
+    row("foo-explicit", "failed", ["project:foo", "mission:shipping", "slice:shared"]);
+    row("project-missing", "blocked", ["mission:shipping", "slice:shared"]);
+
+    // Match startup's default missions + workspace/slices roots. The catalog's
+    // foo missions root is deliberately not configured on this indexer.
+    const { app, indexer } = route("default", false, defaultMissionsRoot, [path.join(root, "slices")]);
+    expect(indexer.additionalSliceRoots).toEqual([path.join(root, "slices")]);
+    expect(indexer.additionalSliceRoots).not.toContain(fooMissionsRoot);
+    expect(fooPath).not.toBe(defaultPath);
+    const entries = await list(app);
+    expect(entries.map((entry) => entry.slicePath)).toEqual([defaultPath]);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", rawStatus: "shipped", qitemCount: 3 });
+    expect(entries[0]!.queueCounts, "the project-less row is ambiguous with the hidden foo physical slice")
+      .toEqual({ ...ZERO, done: 1 });
+    authoredUnchanged();
+  });
+
+  it("returns null queue counts when a catalog project cannot be resolved", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    addCatalogProject("foo", "projects/foo");
+    const defaultPath = addSlice(".", "shipping", "shared", "active");
+    write(path.join(root, "projects/foo/project.yaml"), "id: [\n");
+    configureCatalogRoute(defaultMissionsRoot);
+    row("project-missing-unresolved-catalog", "blocked", ["mission:shipping", "slice:shared"]);
+
+    const entries = await list(route("default", false, defaultMissionsRoot, [path.join(root, "slices")]).app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ slicePath: defaultPath, qitemCount: 1 });
+    expect(entries[0]!.queueCounts).toBeNull();
+    authoredUnchanged();
+  });
+
+  it("returns null queue counts when a catalog missions root cannot be traversed", async () => {
+    catalog([{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }]);
+    const defaultMissionsRoot = addCatalogProject("default", ".");
+    const fooMissionsRoot = addCatalogProject("foo", "projects/foo");
+    const defaultPath = addSlice(".", "shipping", "shared", "active");
+    write(fooMissionsRoot, "not a directory");
+    configureCatalogRoute(defaultMissionsRoot);
+    row("project-missing-unreadable-root", "blocked", ["mission:shipping", "slice:shared"]);
+
+    const entries = await list(route("default", false, defaultMissionsRoot, [path.join(root, "slices")]).app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ slicePath: defaultPath, qitemCount: 1 });
+    expect(entries[0]!.queueCounts).toBeNull();
+    authoredUnchanged();
+  });
+
   it("does not assign a mission-less row when same-named slices exist in two missions", async () => {
     const shippingPath = addSlice("alpha", "shipping", "shared");
     const supportRoot = path.join(root, "alpha", "extra-missions");
@@ -946,6 +1003,20 @@ describe("GET /api/slices observed queue counts", () => {
     const entries = await list(route().app);
     expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", qitemCount: 3 });
     expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1, blocked: 1 });
+  });
+
+  it("uses each physical path's authored slice ID when a same-name candidate is hidden", async () => {
+    const visiblePath = addSlice("alpha", "shipping", "shared", "active", "SLICE.ALPHA");
+    const hiddenPath = addSlice("beta", "shipping", "shared", "active", "SLICE.BETA");
+    row("visible-authored-id-only", "pending", ["slice:SLICE.ALPHA"]);
+
+    const { app } = route("alpha", false, path.join(root, "alpha", "missions"), [path.join(root, "beta", "missions")]);
+    const entries = await list(app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: visiblePath });
+    expect(entries[0]!.slicePath).not.toBe(hiddenPath);
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1 });
+    authoredUnchanged();
   });
 
   it.each([
