@@ -1398,7 +1398,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // #2866: the other host would record the routine bare, indistinguishable from a routine of its own (a
           // forwarded create stamps the origin; this path doesn't). A --host that resolves locally is fine.
           console.error(`--source with --host ${target.remote} is not supported: that host would record ${actor.actorSession} ` +
-            "without the host it ran on. Append the note on the routine's own host. Nothing was sent.");
+            "without the host it ran on. Run the routine on the host that holds the row. Nothing was sent.");
           process.exitCode = 1;
           return;
         }
