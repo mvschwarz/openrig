@@ -33,7 +33,7 @@ npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --s
 npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --skill rigs --agent pi
 ```
 
-Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP, and say what you want built. The skill has your agent tell
+Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already open), and say what you want built. The skill has your agent tell
 you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
 OpenRig's operator. If Claude Code was already running when you added the skill, type `/reload-skills` first, or start
 a new session: a session doesn't see a skills folder created after it started.
