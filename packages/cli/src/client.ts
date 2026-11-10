@@ -12,6 +12,14 @@ export function terminalAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** The credential for operator-gated writes (Mission Control actions, a pairing decision): an explicit bearer, else the
+ *  daemon's operator bearer configured as OPENRIG_AUTH_BEARER_TOKEN, else the terminal credential (the same token on a
+ *  daemon that aliases them; none where none is needed). */
+export function operatorAuthHeaders(bearer?: string): Record<string, string> {
+  const token = bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
+  return token ? { Authorization: `Bearer ${token}` } : terminalAuthHeaders();
+}
+
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
 export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
 

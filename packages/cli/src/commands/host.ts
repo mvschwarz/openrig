@@ -29,7 +29,7 @@ import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, operatorAuthHeaders } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
 
@@ -973,11 +973,10 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       .action(async (request: string, opts: { bearer?: string; json?: boolean }) => {
         type Decided = { ok?: boolean; error?: string; message?: string; code?: string; requester?: string; by?: string };
         // The decision is gated by the operator bearer (OPENRIG_AUTH_BEARER_TOKEN), as rig queue resolve and rig mode are.
-        const bearer = opts.bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
         let res: { status: number; data: Decided };
         try {
           res = await new DaemonClient().post<Decided>("/api/hosts/pair-decision", { request: request.trim(), decision },
-            { headers: bearer ? { Authorization: `Bearer ${bearer}` } : terminalAuthHeaders() });
+            { headers: operatorAuthHeaders(opts.bearer) });
         } catch (err) {
           console.error((err as Error).message);
           process.exitCode = 1;

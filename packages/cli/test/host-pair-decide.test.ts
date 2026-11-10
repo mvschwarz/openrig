@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { hostCommand } from "../src/commands/host.js";
+import { operatorAuthHeaders, terminalAuthHeaders } from "../src/client.js";
 import { createFullTestDb } from "../../daemon/test/helpers/test-app.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
@@ -178,3 +179,33 @@ describe("rig host approve against the real pairing route, with distinct credent
   });
 });
 
+
+describe("operatorAuthHeaders: the credential for operator-gated writes", () => {
+  let dir: string;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "operator-auth-"));
+    saved = {};
+    for (const k of ["OPENRIG_HOME", "RIGGED_HOME", "OPENRIG_TERMINAL_BEARER_TOKEN", "OPENRIG_AUTH_BEARER_TOKEN"]) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.OPENRIG_HOME = dir;
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+
+  it("takes the configured operator bearer with no terminal-token file, while terminal calls carry none", () => {
+    process.env.OPENRIG_AUTH_BEARER_TOKEN = "synthetic-operator-bearer";
+    expect(operatorAuthHeaders()).toEqual({ Authorization: "Bearer synthetic-operator-bearer" });
+    expect(terminalAuthHeaders()).toEqual({});
+  });
+
+  it("an explicit bearer wins; with none configured it falls back to the terminal credential, as before", () => {
+    fs.writeFileSync(path.join(dir, "terminal-token"), "synthetic-terminal-token\n");
+    process.env.OPENRIG_AUTH_BEARER_TOKEN = "synthetic-operator-bearer";
+    expect(operatorAuthHeaders("synthetic-explicit")).toEqual({ Authorization: "Bearer synthetic-explicit" });
+    delete process.env.OPENRIG_AUTH_BEARER_TOKEN;
+    expect(operatorAuthHeaders()).toEqual({ Authorization: "Bearer synthetic-terminal-token" });
+    expect(terminalAuthHeaders()).toEqual({ Authorization: "Bearer synthetic-terminal-token" });
+  });
+});
