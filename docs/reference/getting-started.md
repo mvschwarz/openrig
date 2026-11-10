@@ -182,7 +182,7 @@ user.
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. For a new install, add it with the command for the
-agent doing the setup. Both use this release's tag:
+agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
@@ -190,6 +190,8 @@ npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" -
 
 # Codex
 npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent pi
 ```
 
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
@@ -201,7 +203,7 @@ A Claude Code session that was already running doesn't see a skills folder creat
 project's `.claude/skills` that this command adds nor the `~/.claude/skills` the daemon fills on its first start. In
 that session, type `/reload-skills` (Claude Code 2.1.152 or later), or start a new one, before `/rigs`.
 
-These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
+The Claude Code and Codex lines are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 
 **One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
