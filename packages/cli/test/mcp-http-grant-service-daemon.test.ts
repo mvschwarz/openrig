@@ -963,6 +963,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(shown.structured.item).toMatchObject({ state: "handed-off", closureReason: "handed_off_to", handedOffTo: null, closureTarget: null,
       closingTransition: { closureReason: "handed_off_to", closureTarget: null, transitionNote: "handed on (out of scope)" } });
     expect(shown.structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(shown.structured.item).not.toHaveProperty(derived);
     expect(JSON.stringify((await asExternal("rig_queue_list", { all: true })).structured)).not.toContain("impl@team-a");
 
     // A cross-host successor's parties can't be checked here: its id and host stay hidden.
@@ -970,6 +971,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'qitem-far01@other-host', handed_off_to = 'impl@team-a@other-host' WHERE qitem_id = ?").run(remote);
     const far = await asExternal("rig_queue_show", { qitemId: remote });
     expect(far.structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    expect(far.structured.item).not.toHaveProperty("successorNote");
     expect(far.text).not.toContain("other-host");
 
     // A successor addressed to the caller but sent by another caller-shaped seat isn't the team's; nor is a sibling the
