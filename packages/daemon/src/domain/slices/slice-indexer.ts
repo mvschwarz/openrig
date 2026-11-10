@@ -34,6 +34,9 @@ const QUEUE_COUNT_STATES = [
 ] as const;
 
 export type ObservedQueueState = (typeof QUEUE_COUNT_STATES)[number];
+/** State totals for GET /api/slices. A row contributes only when its tags
+ * resolve to one physical slice with a known project and mission.
+ */
 export type SliceQueueCounts = Record<ObservedQueueState, number>;
 
 const KNOWN_QUEUE_STATES = new Set<string>(QUEUE_COUNT_STATES);
@@ -165,7 +168,9 @@ export interface SliceListEntry {
    *  the storytelling adapter as the ConceptCard.oneLiner for
    *  `rawStatus === "candidate"` slices. null when absent. */
   description: string | null;
+  /** Existing legacy display-membership count; separate from state totals. */
   qitemCount: number;
+  /** Added by GET /api/slices as fresh state totals; null when project/mission scope is unresolved. */
   queueCounts?: SliceQueueCounts | null;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
@@ -586,9 +591,13 @@ export class SliceIndexer {
 
   /**
    * Observed per-state queue counts (#2729) for `GET /api/slices`.
-   * Evaluates exact typed `project:` + `mission:` + `slice:` membership across
-   * `entries` in a single shared `queue_items` scan, with no 500-row cap and
-   * without mutating or relying on the 60s listing cache for row states.
+   * Matches exact typed tags against physical slice candidates across all
+   * configured roots, then updates only a listed candidate. Missing project
+   * or mission tags count only when the remaining tags identify one resolved
+   * project/mission slice; list first-wins/filter behavior does not resolve
+   * ambiguity.
+   * Queue rows are read in one uncapped shared scan, independent of the 60s
+   * listing cache.
    */
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
@@ -596,24 +605,53 @@ export class SliceIndexer {
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
-      projectId: string;
+      projectId: string | null;
+      missionId: string | null;
       missionKeys: Set<string>;
       sliceKeys: Set<string>;
-      counts: SliceQueueCounts;
+      counts: SliceQueueCounts | null;
     }
     const targetsBySliceToken = new Map<string, TargetScope[]>();
+    const visibleCountsByPath = new Map<string, SliceQueueCounts | null>();
+    const projectIdsByPath = new Map<string, string | null>();
+    const projectForPath = (slicePath: string): string | null => {
+      const physicalPath = path.resolve(slicePath);
+      if (!projectIdsByPath.has(physicalPath)) {
+        projectIdsByPath.set(physicalPath, resolveProjectId(slicePath));
+      }
+      return projectIdsByPath.get(physicalPath) ?? null;
+    };
 
     for (const entry of entries) {
-      const projectId = entry.missionId ? resolveProjectId(entry.slicePath) : null;
-      if (!projectId || !entry.missionId) {
-        result.set(entry.slicePath, null);
-        continue;
+      const physicalPath = path.resolve(entry.slicePath);
+      const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
+      const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
+      if (!visibleCountsByPath.has(physicalPath)) {
+        visibleCountsByPath.set(physicalPath, counts);
+      } else if (visibleCountsByPath.get(physicalPath) === null || counts === null) {
+        visibleCountsByPath.set(physicalPath, null);
       }
-      const counts = zeroQueueCounts();
-      result.set(entry.slicePath, counts);
-      const missionKeys = new Set(this.missionTagKeys(entry.missionId, entry.slicePath));
-      const sliceKeys = new Set(this.sliceTagKeys(entry.name));
-      const target: TargetScope = { projectId, missionKeys, sliceKeys, counts };
+      result.set(entry.slicePath, visibleCountsByPath.get(physicalPath) ?? null);
+    }
+    if (![...visibleCountsByPath.values()].some((counts) => counts !== null)) return result;
+
+    const physicalPaths = new Set<string>();
+    for (const location of this.walkSliceLocations(true)) {
+      const physicalPath = path.resolve(location.slicePath);
+      if (physicalPaths.has(physicalPath)) continue;
+      physicalPaths.add(physicalPath);
+
+      const missionKeys = new Set(location.missionId
+        ? this.missionTagKeys(location.missionId, location.slicePath)
+        : []);
+      const sliceKeys = new Set(this.sliceTagKeys(location.name));
+      const target: TargetScope = {
+        projectId: projectForPath(location.slicePath),
+        missionId: location.missionId,
+        missionKeys,
+        sliceKeys,
+        counts: visibleCountsByPath.get(physicalPath) ?? null,
+      };
       for (const token of sliceKeys) {
         const list = targetsBySliceToken.get(token);
         if (list) list.push(target);
@@ -632,31 +670,40 @@ export class SliceIndexer {
     for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
       if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
       const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size !== 1 || scope.missions.size === 0 || scope.slices.size === 0) continue;
-      const rowProject = scope.projects.values().next().value!;
+      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+      const rowProject = scope.projects.values().next().value;
       const firstSlice = scope.slices.values().next().value!;
       const candidates = targetsBySliceToken.get(firstSlice);
       if (!candidates) continue;
+
+      let uniqueMatch: TargetScope | null = null;
       for (const target of candidates) {
-        if (target.projectId !== rowProject) continue;
+        if (rowProject !== undefined && target.projectId !== rowProject) continue;
         let allSlicesMatch = true;
-        for (const s of scope.slices) {
-          if (!target.sliceKeys.has(s)) {
+        for (const slice of scope.slices) {
+          if (!target.sliceKeys.has(slice)) {
             allSlicesMatch = false;
             break;
           }
         }
         if (!allSlicesMatch) continue;
         let allMissionsMatch = true;
-        for (const m of scope.missions) {
-          if (!target.missionKeys.has(m)) {
+        for (const mission of scope.missions) {
+          if (!target.missionKeys.has(mission)) {
             allMissionsMatch = false;
             break;
           }
         }
         if (!allMissionsMatch) continue;
-        target.counts[row.state as ObservedQueueState]++;
+        if (uniqueMatch) {
+          uniqueMatch = null;
+          break;
+        }
+        uniqueMatch = target;
       }
+
+      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+      uniqueMatch.counts[row.state as ObservedQueueState]++;
     }
 
     return result;
