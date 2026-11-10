@@ -162,10 +162,12 @@ person needs in their project or home folder and name that path.
   doesn't show up as a stopped seat, so don't leave it to a background wait.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
-  passed. If Claude Code is signed in, say you're moving the operator to it and why, run
+  passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
+  yes, run
   `rig seat set-runtime <canonicalSessionName> --runtime claude-code --reason "<model> isn't available to this Codex account"`
-  (`--dry-run` first), and continue the handoff. Otherwise tell the person which model failed and their choices: sign in
-  to Claude Code, or give the seat a model their account can run (`rig seat set-model`, used from its next start).
+  (`--dry-run` first), then continue the handoff. If it isn't, or you can't tell, say so and offer their choices: sign in
+  to Claude Code, or give the seat a model their account can run with `rig seat set-model`, then start it again with
+  `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports.
 - **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.

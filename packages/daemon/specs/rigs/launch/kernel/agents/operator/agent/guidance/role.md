@@ -280,8 +280,10 @@ configurations, as below; do not take the pin from a cached page summary.
      just that seat with `rig seat set-runtime <seat> --runtime claude-code
      --reason "<model> isn't available to this Codex account"` (`--dry-run`
      first); otherwise offer a model their account can run with
-     `rig seat set-model`, used from the seat's next start. On their yes, do it
-     and say what the seat runs now. The team keeps its name.
+     `rig seat set-model`, then start the seat again with
+     `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it
+     reports. On their yes, do it and say what the seat runs now. The team keeps
+     its name.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
    `rig ps --nodes --rig kernel --json`. Use
