@@ -372,12 +372,15 @@ approval says how long and until when, in UTC. A target older than this CLI igno
 
 On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
 Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
-- **When the target's kernel operator (`operator-agent@kernel`) is running as the request is made,** it asks. The
-  person's answer, a click or their words, comes back to it as a reply, and it decides with `rig host approve <code>` or
-  `rig host deny <code>`. It asks the person back when the answer isn't clear. The request stays pending until it decides
-  or the request expires. If it never picks up the answer, the person is told at expiry that nobody read it.
-- **When no kernel operator is running,** Approve and Deny decide at once. Typed words are kept on the request, and the
-  person is asked again with a new request.
+- **When the target has a kernel operator (`operator-agent@kernel`),** it asks. The person's answer, a click or their
+  words, comes back to it as a reply, and it decides with `rig host approve <code>` or `rig host deny <code>`. It asks
+  the person back when the answer isn't clear. The person is told once that their answer was received. If the operator
+  isn't running, the request and that receipt say so, and they name the terminal route. The request stays pending, never
+  granted or denied, until the operator decides or the request expires. If the operator never picks up the answer, the
+  person is told at expiry that nobody read it.
+- **When the target has no kernel operator,** Approve and Deny decide at once. Typed words are kept on the request, and
+  the person is asked again with a new request.
+- **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
 
 On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
 approval row id), run on the target from an agent seat or a plain terminal, decides it. It decides once, and refuses an
@@ -385,7 +388,7 @@ unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or al
 `pair_request_decided`) request. It records who decided: the seat, or `human@host` from a plain terminal. The person
 gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
 --resolution approve` on an unanswered request still approves, and any other close without an answer, or
-`--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator running, run
+`--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator, run
 `rig host deny`, or let it expire (nothing is persisted). The decisions live in the daemon's memory, as the requests
 do, so a daemon restart drops an open request.
 

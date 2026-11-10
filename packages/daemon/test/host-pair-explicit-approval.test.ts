@@ -234,11 +234,12 @@ describe("host pairing with no kernel operator running: Approve and Deny decide,
     }
   });
 
-  it("a kernel operator whose session isn't running doesn't own the request: it's asked as agent-free", async () => {
-    const f = await fixture({ operator: "exited" });
-    expect(f.repo.getById(f.ask)).toMatchObject({ sourceSession: "host-pair@kernel" });
+  it("a click that decides is told to the person as the outcome, apart from their click", async () => {
+    const f = await fixture();
     await f.slackButton("approve");
     expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update", summary: `Pairing ${f.issued.code} from requester@far-host: approved`,
+      body: `Pairing request ${f.issued.code} from requester@far-host: approved by ${PERSON}. This host's token was handed to the requesting machine.` })]);
   });
 
   it("an agent seat approves only by naming the choice: rig queue update --state done --closure-reason no-follow-on --resolution approve", async () => {
@@ -301,8 +302,28 @@ describe("host pairing with the kernel operator running: the person's answer goe
     expect(replies[0]!.body).toContain(words);
     expect(replies[0]!.body).toContain(`In reply to: ${f.ask}`);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-    // Nobody is asked again: the operator reads the words.
-    expect(f.toPerson()).toEqual([]);
+    // Nobody is asked again: the operator reads the words. The person is told once that their answer was received.
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ sourceSession: OPERATOR, humanIntent: "update",
+      summary: `Pairing ${f.issued.code} from requester@far-host: answer received`,
+      body: `Received "${words}" on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} reads it and acts on it. You'll see the result here, or a question if your answer isn't clear.` })]);
+  });
+
+  it("a stopped kernel operator still owns the request: the person sees it isn't running, the answer is kept, and nothing is granted or denied", async () => {
+    const f = await fixture({ operator: "exited" });
+    const item = f.repo.getById(f.ask)!;
+    expect(item.sourceSession).toBe(OPERATOR);
+    expect(item.body).toContain(`${OPERATOR} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}.`);
+    await f.slackButton("approve");
+    expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR, state: "pending" })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    const [receipt, ...more] = f.toPerson();
+    expect(more).toEqual([]);
+    expect(receipt!.body).toContain(`Received your Approve choice on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} isn't running, so nobody has read it yet. Nothing is granted or denied until it acts, or the request expires at `);
+    expect(receipt!.body).toContain(`To decide now, in a terminal on this host: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}.`);
+    // The person's terminal route works without a seat.
+    expect((await f.decide(f.issued.code, "approve")).body).toMatchObject({ ok: true, by: "human@host" });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
   });
 
   it("a typed Slack thread reply reaches the operator too, and decides nothing by itself", async () => {

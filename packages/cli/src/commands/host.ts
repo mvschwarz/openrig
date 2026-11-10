@@ -884,7 +884,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       if (!opts.json) {
         console.log(`Pairing code: ${issued.code}`);
         console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
-        console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a running kernel operator, the operator reads the answer and decides; without one, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
+        console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
         console.log(`On a 0.7.11 or later target, anyone at its terminal can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}).`);
       }
 

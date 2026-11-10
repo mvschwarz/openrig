@@ -135,6 +135,8 @@ interface IssuedPair {
   owner: string | null;
   /** The explicit decision (`rig host approve|deny`), made once. */
   decision?: { approve: boolean; by: string };
+  /** The person has been told their answer reached the owner. */
+  receipted?: boolean;
 }
 
 interface ClientPair {
@@ -174,15 +176,21 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     return c.get("queueRepo" as never) as QueueRepository;
   }
 
-  /** Who reads a person's answer to a pairing request here: the kernel operator, when its session is running on this host
-   *  and the queue takes rows to it; else nobody, and the request is agent-free. An operator that stops after the request
-   *  is made still owns it: the person's answer waits in its queue. */
+  /** Who reads a person's answer to a pairing request here: the kernel operator, when this host has one (a session, in any
+   *  state) and the queue takes rows to it; else nobody, and the request is agent-free. A stopped operator still owns it:
+   *  the person's answer waits in its queue, and the person is told it isn't running. */
   function pairOwner(c: { get: (key: string) => unknown }): string | null {
     const repo = getRepo(c);
     try {
-      const running = !!repo.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1").get(KERNEL_OPERATOR_SESSION);
-      return running && repo.acceptsDestination(KERNEL_OPERATOR_SESSION) ? KERNEL_OPERATOR_SESSION : null;
+      const configured = !!repo.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION);
+      return configured && repo.acceptsDestination(KERNEL_OPERATOR_SESSION) ? KERNEL_OPERATOR_SESSION : null;
     } catch { return null; }
+  }
+
+  /** Whether the owner's session is running now; null when that can't be read. */
+  function ownerRunning(c: { get: (key: string) => unknown }, owner: string): boolean | null {
+    try { return !!getRepo(c).db.prepare("SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1").get(owner); }
+    catch { return null; }
   }
 
   /** Ask the person to decide a pairing request: its approval row, with the one question. `lead` opens the body when it's
@@ -206,9 +214,10 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         `Pairing code: ${code} — confirm it matches the code shown on the requesting side.`,
         ...(owner ? [
           `Answer with Approve or Deny, or in your own words. ${owner} reads your answer and acts on it: a clear yes pairs, a clear no denies, and if your answer isn't clear it asks you back.`,
+          ...(ownerRunning(c, owner) === false ? [`${owner} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host: rig host approve ${code}, or rig host deny ${code}.`] : []),
           `For ${owner}: when the person's answer to this request comes back, act on it. A clear yes or an Approve click: rig host approve ${code}. A clear no or a Deny click: rig host deny ${code}. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming pairing code ${code}, and act on what they answer.`,
         ] : [
-          `Answer with Approve or Deny. No agent is running on this host to read typed answers (${KERNEL_OPERATOR_SESSION} isn't), so typed words are kept but don't decide it, and you're asked again.`,
+          `Answer with Approve or Deny. No agent reads answers on this host (it has no ${KERNEL_OPERATOR_SESSION}), so typed words are kept but don't decide it, and you're asked again.`,
           `To decide in a terminal on this host: rig host approve ${code}, or rig host deny ${code}.`,
         ]),
         `Approval hands this daemon's bearer token to the requester (full API access).`,
@@ -221,7 +230,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   /** A decided or expired request: close its approval row if nobody has answered it, so it leaves the person's feed, and
    *  tell the person the result. The decision stands whatever this manages: each step is best effort. An expired
    *  request the person never answered is closed without a message. */
-  async function settlePairRequest(c: { get: (key: string) => unknown }, rec: IssuedPair, outcome: "approved" | "denied" | "expired", by: string): Promise<void> {
+  async function settlePairRequest(c: { get: (key: string) => unknown }, rec: IssuedPair, outcome: "approved" | "denied" | "expired", by: string, handedNow = false): Promise<void> {
     const repo = getRepo(c);
     const item = rec.qitemId ? repo.getById(rec.qitemId) : null;
     const open = item?.state === "pending" || item?.state === "in-progress" || item?.state === "blocked";
@@ -237,7 +246,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     if (outcome === "expired" && rec.owner && rec.qitemId) {
       try { unread = !!repo.db.prepare("SELECT 1 FROM queue_items WHERE reply_to = ? AND destination_session = ? AND state = 'pending' LIMIT 1").get(rec.qitemId, rec.owner); } catch { /* can't tell */ }
     }
-    const what = outcome === "approved" ? `approved by ${by}. This host's token is handed over when the requesting machine next checks, if it's still waiting.`
+    const what = outcome === "approved" ? `approved by ${by}. ${handedNow ? "This host's token was handed to the requesting machine." : "This host's token is handed over when the requesting machine next checks, if it's still waiting."}`
       : outcome === "denied" ? `denied by ${by}. Nothing was handed over.`
       : `expired before it was decided${unread ? `: ${rec.owner} never picked up your answer, so nobody read it` : ""}. Nothing was handed over; the requester can run rig host pair again.`;
     try {
@@ -406,9 +415,32 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       : pairClosedRefusing(item) || (!rec.owner && answer === "deny") ? false
       : pairClosedApproving(item) || (!rec.owner && answer === PAIR_APPROVE) ? true
       : null;
-    if (approved === null) return c.json({ status: "pending", code: rec.code });
+    if (approved === null) {
+      // Where the owner reads answers, the person's answer arriving decides nothing: tell them once that it was received,
+      // and whether the owner is running to read it.
+      if (rec.owner && !rec.receipted && answer != null) {
+        rec.receipted = true;
+        const said = typeof answer === "string" ? `your ${answer === PAIR_APPROVE ? "Approve" : answer === "deny" ? "Deny" : answer} choice`
+          : `"${answer.text.replace(/\s+/g, " ").trim().slice(0, 200)}"`;
+        const reading = ownerRunning(c, rec.owner) === false
+          ? `${rec.owner} isn't running, so nobody has read it yet. Nothing is granted or denied until it acts, or the request expires at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC. To decide now, in a terminal on this host: rig host approve ${rec.code}, or rig host deny ${rec.code}.`
+          : `${rec.owner} reads it and acts on it. You'll see the result here, or a question if your answer isn't clear.`;
+        try {
+          await getRepo(c).create({ sourceSession: rec.owner, destinationSession: rec.person, humanIntent: "update",
+            summary: `Pairing ${rec.code} from ${rec.requester}: answer received`,
+            body: `Received ${said} on pairing request ${rec.code} from ${rec.requester}. ${reading}` });
+        } catch { /* the answer is kept either way */ }
+      }
+      return c.json({ status: "pending", code: rec.code });
+    }
     // Single-shot: the first decided read consumes the pairing.
     issued.delete(pairId);
+    // A decision from a close (the person's click on an agent-free host, an agent seat's close) is told to the person
+    // here; `rig host approve|deny` told them when it decided.
+    if (!rec.decision) {
+      const by = (item && getRepo(c).closingTransition(item.qitemId, item.state)?.actorSession) || rec.person;
+      await settlePairRequest(c, rec, approved ? "approved" : "denied", by, true);
+    }
     return c.json(approved ? { status: "approved", token: bearerToken } : { status: "denied" });
   });
 

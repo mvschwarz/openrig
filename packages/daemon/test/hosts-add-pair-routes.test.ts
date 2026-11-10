@@ -471,10 +471,10 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
-    // No kernel operator runs here, so the request is agent-free: Approve and Deny decide, typed words are kept and the
+    // This host has no kernel operator, so the request is agent-free: Approve and Deny decide, typed words are kept and the
     // person is asked again, and a terminal on this host can decide with rig host approve|deny.
     expect(item.sourceSession).toBe("host-pair@kernel");
-    expect(item.body).toContain("Answer with Approve or Deny. No agent is running on this host to read typed answers (operator-agent@kernel isn't), so typed words are kept but don't decide it, and you're asked again.");
+    expect(item.body).toContain("Answer with Approve or Deny. No agent reads answers on this host (it has no operator-agent@kernel), so typed words are kept but don't decide it, and you're asked again.");
     expect(item.body).toContain(`To decide in a terminal on this host: rig host approve ${code}, or rig host deny ${code}.`);
   });
 
