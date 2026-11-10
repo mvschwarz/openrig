@@ -242,17 +242,11 @@ describe("owned Herdr viewer", () => {
     expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "win32", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
-  it("a writable tile attaches, sizing, only from its one typing path; a read-only tile never attaches; recovery still attaches", () => {
+  it("a writable tile attaches immediately and sizes natively; a read-only tile remains an observer", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    // Both attaches are the typing path's: a plain one (also after a paste), and one that carries the first keys.
-    expect(rw.match(/attach -t/g)).toEqual(['attach -t', 'attach -t']);
-    expect(rw).toContain('then pz=1; put "$@"; fi;');
-    expect(rw).toContain('then if [ -n "$kk" ]; then ng=; go "$@"; else kz 0 $(($(wc -c < "$f"))) "$@"; fi; fi; [ -z "$ng" ] || "$@" attach -t "$t";');
-    expect(rw).toContain('go() { set -- "$@" attach -t "$t";');
-    // The first input's files are readable by this user alone.
-    expect(rw.startsWith("umask 077;")).toBe(true);
-    expect(rw.match(/open "/g)).toHaveLength(4);
+    expect(rw).toBe(tileAttachArgv0710("tmux", [], "a@team", false)[2]);
     expect(rw).not.toContain("ignore-size");
+    expect(rw).not.toContain("use()");
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
     expect(ro).toContain('open() { t=$1; shift; stty -echo -isig -ixon 2>/dev/null; view "$t" "" "$@"; };');
     expect(ro).not.toMatch(/attach -r|while use/);
@@ -335,15 +329,28 @@ describe("viewers kept from an earlier release", () => {
     return () => JSON.parse(readFileSync(file, "utf8")).entries[id] as { command: string; argv: string[] };
   }
 
-  it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
-    "keeps a writable viewer recorded by %s and moves it to the current script", async (_, make) => {
-      const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
-      const stored = keepFrom(f, make, false);
-      expect(stored().command).not.toBe(f.target.paneCommand);
-      expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: true });
-      expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
-      expect(stored()).toMatchObject({ command: f.target.paneCommand, argv: f.target.attachArgv });
+  it("keeps 0.7.10's already-sizing writable viewer unchanged", async () => {
+    const f = fixture(); await f.viewer().ensure(key, f.target);
+    const stored = keepFrom(f, tileAttachArgv0710, false);
+    expect(stored().command).toBe(f.target.paneCommand);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "names the close-owned-viewer step for a kept %s writable client, without pretending argv migrated it", async (_, make) => {
+      const f = fixture(); await f.viewer().ensure(key, f.target);
+      const stored = keepFrom(f, make, false), before = stored();
+      const result = await f.viewer().ensure(key, f.target);
+      expect(result).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+      expect(result.ok ? "" : result.error).toContain("Close only the owned Herdr viewer pane");
+      expect(stored()).toEqual(before);
       expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+      f.lose(false); // the person closed that viewer; complete endpoint enumeration proves absence
+      expect(await f.viewer().ensure(key, f.target)).toMatchObject({ code: "viewer_not_provisioned" });
+      expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+      expect(stored()).toMatchObject({ command: f.target.paneCommand, argv: f.target.attachArgv });
+      expect(f.calls.filter(a => a[0] === "workspace" && a[1] === "delete")).toHaveLength(0);
     });
 
   it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(

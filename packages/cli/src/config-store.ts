@@ -170,6 +170,7 @@ export interface RiggedConfig {
     tmuxServer: "inherit" | "isolated";
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
+    fixedGeometry: boolean;
     inheritTmuxEnvironment: boolean;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
@@ -373,6 +374,7 @@ const DEFAULTS = {
     statusBar: false,
     tmuxServer: "inherit",
     historyLimit: 10000,
+    fixedGeometry: false,
     inheritTmuxEnvironment: false,
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
@@ -539,6 +541,7 @@ export const VALID_KEYS = [
   "terminal.tmux_server",
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
+  "terminal.fixed_geometry",
   "terminal.inherit_tmux_environment",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
@@ -676,6 +679,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.fixed_geometry": { primary: "OPENRIG_TERMINAL_FIXED_GEOMETRY" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
@@ -785,6 +789,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.tmux_server": ["terminal", "tmuxServer"],
   "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.fixed_geometry": ["terminal", "fixedGeometry"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
@@ -1451,6 +1456,7 @@ export class ConfigStore {
         statusBar: v("terminal.status_bar") as boolean,
         tmuxServer: v("terminal.tmux_server") as "inherit" | "isolated",
         historyLimit: v("terminal.history_limit") as number,
+        fixedGeometry: v("terminal.fixed_geometry") as boolean,
         inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },
       output: {

@@ -827,7 +827,8 @@ export function createApp(deps: AppDeps): Hono {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
-    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null,
+      fixedGeometry: () => deps.settingsStore?.resolveOne("terminal.fixed_geometry").value === true });
   } else if (deps.enableNodeWebSocket) {
     registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }

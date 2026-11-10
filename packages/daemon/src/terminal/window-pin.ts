@@ -18,7 +18,7 @@ export interface PinTmux {
   restoreWindowOption?(target: string, option: string, value: string | null): Promise<TmuxResult>;
 }
 
-/** A window, its own `window-size` now (`live`), the value to give back (`prior`), and the live holders of a pin. */
+/** A window, its own `window-size` now (`live`), the recorded pre-pin value (`prior`, retained for old holder compatibility), and the live holders of a pin. */
 export interface PinSizing {
   window: string;
   live: string | null;
@@ -93,12 +93,12 @@ export async function recordPin(tmux: PinTmux, sizing: PinSizing, holder: string
   return written?.ok === true;
 }
 
-/** What letting go did: the window got its prior back; another live holder keeps the pin; the window no longer lists
+/** What letting go did: the window resumed inherited sizing; another live holder keeps the pin; the window no longer lists
  *  this holder; or the give-back failed (the record is kept for the next holder). */
 export type PinRelease = "given-back" | "kept-by-another-holder" | "not-listed" | "failed";
 
 /** Let go of `holder`'s pin on `window`, once. While another live holder remains, only drop this one. As the last one,
- *  run `beforeGiveBack` (a readable capture puts the size back), then give back the prior and drop the record. A window
+ *  run `beforeGiveBack` (a readable capture puts the size back), then unset the temporary window-size override and drop the record. A window
  *  that no longer lists this holder (the record was cleared, or the tmux server restarted and `@N` is another window)
  *  is left alone. */
 export function releasePin(tmux: PinTmux, window: string, holder: string, beforeGiveBack?: () => Promise<void>): Promise<PinRelease> {
@@ -112,7 +112,7 @@ export function releasePin(tmux: PinTmux, window: string, holder: string, before
         return "kept-by-another-holder";
       }
       await beforeGiveBack?.().catch(() => {});
-      const restored = await tmux.restoreWindowOption?.(window, "window-size", record.prior).catch(() => null);
+      const restored = await tmux.restoreWindowOption?.(window, "window-size", null).catch(() => null);
       // Kept when the give-back failed: this holder is then no longer live, so the next one gives it back instead.
       if (!restored?.ok) return "failed";
       await tmux.restoreWindowOption?.(window, WINDOW_SIZE_PRIOR_OPTION, null).catch(() => {});

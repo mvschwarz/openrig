@@ -54,9 +54,9 @@ export const READABLE_REQUEST_TIMEOUT_MS = 15_000;
 /** What happened to the window after a readable read, as far as OpenRig knows. */
 export function readableRelease(release: string | undefined): string {
   switch (release) {
-    case "given-back": return "its window was then given back its size and its own window-size";
+    case "given-back": return "its size was put back and its window-size override was unset";
     case "kept-by-another-holder": return "a web terminal opened on it meanwhile and holds its window now; it gives the window back when it closes";
-    case "failed": return "giving its window back failed; a later readable capture or web terminal visit gives it back";
+    case "failed": return "giving its window back failed; a later readable capture can retry releasing its pin";
     default: return "its window's record had changed, so OpenRig left the window as it found it";
   }
 }
@@ -122,7 +122,7 @@ function renderCapture(data: Record<string, unknown>): void {
     const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string; release?: string; sizeBack?: string } | undefined;
     if (readable?.resized === true) {
       const after = readable.release === "given-back" && readable.sizeBack
-        ? `its own window-size was given back, but ${readable.sizeBack}`
+        ? `its window-size override was unset, but ${readable.sizeBack}`
         : readableRelease(readable.release);
       console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; ${after}]`);
     } else if (readable?.resized === false) console.error(`[rig capture: ${r["sessionName"]}: not resized for reading: ${readable.reason}]`);
@@ -190,11 +190,11 @@ Supported notes:
     "[rig capture: ...: pane WxH is smaller than 80x24, ...]" note on stderr says the prompt may be
     cut off and suggests --readable. --json has it as promptPane: width, height and hint.
   - --readable (or --size WxH) reads a seat whose pane is smaller than that: it resizes the seat's
-    window, waits for the seat to redraw, captures, then puts the window back, both its size and
-    its own window-size setting, so Herdr, tmux attach and other clients size it as before. The
+    window, waits for the seat to redraw, captures, then puts its size back and unsets the temporary
+    window-size override, so Herdr, tmux attach and other clients size it again. The
     seat redraws twice, and anyone watching it sees the resize briefly. A window that's already big
     enough is read as it is, and so is one whose size is pinned (window-size manual, as while the
-    web terminal shows it), one whose sizing can't be read, and one with several panes. With --rig
+    web terminal has opted into fixed geometry), one whose sizing can't be read, and one with several panes. With --rig
     or --pod, small seats are read at that size for up to 8 seconds in all, and the rest as they
     are. A stderr note says which; --json has it as readable.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines

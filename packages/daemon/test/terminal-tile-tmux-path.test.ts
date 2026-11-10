@@ -17,7 +17,7 @@ import type { ComposedPane, ComposedView, OpenViewResult, TerminalProvider } fro
 const local = (seat: string, readOnly = false): ViewMemberInput => ({ seat, label: seat, tmuxSession: seat, host: null, readOnly, alive: true });
 
 describe("#707 local tiles run the tmux the daemon resolves", () => {
-  it("a provider PATH without tmux fails the bare command; the resolved path views the seat, and neither mode attaches untyped", () => {
+  it("a provider PATH without tmux fails the bare command; the resolved path attaches writable tiles and observes read-only tiles", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-707-"));
     const narrow = join(root, "provider-path"); // the provider's PATH: system tools, no tmux
     const elsewhere = join(root, "elsewhere"); // where the daemon found tmux
@@ -48,11 +48,15 @@ esac
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
         rmSync(seen, { force: true });
+        rmSync(other, { force: true });
         const out = execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env, encoding: "utf8", timeout: 10000 });
-        expect(out).toContain("SCREEN");
-        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
-        // Nobody typed, so nothing attached or typed into the seat.
-        expect(existsSync(other)).toBe(false);
+        if (readOnly) expect(out).toContain("SCREEN");
+        if (readOnly) {
+          expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
+          expect(existsSync(other)).toBe(false);
+        } else {
+          expect(readFileSync(other, "utf8").trimEnd().split("\n")).toEqual(["attach", "-t", "session-id"]);
+        }
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
       }
     } finally {
@@ -80,8 +84,8 @@ esac
         const view = composeView("v", [local("seat", readOnly)], { resolveHost: () => null, localTmux: tmux });
         const result = spawnSync("/bin/sh", ["-c", view.opened[0]!.paneCommand], { env: { PATH: narrow }, encoding: "utf8", timeout: 10000 });
         expect(result.signal).toBeNull();
-        expect(result.status).toBe(1);
-        expect(result.stdout).toContain("SCREEN");
+        expect(result.status).toBe(readOnly ? 1 : 0);
+        if (readOnly) expect(result.stdout).toContain("SCREEN");
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
