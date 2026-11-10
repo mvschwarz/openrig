@@ -885,7 +885,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         console.log(`Pairing code: ${issued.code}`);
         console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
         console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
-        console.log(`On a 0.7.11 or later target, anyone at its terminal can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}).`);
+        console.log(`On a 0.7.11 or later target, anyone at its terminal with its operator bearer token can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}), with OPENRIG_AUTH_BEARER_TOKEN set or --bearer <token>.`);
       }
 
       // A note names the bound actually used so a clamped value is not silently absorbed.
@@ -968,12 +968,16 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         ? "Approve a pairing request made to this host: the requesting machine receives this host's token"
         : "Deny a pairing request made to this host: nothing is handed over")
       .argument("<request>", "The pairing code, or the request's approval row id")
+      .option("--bearer <token>", "This daemon's operator bearer token (or set OPENRIG_AUTH_BEARER_TOKEN); pairing targets always have one")
       .option("--json", "JSON output")
-      .action(async (request: string, opts: { json?: boolean }) => {
+      .action(async (request: string, opts: { bearer?: string; json?: boolean }) => {
         type Decided = { ok?: boolean; error?: string; message?: string; code?: string; requester?: string; by?: string };
+        // The decision is gated by the operator bearer (OPENRIG_AUTH_BEARER_TOKEN), as rig queue resolve and rig mode are.
+        const bearer = opts.bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
         let res: { status: number; data: Decided };
         try {
-          res = await new DaemonClient().post<Decided>("/api/hosts/pair-decision", { request: request.trim(), decision }, { headers: terminalAuthHeaders() });
+          res = await new DaemonClient().post<Decided>("/api/hosts/pair-decision", { request: request.trim(), decision },
+            { headers: bearer ? { Authorization: `Bearer ${bearer}` } : terminalAuthHeaders() });
         } catch (err) {
           console.error((err as Error).message);
           process.exitCode = 1;
@@ -981,7 +985,9 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         }
         if (opts.json) console.log(JSON.stringify(res.data));
         if (res.status !== 200 || !res.data?.ok) {
-          if (!opts.json) console.error(res.data?.message ?? res.data?.error ?? `the pairing decision failed (HTTP ${res.status})`);
+          if (!opts.json) console.error(res.status === 401
+            ? `This daemon refused the decision without its operator bearer token. Set OPENRIG_AUTH_BEARER_TOKEN to the token this daemon runs with, or pass --bearer <token>. Nothing was decided.`
+            : res.data?.message ?? res.data?.error ?? `the pairing decision failed (HTTP ${res.status})`);
           process.exitCode = 1;
           return;
         }

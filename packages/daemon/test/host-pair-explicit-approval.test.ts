@@ -35,7 +35,7 @@ afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 /** The production destination check. `kernel: false` is a daemon started without a kernel rig (--no-kernel), where no
  *  row can be addressed to `…@kernel`; the agent's rig is registered either way. `operator` is the kernel operator's
  *  session state when the request is made (none: no session row). */
-async function fixture({ kernel = true, operator }: { kernel?: boolean; operator?: "running" | "exited" } = {}) {
+async function fixture({ kernel = true, operator, ownershipUnreadable = false }: { kernel?: boolean; operator?: "running" | "exited"; ownershipUnreadable?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "pair-explicit-"));
   const db = new Database(join(home, "queue.sqlite")); migrate(db, ALL_MIGRATIONS); const bus = new EventBus(db);
   if (operator) {
@@ -55,8 +55,15 @@ async function fixture({ kernel = true, operator }: { kernel?: boolean; operator
   app.route("/api/hosts", hostsRoutes({ bearerToken: BEARER, humanRegistry: () => registry }));
   closes.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
 
+  // The ownership read fails while the request is made (the sessions lookup throws).
+  const real = db.prepare.bind(db);
+  const unreadable = ownershipUnreadable ? vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+    if (sql.includes("FROM sessions WHERE session_name = ? LIMIT 1")) throw new Error("sessions unreadable");
+    return real(sql);
+  }) as typeof db.prepare) : null;
   const issued = await (await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requester: "requester@far-host" }) })).json() as { pairId: string; code: string; approvalQitemId: string };
+  unreadable?.mockRestore();
   const ask = issued.approvalQitemId;
   const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: "host-pair@kernel", seen: new SeenStore(join(home, "seen.jsonl")),
     deadLetter: new DeadLetterStore(join(home, "dead.jsonl")), resolveSender: () => ({ admitted: true, source: PERSON }),
@@ -105,7 +112,7 @@ describe("host pairing with no kernel operator running: Approve and Deny decide,
     expect(item.sourceSession).toBe("host-pair@kernel");
     expect(item.humanQuestions).toEqual([{ id: "pair", question: `Pair requester@far-host (code ${f.issued.code}) with this host?`, options: [
       { id: "approve", label: "Approve: hand this host's bearer token to the requester" }, { id: "deny", label: "Deny" }] }]);
-    expect(item.body).toContain("typed words are kept but don't decide it, and you're asked again");
+    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (it has no ${OPERATOR}).`);
     expect(item.body).toContain(`rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}`);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
   });
@@ -313,14 +320,14 @@ describe("host pairing with the kernel operator running: the person's answer goe
     const f = await fixture({ operator: "exited" });
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe(OPERATOR);
-    expect(item.body).toContain(`${OPERATOR} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}.`);
+    expect(item.body).toContain(`${OPERATOR} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host with its operator bearer token: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
     await f.slackButton("approve");
     expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR, state: "pending" })]);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     const [receipt, ...more] = f.toPerson();
     expect(more).toEqual([]);
-    expect(receipt!.body).toContain(`Received your Approve choice on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} isn't running, so nobody has read it yet. Nothing is granted or denied until it acts, or the request expires at `);
-    expect(receipt!.body).toContain(`To decide now, in a terminal on this host: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}.`);
+    expect(receipt!.body).toContain(`Received your Approve choice on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} isn't running, so it may not have read it yet. Nothing is granted or denied until it acts, or the request expires at `);
+    expect(receipt!.body).toContain(`To decide now, in a terminal on this host with its operator bearer token: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
     // The person's terminal route works without a seat.
     expect((await f.decide(f.issued.code, "approve")).body).toMatchObject({ ok: true, by: "human@host" });
     expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
@@ -368,7 +375,7 @@ describe("host pairing with the kernel operator running: the person's answer goe
     expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
   });
 
-  it("after expiry a decision is refused, the request reads expired, and an answer nobody picked up is named as unread", async () => {
+  it("after expiry a decision is refused, the request reads expired, and an answer the operator didn't pick up is named", async () => {
     const f = await fixture({ operator: "running" });
     await f.answer({ decision: "yes" });
     const later = Date.now() + 11 * 60_000;
@@ -378,6 +385,136 @@ describe("host pairing with the kernel operator running: the person's answer goe
       expect(await f.poll()).toEqual({ http: 200, body: { status: "expired" }, leaksToken: false });
     } finally { now.mockRestore(); }
     expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update",
-      body: `Pairing request ${f.issued.code} from requester@far-host: expired before it was decided: ${OPERATOR} never picked up your answer, so nobody read it. Nothing was handed over; the requester can run rig host pair again.` })]);
+      body: `Pairing request ${f.issued.code} from requester@far-host: expired before it was decided: ${OPERATOR} didn't pick up your answer. Nothing was handed over; the requester can run rig host pair again.` })]);
+  });
+});
+
+describe("host pairing: one decision per request, and no reply is denied on a technicality", () => {
+  it("a Deny click the requester hasn't polled yet stands: rig host approve is refused, and the poll denies", async () => {
+    const f = await fixture();
+    await f.slackButton("deny");
+    expect(await f.decide(f.issued.code, "approve")).toMatchObject({ status: 409, body: { error: "pair_request_decided", decision: "deny", by: PERSON } });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  });
+
+  it("an operator's refusing close the requester hasn't polled yet stands: rig host approve is refused", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.repo.update({ qitemId: f.ask, actorSession: OPERATOR, state: "denied" });
+    expect(await f.decide(f.issued.code, "approve", AGENT)).toMatchObject({ status: 409, body: { error: "pair_request_decided", decision: "deny", by: OPERATOR } });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  });
+
+  it("an attachment-only Slack reply on an owner host reaches the operator and is never denied: the person gets a receipt", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.slackThreadReply("");
+    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(f.repo.getById(f.ask)?.humanAnswers?.pair).toBeUndefined();
+    expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ body: expect.stringContaining(`Received your reply on pairing request ${f.issued.code}`) })]);
+  });
+
+  it("an attachment-only Slack reply on an agent-free host is never denied: the person is asked again", async () => {
+    const f = await fixture();
+    await f.slackThreadReply("");
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ state: "pending", sourceSession: "host-pair@kernel",
+      body: expect.stringContaining("Your reply to this request had no words to keep here, and it didn't deny anything") })]);
+  });
+
+  // The queue keeps no words for the literal text "[file reply]" (the text a Slack file reply carries), so these closes
+  // carry no answer: they're still the person's reply, and never a denial.
+  it.each([
+    ["Steering", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "[file reply]" })],
+    ["Slack", (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("[file reply]")],
+  ] as const)("the literal text [file reply] typed in %s is never denied: asked again with no operator, a receipt with one", async (_label, act) => {
+    const free = await fixture();
+    await act(free);
+    expect(free.repo.getById(free.ask)?.humanAnswers?.pair).toBeUndefined();
+    expect(await free.poll()).toEqual({ http: 200, body: { status: "pending", code: free.issued.code }, leaksToken: false });
+    expect(free.toPerson()).toEqual([expect.objectContaining({ state: "pending", body: expect.stringContaining("Your reply to this request had no words to keep here") })]);
+
+    const owned = await fixture({ operator: "running" });
+    await act(owned);
+    expect(await owned.poll()).toEqual({ http: 200, body: { status: "pending", code: owned.issued.code }, leaksToken: false });
+    expect(owned.toPerson()).toEqual([expect.objectContaining({ body: expect.stringContaining(`Received your reply on pairing request ${owned.issued.code}`) })]);
+  });
+
+  it("when OpenRig can't read whether the operator runs, the receipt says so instead of saying it reads the answer", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.answer({ decision: "yes" });
+    const real = f.repo.db.prepare.bind(f.repo.db);
+    const prepare = vi.spyOn(f.repo.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("status = 'running'")) throw new Error("sessions unreadable");
+      return real(sql);
+    }) as typeof f.repo.db.prepare);
+    try {
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    } finally { prepare.mockRestore(); }
+    const [receipt] = f.toPerson();
+    expect(receipt!.body).toContain(`OpenRig couldn't tell whether ${OPERATOR} is running, so it may not have read it yet.`);
+    expect(receipt!.body).toContain(`rig host approve ${f.issued.code}`);
+    expect(receipt!.body).not.toContain("reads it and acts on it");
+  });
+});
+
+describe("host pairing: exact expiry, and an agent-free request says why nobody reads answers", () => {
+  it("the outcome update can't hold the token: a hanging update doesn't delay the approved response", async () => {
+    const f = await fixture();
+    await f.slackButton("approve");
+    const create = f.repo.create.bind(f.repo);
+    const hang = vi.spyOn(f.repo, "create").mockImplementation(((input: Parameters<typeof f.repo.create>[0]) =>
+      input.humanIntent === "update" ? new Promise(() => {}) : create(input)) as typeof f.repo.create);
+    try {
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    } finally { hang.mockRestore(); }
+  });
+
+  it("a decision the requester never collected expires, and the person is told it was decided but not collected", async () => {
+    const f = await fixture({ operator: "running" });
+    expect((await f.decide(f.issued.code, "approve", OPERATOR)).status).toBe(200);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11 * 60_000);
+    try {
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "expired" }, leaksToken: false });
+    } finally { now.mockRestore(); }
+    expect(f.toPerson().map((row) => row.body)).toContain(`Pairing request ${f.issued.code} from requester@far-host: expired after it was approved by ${OPERATOR}, before the requesting machine collected the result. Nothing was handed over; the requester can run rig host pair again.`);
+  });
+
+  it("an operator the queue can't send answers to doesn't own the request, and the request says so", async () => {
+    const f = await fixture({ kernel: false, operator: "running" });
+    const item = f.repo.getById(f.ask)!;
+    expect(item.sourceSession).toBe("host-pair@kernel");
+    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: ${OPERATOR} can't receive answers on this host.`);
+  });
+
+  it("when OpenRig can't read who owns the request, it's agent-free and says it couldn't tell", async () => {
+    const f = await fixture({ operator: "running", ownershipUnreadable: true });
+    const item = f.repo.getById(f.ask)!;
+    expect(item.sourceSession).toBe("host-pair@kernel");
+    expect(item.body).toContain("Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: OpenRig couldn't tell whether an agent reads answers on this host.");
+    await f.answer({ decision: "yes" });
+    await f.poll();
+    expect(f.toPerson()[0]!.body).toContain("and they didn't deny anything: OpenRig couldn't tell whether an agent reads answers on this host, so please decide");
+  });
+});
+
+describe("host pairing: expiry when the requester stopped waiting", () => {
+  it("the request's ask closes as expired at its deadline, so a late Approve click there isn't accepted", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const f = await fixture();
+      const later = Date.now() + 11 * 60_000;
+      const now = vi.spyOn(Date, "now").mockReturnValue(later);
+      try {
+        vi.advanceTimersByTime(11 * 60_000);
+        await vi.waitFor(() => expect(f.repo.getById(f.ask)?.state).toBe("canceled"));
+        expect(f.repo.closingTransition(f.ask, "canceled")?.transitionNote).toBe(`pairing request ${f.issued.code} expired undecided`);
+        const late = await f.answer({ questionId: "pair", optionId: "approve" });
+        expect(late.status).not.toBe(200);
+        expect(f.repo.getById(f.ask)).toMatchObject({ state: "canceled" });
+        expect(f.repo.getById(f.ask)?.humanAnswers?.pair).toBeUndefined();
+        expect(await f.poll()).toEqual({ http: 200, body: { status: "expired" }, leaksToken: false });
+      } finally { now.mockRestore(); }
+    } finally { vi.useRealTimers(); }
   });
 });
