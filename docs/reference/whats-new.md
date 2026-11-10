@@ -142,6 +142,8 @@ port (normally 7433)."
 
 ## Other changes to act on
 
+- Denying or dropping a host pairing request in Steering now gives the requesting machine no access; in 0.7.9 and 0.7.10, that action could return the daemon access token. ([#2884](https://github.com/mvschwarz/openrig/pull/2884))
+
 - **Rows on another host:** `rig queue show`, `list`, `transitions`, `update`
   and `block` take `--host <id>`; `claim` doesn't, since only the destination
   seat on its own host claims. `--host` never follows `rig host select`.

@@ -291,12 +291,15 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     }
     const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
     const state = item?.state ?? "pending";
-    if (state === "done") {
+    // Approval hands over this daemon's bearer token, so only an approval does: the item closed done with closure
+    // no-follow-on (Steering's and the TUI's Approve, or rig queue update --state done --closure-reason no-follow-on).
+    // Any other close denies, a done that records a denial (Steering's Deny), a drop or any other reason included.
+    if (state === "done" && item?.closureReason === "no-follow-on") {
       // Single-shot handover: the first approved read consumes the pairing.
       issued.delete(pairId);
       return c.json({ status: "approved", token: bearerToken });
     }
-    if (state === "denied" || state === "canceled" || state === "failed") {
+    if (state === "done" || state === "denied" || state === "canceled" || state === "failed") {
       issued.delete(pairId);
       return c.json({ status: "denied" });
     }

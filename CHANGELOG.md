@@ -152,6 +152,8 @@ to end: see Known limits.
 
 ### People and connected assistants
 
+- Denying or dropping a host pairing request in Steering now gives the requesting machine no access; in 0.7.9 and 0.7.10, that action could return the daemon access token. ([#2884](https://github.com/mvschwarz/openrig/pull/2884))
+
 - **Assistants connected through a grant service** (experimental, unsupported,
   off by default: you serve `rig mcp serve --http --grant-service <url>` behind
   your own TLS tunnel, and an outside service grants each connection):

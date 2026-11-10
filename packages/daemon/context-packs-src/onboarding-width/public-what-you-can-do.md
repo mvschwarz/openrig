@@ -1240,6 +1240,7 @@ reaching them is ordinary work rather than an escalation.
   person can settle an ask that was asked of someone else, recorded as themselves beside the person
   asked. The first committed answer wins; a later one gets 409 `qitem_already_terminal` and records
   nothing. A park addressed to a registered person can be resolved.
+  Denying or dropping a host pairing request in Steering now gives the requesting machine no access; in 0.7.9 and 0.7.10, that action could return the daemon access token. ([#2884](https://github.com/mvschwarz/openrig/pull/2884))
 - **`rig gateway channel add <id> --display-name <name> --binding
   slack:<connectorRef>:<secretsRef>:<channelId>`** — a Slack shared channel as one participant,
   `<id>@external` (Slack only). Anyone writing there reaches the team, registered or not. Each row
