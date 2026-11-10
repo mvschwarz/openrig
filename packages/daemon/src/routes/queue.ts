@@ -81,6 +81,35 @@ export function isAttentionItem(q: { tier: string | null; destinationSession: st
 }
 
 
+/** A row a handoff of this one made: the rows naming it as `handedOffFrom`, and a local row its closure target names. */
+export interface HandoffSuccessor { qitemId: string; destinationSession: string; state: QueueState; via: "handedOffFrom" | "closureTarget" }
+
+/** #2794: a handed-off row records its new owner as the closure target, not the row the handoff made. This names that row
+ *  from what's already stored: the successor's own `handedOffFrom`, or a local row id in the closure target. A cross-host
+ *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
+ *  the read. */
+export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorNote?: string } {
+  try {
+    const successors: HandoffSuccessor[] = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: 20 })
+      .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
+      .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
+    const target = item.closureTarget;
+    if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
+      const named = repo.getById(target);
+      if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
+    }
+    if (successors.length > 0) return { successors };
+    return {
+      successors,
+      successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
+        ? `It was handed to another host; its successor there is ${target}. This daemon has no copy.`
+        : "No row on this daemon was made by this handoff.",
+    };
+  } catch {
+    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+  }
+}
+
 export function queueRoutes(): Hono {
   const app = new Hono();
 
@@ -1478,6 +1507,8 @@ export function queueRoutes(): Hono {
         actorSession: closing.actorSession,
         transitionNote: closing.transitionNote,
       } } : {}),
+      // #2794: a handed-off row names the row its handoff made (read only; nothing stored changes).
+      ...(item.state === "handed-off" || item.closureReason === "handed_off_to" ? handoffSuccessors(repo, item) : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });
