@@ -1129,6 +1129,15 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(window).toEqual({ own: "largest", recorded: "" });
   });
 
+  it("an explicit manual window without an OpenRig pin stays untouched by an opt-in browser", async () => {
+    const resizeWindow = vi.fn(async () => ({ ok: true as const }));
+    const { tmux, calls, window } = sizingTmux("manual", { resizeWindow });
+    await visit(tmux);
+    expect(resizeWindow).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect(window).toEqual({ own: "manual", recorded: "" });
+  });
+
   it("a failed open gives the sizing back too", async () => {
     const { tmux, window } = sizingTmux(null, {
       startPipePane: async () => ({ ok: false, code: "session_not_found", message: "gone" }),

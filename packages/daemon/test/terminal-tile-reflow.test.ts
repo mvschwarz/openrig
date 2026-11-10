@@ -4,6 +4,11 @@ import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
+it("the writable argv remains valid for Herdr restart reporting", () => {
+  const argv = tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", false);
+  expect(argv.every(word => !/['\u0000-\u001f\u007f]/.test(word))).toBe(true);
+});
+
 it.skipIf(spawnSync("tmux", ["-V"]).status !== 0)("the shipped writable tile follows phone, laptop and every outer-terminal resize", async () => {
   const { stdout } = await promisify(execFile)("python3", [
     fileURLToPath(new URL("./helpers/tmux-tile-reflow.py", import.meta.url)),

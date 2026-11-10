@@ -75,6 +75,20 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     await until(async () => (await size("inherits")) === "150x45");
   });
 
+  it("an opt-in browser preserves a person's manual geometry with no OpenRig pin record", async () => {
+    await nativeSession("user-manual");
+    await tmux("resize-window", "-t", "=user-manual:", "-x", "113", "-y", "31");
+    const broker = new TerminalSessionBroker("user-manual", new TmuxAdapter(exec), { fixedGeometry: true, pollMs: 20 });
+    try {
+      await broker.attach(viewer());
+      expect(await size("user-manual")).toBe("113x31");
+      expect(await ownSizing("user-manual")).toBe("manual");
+      expect(await record("user-manual")).toBe("");
+    } finally { await broker.dispose(); }
+    expect(await size("user-manual")).toBe("113x31");
+    expect(await ownSizing("user-manual")).toBe("manual");
+  });
+
   it("an opt-in pin releases to inherited sizing even after an old local override", async () => {
     await nativeSession("own", "largest");
     await browserVisit("own");

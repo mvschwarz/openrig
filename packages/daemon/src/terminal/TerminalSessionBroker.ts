@@ -455,6 +455,8 @@ export class TerminalSessionBroker {
     const sizing = window ? await readPinSizing(this.tmux, window) : null;
     if (this.torndown) return false; // disposed: pin nothing
     if (!sizing) return true; // Unknown geometry: observe normally rather than leave an untracked manual pin.
+    // A person's fixed window is not an OpenRig pin to take over or unset.
+    if (sizing.live === "manual" && !(await this.tmux.readWindow?.(sizing.window, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.userOption.trim()) return true;
     this.pinnedWindow = sizing.window;
     if (!(await recordPin(this.tmux, sizing, this.holder))) { this.pinnedWindow = null; return true; }
     const target = sizing.window;

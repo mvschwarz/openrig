@@ -14,7 +14,7 @@ export function tileAttachArgv(
   // The child can exec its client; the parent restores the viewer's original modes on return.
   // No reader, key replay or paste buffer competes with tmux for stdin.
   argv[2] = 'modes=$(stty -g 2>/dev/null) || modes=; '
-    + 'if [ -n "$modes" ]; then trap \'printf "\\033[?2004l"; stty "$modes" 2>/dev/null\' EXIT; '
+    + 'rs() { printf "\\033[?2004l"; stty "$modes" 2>/dev/null; }; if [ -n "$modes" ]; then trap rs EXIT; '
     + 'stty raw -echo 2>/dev/null; printf "\\033[?2004h"; fi; '
     + `(${argv[2]})`;
   return argv;
