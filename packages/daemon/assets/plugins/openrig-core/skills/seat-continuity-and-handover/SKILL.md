@@ -149,11 +149,13 @@ available artifacts in that order. So before a handover, a compaction or a long 
 the sitting occupant writes its recap alongside `LEARNED.md`:
 
 ```sh
-rig context recap-write --rig <rig> --seat <seat> --file <draft.md>
+rig context recap-write --file <draft.md>
 ```
 
-- `<seat>` is the seat's folder under `rigs/<rig>/seats/`, the part of its session
-  name before `@`.
+- Without `--rig` and `--seat` it writes the calling seat's recap (from `OPENRIG_SESSION_NAME`).
+  For another seat, `--seat` is its folder under `rigs/<rig>/seats/`, the part of its session
+  name before `@`. A seat's recorded logical id or member id maps to its folder when the daemon
+  can check it against the rig's seats.
 - The command reads `topology.root` and doesn't need the daemon.
 - Each write moves the previous recap into the seat's `recap-superseded/` chain,
   which later rebuilds list as history. Write through this command, not a file tool, so

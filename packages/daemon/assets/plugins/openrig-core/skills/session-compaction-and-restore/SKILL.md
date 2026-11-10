@@ -172,7 +172,7 @@ A packet or marker proves retained/delivered evidence, not successful provider
 restoration; measure the resumed seat against the proof standard above.
 
 Before a planned compaction, restart or long pause, write the seat's authored recap
-with `rig context recap-write --rig <rig> --seat <seat> --file <draft>`. Its format is
+with `rig context recap-write --file <draft>`. Its format is
 in `seat-continuity-and-handover`, "Write the seat's recap before a handover". A
 rebuild reads it before `LEARNED.md`, and a profile source of `seat:RECAP.md` serves
 it after a restore.
