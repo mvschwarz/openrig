@@ -364,7 +364,7 @@ even when it is bound to a tailnet address and so starts without one: pairing ha
 over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
 `pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
 registered person can approve (none, or several with no default; name one with
-`--human`) (`packages/daemon/src/routes/hosts.ts:324-343`).
+`--human`) (`packages/daemon/src/routes/hosts.ts:379-398`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
 approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
