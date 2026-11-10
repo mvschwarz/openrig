@@ -27,7 +27,7 @@ import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { SlackAskSettlement } from "./settled-asks.js";
-import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
+import { abortableSleep, POSSIBLY_POSTED_CLASS, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
@@ -497,11 +497,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         || transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `))
         && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`)).at(-1);
     // A corrected attempt can fail transiently after a permanent rejection, and a
-    // transient failure can be followed by a definite rejection. Preserve both changes.
-    const alreadyRecorded = Boolean(
-      previousFailure?.transitionNote?.startsWith("slack-owner-notification-transport-failed ") &&
-      previousFailure.transitionNote.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks"),
-    );
+    // transient failure can be followed by a definite rejection; an unreadable 2xx
+    // (possibly posted) can follow either. Preserve each change of kind.
+    const previousNote = previousFailure?.transitionNote ?? "";
+    const sameKind = (kind: string) => previousNote.includes(`class=${kind} `) === (failureClass === kind);
+    const alreadyRecorded = previousNote.startsWith("slack-owner-notification-transport-failed ")
+      && sameKind("slack-invalid-blocks") && sameKind(POSSIBLY_POSTED_CLASS);
     if (alreadyRecorded) return;
     opts.queueRepo.update({
       qitemId: p.qitemId,

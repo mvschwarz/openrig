@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callWebApi } from "../src/domain/gateway/slack/slack-api.js";
@@ -13,6 +13,10 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
+import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
+import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 
 // Slack answered 200, and the body read then failed: the shape a stalled daemon gives when its
 // 15 s abort fires after the headers arrive.
@@ -78,6 +82,49 @@ describe("delivery of an ask whose post may have landed", () => {
   });
 });
 
+describe("the receipt the gateway records on the ask's row", () => {
+  let home: string;
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), "slack-unreadable-200-wire-")); });
+  afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+  it("records a change into possibly-posted after a named failure, and out of it again, but not a repeat", async () => {
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    const repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
+    const secrets = join(home, "fake.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets }, home);
+    const item = await repo.create(request);
+    const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+    const key = alert!.notificationKey ?? item.qitemId;
+    // An earlier attempt that Slack refused by name.
+    repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-transport-failed notification_key=${key} class=http-200 error=channel_not_found` });
+    let answer: () => Response = unreadable200;
+    const fetchImpl = vi.fn(async (url: string) => url.endsWith("chat.postMessage") ? answer() : reply({ ok: true, messages: [] }));
+    const receipts = (failureClass: string) => repo.listTransitions(item.qitemId).filter((t) =>
+      t.transitionNote?.startsWith(`slack-owner-notification-transport-failed notification_key=${key} class=${failureClass} `)).length;
+    // Each failed post the production callback handled leaves one repaired-receipt line in the attempted store.
+    const handled = () => readFileSync(join(home, "state", "slack-attempted-decisions.jsonl"), "utf8").split("\n")
+      .filter((line) => line.includes("transport-failure-receipt-repaired")).length;
+    const makeWire = () => buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl, log: () => {} });
+    let wire = makeWire();
+    try {
+      wire.dispatcher.dispatch("post_message", request.destinationSession, alert);
+      await vi.waitFor(() => expect(handled()).toBe(1));
+      expect(receipts("possibly-posted"), "the change into possibly-posted is on the row").toBe(1);
+      // The gateway starts again; no marker in the channel, so it posts once more and the reply is unreadable again.
+      wire.stop(); wire = makeWire(); wire.startServices?.();
+      await vi.waitFor(() => expect(handled()).toBe(2));
+      expect(receipts("possibly-posted"), "an equivalent receipt isn't recorded twice").toBe(1);
+      // And again, with Slack refusing it by name: the change out of possibly-posted is on the row too.
+      answer = () => reply({ ok: false, error: "channel_not_found" });
+      wire.stop(); wire = makeWire(); wire.startServices?.();
+      await vi.waitFor(() => expect(handled()).toBe(3));
+      expect(receipts("http-200")).toBe(2);
+      expect(fetchImpl.mock.calls.filter(([url]) => String(url).endsWith("chat.postMessage"))).toHaveLength(3);
+    } finally { wire.stop(); db.close(); }
+  });
+});
+
 describe("the stuck sweep on a possibly-posted ask", () => {
   it("says it may have posted and that the marker is checked before any resend", async () => {
     const db = createDb(); migrate(db, ALL_MIGRATIONS);
@@ -101,7 +148,7 @@ describe("an alert on an update", () => {
     try {
       const repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
       await expect(repo.create({ ...request, humanIntent: "update" })).rejects.toThrow(
-        /an update isn't an ask: send it without --alert; an update posts to Slack per the person's subscription/);
+        "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices and follow Slack's posting floor and delivery settings.");
     } finally { db.close(); }
   });
 });

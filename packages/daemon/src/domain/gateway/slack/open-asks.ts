@@ -122,6 +122,9 @@ const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome;
   "no-connector": { outcome: "no-connector", detail: "the person has no connector now: it stays on Steering and the Feed" },
 };
 
+/** A post Slack answered 2xx without a readable reply (slack-delivery's POSSIBLY_POSTED_CLASS): uncertain, not failed. */
+const MAY_BE_IN_SLACK = "may already be in Slack (its reply couldn't be read)";
+
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */
 function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; detail?: string } | null {
   if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) {
@@ -130,7 +133,9 @@ function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; 
   }
   for (const note of [...notes].reverse()) {
     if (hasToken(note, "slack-owner-notification-transport-failed", key)) {
-      return { outcome: "transport-failed", detail: /\bclass=(\S+)/.exec(note)?.[1] };
+      const failureClass = /\bclass=(\S+)/.exec(note)?.[1];
+      return failureClass === POSSIBLY_POSTED_CLASS ? { outcome: "uncertain", detail: MAY_BE_IN_SLACK }
+        : { outcome: "transport-failed", detail: failureClass };
     }
     if (parseQuietHoldNote(note)?.notificationKey === key || hasToken(note, "quiet-release-returned", key)) {
       return { outcome: "held", detail: "quiet hours: their release posts it when quiet hours end" };
@@ -244,13 +249,16 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     }
     if (pending) {
       Object.assign(result, fact?.outcome === "transport-failed"
-        ? { outcome: "transport-failed", detail: fact.detail === POSSIBLY_POSTED_CLASS
-          ? "may already be in Slack (its reply couldn't be read); the gateway checks Slack for its marker before any resend when it next starts"
-          : `${fact.detail ?? "failed"}; kept for another try when the gateway next starts` }
-        : pending);
+        ? { outcome: "transport-failed", detail: `${fact.detail ?? "failed"}; kept for another try when the gateway next starts` }
+        : fact?.detail === MAY_BE_IN_SLACK
+          ? { outcome: "uncertain", detail: `${MAY_BE_IN_SLACK}; the gateway checks Slack for its marker before any resend when it next starts` }
+          : pending);
       continue;
     }
-    if (fact && fact.outcome !== "state-unavailable") { Object.assign(result, fact); continue; }
+    if (fact && fact.outcome !== "state-unavailable") {
+      Object.assign(result, fact.detail === MAY_BE_IN_SLACK ? { ...fact, detail: `${MAY_BE_IN_SLACK}; no resend is pending` } : fact);
+      continue;
+    }
     if (!(statuses instanceof Map)) { Object.assign(result, notOffered("seen store", statuses.unreadable)); continue; }
     const status = statuses.get(key);
     if (status === "log-class-contained") { Object.assign(result, LOG_ONLY); continue; }

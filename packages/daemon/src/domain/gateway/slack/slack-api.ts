@@ -74,7 +74,7 @@ export interface WebApiResult {
   grantedScopes: string[]; // parsed from x-oauth-scopes response header (item 5)
   json: Record<string, unknown>;
   error?: string;
-  /** A 2xx whose body couldn't be read: Slack processed the request, so its outcome is unknown, not failed. */
+  /** A 2xx whose body couldn't be read: the outcome is unknown, not failed (the post may have landed). */
   responseUnreadable?: true;
 }
 
@@ -142,8 +142,8 @@ export async function callWebApi(
       try {
         json = (await res.json()) as Record<string, unknown>;
       } catch (e) {
-        // A 2xx means Slack processed the request, so a body we couldn't read (a timeout that fired after the
-        // headers, say) leaves the outcome unknown: keep why, and say so, rather than reporting a bare status.
+        // A 2xx whose body we couldn't read (a timeout that fired after the headers, say) leaves the outcome
+        // unknown, not failed: keep why, and say so, rather than reporting a bare status.
         if (res.ok) unreadable = withoutToken((e as Error)?.message ?? String(e), token);
       }
       const ok = res.ok && json.ok === true;
