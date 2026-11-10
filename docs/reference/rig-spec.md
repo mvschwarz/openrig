@@ -695,7 +695,7 @@ first turn. Check `/status` after a real tool turn to confirm the authentication
 
 For Codex, a saved native API-key login is selected with the existing `--to-account <name>`
 path, exactly like a saved subscription login. Prepare it using native `codex login --with-api-key`
-with the key on stdin, then `rig auth save --codex-home <home> <name>`; never put a key in argv.
+with the key on stdin, then `CODEX_HOME=<home> rig auth save <name>`; never put a key in argv.
 Use the seat's existing home. Preparing a login replaces that home's active credentials, so do it
 before running seats there, or prepare/import a native auth profile separately. Switches preserve
 an outgoing credential copy and report peers sharing the home. A native keyring or administrator
