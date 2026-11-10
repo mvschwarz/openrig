@@ -1,5 +1,6 @@
 import type { EventBus } from "../domain/event-bus.js";
 import { listProjects, selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
+import { inferCatalogProject, ProjectReadError } from "../domain/workspace/project-catalog.js";
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
@@ -250,9 +251,12 @@ function resolveSliceProjectLookup(
     const explicit = indexer.projectId;
     return () => explicit;
   }
+  let catalogPath: string | null = null;
   let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
   try {
-    projects = listProjects(c as never).projects.map((p) => ({
+    const listed = listProjects(c as never);
+    catalogPath = listed.catalogPath;
+    projects = listed.projects.map((p) => ({
       id: p.id,
       root: safeRealpath(p.root),
       missionsRoot: safeRealpath(p.missionsRoot),
@@ -267,10 +271,28 @@ function resolveSliceProjectLookup(
     const matching = projects.filter(
       (p) => isInsideDir(p.root, actualSlicePath) || isInsideDir(p.missionsRoot, actualSlicePath),
     );
-    if (matching.length !== 1) return null;
-    const only = matching[0]!;
-    if (only.error || !isInsideDir(only.missionsRoot, actualSlicePath)) return null;
-    return only.id;
+    if (matching.length === 0) return null;
+
+    let selected: (typeof projects)[number] | undefined;
+    if (matching.length === 1) {
+      selected = matching[0];
+    } else {
+      if (!catalogPath) return null;
+      try {
+        const inferred = inferCatalogProject(
+          catalogPath,
+          new ProjectReadError("project_required", "Slice queue counts require one containing project"),
+          { cwd: actualSlicePath },
+          [],
+        );
+        if (inferred.selectedBy !== "cwd") return null;
+        selected = matching.find((project) => project.id === inferred.id && project.root === inferred.root);
+      } catch {
+        return null;
+      }
+    }
+    if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
+    return selected.id;
   };
 }
 
