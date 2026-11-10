@@ -57,6 +57,19 @@ function shippedSpecsRootOf(p: string): { root: string; layout: InstallLayout } 
   return null;
 }
 
+/** The install layout of a stored built-in startup file: its logical name is a built-in, its ownerRoot is a recognized
+ *  install's daemon/assets, and its absolutePath is exactly <ownerRoot>/<that built-in's relative path>. Null for
+ *  anything else, including a custom file with the same name or path suffix. */
+function builtinLayout(file: { path: string; absolutePath: string; ownerRoot: string }): InstallLayout | null {
+  const relative = typeof file.path === "string" ? BUILTIN_STARTUP_FILES.get(file.path) : undefined;
+  if (!relative) return null;
+  const storedRoot = nodePath.resolve(file.ownerRoot);
+  const parts = storedRoot.split(nodePath.sep);
+  const i = parts.length - 2;
+  const layout = parts[i] === "daemon" && parts[i + 1] === "assets" ? layoutAt(parts, i) : null;
+  return layout && nodePath.resolve(file.absolutePath) === nodePath.join(storedRoot, relative) ? layout : null;
+}
+
 /** A stored file from a dev checkout is followed only when it is gone; a packaged one always. */
 function shouldReanchor(layout: InstallLayout, storedFile: string, exists: Exists): boolean {
   return layout === "packaged" || !exists(storedFile);
@@ -96,17 +109,11 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
 ): T {
   // Persisted contexts from older versions may lack ownerRoot/path; leave them exactly as stored.
   if (typeof file.ownerRoot !== "string" || typeof file.absolutePath !== "string") return file;
-  const relative = typeof file.path === "string" ? BUILTIN_STARTUP_FILES.get(file.path) : undefined;
-  if (relative) {
-    const storedRoot = nodePath.resolve(file.ownerRoot);
-    const parts = storedRoot.split(nodePath.sep);
-    const i = parts.length - 2;
-    const layout = parts[i] === "daemon" && parts[i + 1] === "assets" ? layoutAt(parts, i) : null;
-    if (layout && nodePath.resolve(file.absolutePath) === nodePath.join(storedRoot, relative)) {
-      return shouldReanchor(layout, file.absolutePath, exists)
-        ? { ...file, absolutePath: nodePath.join(assetsRoot, relative), ownerRoot: assetsRoot }
-        : file;
-    }
+  const layout = builtinLayout(file);
+  if (layout) {
+    return shouldReanchor(layout, file.absolutePath, exists)
+      ? { ...file, absolutePath: nodePath.join(assetsRoot, BUILTIN_STARTUP_FILES.get(file.path)!), ownerRoot: assetsRoot }
+      : file;
   }
   const mapped = mapUnderShippedSpecs(file.ownerRoot, file.absolutePath, specsRoot, exists);
   return mapped ? { ...file, ownerRoot: mapped.root, absolutePath: mapped.file } : file;
@@ -120,8 +127,8 @@ export function withContextEntryFloor<T extends { path: string; absolutePath: st
   assetsRoot: string = runningBuiltinAssetsRoot(),
 ): T[] {
   if (files.some((file) => file.path === "openrig-context-entry.md")) return files;
-  const start = files.findIndex((file) => file.path === "openrig-start.md"
-    && nodePath.resolve(file.absolutePath).endsWith(nodePath.join("assets", "guidance", "openrig-start.md")));
+  // Only OpenRig's own openrig-start.md, from any recognized install: a custom file of that name isn't the anchor.
+  const start = files.findIndex((file) => file.path === "openrig-start.md" && builtinLayout(file) !== null);
   if (start < 0) return files;
   const entry = { ...files[start]!, path: "openrig-context-entry.md", ownerRoot: assetsRoot,
     absolutePath: nodePath.join(assetsRoot, "guidance", "openrig-context-entry.md"), required: false } as T;

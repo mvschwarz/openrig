@@ -2151,7 +2151,10 @@ export class SeatLifecycleService {
       return this.malformedStartupContext(nodeId, (err as Error).message);
     }
 
-    const startupFiles = withContextEntryFloor(resolvedStartupFiles).map((file) => ({
+    // The plan and the delivery share one list, so a selection saved before the context-entry floor gets it delivered
+    // and then recorded by the launch. Reading the saved row doesn't change it.
+    const deliveredFiles = withContextEntryFloor(resolvedStartupFiles);
+    const startupFiles = deliveredFiles.map((file) => ({
       kind: file.kind,
       path: file.path,
       deliveryHint: file.deliveryHint,
@@ -2170,7 +2173,7 @@ export class SeatLifecycleService {
     const hash = createHash("sha256")
       .update(JSON.stringify([row.projection_entries_json, row.resolved_files_json, row.startup_actions_json, row.runtime]))
       .digest("hex");
-    return { ok: true, context: { plan, resolvedStartupFiles, startupActions, runtime: row.runtime, hash } };
+    return { ok: true, context: { plan, resolvedStartupFiles: deliveredFiles, startupActions, runtime: row.runtime, hash } };
   }
 
   private malformedStartupContext(

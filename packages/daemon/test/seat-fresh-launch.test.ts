@@ -1120,6 +1120,26 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
   });
 
+  // A selection saved before the context-entry floor: the fresh launch delivers the floor beside openrig-start.md, from the
+  // running install, and records what it delivered, so the floor is saved once. Checked at the adapter, not the plan.
+  it("a fresh launch from a selection saved before the context-entry floor delivers it and saves it once", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldAssets = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
+    const running = path.resolve(import.meta.dirname, "../assets");
+    const stored = [{ path: "openrig-start.md", absolutePath: `${oldAssets}/guidance/openrig-start.md`, ownerRoot: oldAssets,
+      deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; deliveryHint: string; appliesOn: string[] }> = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...(files as typeof delivered)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "context-entry floor" });
+    expect(result.ok).toBe(true);
+    expect(delivered.map((f) => f.path)).toEqual(["openrig-start.md", "openrig-context-entry.md"]);
+    expect(delivered[1]).toMatchObject({ absolutePath: `${running}/guidance/openrig-context-entry.md`, ownerRoot: running,
+      required: false, deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"] });
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ path: string }>;
+    expect(persisted.filter((f) => f.path === "openrig-context-entry.md")).toHaveLength(1);
+  });
+
   // #261 extension: shipped-spec projection resources follow the running install; a plugin stored
   // outside daemon/specs and user resources are projected exactly as stored.
   it("#261 projects shipped-spec resources from the running install and leaves plugin/user entries untouched", async () => {

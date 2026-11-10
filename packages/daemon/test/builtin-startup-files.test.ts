@@ -210,6 +210,23 @@ describe("withContextEntryFloor", () => {
     expect(withContextEntryFloor([userStart], RUNNING)).toEqual([userStart]);
   });
 
+  it("anchors on a built-in from any recognized install, and takes its delivery from that entry", () => {
+    const old = { ...start, absolutePath: `${OLD}/guidance/openrig-start.md`, ownerRoot: OLD };
+    expect(withContextEntryFloor([old], RUNNING).map((file) => [file.path, file.absolutePath])).toEqual([
+      ["openrig-start.md", `${OLD}/guidance/openrig-start.md`], ["openrig-context-entry.md", `${RUNNING}/guidance/openrig-context-entry.md`]]);
+  });
+
+  // A custom file can sit under its own assets/guidance folder. It isn't OpenRig's, so it's never the anchor, and a block
+  // anchored on the real built-in after it keeps the built-in's managed delivery, not the custom file's.
+  it("a custom openrig-start.md under an assets/guidance folder isn't the anchor, alone or before the built-in", () => {
+    const custom = { path: "openrig-start.md", absolutePath: "/team/agents/assets/guidance/openrig-start.md", ownerRoot: "/team/agents/assets/guidance",
+      deliveryHint: "send_text" as const, required: false, appliesOn: ["fresh_start" as const] };
+    expect(withContextEntryFloor([custom], RUNNING)).toEqual([custom]);
+    const files = withContextEntryFloor([custom, start], RUNNING);
+    expect(files.map((file) => file.path)).toEqual(["openrig-start.md", "openrig-start.md", "openrig-context-entry.md"]);
+    expect(files[2]).toMatchObject({ deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"], ownerRoot: RUNNING, required: false });
+  });
+
   it("ships a thin pointer that names the skills router, help and declared context, not a method", () => {
     const text = readFileSync(path.join(runningBuiltinAssetsRoot(), "guidance", "openrig-context-entry.md"), "utf8");
     for (const pointer of ["openrig-skills", "rig context get help", "rig context list", "rig context work-install", "LEARNED.md"]) expect(text).toContain(pointer);
