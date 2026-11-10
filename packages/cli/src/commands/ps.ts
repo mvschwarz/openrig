@@ -1391,9 +1391,10 @@ async function handleNodes(
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
       // With the daemon's attention flag set, a live question shows its own reason rather than a recorded error. Without
-      // that flag (an older daemon), the order stays as it was, so a startup failure isn't hidden by a hook.
+      // that flag (an older daemon), the order stays as it was, so a startup failure isn't hidden by a hook. The question's
+      // reason is shown whole, as the activity reason always was: it's what a person reads to know what to answer.
       const reason = missingSessionGuidance(n) ?? (n.needsAttention !== false || hasCurrentUsageLimit(n)
-        ? (n.needsAttention === true && servesQuestion(n) ? truncate(questionReason(n) ?? "reason unavailable", 40)
+        ? (n.needsAttention === true && servesQuestion(n) ? questionReason(n) ?? "reason unavailable"
           : n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
           : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
