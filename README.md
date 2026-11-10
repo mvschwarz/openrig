@@ -519,6 +519,9 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 
 - **Website**: [openrig.dev](https://openrig.dev)
 - **Docs**: [openrig.dev/docs](https://openrig.dev/docs) ([documentation index for agents](https://openrig.dev/llms.txt))
+- **What's new**: [openrig.dev/whats-new](https://openrig.dev/whats-new) (every release, in plain words)
+- **Features**: [openrig.dev/features](https://openrig.dev/features)
+- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (assistants, harnesses and environments, with setup and test status)
 - **Blog**: [openrig.dev/blog](https://openrig.dev/blog) · [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
 - **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
 - **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)
