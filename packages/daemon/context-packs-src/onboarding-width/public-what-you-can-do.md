@@ -244,9 +244,14 @@ unseen — which makes messages the one delivery channel that never gets skipped
   YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
   one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
   and the advisor gets its own tab. A `kernel` view the person saved still wins.
-  Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
-  writable tile attaches when someone types or pastes and goes back to showing after 30 seconds
-  without a key. Inside herdr it
+  Writable tiles attach as in 0.7.10: the screen in use sizes the seat and text reflows on resize.
+  Read-only tiles show without attaching or resizing it. Fixed web geometry is opt-in through
+  `terminal.fixed_geometry` (off by default). Enter or Ctrl-C during the first attach can close
+  the viewer; the agent keeps running, so reopen it. Kept writable 0.7.8, 0.7.9 or pre-reflow
+  0.7.11 tiles need a manual refresh: close only their owned viewer and reopen with
+  `rig terminal open`; for `--follow`, use `--no-follow` first, then open a fresh view.
+  The agent and conversation are preserved; this is not an automatic migration.
+  Inside herdr it
   opens a focused `openrig kernel` space. It opens where the caller is: Terminal gets a window and
   Ghostty a tab; from Claude Desktop, iTerm or VS Code on a Mac it opens a new Ghostty or Terminal
   window, and only then say that clicking macOS's Allow is fine. Herdr is visible only in a

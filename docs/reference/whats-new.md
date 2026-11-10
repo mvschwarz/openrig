@@ -170,12 +170,16 @@ port (normally 7433)."
   tmux server starts in its own user scope (`openrig-tmux-<id>.scope`), so the
   daemon's unit can stop or restart without ending them. Otherwise the server
   starts as before, with one log line giving the reason.
-- **Terminal tiles** show whole lines at any width without resizing the seat: a
-  tile reads its seat about once a second, a writable tile attaches when someone
-  types and goes back to showing after 30 seconds without a key, and a detach
-  shows the seat again instead of closing the tile. With a tmux server older
-  than 3.5, a tmux prefix typed as a tile's very first key reaches the seat
-  instead of acting as the prefix.
+- **Writable terminal tiles** attach as in 0.7.10: the screen in use sizes the
+  seat and text reflows on resize. Read-only tiles keep showing without attaching
+  or resizing the seat. Web fixed geometry is opt-in through
+  `terminal.fixed_geometry` (off by default). As in 0.7.10, Enter or Ctrl-C while
+  the first attach is in flight can close that viewer; the agent keeps running,
+  so reopen the view. Kept writable tiles from 0.7.8, 0.7.9 or pre-reflow 0.7.11
+  need a manual refresh: close only the owned viewer and reopen with
+  `rig terminal open`; for `--follow`, use `--no-follow` first, then open a fresh
+  view. The agent and conversation are preserved; no automatic migration runs.
+  ([#2868](https://github.com/mvschwarz/openrig/pull/2868), [#2757](https://github.com/mvschwarz/openrig/pull/2757), [#2821](https://github.com/mvschwarz/openrig/pull/2821))
 - **A Claude seat launched with `--settings` JSON written with spaces** can be
   verified again.
 - **`view.changed` is no longer stored,** and `/api/events` no longer sends it.

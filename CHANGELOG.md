@@ -19,7 +19,7 @@ Code, and, as an experiment that's off by default, answer the team's questions
 from an assistant connected through a grant service. A prepared managed compaction waits for an idle moment instead
 of asking again, and a restore stopped at a prompt clears itself. On Linux, a
 daemon run as a systemd user service no longer takes its seats down when its
-unit stops or restarts, and terminal tiles show whole lines at any width. There
+unit stops or restarts, and writable terminal tiles reflow text when the screen resizes. There
 are fixes across the queue, workflows, launch and speed under load, many
 contributed or reported by people using OpenRig. The OpenShell worker's
 maintained cleanup now works on OpenShell 0.1.6, but the worker still isn't end
@@ -220,14 +220,12 @@ to end: see Known limits.
 
 ### Terminals and views
 
-- **Tiles show whole lines at any width without resizing the seat.** A tile
-  reads its seat's screen about once a second instead of attaching, so a tile
-  narrower than the seat no longer shows only its left part. A writable tile
-  attaches when someone types or pastes and goes back to showing after 30
-  seconds without a key; a read-only tile only shows. With a tmux server older
-  than 3.5, a tile's first keys go to the seat before the tile attaches, so a
-  tmux prefix typed as the very first key reaches the seat instead of acting as
-  the prefix. ([#2757](https://github.com/mvschwarz/openrig/pull/2757), [#2821](https://github.com/mvschwarz/openrig/pull/2821))
+- **Writable tiles reflow with the screen.** They attach as in 0.7.10: the screen
+  in use sizes the seat, and text reflows on resize. They stay attached until
+  detached or closed. Read-only tiles keep showing the seat without attaching,
+  typing into it or resizing it. Fixed web geometry is opt-in through
+  `terminal.fixed_geometry` (off by default).
+  ([#2868](https://github.com/mvschwarz/openrig/pull/2868), [#2757](https://github.com/mvschwarz/openrig/pull/2757), [#2821](https://github.com/mvschwarz/openrig/pull/2821))
 - **Herdr follow views** work on macOS too (protocol 22), open a labelled
   snapshot where live following isn't supported, and show a cleaner strip. ([#2663](https://github.com/mvschwarz/openrig/pull/2663), [#2706](https://github.com/mvschwarz/openrig/pull/2706))
 - **Closing the herdr-core terminal that started OpenRig** no longer ends the
@@ -280,9 +278,10 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
 - **On Linux, the seats' tmux server runs in its own systemd user scope** when
   the daemon is a user service (above): the daemon unit's stop, restart and
   memory accounting no longer cover the seats. ([#2749](https://github.com/mvschwarz/openrig/pull/2749))
-- **Terminal tiles don't attach to show a seat:** a detach shows the seat again
-  instead of closing the tile, and a tile that can't read its seat ends with
-  tmux's own error. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
+- **Read-only terminal tiles** show the seat without attaching and end with
+  tmux's own error if they cannot read it. Writable tiles use the ordinary
+  sizing attach; detaching ends that viewer, while the agent keeps running.
+  ([#2757](https://github.com/mvschwarz/openrig/pull/2757), [#2868](https://github.com/mvschwarz/openrig/pull/2868))
 - **Also:** each sender keeps one live held message per seat; daemon start
   doesn't re-send a failed wake to a seat with no receiver; restores record
   `restore.outcome_reconciled` themselves; `rig terminal open --follow` returns
@@ -341,9 +340,20 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
 - **`keep_saved` skills:** a skill whose source changes between `rig down` and
   the restore comes back missing, named in the restore's warnings; an edited seat
   copy is kept. ([#2626](https://github.com/mvschwarz/openrig/pull/2626))
-- **Terminal tiles** each run one tmux command a second while showing: 8 tiles
-  used about 6–8% of one core on an Apple Silicon Mac mini, against about 0.2%
-  for 0.7.10's attached tiles. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
+- **Read-only terminal tiles** each run one tmux command a second while
+  showing. The earlier eight-tile showing measurement used about 6–8% of one
+  core on an Apple Silicon Mac mini, against about 0.2% for attached 0.7.10
+  tiles. This polling cost no longer applies to writable tiles. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
+- **Early writable-tile input:** as in 0.7.10, Enter or Ctrl-C typed while a
+  new tile is still attaching can close that viewer. The agent keeps running;
+  reopen the view. Once attached, tmux handles input and paste directly.
+  ([#2868](https://github.com/mvschwarz/openrig/pull/2868))
+- **Kept writable tiles from 0.7.8, 0.7.9 or pre-reflow 0.7.11** keep their old
+  client. Manually refresh them: close only their owned viewer and reopen with
+  `rig terminal open`. For a `--follow` view, use `--no-follow` first, then open
+  a fresh view. This does not touch the agent or its conversation; it is not an
+  automatic migration. Existing 0.7.10 plain and read-only tiles stay as they are.
+  ([#2868](https://github.com/mvschwarz/openrig/pull/2868))
 - **Claude `launch_wrapper`** hasn't run with zsh, on macOS arm64 or with a real
   installed Claude; an alias or shell function named `claude` fails closed. ([#2746](https://github.com/mvschwarz/openrig/pull/2746))
 - **Going back to 0.7.10:** besides the migrations, an older permission hook
