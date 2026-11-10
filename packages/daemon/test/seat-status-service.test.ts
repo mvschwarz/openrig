@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
@@ -312,6 +312,43 @@ describe("SeatStatusService", () => {
       expect(await response.json()).toMatchObject({
         logical_id: "dev.impl", current_occupant: "adopted-private-name", session_status: "running",
       });
+    }
+  });
+
+  // A running Claude or Codex seat gets what OpenRig wrote into its guidance file, set against when the running agent
+  // loaded it; a Pi seat and a stopped seat get no guidance field.
+  it("reports which of OpenRig's guidance blocks were written after the running agent loaded the file", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "seat-guidance-"));
+    try {
+      const rig = rigRepo.createRig("guidance-rig");
+      const node = rigRepo.addNode(rig.id, "lead", { runtime: "claude-code", cwd });
+      const session = sessionRegistry.registerSession(node.id, "lead@guidance-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      db.prepare("UPDATE sessions SET startup_completed_at = ? WHERE id = ?").run("2026-11-10T10:00:00.000Z", session.id);
+      const file = path.join(cwd, "CLAUDE.md");
+      writeFileSync(file, "<!-- BEGIN OpenRig MANAGED BLOCK: openrig-start.md -->\nIdentity.\n<!-- END OpenRig MANAGED BLOCK: openrig-start.md -->\n"
+        + "<!-- BEGIN OpenRig MANAGED BLOCK: openrig-context-entry.md -->\nWhere things are.\n<!-- END OpenRig MANAGED BLOCK: openrig-context-entry.md -->\n");
+      const record = db.prepare("INSERT INTO managed_block_writes (path_key, block_id, body_sha256, written_at) VALUES (?, ?, 'x', ?)");
+      record.run(realpathSync.native(file), "openrig-start.md", "2026-11-10T09:59:30.000Z");
+      record.run(realpathSync.native(file), "openrig-context-entry.md", "2026-11-10T12:00:00.000Z");
+
+      const status = service.getStatus("lead@guidance-rig");
+      expect(status.ok && status.status.guidance).toMatchObject({
+        file,
+        loadedAt: { at: "2026-11-10T10:00:00.000Z", basis: "startup_completed" },
+        blocks: [{ id: "openrig-start.md", loaded: "before" }, { id: "openrig-context-entry.md", loaded: "after" }],
+      });
+      expect(status.ok && status.status.guidance?.detail).toContain("OpenRig doesn't record what an agent read.");
+
+      const pi = rigRepo.addNode(rig.id, "helper", { runtime: "pi", cwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(pi.id, "helper@guidance-rig").id, "running");
+      const piStatus = service.getStatus("helper@guidance-rig");
+      expect(piStatus.ok && piStatus.status.guidance).toBeUndefined();
+      sessionRegistry.updateStatus(session.id, "exited");
+      const stopped = service.getStatus("lead@guidance-rig");
+      expect(stopped.ok && stopped.status.guidance).toBeUndefined();
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
     }
   });
 
