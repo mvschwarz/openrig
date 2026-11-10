@@ -161,6 +161,18 @@ or `pending`, `draft`. A word that matches none of these counts as `active`, so 
 slice marked `complete` counts as `active`. A slice with no `status:` counts as
 `draft`.
 
+`rig view show execution` shows the slice's own `status:` word (from its
+`SPEC.md`, or a legacy `README.md`) and that word's bucket beside each slice's
+ladder as `recorded_status` (`word: null` when there's none). Like the scopes
+views, it never reads `PROGRESS.md`; `GET /api/slices` lets a `status:` in
+`PROGRESS.md` frontmatter override the node file's. It's the team's record, not
+verified, so it never turns a rung true or makes a slice next-up.
+The ladder's rungs read Part B records: plan lock, `candidate:<sha>` rows, review
+artifacts and an EC-3 `worktree_path=` row. On this flow they read `INDETERMINATE`
+(plan lock reads `false`), and `q4_records` says once for the mission that no
+build is recorded. Built means a Git commit, so work that isn't a commit never
+reads built.
+
 When the owning scope selects `proofPolicy.judges`, use `rig proof judge` to
 record an attributed accept, reject or withdraw decision on a contract item,
 and `rig proof show` to read derived readiness up through slice, mission and
