@@ -272,6 +272,45 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     });
   });
 
+  it("rebuild: superseded recaps are briefed as optional history after the required artifacts, never under 'read each'", async () => {
+    seedSeat();
+    rebuildChain.mockImplementation(() => ({
+      artifacts: [
+        { address: "/seats/dev-impl/RECAP.md", label: "authored seat recap (highest trust)" },
+        { address: "/seats/dev-impl/LEARNED.md", label: "seat lineage lessons" },
+        { address: "/seats/dev-impl/recap-superseded/RECAP-2000.md", label: "superseded recap (1 generation back)", optional: true },
+        { address: "/seats/dev-impl/recap-superseded/RECAP-1000.md", label: "superseded recap (2 generations back)", optional: true },
+      ],
+    }));
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok || !("result" in result)) throw new Error("expected handover result");
+    // The record still names every artifact the packet carried.
+    expect(result.result.sourceOutcome).toMatchObject({
+      primedArtifacts: [
+        expect.objectContaining({ address: "/seats/dev-impl/RECAP.md" }),
+        expect.objectContaining({ address: "/seats/dev-impl/LEARNED.md" }),
+        expect.objectContaining({ address: "/seats/dev-impl/recap-superseded/RECAP-2000.md", optional: true }),
+        expect.objectContaining({ address: "/seats/dev-impl/recap-superseded/RECAP-1000.md", optional: true }),
+      ],
+      gaps: [],
+    });
+    const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+    const requiredHeading = "Priming artifacts (read each, in order):";
+    const historyHeading = "Older recaps, newest first (read these only if you need the seat's history):";
+    expect(delivered.indexOf(requiredHeading)).toBeGreaterThanOrEqual(0);
+    expect(delivered.indexOf(historyHeading)).toBeGreaterThan(delivered.indexOf(requiredHeading));
+    const required = delivered.split(requiredHeading)[1]!.split("\n\n")[0]!;
+    expect(required).toContain("/seats/dev-impl/RECAP.md");
+    expect(required).toContain("/seats/dev-impl/LEARNED.md");
+    expect(required).not.toContain("recap-superseded");
+    const history = delivered.split(historyHeading)[1]!;
+    expect(history.indexOf("RECAP-2000.md")).toBeGreaterThanOrEqual(0);
+    expect(history.indexOf("RECAP-2000.md")).toBeLessThan(history.indexOf("RECAP-1000.md"));
+  });
+
   it("rebuild: an EMPTY durable chain still executes and says so by name — in the result AND in the delivered packet", async () => {
     const { node } = seedSeat();
     rebuildChain.mockImplementation(() => ({ emptyReason: "no recap chain, no LEARNED, no restore packet for this seat" }));
@@ -507,7 +546,7 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
     return join(openrigHome, "compaction", "restore-pending", "dev-impl@seat-rig.json");
   }
 
-  function chain(): Array<{ address: string; label: string }> {
+  function chain(): Array<{ address: string; label: string; optional?: true }> {
     const result = buildRebuildPrimingChain(SEAT, { topologyRoot, openrigHome });
     if (!("artifacts" in result)) throw new Error(`expected artifacts, got: ${JSON.stringify(result)}`);
     return result.artifacts;
@@ -570,6 +609,21 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
       join(seatDir, "LEARNED.md"),
       join(seatDir, "recap-superseded", "RECAP-2000.md"),
       join(seatDir, "recap-superseded", "RECAP-1000.md"),
+    ]);
+  });
+
+  it("superseded recaps are marked optional; the current recap, LEARNED and the restore packet are not", () => {
+    const packetDir = join(openrigHome, "packet-y");
+    mkdirSync(packetDir, { recursive: true });
+    writeFileSync(markerPath(), JSON.stringify({ version: 1, outputDir: packetDir }));
+    mkdirSync(join(seatDir, "recap-superseded"), { recursive: true });
+    writeFileSync(join(seatDir, "recap-superseded", "RECAP-1000.md"), "older");
+
+    expect(chain().map((artifact) => [artifact.address, artifact.optional === true])).toEqual([
+      [join(seatDir, "RECAP.md"), false],
+      [join(seatDir, "LEARNED.md"), false],
+      [packetDir, false],
+      [join(seatDir, "recap-superseded", "RECAP-1000.md"), true],
     ]);
   });
 
