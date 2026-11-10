@@ -23,6 +23,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 const require = createRequire(import.meta.url);
 const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") as {
   buildOpenRigPayload: (payload: Record<string, unknown>, env: Record<string, string>, now: () => Date) => Record<string, unknown>;
+  claudeLimitResetAt: (text: string, now: Date) => string | null;
 };
 const SESSION = "dev-worker@limit-fixture";
 const NODE = "node-limit-fixture";
@@ -123,6 +124,77 @@ describe("Claude provider interruptions (#99)", () => {
     expect(payload).not.toHaveProperty("error_details");
     expect(payload).not.toHaveProperty("last_assistant_message");
     expect(store.getLatestForNode({ sessionName: SESSION })).toMatchObject({ state: "unknown", reason: "usage_limit" });
+  });
+
+  describe("the reset a Claude limit states (#99)", () => {
+    const WEEKLY = "You've hit your weekly limit · resets Jan 2, 4pm (America/Sao_Paulo)";
+    const reportStated = (text: string, field = "last_assistant_message") =>
+      report({ hook_event_name: "StopFailure", error: "rate_limit", [field]: text });
+
+    it.each([
+      // Real messages from a Claude Code 2.1.296 limit, and the older formats.
+      [WEEKLY, "2025-01-02T19:00:00.000Z"],
+      ["5-hour limit reached ∙ resets 8am (UTC)", "2025-01-02T08:00:00.000Z"],
+      ["5-hour limit reached ∙ resets 1:30pm (UTC)", "2025-01-01T13:30:00.000Z"],
+      ["rate limit · resets in 2h 30m", "2025-01-01T14:30:00.000Z"],
+      ["Claude AI usage limit reached|1735740000", "2025-01-01T14:00:00.000Z"],
+    ])("reads %j", (text, expected) => {
+      expect(relay.claudeLimitResetAt(text, new Date(T0))).toBe(expected);
+    });
+
+    it.each([
+      "API Error: Rate limit reached",
+      "resets 3",
+      "resets 4pm (Not/AZone)",
+      "resets Feb 30, 4pm (UTC)",
+      "resets Mar 1, 4pm (UTC)", // more than a week away: not a usage window
+      "Claude AI usage limit reached|1735730000", // already past
+    ])("states no reset for %j", text => {
+      expect(relay.claudeLimitResetAt(text, new Date(T0))).toBeNull();
+    });
+
+    it("relays only the instant, never the message", () => {
+      const payload = reportStated(WEEKLY);
+      expect(payload).toMatchObject({ subtype: "rate_limit", resetsAt: "2025-01-02T19:00:00.000Z" });
+      expect(JSON.stringify(payload)).not.toContain("weekly");
+      expect(reportStated(WEEKLY, "error_details")).toMatchObject({ resetsAt: "2025-01-02T19:00:00.000Z" });
+    });
+
+    it.each([
+      { hook_event_name: "StopFailure", error: "overloaded", last_assistant_message: WEEKLY },
+      { hook_event_name: "Stop", last_assistant_message: WEEKLY },
+      { hook_event_name: "Notification", notification_type: "rate_limit", message: WEEKLY },
+    ])("reads no reset off another event: %j", payload => {
+      expect(report(payload)).not.toHaveProperty("resetsAt");
+    });
+
+    it("keeps a stated reset only on the typed limit row", () => {
+      const result = store.recordHookEvent({ runtime: "claude-code", sessionName: SESSION, hookEvent: "Stop",
+        resetsAt: "2025-01-02T19:00:00.000Z", generation: GENERATION });
+      expect(result.ok && result.activity).not.toHaveProperty("resetsAt");
+    });
+
+    it("parks pending work until the stated reset instead of the bounded retry", async () => {
+      reportStated(WEEKLY);
+      const model = await service.getReadModel();
+      expect(model.signals.filter(signal => signal.sourceClass === "provider_event"))
+        .toEqual([expect.objectContaining({ provider: "claude", seatSession: SESSION, resetsAt: "2025-01-02T19:00:00.000Z" })]);
+      expect(deriveUsageLimitPools({ signals: model.signals, bindings: model.bindings, now: new Date(), fallbackSeconds: 300 }))
+        .toEqual([{ poolKey: "claude:local", provider: "claude", seatSessions: [SESSION], expiresAt: "2025-01-02T19:00:00.000Z", source: "provider-reset" }]);
+
+      queue.attachWatchdogJobsRepository(new WatchdogJobsRepository(db, () => new Date()));
+      queue.attachOutbox(new OutboxHandler(db));
+      const source = await queue.create({ sourceSession: "sender@limit-fixture", destinationSession: "relay@limit-fixture", body: "work", nudge: false });
+      const { created: baton } = await queue.handoff({ qitemId: source.qitemId, fromSession: "relay@limit-fixture", toSession: SESSION, nudge: false });
+      db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = 'failed:provider limit' WHERE qitem_id = ?")
+        .run(new Date(Date.parse(T0) - 600_000).toISOString(), baton.qitemId);
+      const result = await runWakeLadderTick({ db, queueRepo: queue, attemptWake: vi.fn(async () => "typed"), resolveOrchestrator: () => null,
+        retryIntervalSeconds: 300, usageLimitJitterSeconds: 0, getProviderReadModel: () => service.getReadModel(), log: () => {} });
+      expect(result.actions).toContainEqual({ qitemId: baton.qitemId, action: "park-usage-limit" });
+      const blocker = queue.getById(baton.qitemId)!.blockedOn!;
+      expect(queue.getParkWakeStatus(blocker)).toMatchObject({ kind: "timer", live: true, expiresAt: "2025-01-02T19:00:00.000Z" });
+      expect(queue.transitionLog.listForQitem(blocker).some(row => row.transitionNote?.includes("cause=provider-reset"))).toBe(true);
+    });
   });
 
   it("reports a fresh same-occupant limit without inventing a Claude account, usage meter or reset", async () => {

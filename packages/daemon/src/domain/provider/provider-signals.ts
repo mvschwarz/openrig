@@ -219,6 +219,8 @@ export type ReactiveEventInput = {
   // Required: a reactive event without a freshness bound could never pass BR-2, and a momentary
   // event must always carry when it expires. Staleness itself stays the shared predicate's job.
   staleAfter: string;
+  /** #99: when the provider's own failure says the limit resets. Absent, the pool falls back to the bounded retry. */
+  resetsAt?: string;
 } & ({ provider: ProviderKind; accountRef: string; seatSession?: never }
   | { provider: "claude"; seatSession: string; accountRef?: never });
 
@@ -236,6 +238,7 @@ export function reactiveEventSignal(input: ReactiveEventInput): ProviderSignal {
     // At-limit exhaustion is an actionable switch trigger; stream/stop errors are advisory.
     automationUse: input.kind === "at_limit" ? "allow_switch_decision" : "advisory_only",
     // No usedPercent — a reactive event is exhaustion evidence, not a remaining meter.
+    ...(input.resetsAt !== undefined ? { resetsAt: input.resetsAt } : {}),
   };
 }
 
@@ -319,8 +322,8 @@ export function deriveUsageLimitPools(input: {
     const statedResets = pool.signals
       .map((signal) => Date.parse(signal.resetsAt ?? ""))
       .filter((value) => Number.isFinite(value) && value > nowMs);
-    // A typed Claude failure has no reset timestamp. Use the existing bounded retry interval,
-    // as for Codex events; a Claude meter missing its reset still cannot invent one.
+    // A typed Claude failure carries a reset only when Claude's own message stated one (#99). Without it, use
+    // the existing bounded retry interval, as for Codex events; a Claude meter missing its reset still cannot invent one.
     const fallbackResets = pool.signals
       .filter((signal) => pool.provider === "codex" || (signal.sourceClass === "provider_event" && signal.authority === "reactive_error"))
       .map((signal) => Date.parse(signal.asOf) + input.fallbackSeconds * 1000)

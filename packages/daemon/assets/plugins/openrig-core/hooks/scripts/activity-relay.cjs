@@ -129,7 +129,103 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
+    ...limitResetField(runtime, hookEvent, subtype, providerPayload, now),
     ...conversationFields(providerPayload, env),
+  };
+}
+
+// #99: a Claude usage limit says when it resets only in its rendered text ("You've hit your weekly limit ·
+// resets Nov 10, 4pm (America/Sao_Paulo)"). The typed error still decides THAT the seat is limited; the text
+// is read here, on the seat's machine and in its time zone, only for WHEN, and only the instant leaves the
+// relay: never the text itself.
+function limitResetField(runtime, hookEvent, subtype, providerPayload, now) {
+  if (runtime !== "claude-code" || hookEvent !== "StopFailure" || subtype !== "rate_limit") return {};
+  for (const value of [providerPayload.last_assistant_message, providerPayload.error_details]) {
+    if (typeof value !== "string") continue;
+    const resetsAt = claudeLimitResetAt(value.slice(0, 2000), now());
+    if (resetsAt) return { resetsAt };
+  }
+  return {};
+}
+
+const RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const RESET_EPOCH_RE = /usage limit reached\|(\d{10})\b/i;
+const RESET_IN_RE = /\bresets?\s+in\s+(?:(\d+)\s*d(?:ays?)?\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\s*)?(?:(\d+)\s*m(?:in(?:utes?)?)?)?/i;
+const RESET_AT_RE = /\bresets?\s+(?:at\s+|on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(([^)\n]{1,64})\))?/i;
+
+/** The reset instant a Claude usage-limit message states, as an ISO string, or null when it states none
+ *  this can read. A wall-clock time without a zone is the seat's local time, which is what Claude renders. */
+function claudeLimitResetAt(text, nowDate) {
+  const nowMs = nowDate.getTime();
+  if (!Number.isFinite(nowMs) || typeof text !== "string") return null;
+  let resetMs = null;
+  const epoch = RESET_EPOCH_RE.exec(text);
+  const relative = RESET_IN_RE.exec(text);
+  const wall = RESET_AT_RE.exec(text);
+  if (epoch) {
+    resetMs = Number(epoch[1]) * 1000;
+  } else if (relative && (relative[1] || relative[2] || relative[3])) {
+    resetMs = nowMs + ((Number(relative[1] || 0) * 24 + Number(relative[2] || 0)) * 60 + Number(relative[3] || 0)) * 60_000;
+  } else if (wall) {
+    resetMs = wallClockReset(wall, nowMs);
+  }
+  if (resetMs === null || !Number.isFinite(resetMs) || resetMs <= nowMs || resetMs > nowMs + RESET_MAX_MS) return null;
+  return new Date(resetMs).toISOString();
+}
+
+function wallClockReset(match, nowMs) {
+  const [, monthName, day, hourText, minuteText, meridiem, zoneText] = match;
+  const hour12 = Number(hourText);
+  const minute = Number(minuteText || 0);
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = (hour12 % 12) + (meridiem.toLowerCase() === "pm" ? 12 : 0);
+  const zone = zoneText ? zoneText.trim() : null;
+  let toUtc;
+  try {
+    toUtc = zone ? zonedClock(zone) : localClock();
+  } catch {
+    return null; // a zone this runtime doesn't know: no reset rather than a guessed one
+  }
+  const today = toUtc.partsAt(nowMs);
+  if (monthName) {
+    const month = MONTHS.indexOf(monthName.toLowerCase());
+    if (month < 0) return null;
+    for (const year of [today.year, today.year + 1]) {
+      const at = toUtc.instant(year, month, Number(day), hour, minute);
+      if (at > nowMs) return at;
+    }
+    return null;
+  }
+  const at = toUtc.instant(today.year, today.month, today.day, hour, minute);
+  return at > nowMs ? at : toUtc.instant(today.year, today.month, today.day + 1, hour, minute);
+}
+
+function localClock() {
+  return {
+    partsAt: (ms) => { const d = new Date(ms); return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate() }; },
+    instant: (year, month, day, hour, minute) => new Date(year, month, day, hour, minute).getTime(),
+  };
+}
+
+function zonedClock(timeZone) {
+  const format = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "numeric",
+    day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+  const partsAt = (ms) => {
+    const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((part) => [part.type, Number(part.value)]));
+    return { year: parts.year, month: parts.month - 1, day: parts.day, hour: parts.hour, minute: parts.minute, second: parts.second };
+  };
+  const offsetAt = (ms) => {
+    const p = partsAt(ms);
+    return Date.UTC(p.year, p.month, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000;
+  };
+  return {
+    partsAt,
+    instant: (year, month, day, hour, minute) => {
+      const asUtc = Date.UTC(year, month, day, hour, minute);
+      const first = asUtc - offsetAt(asUtc);
+      return asUtc - offsetAt(first);
+    },
   };
 }
 
@@ -375,6 +471,7 @@ if (require.main === module) {
 
 module.exports = {
   buildOpenRigPayload,
+  claudeLimitResetAt,
   claimFirstLaunchHook,
   buildSessionIdentityPayload,
   parseJson,

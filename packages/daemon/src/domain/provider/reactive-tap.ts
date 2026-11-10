@@ -98,9 +98,12 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapR
         || isVerificationReason(event.reason) || event.stale) continue;
       const eventAtMs = Date.parse(event.eventAt ?? "");
       if (!Number.isFinite(eventAtMs) || eventAtMs > nowMs || nowMs >= eventAtMs + deps.freshnessMs) continue;
+      // #99: the reset Claude's message stated, when the relay could read one and it is still after the failure.
+      const resetMs = Date.parse(event.resetsAt ?? "");
       signals.push(reactiveEventSignal({
         provider: "claude", seatSession: seat.seatSession, kind: "at_limit",
         asOf: event.eventAt!, staleAfter: new Date(eventAtMs + deps.freshnessMs).toISOString(),
+        ...(Number.isFinite(resetMs) && resetMs > eventAtMs ? { resetsAt: new Date(resetMs).toISOString() } : {}),
       }));
       continue;
     }

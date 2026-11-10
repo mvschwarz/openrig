@@ -26,6 +26,8 @@ export interface HookActivityInput {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while it stays idle (OpenRig's pi runner). */
   livenessSeconds?: number | null;
+  /** #99: the reset instant a Claude usage limit stated; kept only on that typed failure. */
+  resetsAt?: string | null;
 }
 
 export type RecordHookActivityResult =
@@ -159,6 +161,9 @@ export class AgentActivityStore {
     if (input.hookAgentId !== undefined) activity.hookAgentId = input.hookAgentId;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
     if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
+    if (input.resetsAt && isClaudeRateLimitHook(activity.runtime, input.hookEvent, input.subtype)) {
+      activity.resetsAt = input.resetsAt;
+    }
 
     const event = this.eventBus.emit({
       type: "agent.activity",
