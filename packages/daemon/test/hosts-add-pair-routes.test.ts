@@ -534,6 +534,23 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(second.status).toBe(404);
   });
 
+  // Steering's Deny and Drop close the item done, with closure denied or canceled (mission-control-write-contract.ts
+  // verbToClosure); a done with any reason but no-follow-on isn't an approval. Each denies and hands nothing over.
+  it.each([
+    ["Steering's Deny", { closureReason: "denied", closureTarget: "operator denied" }],
+    ["Steering's Drop", { closureReason: "canceled", closureTarget: "not now" }],
+    ["another closure", { closureReason: "escalation", closureTarget: "ops@team" }],
+  ] as const)("%s (done, not no-follow-on) → denied, with no token, and the pairing dies", async (_label, closure) => {
+    const { pairId, approvalQitemId } = await issue();
+    await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "done", ...closure });
+    expect(repo.getById(approvalQitemId)).toMatchObject({ state: "done", closureReason: closure.closureReason });
+    const res = await app.request(`/api/hosts/pair-request/${pairId}`);
+    const body = await res.json() as { status: string; token?: string };
+    expect(body).toEqual({ status: "denied" });
+    expect(JSON.stringify(body)).not.toContain(BEARER);
+    expect((await app.request(`/api/hosts/pair-request/${pairId}`)).status).toBe(404);
+  });
+
   it("deny → status denied, and the pairing dies (nothing to hand over)", async () => {
     const { pairId, approvalQitemId } = await issue();
     await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "denied" });
