@@ -389,20 +389,25 @@ historical rows are not attributed to a selected project.
 
 The `GET /api/slices` response keeps that legacy `qitemCount` separate from
 `queueCounts`, eight current-state counts (or `null` when the listed
-mission/project scope cannot be resolved). `queueCounts` matches exact typed
-tags in one uncapped queue scan and is recomputed on every request; `?refresh`
-invalidates the separate listing cache, not a queue-count snapshot. A row may
-omit `project:` or `mission:` only when its remaining scope tokens identify
-exactly one physical slice with a resolved project and mission across all
-configured roots; ambiguous matches count nowhere, including matches hidden by
-first-wins listing or a list filter. An explicit mismatched project or mission
-never counts. Physical candidates are used for counting only and do not change
-which slice is listed or served.
+mission/project scope cannot be resolved or catalog/candidate-root discovery is
+incomplete). `queueCounts` matches exact typed tags in one uncapped queue scan
+and is recomputed on every request; `?refresh` invalidates the separate listing
+cache, not a queue-count snapshot. A row may omit `project:` or `mission:` only
+when its remaining scope tokens identify exactly one physical slice with a
+resolved project and mission across the configured indexer roots and the
+catalog projects' missions roots. If catalog/project resolution or a candidate
+root cannot be read completely, counts stay `null` rather than treating unseen
+candidates as absent. Ambiguous matches count nowhere, including matches hidden
+by first-wins listing or a list filter. An explicit mismatched project or
+mission never counts. Physical candidates are used for counting only and do
+not change which slice is listed or served.
 
-> Source: `domain/slices/slice-indexer.ts` (`SliceRecord` / `SliceListEntry`;
-> `readSliceLocations` first-name-wins and nested/flat discovery;
-> `observedQueueCounts` physical-candidate matching and the shared queue scan;
-> `toListEntry` / `matchQitems` legacy membership);
+> Source: `domain/slices/slice-indexer.ts` (read-only/no-new-state module
+> contract; `SliceRecord.qitemIds` / `SliceRecord.proofPacket`;
+> `DEFAULT_CACHE_TTL_MS`; `isReady()`; `invalidate()`;
+> `reconcileComposition()`; `readSliceLocations()`;
+> `observedQueueCounts()` physical-candidate matching and the shared queue
+> scan; `toListEntry()` / `matchQitems()` legacy membership);
 > `domain/workspace/project-catalog.ts:132–138`
 > (`belongsToProject`); startup `startup.ts:1705`, `:1718` (`OPENRIG_SLICES_ROOT`
 > first), `:1725–1730`, `:1743–1748`, proof-source watch `:1762–1765`

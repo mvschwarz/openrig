@@ -170,7 +170,7 @@ export interface SliceListEntry {
   description: string | null;
   /** Existing legacy display-membership count; separate from state totals. */
   qitemCount: number;
-  /** Added by GET /api/slices as fresh state totals; null when project/mission scope is unresolved. */
+  /** Added by GET /api/slices as fresh state totals; null when scope or physical-candidate discovery is unresolved. */
   queueCounts?: SliceQueueCounts | null;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
@@ -591,17 +591,20 @@ export class SliceIndexer {
 
   /**
    * Observed per-state queue counts (#2729) for `GET /api/slices`.
-   * Matches exact typed tags against physical slice candidates across all
-   * configured roots, then updates only a listed candidate. Missing project
-   * or mission tags count only when the remaining tags identify one resolved
-   * project/mission slice; list first-wins/filter behavior does not resolve
-   * ambiguity.
+   * Matches exact typed tags against physical slice candidates across the
+   * configured roots and the request's catalog project missions roots, then
+   * updates only a listed candidate. Missing project or mission tags count
+   * only when the remaining tags identify one resolved project/mission slice;
+   * list first-wins/filter behavior does not resolve ambiguity. Incomplete
+   * catalog or candidate-root discovery yields null totals rather than
+   * treating unseen candidates as absent.
    * Queue rows are read in one uncapped shared scan, independent of the 60s
    * listing cache.
    */
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
     resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean } = {},
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
@@ -633,18 +636,52 @@ export class SliceIndexer {
       }
       result.set(entry.slicePath, visibleCountsByPath.get(physicalPath) ?? null);
     }
+    if (candidateOptions.complete === false) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
     if (![...visibleCountsByPath.values()].some((counts) => counts !== null)) return result;
 
-    const physicalPaths = new Set<string>();
-    for (const location of this.walkSliceLocations(true)) {
-      const physicalPath = path.resolve(location.slicePath);
-      if (physicalPaths.has(physicalPath)) continue;
-      physicalPaths.add(physicalPath);
+    let candidateScanComplete = true;
+    const candidateLocations = this.walkSliceLocations(
+      true,
+      candidateOptions.additionalSliceRoots ?? [],
+      () => { candidateScanComplete = false; },
+    );
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
 
+    // Keep one target per resolved physical path even when overlapping roots
+    // discover it more than once. Authored IDs belong to that path, not to the
+    // first visible location that happens to share its directory name.
+    const locationsByPath = new Map<string, SliceLocation>();
+    for (const location of candidateLocations) {
+      const physicalPath = path.resolve(location.slicePath);
+      if (!locationsByPath.has(physicalPath)) locationsByPath.set(physicalPath, location);
+    }
+    const candidateNames = new Set([...locationsByPath.values()].map((location) => location.name));
+    const sliceIdsByPath = new Map<string, string | null>();
+    const pathsBySliceId = new Map<string, Set<string>>();
+    for (const [physicalPath, location] of locationsByPath) {
+      const id = this.readSliceId(location.slicePath);
+      sliceIdsByPath.set(physicalPath, id);
+      if (!id || candidateNames.has(id)) continue;
+      const claimants = pathsBySliceId.get(id) ?? new Set<string>();
+      claimants.add(physicalPath);
+      pathsBySliceId.set(id, claimants);
+    }
+
+    for (const [physicalPath, location] of locationsByPath) {
       const missionKeys = new Set(location.missionId
         ? this.missionTagKeys(location.missionId, location.slicePath)
         : []);
-      const sliceKeys = new Set(this.sliceTagKeys(location.name));
+      const sliceKeys = new Set<string>([location.name]);
+      const sliceId = sliceIdsByPath.get(physicalPath);
+      if (sliceId && !candidateNames.has(sliceId) && pathsBySliceId.get(sliceId)?.size === 1) {
+        sliceKeys.add(sliceId);
+      }
       const target: TargetScope = {
         projectId: projectForPath(location.slicePath),
         missionId: location.missionId,
@@ -717,7 +754,11 @@ export class SliceIndexer {
 
   /** Every slice location under the roots, whatever mission this indexer is scoped to.
    *  Directory names are deduplicated (first wins) unless `physical` asks for every folder. */
-  private walkSliceLocations(physical = false): SliceLocation[] {
+  private walkSliceLocations(
+    physical = false,
+    additionalRoots: readonly string[] = [],
+    onReadError?: () => void,
+  ): SliceLocation[] {
     const locations: SliceLocation[] = [];
     const seen = new Set<string>();
     const addLocation = (location: SliceLocation) => {
@@ -728,23 +769,25 @@ export class SliceIndexer {
       locations.push(location);
     };
 
-    for (const root of this.sliceRoots()) {
+    for (const root of this.sliceRoots(additionalRoots)) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
         continue;
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
         const entryPath = path.join(root, entry.name);
         const nestedSlicesRoot = path.join(entryPath, "slices");
-        if (this.isDirectory(nestedSlicesRoot)) {
+        if (this.isDirectory(nestedSlicesRoot, onReadError)) {
           let nestedEntries: fs.Dirent[];
           try {
             nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
           } catch {
             nestedEntries = [];
+            onReadError?.();
           }
           for (const nested of nestedEntries) {
             if (!nested.isDirectory() || nested.name.startsWith(".")) continue;
@@ -870,16 +913,17 @@ export class SliceIndexer {
     return this.readSliceLocations().find((location) => location.name === name) ?? null;
   }
 
-  private isDirectory(absPath: string): boolean {
+  private isDirectory(absPath: string, onReadError?: () => void): boolean {
     try {
       return fs.statSync(absPath).isDirectory();
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
       return false;
     }
   }
 
-  private sliceRoots(): string[] {
-    const roots = [this.slicesRoot, ...this.additionalSliceRoots].filter((root) => root.length > 0);
+  private sliceRoots(additionalRoots: readonly string[] = []): string[] {
+    const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {

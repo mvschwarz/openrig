@@ -96,10 +96,11 @@ export function slicesRoutes(): Hono {
       // Sort by lastActivityAt DESC (most recently touched first); slices
       // without activity sort to the end.
       filtered.sort(compareByActivityDesc);
-      const queueCountsByPath = deps.indexer.observedQueueCounts(
-        filtered,
-        resolveSliceProjectLookup(c, deps.indexer),
-      );
+      const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
+      const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
+        additionalSliceRoots: projectLookup.additionalSliceRoots,
+        complete: projectLookup.complete,
+      });
       const authored = deps.indexer.missionAuthoredStatuses();
       return c.json({
         slices: filtered.map((s) => ({
@@ -243,14 +244,16 @@ function isInsideDir(parentDir: string, childPath: string): boolean {
   return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
 }
 
+interface SliceProjectLookup {
+  resolveProjectId: (slicePath: string) => string | null;
+  additionalSliceRoots: string[];
+  complete: boolean;
+}
+
 function resolveSliceProjectLookup(
   c: { get: (key: string) => unknown },
   indexer: SliceIndexer,
-): (slicePath: string) => string | null {
-  if (typeof indexer.projectId === "string" && indexer.projectId.length > 0) {
-    const explicit = indexer.projectId;
-    return () => explicit;
-  }
+): SliceProjectLookup {
   let catalogPath: string | null = null;
   let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
   try {
@@ -263,14 +266,29 @@ function resolveSliceProjectLookup(
       error: p.error,
     }));
   } catch {
-    return () => null;
+    return { resolveProjectId: () => null, additionalSliceRoots: [], complete: false };
   }
-  if (projects.length === 0) return () => null;
+  const additionalSliceRoots = projects.map((project) => project.missionsRoot);
+  const complete = projects.length > 0 && projects.every((project) => !project.error);
+  if (projects.length === 0) {
+    return { resolveProjectId: () => null, additionalSliceRoots, complete };
+  }
+  // A project-scoped indexer's explicitly configured roots keep their existing
+  // project identity, including compatible roots outside project.yaml. Extra
+  // catalog roots are resolved by containment so hidden sibling projects remain
+  // distinct candidates.
+  const explicitProjectId = typeof indexer.projectId === "string" && indexer.projectId.length > 0
+    ? indexer.projectId
+    : null;
+  const explicitRoots = explicitProjectId
+    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].map(safeRealpath)
+    : [];
   // The resolver is request-local. Reuse inference only for the same canonical
   // project/mission-root matches, keeping the two containment relations distinct.
   const inferredByContainment = new Map<string, { id: string; root: string }>();
-  return (slicePath: string): string | null => {
+  const resolveProjectId = (slicePath: string): string | null => {
     const actualSlicePath = safeRealpath(slicePath);
+    if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
     const matching = projects.flatMap((project) => {
       const projectRootContains = isInsideDir(project.root, actualSlicePath);
       const missionsRootContains = isInsideDir(project.missionsRoot, actualSlicePath);
@@ -324,6 +342,7 @@ function resolveSliceProjectLookup(
     if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
     return selected.id;
   };
+  return { resolveProjectId, additionalSliceRoots, complete };
 }
 
 function compareByActivityDesc(a: SliceListEntry, b: SliceListEntry): number {

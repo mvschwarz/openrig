@@ -210,10 +210,11 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   across missions, as [Project workspace](project-workspace.md) says.
 - **Queue state counts on `GET /api/slices`:** every list row has `queueCounts`, a current, uncapped count by
   `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
-  the row's project/mission scope cannot be resolved. This is separate from the existing `qitemCount` display
-  membership field. Counts match exact typed `project:`, `mission:` and `slice:` tags in one shared queue scan.
-  A row may omit `project:` or `mission:` only when its remaining tags identify exactly one physical slice with
-  a resolved project and mission across all configured roots. Ambiguous matches count nowhere, even if first-wins
-  discovery or a list filter leaves only one row visible; an explicit mismatched project or mission never counts.
-  Counts are recomputed on every list request. `?refresh=1|true` invalidates the separate listing cache, not a
-  stored queue-count snapshot. This resolution does not change the returned slice list or filters.
+  the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
+  separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
+  `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
+  and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
+  tags identify exactly one physical slice with a resolved project and mission. Ambiguous matches count nowhere,
+  even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
+  mission never counts. Counts are recomputed on every list request. `?refresh=1|true` invalidates the separate
+  listing cache, not a stored queue-count snapshot. This resolution does not change the returned slice list or filters.
