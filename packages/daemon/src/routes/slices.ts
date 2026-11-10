@@ -1,5 +1,6 @@
 import type { EventBus } from "../domain/event-bus.js";
-import { selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
+import { listProjects, selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
+import { inferCatalogProject, ProjectReadError } from "../domain/workspace/project-catalog.js";
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
@@ -95,9 +96,18 @@ export function slicesRoutes(): Hono {
       // Sort by lastActivityAt DESC (most recently touched first); slices
       // without activity sort to the end.
       filtered.sort(compareByActivityDesc);
+      const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
+      const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
+        additionalSliceRoots: projectLookup.additionalSliceRoots,
+        complete: projectLookup.complete,
+      });
       const authored = deps.indexer.missionAuthoredStatuses();
       return c.json({
-        slices: filtered.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath) })),
+        slices: filtered.map((s) => ({
+          ...s,
+          queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+          readiness: readSliceReadiness(s.slicePath),
+        })),
         totalCount: filtered.length,
         filter,
         boundToWorkflow: boundDiagnostic,
@@ -219,6 +229,120 @@ function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null 
   const projector = c.get("sliceDetailProjector" as never) as SliceDetailProjector | undefined;
   if (!indexer || !projector) return null;
   return { indexer, projector };
+}
+
+function safeRealpath(targetPath: string): string {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
+  }
+}
+
+function isInsideDir(parentDir: string, childPath: string): boolean {
+  const rel = path.relative(parentDir, childPath);
+  return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
+}
+
+interface SliceProjectLookup {
+  resolveProjectId: (slicePath: string) => string | null;
+  additionalSliceRoots: string[];
+  complete: boolean;
+}
+
+function resolveSliceProjectLookup(
+  c: { get: (key: string) => unknown },
+  indexer: SliceIndexer,
+): SliceProjectLookup {
+  let catalogPath: string | null = null;
+  let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
+  try {
+    const listed = listProjects(c as never);
+    catalogPath = listed.catalogPath;
+    projects = listed.projects.map((p) => ({
+      id: p.id,
+      root: safeRealpath(p.root),
+      missionsRoot: safeRealpath(p.missionsRoot),
+      error: p.error,
+    }));
+  } catch {
+    return { resolveProjectId: () => null, additionalSliceRoots: [], complete: false };
+  }
+  const additionalSliceRoots = projects.map((project) => project.missionsRoot);
+  const complete = projects.length > 0 && projects.every((project) => !project.error);
+  if (projects.length === 0) {
+    return { resolveProjectId: () => null, additionalSliceRoots, complete };
+  }
+  // A project-scoped indexer's explicitly configured roots keep their existing
+  // project identity, including compatible roots outside project.yaml. Extra
+  // catalog roots are resolved by containment so hidden sibling projects remain
+  // distinct candidates.
+  const explicitProjectId = typeof indexer.projectId === "string" && indexer.projectId.length > 0
+    ? indexer.projectId
+    : null;
+  const explicitRoots = explicitProjectId
+    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].map(safeRealpath)
+    : [];
+  // The resolver is request-local. Reuse inference only for the same canonical
+  // project/mission-root matches, keeping the two containment relations distinct.
+  const inferredByContainment = new Map<string, { id: string; root: string }>();
+  const resolveProjectId = (slicePath: string): string | null => {
+    const actualSlicePath = safeRealpath(slicePath);
+    if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
+    const matching = projects.flatMap((project) => {
+      const projectRootContains = isInsideDir(project.root, actualSlicePath);
+      const missionsRootContains = isInsideDir(project.missionsRoot, actualSlicePath);
+      return projectRootContains || missionsRootContains
+        ? [{ project, projectRootContains, missionsRootContains }]
+        : [];
+    });
+    if (matching.length === 0) return null;
+
+    let selected: (typeof projects)[number] | undefined;
+    if (matching.length === 1) {
+      selected = matching[0]?.project;
+    } else {
+      if (!catalogPath) return null;
+      const cacheKey = JSON.stringify(
+        matching
+          .map(({ project, projectRootContains, missionsRootContains }) => ({
+            id: project.id,
+            root: project.root,
+            missionsRoot: project.missionsRoot,
+            error: project.error ?? null,
+            projectRootContains,
+            missionsRootContains,
+          }))
+          .sort((a, b) => {
+            const left = JSON.stringify(a);
+            const right = JSON.stringify(b);
+            return left < right ? -1 : left > right ? 1 : 0;
+          }),
+      );
+      const cached = inferredByContainment.get(cacheKey);
+      if (cached) {
+        selected = matching.find(({ project }) => project.id === cached.id && project.root === cached.root)?.project;
+      } else {
+        try {
+          const inferred = inferCatalogProject(
+            catalogPath,
+            new ProjectReadError("project_required", "Slice queue counts require one containing project"),
+            { cwd: actualSlicePath },
+            [],
+          );
+          if (inferred.selectedBy !== "cwd") return null;
+          selected = matching.find(({ project }) => project.id === inferred.id && project.root === inferred.root)?.project;
+          if (!selected) return null;
+          inferredByContainment.set(cacheKey, { id: inferred.id, root: inferred.root });
+        } catch {
+          return null;
+        }
+      }
+    }
+    if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
+    return selected.id;
+  };
+  return { resolveProjectId, additionalSliceRoots, complete };
 }
 
 function compareByActivityDesc(a: SliceListEntry, b: SliceListEntry): number {

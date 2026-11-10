@@ -387,14 +387,28 @@ that selects by mission. A slice's `qitemIds` come first from rows tagged
 project-scoped indexer only rows tagged `project:<id>` count, so untagged
 historical rows are not attributed to a selected project.
 
-> Source: `domain/slices/slice-indexer.ts:2–15` (contract + no new state),
-> `:238` (TTL), `:297–299` (`isReady`), `:331–336` (`invalidate`),
-> `:457–472` (`reconcileComposition`), `:476–521` (`readSliceLocations`;
-> first name wins `:478–483`; nested-vs-flat `:495–517`), `:61–88`
-> (`SliceRecord`: `missionId` `:65`, `slicePath` `:67`, `qitemIds` `:77`,
-> `proofPacket` `:81`), `:90–111` (`SliceListEntry`, which carries
-> `qitemCount` / `hasProofPacket` instead), `:865–875` and `:936–946` (queue
-> membership; project filter `:870`, `:942`); `domain/workspace/project-catalog.ts:132–138`
+The `GET /api/slices` response keeps that legacy `qitemCount` separate from
+`queueCounts`, eight current-state counts (or `null` when the listed
+mission/project scope cannot be resolved or catalog/candidate-root discovery is
+incomplete). `queueCounts` matches exact typed tags in one uncapped queue scan
+and is recomputed on every request; `?refresh` invalidates the separate listing
+cache, not a queue-count snapshot. A row may omit `project:` or `mission:` only
+when its remaining scope tokens identify exactly one physical slice with a
+resolved project and mission across the configured indexer roots and the
+catalog projects' missions roots. If catalog/project resolution or a candidate
+root cannot be read completely, counts stay `null` rather than treating unseen
+candidates as absent. Ambiguous matches count nowhere, including matches hidden
+by first-wins listing or a list filter. An explicit mismatched project or
+mission never counts. Physical candidates are used for counting only and do
+not change which slice is listed or served.
+
+> Source: `domain/slices/slice-indexer.ts` (read-only/no-new-state module
+> contract; `SliceRecord.qitemIds` / `SliceRecord.proofPacket`;
+> `DEFAULT_CACHE_TTL_MS`; `isReady()`; `invalidate()`;
+> `reconcileComposition()`; `readSliceLocations()`;
+> `observedQueueCounts()` physical-candidate matching and the shared queue
+> scan; `toListEntry()` / `matchQitems()` legacy membership);
+> `domain/workspace/project-catalog.ts:132–138`
 > (`belongsToProject`); startup `startup.ts:1705`, `:1718` (`OPENRIG_SLICES_ROOT`
 > first), `:1725–1730`, `:1743–1748`, proof-source watch `:1762–1765`
 > (`domain/proof/source-watch.ts:16`); default
@@ -433,7 +447,16 @@ handlers (`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/slices.ts`)
   `?boundToWorkflow=<name>:<version>` lens narrows to slices bound to a
   workflow instance (400 `boundToWorkflow_invalid` without the colon). Each
   slice row carries `readiness`, and a `missions` sidecar carries authored
-  mission status and readiness. Rows sort by last activity, newest first.
+  mission status and readiness. The list row also keeps legacy `qitemCount`
+  separate from `queueCounts`: the latter has one count for each supported
+  queue state, or `null` when the row's project/mission scope is unresolved.
+  It counts rows whose exact typed tags match one physical slice with a
+  resolved project and mission across all configured roots. A missing
+  `project:` or `mission:` is accepted only when the remaining tags select
+  exactly one such candidate; ambiguous candidates count nowhere, even if
+  first-wins discovery or the status filter exposes only one
+  listed row. Explicit mismatched qualifiers never count. Counting does not
+  change list or filter behavior. Rows sort by last activity, newest first.
 - `POST /refresh` — drops the indexer caches, no daemon restart.
 - `GET /:name/proof-asset/*` — serves a proof asset from the slice's matched
   dogfood-evidence directory; rejects `..` (400); `Cache-Control: public,
