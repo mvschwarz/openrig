@@ -1,9 +1,10 @@
-// A host pairing hands over this daemon's bearer token only on an explicit Approve: the person's choice on the
-// request's question, or an agent seat's close that names it. A typed reply, "no", "yes" or anything else, is kept
-// as the person's words and never approves.
+// A host pairing hands over this daemon's bearer token only on an explicit decision. Where the kernel operator runs, the
+// person's answer, a click or their words, goes to it and it decides (`rig host approve|deny`); where none runs, the
+// person's Approve or Deny choice decides, or an agent seat's close that names Approve. Typed words never deny, and
+// never approve by themselves.
 // Test-only: real hosts routes, Mission Control HTTP route and write contract (Steering's and the TUI's answer path),
 // the real Slack inbound router (a button and a thread reply) and migrated SQLite. No Slack network, no real token.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -24,7 +25,7 @@ import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsys
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
 
 const BEARER = "synthetic-pairing-bearer-fixture";
-const PERSON = "pair-person@external", AGENT = "dev-agent@fixture-rig";
+const PERSON = "pair-person@external", AGENT = "dev-agent@fixture-rig", OPERATOR = "operator-agent@kernel";
 const registry = { ok: true as const, entities: [{ entityId: "pair-person", class: "human" as const, displayName: "Pairing person", address: PERSON,
   connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "unused", role: "primary" as const, handle: "UPAIR" }], prefs: { deliveryClass: "A" as const } }] };
 
@@ -32,10 +33,16 @@ const closes: Array<() => void> = [];
 afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 
 /** The production destination check. `kernel: false` is a daemon started without a kernel rig (--no-kernel), where no
- *  row can be addressed to `…@kernel`; the agent's rig is registered either way. */
-async function fixture({ kernel = true }: { kernel?: boolean } = {}) {
+ *  row can be addressed to `…@kernel`; the agent's rig is registered either way. `operator` is the kernel operator's
+ *  session state when the request is made (none: no session row). */
+async function fixture({ kernel = true, operator }: { kernel?: boolean; operator?: "running" | "exited" } = {}) {
   const home = mkdtempSync(join(tmpdir(), "pair-explicit-"));
   const db = new Database(join(home, "queue.sqlite")); migrate(db, ALL_MIGRATIONS); const bus = new EventBus(db);
+  if (operator) {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-kernel", "kernel");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run("node-operator", "rig-kernel", "operator.agent");
+    db.prepare("INSERT INTO sessions (node_id, session_name, status) VALUES (?, ?, ?)").run("node-operator", OPERATOR, operator);
+  }
   const rigs = kernel ? ["kernel", "fixture-rig"] : ["fixture-rig"];
   const validateRig = makeTopologyDestinationCheck({ findRigsByName: (name) => rigs.filter((rig) => rig === name),
     loadHumanRegistry: () => registry, sharedChannels: () => [] });
@@ -53,7 +60,8 @@ async function fixture({ kernel = true }: { kernel?: boolean } = {}) {
   const ask = issued.approvalQitemId;
   const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: "host-pair@kernel", seen: new SeenStore(join(home, "seen.jsonl")),
     deadLetter: new DeadLetterStore(join(home, "dead.jsonl")), resolveSender: () => ({ admitted: true, source: PERSON }),
-    resolveRoute: () => ({ destination: "host-pair@kernel", correlationQitemId: ask }),
+    // The thread map's seat for a posted ask is the ask's source (slack-subsystem's threadMap.open).
+    resolveRoute: () => ({ destination: repo.getById(ask)!.sourceSession, correlationQitemId: ask }),
     acknowledgeAnswer: async () => {}, recordHumanAnswer: input => repo.recordHumanAnswer(input),
     resolveHumanReply: makeHumanReplyResolver(repo, contract) });
 
@@ -65,47 +73,83 @@ async function fixture({ kernel = true }: { kernel?: boolean } = {}) {
   };
   /** Steering's question card and the TUI's acts both post Mission Control's answer verb. The TUI's carry the primary
    *  user's authority and no seat header (attention-model.ts answerRequest); the route honours it only then. */
-  const answer = async (input: Record<string, unknown>) => {
+  const answer = async (input: Record<string, unknown>, qitemId = ask) => {
     const tui = input.authority === "primary-user";
     const res = await app.request("/api/mission-control/action", { method: "POST",
       headers: { "Content-Type": "application/json", ...(tui ? {} : { "X-OpenRig-Session": PERSON }) },
-      body: JSON.stringify({ verb: "answer", qitemId: ask, actorSession: PERSON, ...input }) });
+      body: JSON.stringify({ verb: "answer", qitemId, actorSession: PERSON, ...input }) });
     return { status: res.status, body: await res.json() as Record<string, unknown> };
   };
+  /** `rig host approve|deny <request>`: from a seat (its header), or from a plain terminal (no seat). */
+  const decide = async (request: string, decision: string, seat?: string) => {
+    const res = await app.request("/api/hosts/pair-decision", { method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${BEARER}`, ...(seat ? { "X-OpenRig-Session": seat } : {}) },
+      body: JSON.stringify({ request, decision }) });
+    return { status: res.status, body: await res.json() as Record<string, unknown> };
+  };
+  /** Rows to the person other than the request: a re-ask, or the result's update. */
+  const toPerson = () => repo.list({ limit: 1000 }).filter((item) => item.destinationSession === PERSON && item.qitemId !== ask);
   const slackButton = (optionId: string) => router.routeAction({ type: "block_actions", user: { id: "UPAIR" }, channel: { id: "CPAIR" },
     container: { type: "message", message_ts: "1.1", channel_id: "CPAIR" }, message: { ts: "1.1" },
     actions: [{ type: "button", block_id: "or-q:pair", action_id: `or-opt:${optionId}`, value: optionId, action_ts: "2.2" }] });
   const slackThreadReply = (text: string) => router.route({ type: "message", user: "UPAIR", channel: "CPAIR", thread_ts: "1.1", ts: "3.3", text });
   /** Rows created in reply to the request: an answer to it is kept on the request itself, so there are none. */
   const replyRows = () => repo.list({ limit: 1000 }).filter((item) => item.replyTo === ask || item.destinationSession === "host-pair@kernel");
-  return { repo, contract, ask, issued, poll, answer, slackButton, slackThreadReply, replyRows };
+  return { repo, contract, ask, issued, poll, answer, decide, toPerson, slackButton, slackThreadReply, replyRows };
 }
 
-describe("host pairing: only an explicit Approve hands over the token (r9)", () => {
-  it("the request carries one question, Approve or Deny, and the person is told a typed reply doesn't approve", async () => {
+describe("host pairing with no kernel operator running: Approve and Deny decide, typed words are asked again", () => {
+  it("the request carries one question, Approve or Deny, and tells the person typed words are kept and asked again", async () => {
     const f = await fixture();
     const item = f.repo.getById(f.ask)!;
+    expect(item.sourceSession).toBe("host-pair@kernel");
     expect(item.humanQuestions).toEqual([{ id: "pair", question: `Pair requester@far-host (code ${f.issued.code}) with this host?`, options: [
       { id: "approve", label: "Approve: hand this host's bearer token to the requester" }, { id: "deny", label: "Deny" }] }]);
-    expect(item.body).toContain(`A typed reply, even "yes", is kept as your words and doesn't approve`);
+    expect(item.body).toContain("typed words are kept but don't decide it, and you're asked again");
+    expect(item.body).toContain(`rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}`);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
   });
 
   // Steering's and the TUI's "reply <text>": the person's words close the request and are kept under its question.
-  it.each(["no", "yes", "who is this?"])("a typed reply %j (Steering or the TUI) closes the request denied, no token, words kept", async (words) => {
+  // Nothing on this host reads them, so they never deny: the person is asked again, and their choice there decides.
+  it.each(["no", "yes", "who is this?"])("a typed reply %j (Steering or the TUI) never denies: words kept, the person is asked again, and Approve there pairs", async (words) => {
     const f = await fixture();
     expect((await f.answer({ decision: words })).status).toBe(200);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
-    expect((await f.poll()).http).toBe(404);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on",
       humanAnswers: { pair: { kind: "typed-reply", text: words } } });
+    const [again, ...more] = f.toPerson();
+    expect(more).toEqual([]);
+    expect(again).toMatchObject({ state: "pending", sourceSession: "host-pair@kernel", humanQuestions: f.repo.getById(f.ask)!.humanQuestions });
+    expect(again!.body).toContain(`You wrote "${words}" in reply to this request. Your words are kept, and they didn't deny anything`);
+    // Polling again asks nothing more.
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toHaveLength(1);
+    expect((await f.answer({ questionId: "pair", optionId: "approve" }, again!.qitemId)).status).toBe(200);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    expect((await f.poll()).http).toBe(404);
   });
 
-  it.each(["yes", "no"])("a typed Slack thread reply %j closes the request denied, no token, words kept", async (words) => {
+  it.each(["yes", "no"])("a typed Slack thread reply %j never denies: words kept, the person is asked again", async (words) => {
     const f = await fixture();
     await f.slackThreadReply(words);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: words } } });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ state: "pending", sourceSession: "host-pair@kernel" })]);
+  });
+
+  it("a plain terminal on this host decides with rig host approve, recorded as a direct human action, and the person is told", async () => {
+    const f = await fixture();
+    await f.answer({ decision: "yes please" });
+    await f.poll();
+    const again = f.toPerson()[0]!;
+    expect(await f.decide(f.issued.code, "approve")).toEqual({ status: 200,
+      body: { ok: true, decision: "approve", code: f.issued.code, requester: "requester@far-host", by: "human@host" } });
+    // The open re-ask is closed with the result, and one update tells the person.
+    expect(f.repo.getById(again.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "pairing approved by human@host" });
+    expect(f.toPerson().filter((item) => item.humanIntent === "update")).toEqual([expect.objectContaining({
+      body: `Pairing request ${f.issued.code} from requester@far-host: approved by human@host. This host's token is handed over when the requesting machine next checks, if it's still waiting.` })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
   });
 
   it.each([
@@ -174,7 +218,7 @@ describe("host pairing: only an explicit Approve hands over the token (r9)", () 
     }
   });
 
-  it.each([true, false])("kernel rig registered: %s. A typed reply (Steering, Slack) closes the request in place, words kept, denied", async (kernel) => {
+  it.each([true, false])("kernel rig registered: %s. A typed reply (Steering, Slack) closes the request in place, words kept, never denied", async (kernel) => {
     for (const act of [
       (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "yes" }),
       (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("yes"),
@@ -186,8 +230,15 @@ describe("host pairing: only an explicit Approve hands over the token (r9)", () 
       expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: "yes" } } });
       expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(PERSON);
       expect(f.replyRows()).toEqual([]);
-      expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     }
+  });
+
+  it("a kernel operator whose session isn't running doesn't own the request: it's asked as agent-free", async () => {
+    const f = await fixture({ operator: "exited" });
+    expect(f.repo.getById(f.ask)).toMatchObject({ sourceSession: "host-pair@kernel" });
+    await f.slackButton("approve");
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
   });
 
   it("an agent seat approves only by naming the choice: rig queue update --state done --closure-reason no-follow-on --resolution approve", async () => {
@@ -229,5 +280,83 @@ describe("host pairing: only an explicit Approve hands over the token (r9)", () 
     deniedAfter.repo.recordHumanAnswer({ qitemId: deniedAfter.ask, actorSession: PERSON, questionId: "pair", optionId: "approve" });
     await deniedAfter.contract.act({ verb: "deny", qitemId: deniedAfter.ask, actorSession: PERSON });
     expect(await deniedAfter.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  });
+});
+
+describe("host pairing with the kernel operator running: the person's answer goes to it, and it decides", () => {
+  it("the operator asks, and the request tells it to act on a clear answer with rig host approve|deny", async () => {
+    const f = await fixture({ operator: "running" });
+    const item = f.repo.getById(f.ask)!;
+    expect(item).toMatchObject({ sourceSession: OPERATOR, destinationSession: PERSON, tier: "human-gate" });
+    expect(item.body).toContain(`Answer with Approve or Deny, or in your own words. ${OPERATOR} reads your answer and acts on it`);
+    expect(item.body).toContain(`For ${OPERATOR}: when the person's answer to this request comes back, act on it. A clear yes or an Approve click: rig host approve ${f.issued.code}. A clear no or a Deny click: rig host deny ${f.issued.code}.`);
+  });
+
+  it.each(["yes", "no", "yes, but which machine?"])("a typed %j (Steering) reaches the operator as a reply with the person's words, and decides nothing by itself", async (words) => {
+    const f = await fixture({ operator: "running" });
+    expect((await f.answer({ decision: words })).status).toBe(200);
+    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on", humanAnswers: { pair: { kind: "typed-reply", text: words } } });
+    const replies = f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask);
+    expect(replies).toEqual([expect.objectContaining({ sourceSession: PERSON, destinationSession: OPERATOR, state: "pending" })]);
+    expect(replies[0]!.body).toContain(words);
+    expect(replies[0]!.body).toContain(`In reply to: ${f.ask}`);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    // Nobody is asked again: the operator reads the words.
+    expect(f.toPerson()).toEqual([]);
+  });
+
+  it("a typed Slack thread reply reaches the operator too, and decides nothing by itself", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.slackThreadReply("go ahead");
+    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: "go ahead" } } });
+    expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+  });
+
+  it.each(["approve", "deny"])("a %s click reaches the operator as context: no token until it decides", async (optionId) => {
+    const f = await fixture({ operator: "running" });
+    expect((await f.answer({ questionId: "pair", optionId })).status).toBe(200);
+    expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+  });
+
+  it("the operator approves by code: the token is handed over once, and the person is told who approved", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.answer({ decision: "yes" });
+    expect(await f.decide(f.issued.code, "approve", OPERATOR)).toMatchObject({ status: 200, body: { ok: true, decision: "approve", by: OPERATOR } });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    expect((await f.poll()).http).toBe(404);
+    expect(f.toPerson()).toEqual([expect.objectContaining({ sourceSession: OPERATOR, humanIntent: "update",
+      summary: `Pairing ${f.issued.code} from requester@far-host: approved` })]);
+  });
+
+  it("the operator denies by the request's row: nothing is handed over", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.answer({ decision: "no thanks" });
+    expect(await f.decide(f.ask, "deny", OPERATOR)).toMatchObject({ status: 200, body: { ok: true, decision: "deny", by: OPERATOR } });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+    expect(f.toPerson()[0]!.body).toBe(`Pairing request ${f.issued.code} from requester@far-host: denied by ${OPERATOR}. Nothing was handed over.`);
+  });
+
+  it("a decision is made once: a second one, an unknown request or a malformed call changes nothing", async () => {
+    const f = await fixture({ operator: "running" });
+    expect((await f.decide(f.issued.code, "deny", OPERATOR)).status).toBe(200);
+    expect(await f.decide(f.issued.code, "approve", AGENT)).toMatchObject({ status: 409, body: { error: "pair_request_decided", decision: "deny", by: OPERATOR } });
+    expect(await f.decide("000000", "approve", OPERATOR)).toMatchObject({ status: 404, body: { error: "pair_request_unknown" } });
+    expect(await f.decide(f.issued.code, "yes", OPERATOR)).toMatchObject({ status: 400, body: { error: "pair_decision_invalid" } });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  });
+
+  it("after expiry a decision is refused, the request reads expired, and an answer nobody picked up is named as unread", async () => {
+    const f = await fixture({ operator: "running" });
+    await f.answer({ decision: "yes" });
+    const later = Date.now() + 11 * 60_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(later);
+    try {
+      expect(await f.decide(f.issued.code, "approve", OPERATOR)).toMatchObject({ status: 409, body: { error: "pair_request_expired" } });
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "expired" }, leaksToken: false });
+    } finally { now.mockRestore(); }
+    expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update",
+      body: `Pairing request ${f.issued.code} from requester@far-host: expired before it was decided: ${OPERATOR} never picked up your answer, so nobody read it. Nothing was handed over; the requester can run rig host pair again.` })]);
   });
 });

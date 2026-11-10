@@ -354,6 +354,8 @@ the sections that were not read are `null`.
 | `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
 | `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
+| `rig host approve <request>` | — | `--json` |
+| `rig host deny <request>` | — | `--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
@@ -362,19 +364,30 @@ even when it is bound to a tailnet address and so starts without one: pairing ha
 over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
 `pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
 registered person can approve (none, or several with no default; name one with
-`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+`--human`) (`packages/daemon/src/routes/hosts.ts:324-343`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
 approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
-On a 0.7.11 or later target, its person approves the request by answering its question with Approve: in the TUI
-(`rig tui`, then `attention`: open it), on Steering, or with Slack's Approve button. From an agent seat on the target,
-`rig queue update <id> --state done --closure-reason no-follow-on --resolution approve` approves. `rig queue update` acts
-as a managed seat, so it refuses in a plain terminal. To refuse a pairing, answer Deny, let it expire (nothing is
-persisted), or `rig queue update <id> --state denied` from an agent seat. A typed reply, even "yes", is kept as the
-person's words and doesn't approve: it closes the request, and the requester is told it was denied. An agent seat's
-close without `--resolution approve` denies too.
+On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
+Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
+- **When the target's kernel operator (`operator-agent@kernel`) is running as the request is made,** it asks. The
+  person's answer, a click or their words, comes back to it as a reply, and it decides with `rig host approve <code>` or
+  `rig host deny <code>`. It asks the person back when the answer isn't clear. The request stays pending until it decides
+  or the request expires. If it never picks up the answer, the person is told at expiry that nobody read it.
+- **When no kernel operator is running,** Approve and Deny decide at once. Typed words are kept on the request, and the
+  person is asked again with a new request.
+
+On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
+approval row id), run on the target from an agent seat or a plain terminal, decides it. It decides once, and refuses an
+unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or already-decided (409
+`pair_request_decided`) request. It records who decided: the seat, or `human@host` from a plain terminal. The person
+gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
+--resolution approve` on an unanswered request still approves, and any other close without an answer, or
+`--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator running, run
+`rig host deny`, or let it expire (nothing is persisted). The decisions live in the daemon's memory, as the requests
+do, so a daemon restart drops an open request.
 
 A 0.7.10 or earlier target asks no question. Its person approves with the request's Approve, in the TUI (`rig tui`,
 then `attention`: open it; the TUI from 0.7.1) or on Steering, and from an agent seat `rig queue update <id> --state done

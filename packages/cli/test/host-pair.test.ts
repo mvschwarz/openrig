@@ -81,9 +81,9 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
       expect(JSON.parse(out.join("\n"))).toMatchObject({ ok: true, entry: { id: "vps-a", transport: "http" } });
     } else {
       expect(out.join("\n")).toContain("Pairing code: 424242");
-      // The person on the target answers the request with Approve (TUI, Steering, Slack); an agent seat names the choice.
-      expect(out.join("\n")).toContain("On the target, its person approves it by answering the pairing request with Approve: in the TUI (rig tui, then attention), on Steering, or with Slack's Approve button. On a 0.7.11 or later target a typed reply doesn't approve; on an older target any typed reply approves.");
-      expect(out.join("\n")).toContain("From an agent seat on the target instead: rig queue update qitem-1 --state done --closure-reason no-follow-on --resolution approve");
+      // The person on the target answers however they like (TUI, Steering, Slack); its kernel operator, or a terminal, decides.
+      expect(out.join("\n")).toContain("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a running kernel operator, the operator reads the answer and decides; without one, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
+      expect(out.join("\n")).toContain("On a 0.7.11 or later target, anyone at its terminal can also decide: rig host approve 424242 (or rig host deny 424242).");
       expect(out.join("\n")).not.toContain("On the target: rig queue update");
       expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");
       expect(out.join("\n")).toContain("rig host doctor vps-a");

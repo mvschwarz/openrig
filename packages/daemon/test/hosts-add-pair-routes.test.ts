@@ -471,12 +471,11 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
-    // D#52 and r9: the person approves by answering the question with Approve (the TUI, Steering, Slack); a typed reply
-    // doesn't approve; an agent seat names the choice with --resolution approve.
-    expect(item.body).toContain("APPROVE, as the person: answer this request's question with Approve, in the TUI (rig tui, then attention: open this request), on Steering, or with Slack's Approve button.");
-    expect(item.body).toContain(`A typed reply, even "yes", is kept as your words and doesn't approve`);
-    expect(item.body).toContain("APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on --resolution approve");
-    expect(item.body).toContain("DENY: answer Deny, or let it expire (nothing is persisted)");
+    // No kernel operator runs here, so the request is agent-free: Approve and Deny decide, typed words are kept and the
+    // person is asked again, and a terminal on this host can decide with rig host approve|deny.
+    expect(item.sourceSession).toBe("host-pair@kernel");
+    expect(item.body).toContain("Answer with Approve or Deny. No agent is running on this host to read typed answers (operator-agent@kernel isn't), so typed words are kept but don't decide it, and you're asked again.");
+    expect(item.body).toContain(`To decide in a terminal on this host: rig host approve ${code}, or rig host deny ${code}.`);
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
