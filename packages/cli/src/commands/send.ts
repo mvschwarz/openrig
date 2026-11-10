@@ -61,6 +61,8 @@ export interface EnvelopeMeta {
   /** Twin of pane-envelope's field: the row a person's (@external) message delivers, named in the
    *  reply hint with --reply-to so the answer joins its Slack thread. ABSENT ⇒ the plain hint. */
   replyToQitem?: string;
+  /** Twin of pane-envelope's field (#2895 (a)): false ⇒ the reply line names no `rig send`. ABSENT or true ⇒ today's hint. */
+  senderReachable?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -108,7 +110,9 @@ export function wrapSendBody(
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
-      : `↩ Reply: rig send ${senderLabel} "..."`;
+      : meta?.senderReachable === false
+        ? `↩ No reply by rig send: ${senderLabel} has no session.`
+        : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
 

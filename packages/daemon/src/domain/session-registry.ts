@@ -202,6 +202,21 @@ export class SessionRegistry {
     return resolveCurrentSessionAddress(this.db, address);
   }
 
+  /** #2895 (a): whether `rig send <sender>` can find this sender, by the transport's own resolution (a current
+   *  address, or a session row on a node of a rig). A three-part `member@rig@host` label is a cross-host origin that
+   *  `rig send` forwards, so it counts. A stopped seat still has its rows, so it counts too. Any lookup error ⇒ true,
+   *  which keeps today's reply line. */
+  senderIsSendable(sender: string): boolean {
+    if (sender.split("@").length === 3) return true;
+    try {
+      if (this.resolveAddress(sender)) return true;
+      return this.db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE s.session_name = ? LIMIT 1`).get(sender) !== undefined;
+    } catch {
+      return true;
+    }
+  }
+
   /** Current queue equivalence, not a rewrite of recorded identity. A raw name
    * reused by another node has ambiguous history: do not newly attribute its
    * old rows through the logical spelling. Exact raw access stays unchanged. */

@@ -51,6 +51,14 @@ describe("SessionRegistry", () => {
     expect(session.createdAt).toBeDefined();
   });
 
+  it("#2895 (a): senderIsSendable follows rig send's own resolution", () => {
+    registry.registerSession("node-1", "r01-dev1-impl");
+    expect(registry.senderIsSendable("r01-dev1-impl")).toBe(true);
+    expect(registry.senderIsSendable("planner@global")).toBe(false);
+    // A three-part origin is a cross-host sender; rig send forwards it, so it stays sendable.
+    expect(registry.senderIsSendable("dev@rig@other-host")).toBe(true);
+  });
+
   it("registerSession with invalid nodeId throws", () => {
     expect(() =>
       registry.registerSession("nonexistent", "r01-dev1-impl")
