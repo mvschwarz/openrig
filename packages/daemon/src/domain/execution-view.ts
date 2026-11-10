@@ -18,6 +18,8 @@ import { isTypedGateBlocker } from "./queue-repository.js";
 //   "INDETERMINATE" (with a named basis), never idle/dead/done/false.
 // - THE LADDER IS THE SCHEMA: done-ness is five named rungs
 //   (locked/built/reviewed/folded/adopted); a single "done" boolean does not exist.
+//   What a team recorded about a slice (its `status:` word, a `merged:<pr>` report)
+//   is shown beside the rungs as labelled testimony and never sets one.
 // - PROJECTION, NOT AUTHORITY: every cell carries the row/artifact/command that
 //   makes it one command from source.
 //
@@ -38,7 +40,7 @@ import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { parseFrontmatter } from "./slices/slice-indexer.js";
+import { parseFrontmatter, sliceStatusBucket } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
 
@@ -986,7 +988,13 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const fm = facts.frontmatter;
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
       ? { value: true, basis: `frontmatter approved-spec-at=${fm["approved-spec-at"]}` }
-      : { value: false, basis: "no approved-spec-at in frontmatter" };
+      : { value: false, basis: "no approved-spec-at in frontmatter; plan lock is a Part B step (rig scope slice approve --scope spec), so the default flow reads false here whatever the recorded status" };
+    // The team's own word for the slice, as `GET /api/slices` buckets it. Testimony: it never sets a rung or next-up.
+    const rawStatus = fm["status"];
+    const statusWord = typeof rawStatus === "string" && rawStatus.trim() ? rawStatus.trim() : null;
+    const recorded_status = statusWord
+      ? { word: statusWord, bucket: sliceStatusBucket(statusWord), basis: "slice frontmatter status:, recorded by the team, not verified; it never sets a rung" }
+      : { word: null, bucket: null, basis: "no status: in slice frontmatter" };
     // built: latest candidate:<sha> tag on a row bound to this slice.
     const candRows = rows
       .filter((r) => sliceOfRow(r) === facts.id || sliceOfRow(r) === facts.dir)
@@ -1110,7 +1118,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         : buildInfo.commit
           ? await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
           : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
-    return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
+    return { slice_id: facts.id, dir: facts.dir, recorded_status, locked, built, reviewed, folded, adopted };
   };
 
   const ladderCache = new Map<string, Record<string, unknown>>();
@@ -1124,6 +1132,20 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // so mutable refs (HEAD/main) are observed again on the next request.
   const q4: Record<string, unknown>[] = [];
   for (const s of slices) q4.push(await ladderFor(s));
+  // #2761: say once what the mission records for the ladder, so missing records never read as missing work.
+  const withCandidate = q4.filter((l) => (l["built"] as { candidate_sha?: unknown }).candidate_sha !== INDETERMINATE).length;
+  const withMergeReport = q4.filter((l) => !!(l["folded"] as { merge_report?: unknown }).merge_report).length;
+  const q4Records = {
+    slices: q4.length,
+    with_candidate: withCandidate,
+    with_merge_report: withMergeReport,
+    repo_context: repoCtx ?? INDETERMINATE,
+    basis: q4.length === 0
+      ? "no slices in this mission"
+      : withCandidate === 0
+        ? "no slice in this mission has a candidate:<sha> row, so built, reviewed and merged read INDETERMINATE: not recorded, which is not the same as not done. The default flow (sdlc-conventions.md Part A) doesn't record them; each slice's recorded_status is the team's own word"
+        : `${withCandidate} of ${q4.length} slices have a candidate:<sha> row; ${repoCtx ? `merged is tested in repo context ${repoCtx}` : "no row carries worktree_path= (EC-3), so merged can't be tested"}`,
+  };
 
   // ---- Q2 sequencing ----
   const q2 = [];
@@ -1382,6 +1404,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     q2_sequencing: q2,
     q3_care: q3,
     q4_ladder: q4,
+    q4_records: q4Records,
     q5_park: q5,
     q6_parallelism: q6,
   };
