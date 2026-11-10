@@ -1,0 +1,155 @@
+{
+  "source": "Claude Code 2.1.319 (linux-x64), real capture of 2026-11-10: a git repo with a tracked seat-level .claude/settings.json carrying permissions.allow, a symlink to the repo and a linked git worktree; fake HOME and CLAUDE_CONFIG_DIR, no credentials. Paths are relative to the lab directory.",
+  "layout": {
+    "repo": "repo",
+    "seat": "repo/cadeiras/rig/seat",
+    "symlink": {
+      "link": "repo"
+    },
+    "worktree": {
+      "wt": "git worktree add of repo"
+    }
+  },
+  "cases": {
+    "subdir:a": {
+      "cwd": "repo/cadeiras/rig/seat",
+      "seeded": [
+        "repo/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": true,
+      "projectsAfter": [
+        "repo/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:06Z"
+    },
+    "subdir:b": {
+      "cwd": "repo/cadeiras/rig/seat",
+      "seeded": [
+        "repo",
+        "repo/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": false,
+      "projectsAfter": [
+        "repo",
+        "repo/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:09Z"
+    },
+    "subdir:c": {
+      "cwd": "repo/cadeiras/rig/seat",
+      "seeded": [
+        "repo"
+      ],
+      "gatedGrantsScreen": false,
+      "projectsAfter": [
+        "repo"
+      ],
+      "capturedAt": "2026-11-10T07:07:11Z"
+    },
+    "subdir:d": {
+      "cwd": "repo/cadeiras/rig/seat",
+      "seeded": [],
+      "gatedGrantsScreen": true,
+      "projectsAfter": [],
+      "capturedAt": "2026-11-10T07:07:13Z"
+    },
+    "root:a": {
+      "cwd": "repo",
+      "seeded": [
+        "repo"
+      ],
+      "gatedGrantsScreen": false,
+      "projectsAfter": [
+        "repo"
+      ],
+      "capturedAt": "2026-11-10T07:07:15Z"
+    },
+    "link-subdir:a": {
+      "cwd": "link/cadeiras/rig/seat",
+      "seeded": [
+        "link/cadeiras/rig/seat",
+        "repo",
+        "repo/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": false,
+      "projectsAfter": [
+        "link/cadeiras/rig/seat",
+        "repo",
+        "repo/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:18Z"
+    },
+    "link-subdir:b": {
+      "cwd": "link/cadeiras/rig/seat",
+      "seeded": [
+        "link",
+        "link/cadeiras/rig/seat",
+        "repo/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": true,
+      "projectsAfter": [
+        "link",
+        "link/cadeiras/rig/seat",
+        "repo/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:20Z"
+    },
+    "wt-subdir:a": {
+      "cwd": "wt/cadeiras/rig/seat",
+      "seeded": [
+        "wt",
+        "wt/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": true,
+      "projectsAfter": [
+        "wt",
+        "wt/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:22Z"
+    },
+    "wt-subdir:b": {
+      "cwd": "wt/cadeiras/rig/seat",
+      "seeded": [
+        "repo",
+        "wt/cadeiras/rig/seat"
+      ],
+      "gatedGrantsScreen": false,
+      "projectsAfter": [
+        "repo",
+        "wt/cadeiras/rig/seat"
+      ],
+      "capturedAt": "2026-11-10T07:07:24Z"
+    }
+  },
+  "strictTrustKey": {
+    "subdir": {
+      "key": "repo",
+      "passes": "subdir:b",
+      "stops": "subdir:a"
+    },
+    "link-subdir": {
+      "key": "repo",
+      "passes": "link-subdir:a",
+      "stops": "link-subdir:b"
+    },
+    "wt-subdir": {
+      "key": "repo",
+      "passes": "wt-subdir:b",
+      "stops": "wt-subdir:a"
+    }
+  },
+  "gatedGrantsScreen": [
+    " Accessing workspace:",
+    " <lab>/repo/cadeiras/rig/seat",
+    " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team).",
+    " If not, take a moment to review what's in this folder first.",
+    " Claude Code'll be able to read, edit, and execute files here.",
+    " ⚠ This folder pre-approves 2 tool permissions in .claude/settings.json:",
+    "   Bash(ls:*) and Bash(git status:*)",
+    " These will apply without asking. Only proceed if you trust this configuration.",
+    " Security guide",
+    " ❯ No, continue without these permissions",
+    "   Yes, I trust this folder",
+    " Enter to confirm · Esc to cancel"
+  ]
+}

@@ -27,6 +27,7 @@ import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
+import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -1150,6 +1151,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     } catch {
       // Best-effort only — non-existent test paths can still use the resolved input.
     }
+    // #2820: Claude Code's strict trust check (the "Quick safety check" for tracked permissions.allow) reads only the
+    // canonical git root of the cwd, so a seat below that root also needs the root trusted. Never an ancestor above it.
+    const gitRoot = claudeStrictTrustRoot(cwd);
+    if (gitRoot) keys.add(gitRoot);
     return Array.from(keys);
   }
 
