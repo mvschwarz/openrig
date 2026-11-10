@@ -75,6 +75,7 @@ describe("queue create scope advisories preserve admission and output", () => {
   let stdout: string[];
   let stderr: string[];
   let responseHeaders: Headers[];
+  let createResponses: Array<{ status: number; data: Record<string, unknown> }>;
   let savedHost: string | null;
   let savedExit: typeof process.exitCode;
 
@@ -132,6 +133,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     stdout = [];
     stderr = [];
     responseHeaders = [];
+    createResponses = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { stdout.push(args.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { stderr.push(args.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
@@ -152,7 +154,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
 
-  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract", clientFactory?: QueueDeps["clientFactory"], destination = "worker@scope"): Promise<void> {
+  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract", clientFactory?: QueueDeps["clientFactory"], destination = "worker@scope", jsonOnlyResponse = false): Promise<void> {
     stdout.length = 0;
     stderr.length = 0;
     const deps: QueueDeps = {
@@ -164,7 +166,9 @@ describe("queue create scope advisories preserve admission and output", () => {
             headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
             body: JSON.stringify(body) });
           responseHeaders.push(response.headers);
-          return { status: response.status, data: await response.json(), headers: response.headers };
+          const data = await response.json() as Record<string, unknown>;
+          createResponses.push({ status: response.status, data });
+          return { status: response.status, data, ...(jsonOnlyResponse ? {} : { headers: response.headers }) };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>),
     };
@@ -186,6 +190,95 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   const scopeLines = () => stderr.join("\n").split("\n")
     .filter(line => /\bscope\b|mission:|slice:/i.test(line)).join("\n");
+
+  function assertJsonCreate(f: Fixture, destination: string, tags: string[]): Record<string, unknown> {
+    expect(createResponses).toHaveLength(1);
+    expect(createResponses[0]!.status).toBe(201);
+    const data = createResponses[0]!.data;
+    const stored = f.daemon.deps.queueRepo.getById("qitem-create-contract");
+    expect(stored).toMatchObject({ destinationSession: destination, body: "scope contract body", tags });
+    expect(f.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = ?")
+      .get("qitem-create-contract")).toEqual({ n: 1 });
+    const { advisories: _advisories, ...primary } = data;
+    expect(primary).toEqual(JSON.parse(JSON.stringify(stored)));
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!)).toEqual(data);
+    expect(process.exitCode ?? 0).toBe(0);
+    return data;
+  }
+
+  it.each([
+    { mission: "MISSING.MISSION", code: "unresolved_scope", diagnostic: /unresolved|resolves to 0/i },
+    { mission: "DUP.MISSION", code: "ambiguous_scope", diagnostic: /ambiguous|resolves to 2/i },
+    { mission: "release", code: "scope_check_unavailable", diagnostic: /unavailable|could not.*check/i },
+  ])("carries $code in the real create JSON and renders it once without response headers", async row => {
+    if (row.code === "scope_check_unavailable") {
+      fs.writeFileSync(path.join(source.root, "workspace.yaml"), "projects: invalid\n");
+    }
+    const unchanged = preserveAuthored(source);
+    const tag = "mission:" + row.mission;
+    await create(source.app, ["--mission", row.mission, "--tags", "project:alpha"], true,
+      "qitem-create-contract", undefined, "worker@scope", true);
+    const data = assertJsonCreate(source, "worker@scope", [tag, "project:alpha"]);
+    unchanged();
+    expect.soft(data.advisories).toEqual([expect.objectContaining({ code: row.code,
+      message: expect.stringMatching(row.diagnostic) })]);
+    const advice = Array.isArray(data.advisories) ? data.advisories : [];
+    expect.soft(advice.map(item => item.message).join("\n")).toContain(tag);
+    expect.soft(responseHeaders[0]!.has("X-OpenRig-Scope-Advisory")).toBe(false);
+    const rendered = scopeLines().split("\n").filter(line => line.includes(tag) && row.diagnostic.test(line));
+    expect.soft(rendered).toHaveLength(1);
+  });
+
+  it("keeps the destination advisory before scope advice in the real JSON response", async () => {
+    const destination = "missing-worker@scope";
+    await create(source.app, ["--mission", "MISSING.MISSION", "--tags", "project:alpha"], true,
+      "qitem-create-contract", undefined, destination, true);
+    const data = assertJsonCreate(source, destination, ["mission:MISSING.MISSION", "project:alpha"]);
+    const advice = Array.isArray(data.advisories) ? data.advisories : [];
+    expect.soft(advice.map(item => item.code)).toEqual(["unmatched_destination_seat", "unresolved_scope"]);
+    expect.soft(advice[0]).toMatchObject({ destinationSession: destination,
+      availableDestinations: expect.arrayContaining(["worker@scope", "writer@scope"]) });
+    expect.soft(scopeLines().split("\n").filter(line => /mission:MISSING.MISSION.*unresolved|unresolved.*mission:MISSING.MISSION/i.test(line)))
+      .toHaveLength(1);
+  });
+
+  it("keeps long Unicode scope messages in JSON and stderr without a header-sized limit", async () => {
+    fs.writeFileSync(path.join(source.root, "workspace.yaml"), "projects: invalid\n");
+    const tags = ["project:alpha", ...Array.from({ length: 9 }, (_, i) =>
+      "mission:" + ("部署_" + i + "_").padEnd(150, "x") + "_末尾")];
+    await create(source.app, ["--tags", tags.join(",")], true,
+      "qitem-create-contract", undefined, "worker@scope", true);
+    const data = assertJsonCreate(source, "worker@scope", tags);
+    const advice = Array.isArray(data.advisories) ? data.advisories : [];
+    const messages = advice.map(item => item.message).join("\n");
+    expect.soft(advice).toEqual([expect.objectContaining({ code: "scope_check_unavailable", message: expect.any(String) })]);
+    expect.soft(messages.length).toBeGreaterThan(1024);
+    for (const tag of tags.slice(1)) {
+      expect.soft(messages).toContain(tag);
+      expect.soft(scopeLines()).toContain(tag);
+    }
+    expect.soft(scopeLines().split("\n").filter(line => /unavailable|could not.*check/i.test(line))).toHaveLength(1);
+    expect.soft(responseHeaders[0]!.has("X-OpenRig-Scope-Advisory")).toBe(false);
+  });
+
+  it("returns skipped scope advice for a forwarded create without sender scope reads", async () => {
+    const receiver = await fixture("json-receiver");
+    const { app, observation } = forwardingApp(receiver);
+    const senderReads = observeSenderScopeReads();
+    setSelfHostId(source.hostId);
+    await create(app, ["--host", "remote-fixture", "--mission", "MISSING.MISSION", "--tags", "project:alpha"], true,
+      "qitem-create-contract", undefined, "worker@scope", true);
+    const data = assertJsonCreate(receiver, "worker@scope", ["mission:MISSING.MISSION", "project:alpha", "cross-host", "from-host:" + os.hostname()]);
+    expect(observation.forwards).toBe(1);
+    expect(source.daemon.deps.queueRepo.getById("qitem-create-contract")).toBeNull();
+    expect(senderReads).toEqual([]);
+    const advice = Array.isArray(data.advisories) ? data.advisories : [];
+    expect.soft(advice).toEqual([expect.objectContaining({ code: expect.any(String), message: expect.stringMatching(/skipped.*cross-host|cross-host.*skipped/i) })]);
+    expect.soft(scopeLines()).toMatch(/skipped/i);
+    expect.soft(scopeLines()).not.toMatch(/unresolved|unavailable|resolves to 0/i);
+    expect.soft(responseHeaders[0]!.has("X-OpenRig-Scope-Advisory")).toBe(false);
+  });
 
   function preserveAuthored(f: Fixture): () => void {
     const read = fs.readFileSync.bind(fs);
