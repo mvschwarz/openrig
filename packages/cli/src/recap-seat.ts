@@ -28,7 +28,7 @@ export function resolveRecapSeat(opts: { rig?: string; seat?: string; sessionNam
   const where = "OpenRig reads a seat's recap from the folder named by the part of its session name before @.";
   if (!opts.seats || "unavailable" in opts.seats) {
     const why = opts.seats && "unavailable" in opts.seats ? ` (${opts.seats.unavailable})` : "";
-    return { rig, seat: given, notes: fresh ? [`seats/${given} didn't exist in rig ${rig}, so this write created it, and the name couldn't be checked against the rig's seats${why}. ${where}`] : [] };
+    return { rig, seat: given, notes: [`${fresh ? `seats/${given} didn't exist in rig ${rig}, so this write created it, and the` : `The recap went to the existing seats/${given} as given, but the`} name couldn't be checked against the rig's seats${why}. ${where}`] };
   }
   if (opts.seats.some((seat) => seat.folder === given)) return { rig, seat: given, notes: [] };
   const matches = opts.seats.filter((seat) => seat.logicalId === given || seat.member === given);

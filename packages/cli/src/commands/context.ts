@@ -821,7 +821,7 @@ Examples:
         const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
         const own = sessionName ? parseSessionName(sessionName) : undefined;
         const rigName = opts.rig ?? (own?.kind === "canonical" ? own.rig : undefined);
-        // A named seat is checked against the rig's recorded seats when the daemon answers; the write never waits on it.
+        // A named seat is checked against the rig's recorded seats when the daemon answers; a failed check doesn't stop the write.
         const seats = opts.seat !== undefined && rigName ? await rigSeats(rigName) : undefined;
         const target = resolveRecapSeat({ rig: opts.rig, seat: opts.seat, topologyRoot, sessionName, seats });
         if ("error" in target) { console.error(target.error); process.exitCode = 1; return; }

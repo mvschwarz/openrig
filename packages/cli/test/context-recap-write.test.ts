@@ -408,6 +408,10 @@ describe("rig context recap-write — the seat folder every reader uses", () => 
       expect(res.exitCode ?? 0).toBe(0);
       expect(existsSync(join(seats, "lead", "RECAP.md"))).toBe(true);
       expect(res.errLogs.join("\n")).toContain("the name couldn't be checked against the rig's seats");
+      // An existing folder, such as an old alias, is no proof of identity either, so the note is there too.
+      const existing = await runRecapWrite(["recap-write", "--seat", "lead", "--file", recap]);
+      expect(existing.exitCode ?? 0).toBe(0);
+      expect(existing.errLogs.join("\n")).toContain("The recap went to the existing seats/lead as given, but the name couldn't be checked against the rig's seats");
     });
   });
 
