@@ -544,7 +544,11 @@ function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSou
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   let remote = remoteHostOf(hostId);
-  if (remote && await daemonSelfHostId(client) === remote) remote = undefined;
+  const requestedRemote = remote;
+  const selfHostId = requestedRemote ? await daemonSelfHostId(client) : undefined;
+  if (remote && selfHostId === remote) remote = undefined;
+  const remoteConfirmed = requestedRemote !== undefined && typeof selfHostId === "string"
+    && selfHostId.trim().length > 0 && selfHostId !== requestedRemote;
   let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (remote) {
@@ -559,7 +563,7 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
-  return { reader, options };
+  return { reader, options, remote, remoteConfirmed };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -623,7 +627,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 
 /** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
  *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remoteConfirmed?: boolean }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   const target = await queueReadTarget(deps, client, hostId);
@@ -638,7 +642,8 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
+        remoteConfirmed: target.remoteConfirmed };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
@@ -1230,8 +1235,51 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           remoteHost: remoteHostOf(hostResolved.hostId) };
+        const emitScopeAdvisories = (created: Record<string, unknown>) => {
+          const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
+          for (const value of advisories) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            const advisory = value as { code?: unknown; message?: unknown };
+            if (typeof advisory.message !== "string") continue;
+            switch (advisory.code) {
+              case "scope_check_skipped":
+                console.error(`Note: ${advisory.message}`);
+                break;
+              case "unresolved_scope":
+              case "ambiguous_scope":
+              case "empty_scope":
+              case "conflicting_scope":
+              case "scope_check_unavailable":
+                console.error(`Warning: ${advisory.message}`);
+                break;
+            }
+          }
+        };
+        const emitRecoveredScopeAdvisory = (recoveredRemote: boolean) => {
+          const recoveredTags: string[] = [];
+          for (const raw of tags ?? []) {
+            if (recoveredTags.length >= 8) break;
+            if (!raw.startsWith("mission:") && !raw.startsWith("slice:")) continue;
+            const prefix = raw.startsWith("mission:") ? "mission:" : "slice:";
+            const body = raw.slice(prefix.length).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 120);
+            const sanitized = body ? `${prefix}${body}` : prefix;
+            if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
+          }
+          if (recoveredTags.length === 0) return;
+          // Only a confirmed different host ID justifies "forwarded";
+          // all other recovered outcomes remain neutral.
+          if (recoveredRemote) {
+            console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
+          } else {
+            console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
+          }
+        };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number) => {
+        const finish = async (created: Record<string, unknown>, status: number, recovered?: "neutral" | "remote") => {
+          if (status < 400) {
+            if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
+            else emitScopeAdvisories(created);
+          }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
@@ -1261,7 +1309,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200);
+              await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
               return;
             }
           }
@@ -1278,7 +1326,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200);
+            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
