@@ -721,10 +721,19 @@ function startedWithoutLine(files: string[]): string {
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    // The served question's reason, with the daemon's precedence: the arbitrated answer, the hook only without one.
-    ?? (n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null
-      : n.arbitratedNeedsInput == null && n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null)
-    ?? "reason unavailable";
+    ?? questionReason(n) ?? "reason unavailable";
+}
+
+/** Whether the daemon serves a live question for the seat, with its own precedence: the arbitrated needs-input answer,
+ *  and the hook only when there's none. A served "no" beats a stale hook. */
+export function servesQuestion(n: NodeEntry): boolean {
+  return n.arbitratedNeedsInput ?? (n.agentActivity?.state === "needs_input");
+}
+
+/** The served question's reason, with the daemon's precedence: the arbitrated answer, and the hook only without one. */
+export function questionReason(n: NodeEntry): string | null {
+  return n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null
+    : n.arbitratedNeedsInput == null && n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null;
 }
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
@@ -1381,8 +1390,12 @@ async function handleNodes(
   if (useCompact) {
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
+      // With the daemon's attention flag set, a live question shows its own reason rather than a recorded error. Without
+      // that flag (an older daemon), the order stays as it was, so a startup failure isn't hidden by a hook. The question's
+      // reason is shown whole, as the activity reason always was: it's what a person reads to know what to answer.
       const reason = missingSessionGuidance(n) ?? (n.needsAttention !== false || hasCurrentUsageLimit(n)
-        ? (n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
+        ? (n.needsAttention === true && servesQuestion(n) ? questionReason(n) ?? "reason unavailable"
+          : n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
           : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(

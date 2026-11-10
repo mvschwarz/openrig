@@ -401,6 +401,29 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     } finally { Object.assign(node, original); }
   });
 
+  it.each([
+    // A served question on a seat that also carries a recorded startup error: the question's reason.
+    { arbitrated: true, questionReason: "permission_prompt", expected: "permission_prompt" },
+    // A served question whose reason isn't served: never the recorded error.
+    { arbitrated: true, questionReason: null, expected: "reason unavailable" },
+    // A served "no" with a stale needs_input hook: no question, so the recorded error leads as before.
+    { arbitrated: false, questionReason: null, expected: "startup failure" },
+  ])("REASON names a live question's reason over a recorded error, with the daemon's precedence (arbitrated: $arbitrated)", async ({ arbitrated, questionReason, expected }) => {
+    const node = RIG_B_NODES[0]!;
+    const original = { ...node };
+    Object.assign(node, { needsAttention: true, arbitratedNeedsInput: arbitrated, startupStatus: "failed", latestError: "startup failure",
+      activityState: { activity: "needs_input", display: "needs input", needsInput: { count: arbitrated ? 1 : 0, reason: questionReason }, decidedBy: "hook" },
+      agentActivity: { ...node.agentActivity, state: "needs_input", reason: "approval_pending" } });
+    try {
+      const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
+      expect(text.logs.find((line) => line.includes(node.canonicalSessionName))).toMatch(new RegExp(`yes\\s+${expected}\\s*$`));
+    } finally {
+      // Restore the shared fixture exactly, including dropping keys it didn't have (activityState).
+      for (const key of Object.keys(node)) if (!(key in original)) Reflect.deleteProperty(node, key);
+      Object.assign(node, original);
+    }
+  });
+
   it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
     const node = RIG_B_NODES[0]!;
     const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError, needsAttention: node.needsAttention };
