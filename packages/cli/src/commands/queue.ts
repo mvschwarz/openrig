@@ -627,7 +627,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 
 /** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
  *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remote?: string; remoteConfirmed?: boolean }> {
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remoteConfirmed?: boolean }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   const target = await queueReadTarget(deps, client, hostId);
@@ -642,7 +642,7 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`, remote: target.remote,
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
         remoteConfirmed: target.remoteConfirmed };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
@@ -1301,8 +1301,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
           }
           if (recoveredTags.length === 0) return;
-          // Use the locality settled when readBackCreate selected its target and matched the stored row,
-          // so a later /healthz change cannot overturn a proven local or remote recovery.
+          // Only a confirmed different host ID justifies "forwarded";
+          // all other recovered outcomes remain neutral.
           if (recoveredRemote) {
             console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
           } else {
@@ -1310,7 +1310,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
         };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered?: "local" | "remote") => {
+        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered?: "neutral" | "remote") => {
           if (status < 400) {
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
             else emitScopeAdvisory(headers);
@@ -1344,7 +1344,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "local");
+              await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "neutral");
               return;
             }
           }
@@ -1361,7 +1361,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "local");
+            await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "neutral");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
