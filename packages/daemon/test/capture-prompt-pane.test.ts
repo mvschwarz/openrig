@@ -74,8 +74,8 @@ describe("rig capture says when a pane is too small to show the prompt the seat 
   });
 });
 
-// `rig capture --readable`: read a small seat at a readable size, then give its window back exactly: its size, and its
-// own window-size (resize-window sets that to manual, which would stop Herdr or attach sizing the window).
+// `rig capture --readable`: read at a readable size, put its size back, then unset the temporary local window-size
+// override so native clients size it under the inherited policy.
 describe("rig capture --readable reads a small seat, then gives its window back", () => {
   const dbs: Array<ReturnType<typeof createDb>> = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
@@ -146,16 +146,16 @@ describe("rig capture --readable reads a small seat, then gives its window back"
   it.each([
     ["inherited sizing is unset again", null],
     ["the window's own sizing is set again", "largest"],
-  ])("reads at 120x40, then puts back its size and its sizing: %s", async (_, own) => {
+  ])("reads at 120x40, then puts back its size and resumes inherited sizing: %s", async (_, own) => {
     const { tmux, calls, window } = fakeTmux({ own });
     const result = await (await transportOver(tmux)).capture("review@rig", { readable: { width: 120, height: 40 } });
     expect(result).toMatchObject({ ok: true, content: "the whole prompt\n", readable: { resized: true, width: 120, height: 40, release: "given-back" } });
     expect(calls).toEqual([
       `set @2 @openrig-window-size-prior=${own ?? "inherit"} H`,
       "resize @2 120x40", "capture", "resize @2 18x12",
-      `restore @2 window-size=${own}`, "restore @2 @openrig-window-size-prior=null",
+      "restore @2 window-size=null", "restore @2 @openrig-window-size-prior=null",
     ]);
-    expect(window).toEqual({ own, recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it("a web terminal that opens during the read keeps its pin: the read leaves the size to it and drops only itself", async () => {
@@ -183,7 +183,7 @@ describe("rig capture --readable reads a small seat, then gives its window back"
     await atPanes; // the read has the window's sizing, and hasn't recorded its pin yet
     const ok = async () => ({ ok: true as const });
     const broker = new TerminalSessionBroker("review@rig", { ...tmux, hasSession: async () => true, startPipePane: ok, stopPipePane: ok,
-      sendKeys: ok, sendText: ok, getPaneCursorPosition: async () => null } as never, { pollMs: 10, livenessMs: 60_000 });
+      sendKeys: ok, sendText: ok, getPaneCursorPosition: async () => null } as never, { fixedGeometry: true, pollMs: 10, livenessMs: 60_000 });
     const browser = { send: () => {}, close: () => {} };
     const attaching = broker.attach(browser);
     await new Promise((r) => setTimeout(r, 20));
@@ -244,7 +244,7 @@ describe("rig capture --readable reads a small seat, then gives its window back"
   ])("a pin whose holders are gone (a crash) is taken over and given back: %s", async (_, panes) => {
     const { tmux, window } = fakeTmux({ own: "manual", recorded: `largest ${deadPid}.1`, panes });
     const result = await (await transportOver(tmux)).capture("review@rig", { readable: { width: 120, height: 40 } });
-    expect(window).toEqual({ own: "largest", recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
     expect(result.readable).toEqual(panes[0]!.width < 120
       ? { resized: true, width: 120, height: 40, release: "given-back" }
       : { resized: false, reason: "the pane is already 130x45; a pin left on its window was given back" });
@@ -337,7 +337,7 @@ describe("rig capture --readable reads a small seat, then gives its window back"
 
       await tmux(["set-option", "-w", "-t", "=review@rig:", "window-size", "largest"]);
       expect((await transport.capture("review@rig", { readable: { width: 120, height: 40 } })).readable).toMatchObject({ resized: true });
-      expect(await own("=review@rig:")).toBe("largest");
+      expect(await own("=review@rig:")).toBe("");
 
       await tmux(["set-option", "-w", "-t", "=review@rig:", "window-size", "manual"]);
       expect((await transport.capture("review@rig", { readable: { width: 120, height: 40 } })).readable).toMatchObject({ resized: false });
@@ -353,7 +353,7 @@ describe("rig capture --readable reads a small seat, then gives its window back"
       class BrowserOpensDuringRead extends TmuxAdapter {
         override async capturePaneContent(target: string, lines: number) {
           if (!broker) {
-            broker = new TerminalSessionBroker("review@rig", adapter, { pollMs: 20, livenessMs: 60000, onEmpty: () => { empty = true; } });
+            broker = new TerminalSessionBroker("review@rig", adapter, { fixedGeometry: true, pollMs: 20, livenessMs: 60000, onEmpty: () => { empty = true; } });
             await broker.attach(browser);
           }
           return super.capturePaneContent(target, lines);
@@ -376,7 +376,7 @@ describe("rig capture --readable reads a small seat, then gives its window back"
       expect(await own("=review@rig:")).toBe("manual");
       expect((await transport.capture("review@rig", { readable: { width: 120, height: 40 } })).readable)
         .toEqual({ resized: false, reason: "the pane is already 120x40; a pin left on its window was given back" });
-      expect(await own("=review@rig:")).toBe("largest");
+      expect(await own("=review@rig:")).toBe("");
       expect(await tmux(["show-options", "-q", "-w", "-v", "-t", "=review@rig:", "@openrig-window-size-prior"])).toBe("");
     } finally {
       await tmux(["kill-server"]).catch(() => {});

@@ -44,13 +44,29 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
   /** One browser viewer comes and goes through the broker. */
   async function browserVisit(name: string, adapter = new TmuxAdapter(exec)): Promise<void> {
     let empty = false;
-    const broker = new TerminalSessionBroker(name, adapter, { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
+    const broker = new TerminalSessionBroker(name, adapter, { fixedGeometry: true, pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
     const browser = viewer();
     await broker.attach(browser);
     expect(await size(name)).toBe("90x27"); // the fixed geometry while a browser watches
     broker.detach(browser);
     await until(async () => empty);
   }
+
+  it("a default browser stays open while the native client resizes the agent PTY", async () => {
+    await nativeSession("default-web");
+    const client = clients.at(-1)!;
+    const broker = new TerminalSessionBroker("default-web", new TmuxAdapter(exec), { pollMs: 20 });
+    try {
+      await broker.attach(viewer());
+      expect(await ownSizing("default-web")).toBe("");
+      expect(await size("default-web")).toBe("150x45");
+      client.stdin!.write("refresh-client -C 52x28\n");
+      await until(async () => (await size("default-web")) === "52x28");
+      client.stdin!.write("refresh-client -C 132x40\n");
+      await until(async () => (await size("default-web")) === "132x40");
+      expect(await ownSizing("default-web")).toBe("");
+    } finally { await broker.dispose(); }
+  });
 
   it("a window that inherited its sizing inherits again, and the native client's size comes back", async () => {
     await nativeSession("inherits");
@@ -59,10 +75,24 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     await until(async () => (await size("inherits")) === "150x45");
   });
 
-  it("a window with its own sizing keeps that value", async () => {
+  it("an opt-in browser preserves a person's manual geometry with no OpenRig pin record", async () => {
+    await nativeSession("user-manual");
+    await tmux("resize-window", "-t", "=user-manual:", "-x", "113", "-y", "31");
+    const broker = new TerminalSessionBroker("user-manual", new TmuxAdapter(exec), { fixedGeometry: true, pollMs: 20 });
+    try {
+      await broker.attach(viewer());
+      expect(await size("user-manual")).toBe("113x31");
+      expect(await ownSizing("user-manual")).toBe("manual");
+      expect(await record("user-manual")).toBe("");
+    } finally { await broker.dispose(); }
+    expect(await size("user-manual")).toBe("113x31");
+    expect(await ownSizing("user-manual")).toBe("manual");
+  });
+
+  it("an opt-in pin releases to inherited sizing even after an old local override", async () => {
     await nativeSession("own", "largest");
     await browserVisit("own");
-    expect(await ownSizing("own")).toBe("largest");
+    expect(await ownSizing("own")).toBe("");
     await until(async () => (await size("own")) === "150x45");
   });
 
@@ -70,7 +100,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     await nativeSession("switch");
     const pinned = await tmux("display-message", "-p", "-t", "=switch:", "#{window_id}");
     let empty = false;
-    const broker = new TerminalSessionBroker("switch", new TmuxAdapter(exec), { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
+    const broker = new TerminalSessionBroker("switch", new TmuxAdapter(exec), { fixedGeometry: true, pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
     const browser = viewer();
     await broker.attach(browser);
     const other = await tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", "=switch:");
@@ -97,7 +127,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     expect(await ownSizing(name)).toBe("manual");
     expect(await size(name)).toBe("90x27");
     await browserVisit(name);
-    expect(await ownSizing(name)).toBe(own ?? "");
+    expect(await ownSizing(name)).toBe("");
     expect(await record(name)).toBe("");
     await until(async () => (await size(name)) === "150x45");
   });
@@ -110,7 +140,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     }
     let empty = false;
     const closed: number[] = [];
-    const broker = new TerminalSessionBroker("probe", new Unreachable(exec), { pollMs: 20, livenessMs: 50, onEmpty: () => { empty = true; } });
+    const broker = new TerminalSessionBroker("probe", new Unreachable(exec), { fixedGeometry: true, pollMs: 20, livenessMs: 50, onEmpty: () => { empty = true; } });
     await broker.attach({ send: () => {}, close: (code) => { closed.push(code); } });
     expect(await size("probe")).toBe("90x27");
     reachable = false;
@@ -125,7 +155,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     await nativeSession(name, "largest");
     const adapter = new TmuxAdapter(exec);
     const empty = [false, false];
-    const brokers = [0, 1].map((i) => new TerminalSessionBroker(name, adapter, { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty[i] = true; } }));
+    const brokers = [0, 1].map((i) => new TerminalSessionBroker(name, adapter, { fixedGeometry: true, pollMs: 20, livenessMs: 1000, onEmpty: () => { empty[i] = true; } }));
     const browsers = [viewer(), viewer()];
     await brokers[0].attach(browsers[0]);
     await brokers[1].attach(browsers[1]);
@@ -136,7 +166,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     expect(await size(name)).toBe("90x27");
     brokers[staying].detach(browsers[staying]);
     await until(async () => empty[staying]);
-    expect(await ownSizing(name)).toBe("largest");
+    expect(await ownSizing(name)).toBe("");
     expect(await record(name)).toBe("");
     await until(async () => (await size(name)) === "150x45");
   });
@@ -149,7 +179,7 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     try {
       await t("new-session", "-d", "-s", "reborn", "-x", "120", "-y", "40");
       let empty = false;
-      const broker = new TerminalSessionBroker("reborn", new TmuxAdapter(execOn), { pollMs: 20, livenessMs: 60000, onEmpty: () => { empty = true; } });
+      const broker = new TerminalSessionBroker("reborn", new TmuxAdapter(execOn), { fixedGeometry: true, pollMs: 20, livenessMs: 60000, onEmpty: () => { empty = true; } });
       const browser = viewer();
       await broker.attach(browser);
       const pinned = await t("display-message", "-p", "-t", "=reborn:", "#{window_id}");
