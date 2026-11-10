@@ -212,6 +212,19 @@ describe("pane compositor", () => {
     expect(lines.some(line => line === "S".repeat(79) + "\u2026")).toBe(true);
   });
 
+
+  it("keeps the sentinel when a long pinned status is resized twice", () => {
+    const term = new ReflowScreen(120);
+    const pane = createPaneCompositor(term.terminal());
+    pane.line("SENTINEL-ABOVE");
+    pane.diagnostic("S".repeat(110));
+    term.reflowTo(80); // the pin is repainted clipped to 80 cells
+    term.reflowTo(40); // sized from what is on screen (80 cells = 2 rows), not the 110-cell text
+    const lines = term.lines();
+    expect(lines.filter(line => line.includes("SENTINEL-ABOVE"))).toHaveLength(1);
+    expect(lines.some(line => line === "S".repeat(40))).toBe(false);
+  });
+
   it("widens a wrapped draft without erasing the transcript line above it", () => {
     const term = new ReflowScreen(40);
     const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false,
@@ -337,6 +350,21 @@ describe("compose line through the real editor", () => {
     try {
       t.input.write("ac\u001b[Db\u00e9\u{1F98A}\r");
       expect(t.blocks).toEqual(["ab\u00e9\u{1F98A}c"]);
+    } finally { t.editor.close(); }
+  });
+
+
+  it("keeps the flushed tail line open so new typing starts on its own line", () => {
+    const t = terminal();
+    try {
+      t.input.write("abc");
+      t.pane.transcript("Hello wor");
+      t.input.write("\u0015"); // flush "Hello wor" verbatim, no newline
+      t.input.write("x"); // new draft, no newline
+      t.input.write("y"); // the next keystroke must not erase the tail line
+      const screen = t.screen();
+      expect(screen).toContain("Hello wor\n");
+      expect(screen).not.toContain("Hello worx");
     } finally { t.editor.close(); }
   });
 

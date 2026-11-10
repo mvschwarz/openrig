@@ -13,7 +13,7 @@ import type {
   RungTrust,
 } from "./activity-taxonomy.js";
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
-import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
 import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
@@ -418,7 +418,7 @@ export class SeatActivityService {
       // touching the launch machinery.
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        const inventory = runtimeRungInventory(r.runtime, r.community_harness, r.community_runner === 1);
+        const inventory = runtimeRungInventory(r.runtime, r.community_harness, recordedRunner(r.community_runner));
         // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
         // A plain and a runner launch of the same app read differently, so a change between them re-declares too.
         const communityHarnessChanged = !!known && communityKind(known.inventory) !== communityKind(inventory);

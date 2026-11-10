@@ -294,7 +294,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       expect(text).toContain("── HEALTH");
       expect(text).toContain("WARNING       Seat context utilization reached 96%.");
     } else {
-      expect(text).toMatch(/HEALTH\s+ACTIVE.*WARN 1.*PARTIAL.*context 1/);
+      expect(text).toMatch(/HEALTH\s+ACTIVE.*WARN 1.*COVERAGE 2\/3.*context 1/);
     }
     expect(text).toContain("Seat context utilization reached 96%.");
     expect(text).not.toContain("Not assessed");

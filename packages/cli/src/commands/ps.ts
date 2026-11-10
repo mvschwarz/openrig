@@ -43,7 +43,7 @@ interface PsEntry {
   isArchived?: boolean;
 }
 
-interface NodeEntry {
+export interface NodeEntry {
   /** Served daemon attention, never re-derived here. Missing on an older daemon. */
   needsAttention?: boolean;
   arbitratedNeedsInput?: boolean | null;
@@ -714,6 +714,17 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 /** #2456: the attention reason for an occupant started without a required startup file. */
 function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
+}
+
+/** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
+ *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
+export function attentionReason(n: NodeEntry): string {
+  return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
+    ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
+    // The served question's reason, with the daemon's precedence: the arbitrated answer, the hook only without one.
+    ?? (n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null
+      : n.arbitratedNeedsInput == null && n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null)
+    ?? "reason unavailable";
 }
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {

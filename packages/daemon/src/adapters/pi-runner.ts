@@ -172,6 +172,9 @@ export interface PaneCompositor {
 
 export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
   let status: string | null = null;
+  /** The status text actually on screen: clipped when it was painted. A resize must
+   *  size the region from this, not from the longer text it was pinned with. */
+  let paintedStatus: string | null = null;
   let readInput: (() => string) | null = null;
   let redrawLine: (() => void) | null = null;
   let held = "";
@@ -207,16 +210,23 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
    *  except a reflow, which the resize handler owns. */
   const paint = () => {
-    if (status !== null) {
-      out.write(clip(status));
+    paintedStatus = status !== null ? clip(status) : null;
+    if (paintedStatus !== null) {
+      out.write(paintedStatus);
       out.write("\n");
     }
     const rows = composeRows();
     if (rows) redrawLine?.();
     screenRows = (status !== null ? 1 : 0) + (rows || (status !== null ? 1 : 0));
-    openLine = false;
+    // Only a painted region closes an open transcript line. With nothing painted the
+    // cursor still sits on the line a flush left open, and the next keystroke belongs
+    // to that line's context, not to a fresh one.
+    if (screenRows > 0) openLine = false;
   };
   const eraseScreen = () => {
+    // Nothing painted: there is no region to erase, and stepping down from a stale
+    // caret count would move the cursor off the transcript line it is still on.
+    if (screenRows === 0) return;
     const down = readCaretUp ? readCaretUp() : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
     eraseLines(screenRows);
@@ -251,7 +261,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     const draft = composeText();
     const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
     const draftRows = layout ? layout.rows : 0;
-    const statusLines = status !== null ? Math.max(1, Math.ceil(stringWidth(status) / out.columns)) : 0;
+    const statusLines = paintedStatus !== null ? Math.max(1, Math.ceil(stringWidth(paintedStatus) / out.columns)) : 0;
     const down = layout ? layout.rows - 1 - layout.caretRow : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
     // A pinned status without a draft also owns the blank row its trailing newline
@@ -557,7 +567,7 @@ function diagnosticText(details: unknown[]): string {
     : "").find(Boolean) ?? "";
 }
 
-function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   const text = diagnosticText(details);
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
@@ -568,7 +578,7 @@ function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
  *  turn normally; OMP repeats the message on turn_end, and either runtime can
  *  announce it again when automatic retries exhaust. The core coalesces the
  *  repeats into one notice per failure. */
-function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
+function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime | string): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
     return event.success === false ? { errorNotice: errorNotice([event.finalError, event.error], runtime) } : {};
   }
@@ -579,7 +589,7 @@ function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime
   return {};
 }
 
-export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime = "pi"): MirrorAndActivity {
+export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi"): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
     case "agent_start":
@@ -818,9 +828,11 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
       /** K4: the credential observation taken before Pi was spawned. */
-      launchCredentialEvidence?: PiCredentialEvidence } = {},
+      launchCredentialEvidence?: PiCredentialEvidence;
+      /** The session file this launch resumes (--session). */
+      requestedSessionFile?: string } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -910,7 +922,7 @@ export class RunnerCore {
     if (reason) this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
   }
 
-  private get runtime(): RunnerRuntime { return this.opts.runtime ?? "pi"; }
+  private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
@@ -940,7 +952,7 @@ export class RunnerCore {
    *  closes it. One sent while idle is posted when its run opens (handleEvent), so a prompt Pi handles without a run opens
    *  no turn. */
   private acceptIntoOpenRun(): void {
-    if (this.runtime !== "pi" || !this.streaming) return;
+    if (this.runtime === "omp" || !this.streaming) return;
     this.turn += 1;
     this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
@@ -1001,11 +1013,25 @@ export class RunnerCore {
       const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
-        this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
-        this.io.stopChild?.();
+        if (this.runtime === "omp") {
+          this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
+          this.io.stopChild?.();
+          return;
+        }
+        // For custom protocol: pi-rpc community harnesses, reporting no session file
+        // reads as needing attention rather than stopping the child process.
+        this.diag(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
+        this.raiseAttention("runtime_error");
         return;
       }
       this.writeSidecar({});
+      if (this.resumedElsewhere()) {
+        // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
+        // seat asks for attention rather than beating idle on a session nothing records.
+        this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
+        this.raiseAttention("runtime_error");
+        return;
+      }
       if (!wasReady) {
         // Only the initial transition to ready announces READY in the pane.
         // Subsequent get_state evaluations confirm liveness silently to avoid
@@ -1138,7 +1164,7 @@ export class RunnerCore {
    *  silent working state. So a lost agent_end is not a Pi outcome, and no time limit is needed
    *  on the beat — long silent turns stay covered. */
   heartbeat(): void {
-    if (this.runtime !== "pi" || !this.ready || this.attention) return;
+    if (this.runtime === "omp" || !this.ready || this.attention) return;
     const now = Date.parse(this.io.now());
     if (this.streaming) {
       if (this.lastActivityPostMs !== null && now - this.lastActivityPostMs < STREAM_HEARTBEAT_MS) return;
@@ -1165,13 +1191,13 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
-    if ((this.runtime === "omp" || this.runtime === "pi") && event.type === "extension_ui_request") {
+    if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
       const detail = [event.title, event.message].filter((text): text is string => typeof text === "string")
         .map(stripVTControlCharacters).join(" — ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").slice(0, 400);
-      if (this.runtime === "pi" && !dialog) {
-        if (method === "notify") this.diag(`[pi-runner] ${detail}`);
+      if (this.runtime !== "omp" && !dialog) {
+        if (method === "notify") this.diag(`[${this.runtime}-runner] ${detail}`);
         return; // Pi notifications and other fire-and-forget UI requests expect no answer.
       }
       // RPC does not mount an interactive UI. Reply at once; otherwise the
@@ -1180,8 +1206,8 @@ export class RunnerCore {
         this.io.sendRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
       }
       if (dialog) {
-        this.diag(this.runtime === "pi"
-          ? `[pi-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
+        this.diag(this.runtime !== "omp"
+          ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
         this.raiseAttention("permission_prompt");
       }
@@ -1194,7 +1220,7 @@ export class RunnerCore {
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
     const entryId = typeof event.entryId === "string" ? event.entryId
-      : (this.runtime !== "pi" && typeof event.id === "string" ? event.id : undefined);
+      : (this.runtime === "omp" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
       this.writeSidecar({});
@@ -1222,7 +1248,7 @@ export class RunnerCore {
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
-    const opening = this.runtime === "pi" && mapped.streaming === true && !this.streaming;
+    const opening = this.runtime !== "omp" && mapped.streaming === true && !this.streaming;
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
     if (opening) {
       this.turn += 1;
@@ -1295,7 +1321,14 @@ export class RunnerCore {
     if (this.runtime === "omp" && this.ready) this.postSessionIdentity();
   }
 
+  /** A resume that came up on another session file started a different session: the requested one stays the seat's. */
+  private resumedElsewhere(): boolean {
+    return !!this.opts.requestedSessionFile && !!this.sessionFile && this.sessionFile !== this.opts.requestedSessionFile;
+  }
+
   private postSessionIdentity(): void {
+    // Never the identity of a session other than the one this launch resumes: it would replace the seat's resume token.
+    if (this.resumedElsewhere()) return;
     if (this.runtime === "omp" && (!this.sessionFile || !this.io.sessionFileExists?.(this.sessionFile))) return;
     if (this.runtime === "omp" && (this.identityPersisted || this.identityInFlight)) return;
     const result = this.io.postActivity({
@@ -1333,8 +1366,8 @@ export class RunnerCore {
       runtime: this.runtime,
       hookEvent,
       subtype,
-      // A Pi runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
-      ...(this.runtime === "pi" && hookEvent === "Stop" && subtype !== "pi_exited" ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
+      // A Pi-protocol runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
+      ...(this.runtime !== "omp" && hookEvent === "Stop" && subtype !== `${this.runtime}_exited` ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
       ...extra,
       occurredAt: this.io.now(),
     };
@@ -1359,7 +1392,8 @@ export class RunnerCore {
 
 interface RunnerArgs {
   accountHome?: string;
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
+  command?: string;
   sessionName: string;
   stateRoot: string;
   cwd: string;
@@ -1389,10 +1423,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       return value;
     };
     switch (flag) {
+      case "--command": args.command = next(); break;
       case "--session-name": args.sessionName = next(); break;
       case "--runtime": {
         const runtime = next();
-        if (runtime !== "pi" && runtime !== "omp") throw new Error(`unsupported runtime: ${runtime}`);
+        if (!runtime) throw new Error("runtime must not be empty");
         args.runtime = runtime;
         break;
       }
@@ -1521,8 +1556,8 @@ const WORK_LIVENESS_SECONDS = 30;
 /** The Pi heartbeat scheduler — one 5s tick drives both beats (see PI_HEARTBEAT_TICK_MS).
  *  Exported so tests drive the real interval with fake timers instead of calling heartbeat()
  *  by hand, which is exactly the gap that hid the 15s-tick latency in the first cut. */
-export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime): { stop(): void } {
-  if (runtime !== "pi") return { stop() {} };
+export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime | string): { stop(): void } {
+  if (runtime === "omp") return { stop() {} };
   const timer = setInterval(() => core.heartbeat(), PI_HEARTBEAT_TICK_MS);
   timer.unref();
   return { stop: () => clearInterval(timer) };
@@ -1557,6 +1592,16 @@ export function resolveRuntimeExecutable(
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
 ): { ok: true; path: string } | { ok: false; error: string } {
+  if (nodePath.isAbsolute(name)) {
+    if (ops.isExecutable(name)) {
+      try {
+        return { ok: true, path: ops.realpath(name) };
+      } catch (err) {
+        return { ok: false, error: `could not resolve ${name}: ${(err as Error).message}` };
+      }
+    }
+    return { ok: false, error: `'${name}' is not executable` };
+  }
   const onPath = (env.PATH ?? "").split(nodePath.delimiter)
     .filter((dir) => nodePath.isAbsolute(dir))
     .map((dir) => nodePath.join(dir, name))
@@ -1681,13 +1726,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // OMP runs under a per-seat HOME, and wrapped Pi launches hand the resolved
-  // Pi binary to the wrapper so a HOME-dependent launcher on PATH (a mise
-  // shim) is resolved first with the runner's own environment. Unwrapped Pi
-  // stays bare "pi".
-  let command: string = runtime;
-  if (runtime === "omp" || args.launchWrapper?.length) {
-    const resolved = resolveRuntimeExecutable(runtime, process.env);
+  // OMP runs under a per-seat HOME, wrapped Pi launches hand the resolved
+  // Pi binary to the wrapper, and a pi-rpc fork names its own executable
+  // (--command), so a HOME-dependent launcher on PATH (a mise shim) is
+  // resolved first with the runner's own environment. Unwrapped Pi stays
+  // bare "pi".
+  let command: string = args.command ?? runtime;
+  if (args.command || runtime === "omp" || args.launchWrapper?.length) {
+    const resolved = resolveRuntimeExecutable(args.command ?? runtime, process.env);
     if (!resolved.ok) {
       console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
@@ -1843,9 +1889,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
+    requestedSessionFile: args.sessionFile });
 
-  let transportUp = runtime === "pi";
+  let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     if (runtime === "omp" && !core.isReady()) {
       try {
@@ -1888,9 +1935,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block), pane);
 
-  if (runtime === "pi") {
+  if (runtime !== "omp") {
     child.on("error", (err) => {
-      paneDiag(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : "pi"}: ${err.message}`);
+      paneDiag(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : (args.command ?? "pi")}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();

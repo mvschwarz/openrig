@@ -1,5 +1,5 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
-import { SessionRegistry, physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -18,7 +18,8 @@ import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
-import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { validateResumeToken, validateSessionFileFormat } from "../domain/resume-token-validation.js";
+import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import {
@@ -96,7 +97,7 @@ export function restoredRunnerHookEvidence(
   if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
   const state = !latest.stale ? latest.state
     : latest.reason === "stale_runtime_hook"
-      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true) : "unknown";
+      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true, latest.piRpc === true) : "unknown";
   // A working beat keeps the lifetime it was admitted with, as when it was posted.
   return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
     ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
@@ -415,11 +416,36 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
+/** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),
+ *  or, only while no launch record exists (an identity post can arrive first), its installed preset declares
+ *  `protocol: pi-rpc`. Any other recorded value never qualifies: a plain launch (0) or a preset's own runner (`runner: true`,
+ *  1) keeps its own identity path, so a later preset edit can't move a launched seat onto this one. */
+function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string, runtime: string): boolean {
+  if (runtime === "pi" || runtime === "omp" || runtime === "claude-code" || runtime === "codex" || runtime === "terminal") {
+    return false;
+  }
+  if (sessionCommunityRunnerSelect(db) !== "NULL") {
+    const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { runner?: number | null } | undefined;
+    if (row?.runner !== null && row?.runner !== undefined) return row.runner === AGENT_RUNNER_HOSTED_PI_RPC;
+  }
+  const found = loadCommunityHarnessPreset(runtime);
+  return found.ok && found.preset.protocol === "pi-rpc";
+}
+
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
     // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
     // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
     // it is format-validated before the persist and never echoed on failure.
-    if (runtime === "pi") {
+    // Pi-RPC community harnesses share this protocol, but persist community:<name>.
+    const isPi = runtime === "pi" && resolved.runtime === "pi";
+    const isCommunityPi = !isPi && (resolved.runtime !== null && resolved.runtime !== "omp" && isPiRpcHarness(store.db, resolved.sessionId, resolved.runtime));
+    // A current generation isn't a runtime binding: a process started inside the seat (a Pi helper, say) carries the
+    // seat's generation. Only the seat's own runtime reports its identity; any other keeps the saved token and publishes
+    // nothing for the seat, as OMP's runtime check does above.
+    if (isCommunityPi && runtime !== resolved.runtime) {
+      return c.json({ ok: true, ignored: "runtime_mismatch", tokenPersisted: false });
+    }
+    if (isPi || isCommunityPi) {
       // A delayed get_state from a retired runner must not replace the successor's
       // resume token or publish a current identity. Keep resolution, this check
       // and both effects synchronous so renewal cannot interleave at an await.
@@ -434,26 +460,27 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
-          error: "Pi session identity ignored: occupant generation is unavailable.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: occupant generation is unavailable.`,
         }, 503);
       }
       if (reason) {
         return c.json({
           ok: false, code: reason, tokenPersisted: false,
-          error: "Pi session identity ignored: emitter is not the registered current occupant.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: emitter is not the registered current occupant.`,
         }, 409);
       }
       const sessionFile = stringOrNull(body.sessionFile);
-      const validation = validateResumeToken("pi", sessionFile);
+      const validation = isPi ? validateResumeToken("pi", sessionFile) : validateSessionFileFormat(sessionFile, resolved.runtime ?? "community");
+      const resumeType = isPi ? "pi_session_file" : `community:${resolved.runtime}`;
       if (validation.ok) {
-        sessionRegistry.updateResumeToken(resolved.sessionId, "pi_session_file", validation.token, "hook");
+        sessionRegistry.updateResumeToken(resolved.sessionId, resumeType, validation.token, "hook");
       }
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "pi",
+        runtime: resolved.runtime ?? "pi",
         sessionId,
         provenance: "rpc",
       });
@@ -740,7 +767,7 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
-        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner)),
       );
     }
     if (beat) {

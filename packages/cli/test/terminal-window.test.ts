@@ -309,6 +309,20 @@ describe("desktop terminal view", () => {
     expect(f.deps.launch).not.toHaveBeenCalled();
   });
 
+  it("carries the preview's remote list, so an opened tile's other host isn't mistaken for a local seat", async () => {
+    const f = fixture({ herdr: false });
+    Object.assign(f.preview, { remote: [{ seat: "advisor", host: "edge" }] });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: true, opened: ["tui", "advisor", "operator"], remote: [{ seat: "advisor", host: "edge" }] });
+  });
+
+  it("an older daemon's preview without a remote list leaves provenance unknown, never local", async () => {
+    const f = fixture({ herdr: false });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result.ok).toBe(true);
+    expect(result.remote).toBeUndefined();
+  });
+
   it("creates only a new tmux viewer with the composed three-column ordering", async () => {
     const f = fixture({ herdr: false });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
