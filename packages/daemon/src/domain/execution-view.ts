@@ -989,12 +989,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
       ? { value: true, basis: `frontmatter approved-spec-at=${fm["approved-spec-at"]}` }
       : { value: false, basis: "no approved-spec-at in frontmatter; plan lock is a Part B step (rig scope slice approve --scope spec), so the default flow reads false here whatever the recorded status" };
-    // The team's own word for the slice, as `GET /api/slices` buckets it. Testimony: it never sets a rung or next-up.
+    // The team's own word for the slice: the node file's status:, as the scopes views read it (never PROGRESS.md),
+    // bucketed by the table `GET /api/slices` uses. Testimony: it never sets a rung or next-up.
     const rawStatus = fm["status"];
     const statusWord = typeof rawStatus === "string" && rawStatus.trim() ? rawStatus.trim() : null;
+    const nodeFile = path.basename(facts.specPath);
     const recorded_status = statusWord
-      ? { word: statusWord, bucket: sliceStatusBucket(statusWord), basis: "slice frontmatter status:, recorded by the team, not verified; it never sets a rung" }
-      : { word: null, bucket: null, basis: "no status: in slice frontmatter" };
+      ? { word: statusWord, bucket: sliceStatusBucket(statusWord), basis: `${nodeFile} frontmatter status:, recorded by the team, not verified; it never sets a rung` }
+      : { word: null, bucket: null, basis: `no status: in ${nodeFile} frontmatter` };
     // built: latest candidate:<sha> tag on a row bound to this slice.
     const candRows = rows
       .filter((r) => sliceOfRow(r) === facts.id || sliceOfRow(r) === facts.dir)

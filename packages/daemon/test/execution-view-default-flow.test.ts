@@ -81,9 +81,14 @@ describe("#2761 execution view on the default flow", () => {
     expect(entry(doc, "SF.1").recorded_status).toMatchObject({ word: "done", bucket: "done" });
     expect(entry(doc, "SF.2").recorded_status).toMatchObject({ word: "shipped-to-release-1", bucket: "done" });
     expect(entry(doc, "SF.3").recorded_status).toMatchObject({ word: "Closed", bucket: "done" });
-    expect(entry(doc, "SF.1").recorded_status!.basis).toMatch(/recorded by the team, not verified; it never sets a rung/);
+    expect(entry(doc, "SF.1").recorded_status!.basis).toBe("SPEC.md frontmatter status:, recorded by the team, not verified; it never sets a rung");
     // No status recorded is said as such, not read as draft or as not done.
-    expect(entry(doc, "SF.4").recorded_status).toEqual({ word: null, bucket: null, basis: "no status: in slice frontmatter" });
+    expect(entry(doc, "SF.4").recorded_status).toEqual({ word: null, bucket: null, basis: "no status: in SPEC.md frontmatter" });
+  });
+
+  it("reads the slice's own node file, as the scopes views do: a status kept only in PROGRESS.md isn't the slice's", async () => {
+    fs.writeFileSync(path.join(missionsRoot, MISSION, "slices", "04-unrecorded", "PROGRESS.md"), "---\nstatus: done\n---\n# Progress\n");
+    expect(entry(await show(), "SF.4").recorded_status).toMatchObject({ word: null, bucket: null });
   });
 
   it("says once for the mission that nothing records a build, so built and merged read not recorded", async () => {
