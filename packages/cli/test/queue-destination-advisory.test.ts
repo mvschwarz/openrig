@@ -283,6 +283,63 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect.soft(responseHeaders[0]!.has("X-OpenRig-Scope-Advisory")).toBe(false);
   });
 
+  it("keeps receiver destination advice before forwarded skipped scope advice", async () => {
+    const receiver = await fixture("advisory-receiver");
+    const { app, observation } = forwardingApp(receiver);
+    const senderReads = observeSenderScopeReads();
+    setSelfHostId(source.hostId);
+    const destination = "missing-worker@scope";
+    const tags = ["mission:release", "slice:SLICE.ONE", "project:alpha", "cross-host", "from-host:" + os.hostname()];
+
+    await create(app, ["--host", "remote-fixture", "--mission", "release", "--slice", "SLICE.ONE",
+      "--tags", "project:alpha"], true, "qitem-create-contract", undefined, destination);
+
+    const data = assertJsonCreate(receiver, destination, tags);
+    const advisories = Array.isArray(data.advisories)
+      ? data.advisories as Array<{ code?: unknown; message?: unknown }>
+      : [];
+    expect(advisories.map(advisory => advisory.code)).toEqual(["unmatched_destination_seat", "scope_check_skipped"]);
+    expect(advisories[0]).toMatchObject({ destinationSession: destination,
+      availableDestinations: expect.arrayContaining(["worker@scope", "writer@scope"]) });
+    expect(advisories[1]).toMatchObject({ message: expect.stringMatching(/skipped.*cross-host|cross-host.*skipped/i) });
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses).toEqual([201]);
+    expect(source.daemon.deps.queueRepo.getById("qitem-create-contract")).toBeNull();
+    expect(receiver.daemon.deps.queueRepo.getById("qitem-create-contract")?.sourceSession)
+      .toBe("writer@scope@" + source.hostId);
+    expect(senderReads).toEqual([]);
+  });
+
+  it.each([
+    { label: "JSON null", reply: () => Response.json(null, { status: 202 }), expectedBody: "null" },
+    { label: "JSON array", reply: () => Response.json(["receiver-payload"], { status: 202 }), expectedBody: '["receiver-payload"]' },
+    { label: "non-JSON body", reply: () => new Response("receiver-payload", {
+      status: 202, headers: { "Content-Type": "text/plain" },
+    }), expectedBody: "" },
+  ])("passes through a forwarded $label response unchanged", async row => {
+    const receiver = await fixture("malformed-response-receiver");
+    const { app, observation } = forwardingApp(receiver, false, row.reply);
+    const senderReads = observeSenderScopeReads();
+    setSelfHostId(source.hostId);
+    const id = "qitem-create-contract";
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+      body: JSON.stringify({ qitemId: id, destinationSession: "worker@scope", body: "scope contract body",
+        summary: "scope contract", nudge: false, hostId: "remote-fixture",
+        tags: ["mission:release", "slice:SLICE.ONE", "project:alpha"] }),
+    });
+    const responseBody = await response.text();
+
+    expect(response.status).toBe(202);
+    expect(responseBody).toBe(row.expectedBody);
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses).toEqual([202]);
+    expect(source.daemon.deps.queueRepo.getById(id)).toBeNull();
+    expect(receiver.daemon.deps.queueRepo.getById(id)).toBeNull();
+    expect(senderReads).toEqual([]);
+  });
+
   function preserveAuthored(f: Fixture): () => void {
     const read = fs.readFileSync.bind(fs);
     const stat = fs.statSync.bind(fs);
@@ -316,7 +373,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     return reads;
   }
 
-  function forwardingApp(receiver: Fixture, loseResponse = false) {
+  function forwardingApp(receiver: Fixture, loseResponse = false, remoteResponse?: () => Response) {
     const observation = { forwards: 0, committedStatuses: [] as number[] };
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -332,8 +389,10 @@ describe("queue create scope advisories preserve admission and output", () => {
         const previous = getSelfHostId();
         setSelfHostId(receiver.hostId);
         try {
-          const response = await receiver.app.request("/api/queue/create", { ...init,
-            headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
+          const response = remoteResponse
+            ? remoteResponse()
+            : await receiver.app.request("/api/queue/create", { ...init,
+              headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
           observation.committedStatuses.push(response.status);
           if (loseResponse) {
             await response.text();
