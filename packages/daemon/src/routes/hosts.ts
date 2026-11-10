@@ -56,7 +56,9 @@ import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
 import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry, type SshHostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import type { QueueRepository } from "../domain/queue-repository.js";
+import type { QueueItem, QueueRepository } from "../domain/queue-repository.js";
+import type { HumanQuestion } from "../domain/human-questions.js";
+import { PAIR_SOURCE_SESSION } from "../domain/hosts/pairing-ask.js";
 import { existsSync } from "node:fs";
 import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-registry.js";
 import { resolveDefaultPerson } from "../domain/gateway/participants.js";
@@ -89,7 +91,29 @@ function describePairTtl(ms: number): string {
 }
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
 
-const PAIR_SOURCE_SESSION = "host-pair@kernel";
+/** The pairing request's one question. Approval is only ever this explicit choice: the person's click on its Approve
+ *  option (the TUI, Steering, Slack's buttons), or an agent seat's close that names it, the option-id answer ACP rows
+ *  use (`rig queue update <id> --state done --closure-reason no-follow-on --resolution approve`). */
+const PAIR_QUESTION_ID = "pair";
+const PAIR_APPROVE = "approve";
+function pairQuestion(requester: string, code: string): HumanQuestion[] {
+  return [{ id: PAIR_QUESTION_ID, question: `Pair ${requester} (code ${code}) with this host?`, options: [
+    { id: PAIR_APPROVE, label: "Approve: hand this host's bearer token to the requester" },
+    { id: "deny", label: "Deny" },
+  ] }];
+}
+
+const PAIR_CLOSED = new Set(["done", "denied", "canceled", "failed"]);
+/** Whether the request's approval item records an explicit Approve. A typed reply, "yes" included, is kept under the
+ *  question as the person's words and approves nothing; so does a close that names no choice (a bare Approve, or
+ *  rig queue update without --resolution approve). A Deny, Drop or any other close, or any other answer, never approves. */
+function pairApproved(item: QueueItem | null): boolean {
+  if (!item) return false;
+  const answer = item.humanAnswers?.[PAIR_QUESTION_ID];
+  const closedAsApproval = item.state === "done" && item.closureReason === "no-follow-on";
+  if (answer != null) return answer === PAIR_APPROVE && (closedAsApproval || !PAIR_CLOSED.has(item.state));
+  return closedAsApproval && item.resolution?.trim() === PAIR_APPROVE;
+}
 
 interface IssuedPair {
   code: string;
@@ -259,12 +283,14 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         humanAlert: true,
         summary: `Host pairing request ${code} from ${requester}`,
         evidenceRef: `pair-request:${pairId}`,
+        humanQuestions: pairQuestion(requester, code),
         body: [
           `A remote operator (${requester}) is asking to pair with this host.`,
           `Pairing code: ${code} — confirm it matches the code shown on the requesting side.`,
-          `APPROVE, as the person: in the TUI (rig tui, then attention), open this request and choose Approve; Steering's Approve does the same.`,
-          `APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on (rig queue update acts as a managed seat, so it refuses in a plain terminal).`,
-          `DENY: let it expire (nothing is persisted), or from an agent seat: rig queue update <this-qitem-id> --state denied`,
+          `APPROVE, as the person: answer this request's question with Approve, in the TUI (rig tui, then attention: open this request), on Steering, or with Slack's Approve button.`,
+          `A typed reply, even "yes", is kept as your words and doesn't approve: it closes this request, and the requester is told it was denied and can ask again.`,
+          `APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on --resolution approve (rig queue update acts as a managed seat, so it refuses in a plain terminal).`,
+          `DENY: answer Deny, or let it expire (nothing is persisted), or from an agent seat: rig queue update <this-qitem-id> --state denied`,
           `Approval hands this daemon's bearer token to the requester (full API access).`,
           `This request expires ${describePairTtl(ttlMs)} after creation, at ${new Date(createdAt + ttlMs).toISOString().slice(0, 19).replace("T", " ")} UTC; expiry persists nothing.`,
         ].join("\n"),
@@ -292,15 +318,14 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     }
     const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
     const state = item?.state ?? "pending";
-    // Approval hands over this daemon's bearer token, so only an approval does: the item closed done with closure
-    // no-follow-on (Steering's and the TUI's Approve, or rig queue update --state done --closure-reason no-follow-on).
-    // Any other close denies, a done that records a denial (Steering's Deny), a drop or any other reason included.
-    if (state === "done" && item?.closureReason === "no-follow-on") {
+    // Approval hands over this daemon's bearer token, so only an explicit Approve does (pairApproved). When it can't
+    // tell, it never approves: a closed request, or any other recorded answer, denies; otherwise it's still pending.
+    if (pairApproved(item)) {
       // Single-shot handover: the first approved read consumes the pairing.
       issued.delete(pairId);
       return c.json({ status: "approved", token: bearerToken });
     }
-    if (state === "done" || state === "denied" || state === "canceled" || state === "failed") {
+    if (PAIR_CLOSED.has(state) || item?.humanAnswers?.[PAIR_QUESTION_ID] != null) {
       issued.delete(pairId);
       return c.json({ status: "denied" });
     }

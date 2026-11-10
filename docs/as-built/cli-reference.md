@@ -368,10 +368,15 @@ The request stays open on the target for as long as `--timeout` waits (600 secon
 approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
-On the target, its person approves the request in the TUI (`rig tui`, then `attention`: open it and choose Approve) or
-with Steering's Approve. From an agent seat on the target, `rig queue update <id> --state done --closure-reason
-no-follow-on` does the same; `rig queue update` acts as a managed seat, so it refuses in a plain terminal. To refuse a
-pairing, let it expire (nothing is persisted), or `rig queue update <id> --state denied` from an agent seat.
+On the target, its person approves the request by answering its question with Approve: in the TUI (`rig tui`, then
+`attention`: open it), on Steering, or with Slack's Approve button. From an agent seat on the target,
+`rig queue update <id> --state done --closure-reason no-follow-on --resolution approve` approves. `rig queue update` acts
+as a managed seat, so it refuses in a plain terminal. To refuse a pairing, answer Deny, let it expire (nothing is
+persisted), or `rig queue update <id> --state denied` from an agent seat.
+
+On a 0.7.11 or later target, a typed reply, even "yes", is kept as the person's words and doesn't approve: it closes the
+request, and the requester is told it was denied. An agent seat's close without `--resolution approve` denies too. On
+an older target, any typed reply on the request, or any such close, approves it.
 
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED

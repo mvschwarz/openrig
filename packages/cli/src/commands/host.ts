@@ -884,8 +884,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       if (!opts.json) {
         console.log(`Pairing code: ${issued.code}`);
         console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
-        console.log("On the target, its person approves it in the TUI (rig tui, then attention): open the pairing request and choose Approve. Steering's Approve does the same.");
-        console.log(`From an agent seat on the target instead: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on (it needs a managed seat; a plain terminal is refused).`);
+        console.log("On the target, its person approves it by answering the pairing request with Approve: in the TUI (rig tui, then attention), on Steering, or with Slack's Approve button. On a 0.7.11 or later target a typed reply doesn't approve; on an older target any typed reply approves.");
+        console.log(`From an agent seat on the target instead: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on --resolution approve (it needs a managed seat; a plain terminal is refused).`);
       }
 
       // A note names the bound actually used so a clamped value is not silently absorbed.

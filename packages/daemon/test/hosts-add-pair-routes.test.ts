@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -414,7 +415,8 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    // The full schema: the approval item carries its question (human_questions) and records the person's answer.
+    migrate(db, ALL_MIGRATIONS);
     // The REAL gate composition (startup.ts shape): human seats pass
     // before parse — pairing's approval item rides it.
     repo = new QueueRepository(db, new EventBus(db), {
@@ -469,10 +471,12 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
-    // D#52: the person approves in the TUI or Steering; rig queue update is named as an agent seat's way, not theirs.
-    expect(item.body).toContain("APPROVE, as the person: in the TUI (rig tui, then attention), open this request and choose Approve");
-    expect(item.body).toContain("APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on");
-    expect(item.body).toContain("DENY: let it expire (nothing is persisted)");
+    // D#52 and r9: the person approves by answering the question with Approve (the TUI, Steering, Slack); a typed reply
+    // doesn't approve; an agent seat names the choice with --resolution approve.
+    expect(item.body).toContain("APPROVE, as the person: answer this request's question with Approve, in the TUI (rig tui, then attention: open this request), on Steering, or with Slack's Approve button.");
+    expect(item.body).toContain(`A typed reply, even "yes", is kept as your words and doesn't approve`);
+    expect(item.body).toContain("APPROVE, from an agent seat on this host: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on --resolution approve");
+    expect(item.body).toContain("DENY: answer Deny, or let it expire (nothing is persisted)");
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
@@ -521,13 +525,14 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     }
   });
 
-  it("approve (close done) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {
+  it("approve (an agent seat's close naming Approve) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {
     const { pairId, approvalQitemId } = await issue();
 
     const pending = await app.request(`/api/hosts/pair-request/${pairId}`);
     expect(((await pending.json()) as { status: string }).status).toBe("pending");
 
-    await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "done", closureReason: "no-follow-on" });
+    // A close with no choice named doesn't approve (host-pair-explicit-approval.test.ts); this one names it.
+    await repo.update({ qitemId: approvalQitemId, actorSession: "dev-agent@fixture-rig", state: "done", closureReason: "no-follow-on", resolution: "approve" });
 
     const approved = await app.request(`/api/hosts/pair-request/${pairId}`);
     const body = await approved.json() as { status: string; token: string };
