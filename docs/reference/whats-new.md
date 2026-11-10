@@ -143,6 +143,7 @@ port (normally 7433)."
 ## Other changes to act on
 
 - Denying or dropping a host pairing request in Steering now gives the requesting machine no access; in 0.7.9 and 0.7.10, that action could return the daemon access token. ([#2884](https://github.com/mvschwarz/openrig/pull/2884))
+- Host pairing now requires an explicit approval choice; a typed reply does not approve, even when it says yes. Agent approval needs `--state done --closure-reason no-follow-on --resolution approve`; omitting `--resolution approve` denies, including the command printed by an older requesting CLI. This fixes the target: older targets, including 0.7.9, 0.7.10 and earlier 0.7.11 candidates, still approve typed replies. An attachment-only Slack reply, or the literal `[file reply]`, keeps no words in OpenRig; it still denies. ([#2890](https://github.com/mvschwarz/openrig/pull/2890))
 
 - **Rows on another host:** `rig queue show`, `list`, `transitions`, `update`
   and `block` take `--host <id>`; `claim` doesn't, since only the destination

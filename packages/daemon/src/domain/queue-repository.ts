@@ -73,6 +73,7 @@ import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
+import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
@@ -2058,9 +2059,10 @@ export class QueueRepository {
   async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string }): Promise<QueueItem> {
     const { episodeKey, ...create } = input;
     // A runner's permission request is answered in its ask, and the runner reads the answer back. No reply row: it
-    // would wake the runner's terminal, where typed text reads as a prompt to its agent.
+    // would wake the runner's terminal, where typed text reads as a prompt to its agent. A host pairing request is
+    // answered in its ask too: the pairing poll reads it there, and nothing reads a reply.
     const ask = this.getById(input.inboundReplyTo);
-    if (ask && runnerPermissionOrigin(ask)) return ask;
+    if (ask && (runnerPermissionOrigin(ask) || isHostPairingAsk(ask))) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
