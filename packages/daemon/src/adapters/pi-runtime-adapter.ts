@@ -353,7 +353,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const appliedLaunch = this.runtime === "omp"
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
-    const accountHome = binding.accountHome !== undefined ? binding.accountHome
+    // An account home is Pi's own, as on main: OMP and a pi-rpc fork take none, and the runner refuses --account-home
+    // for any runtime but pi.
+    const accountHome = this.runtime !== "pi" ? undefined
+      : binding.accountHome !== undefined ? binding.accountHome
       : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
     const preparedHome = accountHome === null && binding.nodeId
       ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime, true) : accountHome;

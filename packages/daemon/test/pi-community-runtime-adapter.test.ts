@@ -427,6 +427,42 @@ describe("PiCommunityRuntimeAdapter", () => {
     }
   });
 
+  it("a pi-rpc fork launch whose binding carries accountHome: null builds no --account-home", async () => {
+    const f = makeFixture();
+    try {
+      const preset = {
+        name: "omo", command: "omo", maintainer: "OmO Team", limits: [],
+        protocol: "pi-rpc" as const, launchResult: false, namesConversation: false,
+        resume: true, startupAssisted: false, firstInput: false, runner: false, passesModel: false, launchWrapper: false, path: "/fake/omo.yaml",
+      };
+      const envWrap = vi.fn(async (_session: string, cmd: string, _ctx: unknown) => `/usr/bin/wrapped ${cmd}`);
+      // As in production, asking again for a runtime other than pi can answer with another runtime's home.
+      const accountHome = vi.fn((_nodeId: string, _runtime: string, ignoreAccountHome?: boolean) => ignoreAccountHome ? "/home/claude-config" : undefined);
+      const adapter = PiCommunityRuntimeAdapter.fromPiAdapter(new PiRuntimeAdapter({
+        ...f.piAdapter.getCommunityDeps(),
+        seatLaunchEnvironment: { command: envWrap, accountHome } as any,
+      }), "omo", preset);
+      const sessionName = "omo-seat@rig";
+      const paths = piSeatPaths(f.stateRoot, sessionName);
+      const sessionFile = join(paths.sessionsDir, "0001-test.jsonl");
+      f.files[sessionFile] = '{"type":"session_start"}';
+      f.tmux.sendShellCommand.mockImplementation(async () => {
+        f.files[paths.runnerStatePath] = JSON.stringify({ ready: true, launchId: "test-launch-id-1", sessionFile, updatedAt: new Date().toISOString() });
+        return { ok: true, code: "ok" };
+      });
+      const binding: NodeBinding = {
+        id: "b1", nodeId: "node-1", tmuxSession: sessionName, tmuxPane: "%1", cwd: "/workspace", launchGeneration: "gen-env", accountHome: null,
+      } as NodeBinding;
+
+      expect((await adapter.launchHarness(binding, { name: sessionName })).ok).toBe(true);
+      expect(envWrap.mock.calls[0]![1]).not.toContain("--account-home");
+      expect((f.tmux.sendShellCommand.mock.calls[0] as unknown[])[1]).not.toContain("--account-home");
+      expect(accountHome).not.toHaveBeenCalled();
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("identity post stores community:<name>, restore plan resumes, quiet turn reads idle, exit reads exited", async () => {
     const db = new Database(":memory:");
     try {
