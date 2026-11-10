@@ -164,14 +164,20 @@ export function skillsRoutes(): Hono {
     const db = c.get("db" as never) as Database.Database | undefined;
     if (!db) return { error: "the daemon database is unavailable" } as const;
     const resolved = resolveSeat(db, session);
-    if (!resolved.ok) return { error: resolved.error, notFound: true } as const;
+    if (!resolved.ok) return { error: resolved.error, notFound: true, unsupportedRuntime: resolved.unsupportedRuntime } as const;
     const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     const occupant = registry?.currentOccupantTenure(resolved.seat.nodeId)?.generationUuid ?? null;
     return { seat: resolved.seat, occupant } as const;
   };
 
   router.get("/seat", (c) => {
-    const ctx = seatContext(c, c.req.query("session"));
+    const session = c.req.query("session");
+    const ctx = seatContext(c, session);
+    // #2895 (b): reading a seat that keeps no seat skills is not a failure; the note says why there is nothing to list.
+    if ("unsupportedRuntime" in ctx && ctx.unsupportedRuntime) {
+      return c.json({ seat: { sessionName: session, runtime: ctx.unsupportedRuntime }, unsupported: true, note: ctx.error,
+        storage: null, skills: [], catalogDigest: null, occupant: null, delivery: null });
+    }
     if ("error" in ctx) return c.json({ error: ctx.error }, "notFound" in ctx ? 404 : 400);
     const store = c.get("settingsStore" as never) as SettingsStore | undefined;
     const line = store ? bootstrapLineChoice(store) : null;
