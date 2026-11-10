@@ -24,6 +24,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
+import { seatsNeedingAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -135,6 +136,15 @@ function humanOpen(r: OpenViewResult): string {
   return lines.join("\n");
 }
 
+/** Names the opened seats that are waiting on a person (a startup prompt, a sign-in), so a held seat doesn't read as
+ *  an open that failed for no reason. Only seats the result names are checked. */
+async function withHeldSeats(client: DaemonClient, r: OpenViewResult): Promise<OpenViewResult> {
+  const held = await seatsNeedingAttention(client, [...new Set([...r.opened, ...r.degraded.map(d => d.seat), ...(r.following?.tiles.map(t => t.seat) ?? [])])]);
+  if (held.length === 0) return r;
+  return { ...r, notes: [...(r.notes ?? []), ...held.map(({ seat, reason }) =>
+    `${seat} is waiting on a person: ${reason}. Answer it in its tile, or read it with: rig capture ${seat}`)] };
+}
+
 /** A successful existing-workspace selection also needs no new panes. */
 function printOpen(json: boolean, r: OpenViewResult, status: number): void {
   if (json) {
@@ -221,7 +231,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             herdrApp: { appHome },
             ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
           if (!Array.isArray(res.data?.opened)) { printResult(opts.json ?? false, res.data, res.status); return; }
-          printOpen(opts.json ?? false, res.data, res.status);
+          printOpen(opts.json ?? false, await withHeldSeats(client, res.data), res.status);
           return;
         }
         // Herdr's control socket can answer with no desktop client attached.
@@ -231,7 +241,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           const windowProvider = opts.provider?.trim() === "herdr-app" ? undefined : opts.provider;
           const result = await openTerminalWindow(client, view, windowProvider, deps.windowDeps, opts.expectedPlan, session, following);
           const out = ambientFallbackNote ? { ...result, notes: [...(result.notes ?? []), ambientFallbackNote] } : result;
-          printOpen(opts.json ?? false, out, 200);
+          printOpen(opts.json ?? false, await withHeldSeats(client, out), 200);
           return;
         }
         let expectedPlan = opts.expectedPlan;
@@ -256,7 +266,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           printResult(opts.json ?? false, res.data, res.status);
           return;
         }
-        printOpen(opts.json ?? false, res.data, res.status);
+        printOpen(opts.json ?? false, await withHeldSeats(client, res.data), res.status);
       });
     });
 

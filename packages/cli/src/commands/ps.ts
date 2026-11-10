@@ -43,7 +43,7 @@ interface PsEntry {
   isArchived?: boolean;
 }
 
-interface NodeEntry {
+export interface NodeEntry {
   /** Served daemon attention, never re-derived here. Missing on an older daemon. */
   needsAttention?: boolean;
   arbitratedNeedsInput?: boolean | null;
@@ -714,6 +714,13 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 /** #2456: the attention reason for an occupant started without a required startup file. */
 function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
+}
+
+/** Why a seat that needs attention does, in full: the reason the REASON column shortens. */
+export function attentionReason(n: NodeEntry): string {
+  return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
+    ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
+    ?? n.agentActivity?.reason ?? `startup ${n.startupStatus ?? "unknown"}`;
 }
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
