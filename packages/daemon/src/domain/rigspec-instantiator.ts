@@ -3139,6 +3139,16 @@ export class PodRigInstantiator {
       required: false,
       appliesOn: ["fresh_start", "restore"],
     });
+    // The context-entry floor: where skills, help and declared context are. Not gated by the onboarding pack, so every
+    // seat gets it; a restore of a seat saved before it existed gets it beside openrig-start.md (withContextEntryFloor).
+    files.push({
+      path: "openrig-context-entry.md",
+      absolutePath: nodePath.resolve(import.meta.dirname, "../../assets/guidance/openrig-context-entry.md"),
+      ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
+      deliveryHint: "guidance_merge",
+      required: false,
+      appliesOn: ["fresh_start", "restore"],
+    });
 
     if (this.deps.onboardingEnabledResolver?.() ?? true) {
       const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");

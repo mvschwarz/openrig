@@ -193,7 +193,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     scope: "project",
     runtime: "claude-code",
     path: "CLAUDE.md (or CLAUDE.local.md when the rig chooses it)",
-    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
+    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the context-entry pointer to skills, help and declared context, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
   },
   {
     scope: "project",

@@ -20,7 +20,7 @@ import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import { resolveStartupProof } from "./startup-resolver.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
@@ -2151,7 +2151,10 @@ export class SeatLifecycleService {
       return this.malformedStartupContext(nodeId, (err as Error).message);
     }
 
-    const startupFiles = resolvedStartupFiles.map((file) => ({
+    // The plan and the delivery share one list, so a selection saved before the context-entry floor gets it delivered
+    // and then recorded by the launch. Reading the saved row doesn't change it.
+    const deliveredFiles = withContextEntryFloor(resolvedStartupFiles);
+    const startupFiles = deliveredFiles.map((file) => ({
       kind: file.kind,
       path: file.path,
       deliveryHint: file.deliveryHint,
@@ -2170,7 +2173,7 @@ export class SeatLifecycleService {
     const hash = createHash("sha256")
       .update(JSON.stringify([row.projection_entries_json, row.resolved_files_json, row.startup_actions_json, row.runtime]))
       .digest("hex");
-    return { ok: true, context: { plan, resolvedStartupFiles, startupActions, runtime: row.runtime, hash } };
+    return { ok: true, context: { plan, resolvedStartupFiles: deliveredFiles, startupActions, runtime: row.runtime, hash } };
   }
 
   private malformedStartupContext(
