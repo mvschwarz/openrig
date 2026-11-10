@@ -31,10 +31,9 @@ import {
   deriveCurrentWorkChoice,
   deriveRole,
   deriveWorkCandidates,
-  encodeScopeAdvisory,
   evaluateCreateScope,
-  SCOPE_ADVISORY_HEADER,
   skippedCreateScopeAdvisory,
+  toCreateScopeAdvisory,
   type CurrentWorkRow,
   type MissionsRootResolver,
   type RoleOrientation,
@@ -162,7 +161,7 @@ export function queueRoutes(): Hono {
   }
   function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
     try {
-      return evaluateCreateScope(tags, () => {
+      const check = evaluateCreateScope(tags, () => {
         const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
         const projectTags = flat.filter((tag) => tag.startsWith("project:"));
         if (projectTags.some((tag) => !tag.slice("project:".length).trim())) return null;
@@ -181,6 +180,7 @@ export function queueRoutes(): Hono {
         const value = store?.resolveOne("workspace.slices_root").value;
         return typeof value === "string" && value.trim() ? value : null;
       });
+      return check ? toCreateScopeAdvisory(check) : null;
     } catch {
       return null;
     }
@@ -695,8 +695,10 @@ export function queueRoutes(): Hono {
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
-      if (skippedScope) c.header(SCOPE_ADVISORY_HEADER, encodeScopeAdvisory(skippedScope));
-      return c.json(fwd.payload as Record<string, unknown>, fwd.status as 200);
+      const payload = fwd.payload as Record<string, unknown>;
+      if (!skippedScope) return c.json(payload, fwd.status as 200);
+      const existingAdvisories = Array.isArray(payload.advisories) ? payload.advisories : [];
+      return c.json({ ...payload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
     }
 
     try {
@@ -724,8 +726,7 @@ export function queueRoutes(): Hono {
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
-      if (scopeAdvisory) c.header(SCOPE_ADVISORY_HEADER, encodeScopeAdvisory(scopeAdvisory));
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);

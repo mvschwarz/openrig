@@ -184,8 +184,11 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(f.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = ?").get(id)).toEqual({ n: 1 });
     expect(process.exitCode ?? 0).toBe(0);
     expect(stdout).toHaveLength(1);
-    // The independent read of the committed row pins the complete existing JSON contract.
-    expect(JSON.parse(stdout[0]!)).toEqual(JSON.parse(JSON.stringify(stored)));
+    // The independent read pins the unchanged primary row; advisories are the additive response field.
+    const output = JSON.parse(stdout[0]!) as Record<string, unknown>;
+    const { advisories, ...primary } = output;
+    expect(primary).toEqual(JSON.parse(JSON.stringify(stored)));
+    expect(advisories === undefined || Array.isArray(advisories)).toBe(true);
   }
 
   const scopeLines = () => stderr.join("\n").split("\n")
@@ -668,20 +671,16 @@ describe("queue create scope advisories preserve admission and output", () => {
     await create(source.app, ["--tags", tags.join(",")], true);
     committed(source, "qitem-create-contract", tags);
     unchanged();
-    const raw = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory");
-    expect(raw).toBeTypeOf("string");
-    expect(raw!.length).toBeLessThanOrEqual(1024);
-    expect(raw).toMatch(/^[\x20-\x7e]+$/);
-    const metadata = JSON.parse(raw!) as { status: string; tags: unknown[] };
-    expect(metadata.status).toBe("conflict");
-    expect(Array.isArray(metadata.tags)).toBe(true);
-    expect(metadata.tags.length).toBeGreaterThan(0);
-    expect(metadata.tags.length).toBeLessThanOrEqual(8);
-    for (const tag of metadata.tags) {
-      expect(tag).toMatch(new RegExp("^" + level + ":[^\\x00-\\x1f\\x7f]{1,160}$"));
-    }
-    expect.soft(scopeLines(), "actual bounded header: " + raw).toMatch(/\bconflict(?:ing)?\b/i);
+    const advisories = createResponses[0]?.data.advisories as Array<{ code?: unknown; message?: unknown }> | undefined;
+    expect(advisories).toHaveLength(1);
+    expect(advisories?.[0]).toMatchObject({ code: "conflicting_scope", message: expect.any(String) });
+    const message = advisories?.[0]?.message as string;
+    expect(message).toContain(first);
+    expect(message).toContain(second);
+    expect.soft(scopeLines()).toMatch(/\bconflict(?:ing)?\b/i);
     expect.soft(scopeLines()).toContain(level + ":");
+    expect.soft(scopeLines()).toContain(first);
+    expect.soft(scopeLines()).toContain(second);
     expect.soft(scopeLines()).not.toMatch(/resolves to \d+ directories/i);
   });
 
@@ -807,8 +806,11 @@ describe("queue create scope advisories preserve admission and output", () => {
     await create(source.app, ["--tags", tags.join(",")], true);
     committed(source, "qitem-create-contract", tags);
     expect(JSON.stringify(tags).length).toBeGreaterThan(1024);
-    const length = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory")?.length;
-    expect(scopeLines(), `actual advisory metadata characters: ${length}`).toMatch(/unavailable|could not (?:run|check)|unable to (?:run|check)/i);
+    const advisories = createResponses[0]?.data.advisories as Array<{ code?: unknown; message?: unknown }> | undefined;
+    expect(advisories).toEqual([expect.objectContaining({ code: "scope_check_unavailable", message: expect.any(String) })]);
+    const message = advisories?.[0]?.message as string;
+    for (const tag of tags.slice(1)) expect(message).toContain(tag);
+    expect(scopeLines()).toMatch(/unavailable|could not (?:run|check)|unable to (?:run|check)/i);
     expect(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
   });
 
@@ -866,14 +868,22 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(stored?.tags).toEqual(expect.arrayContaining(["mission:release", "slice:SLICE.ONE", "project:alpha"]));
     expect(process.exitCode ?? 0).toBe(0);
     expect(stdout).toHaveLength(1);
-    expect(JSON.parse(stdout[0]!)).toEqual(JSON.parse(JSON.stringify(stored)));
+    const output = JSON.parse(stdout[0]!) as Record<string, unknown>;
+    const { advisories: _advisories, ...primary } = output;
+    expect(primary).toEqual(JSON.parse(JSON.stringify(stored)));
+    expect(output).toEqual(createResponses[0]?.data);
     expect(senderReads).toEqual([]);
     if (senderState === "long tags") {
       expect(stored?.tags).toEqual(["mission:release", "slice:SLICE.ONE", "project:alpha", ...extraTags, "cross-host", `from-host:${os.hostname()}`]);
       expect(JSON.stringify(extraTags).length).toBeGreaterThan(1024);
     }
-    const length = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory")?.length;
-    expect(scopeLines(), senderState === "long tags" ? `actual advisory metadata characters: ${length}` : undefined).toMatch(/\bskipped\b/i);
+    const advisories = createResponses[0]?.data.advisories as Array<{ code?: unknown; message?: unknown }> | undefined;
+    expect(advisories).toEqual([expect.objectContaining({ code: "scope_check_skipped", message: expect.any(String) })]);
+    const message = advisories?.[0]?.message as string;
+    expect(message).toContain("mission:release");
+    expect(message).toContain("slice:SLICE.ONE");
+    if (senderState === "long tags") for (const tag of extraTags) expect(message).toContain(tag);
+    expect(scopeLines()).toMatch(/\bskipped\b/i);
     expect(scopeLines()).not.toMatch(/unresolved|ambiguous|unavailable/i);
   });
 });

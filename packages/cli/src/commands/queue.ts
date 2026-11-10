@@ -1234,59 +1234,23 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           remoteHost: remoteHostOf(hostResolved.hostId) };
-        const emitScopeAdvisory = (headers?: Headers) => {
-          if (!headers || typeof headers.get !== "function") return;
-          const raw = headers.get("X-OpenRig-Scope-Advisory") ?? headers.get("x-openrig-scope-advisory");
-          if (!raw || raw.length > 1024) return;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(raw);
-          } catch {
-            return;
-          }
-          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-          const safeTag = (value: unknown): value is string =>
-            typeof value === "string" && /^(?:mission|slice):[^\x00-\x1f\x7f]{0,160}$/.test(value);
-          const nonEmptySafeTag = (value: unknown): value is string =>
-            typeof value === "string" && /^(?:mission|slice):[^\x00-\x1f\x7f]{1,160}$/.test(value);
-          const record = parsed as { status?: unknown; tag?: unknown; count?: unknown; tags?: unknown; reason?: unknown };
-          if (record.status === "unresolved" && nonEmptySafeTag(record.tag)) {
-            console.error(`Warning: queue create scope check: ${record.tag} is unresolved (resolves to 0 directories); row was created.`);
-            return;
-          }
-          if (record.status === "empty" && (record.tag === "mission:" || record.tag === "slice:")) {
-            console.error(`Warning: queue create scope check: ${record.tag} has an empty value; row was created.`);
-            return;
-          }
-          // Producer truncation/deduplication can coalesce distinct long inputs into one bounded display representative.
-          if (record.status === "conflict" && Array.isArray(record.tags) && record.tags.length > 0 && record.tags.length <= 8) {
-            const validTags = record.tags.filter(nonEmptySafeTag);
-            if (validTags.length !== record.tags.length) return;
-            console.error(`Warning: queue create scope check: conflicting scope tags (${validTags.join(", ")}); row was created.`);
-            return;
-          }
-          if (
-            record.status === "ambiguous" &&
-            nonEmptySafeTag(record.tag) &&
-            typeof record.count === "number" &&
-            Number.isInteger(record.count) &&
-            record.count >= 2 &&
-            record.count <= 10_000
-          ) {
-            console.error(`Warning: queue create scope check: ${record.tag} is ambiguous (resolves to ${record.count} directories, cannot uniquely resolve); row was created.`);
-            return;
-          }
-          if ((record.status === "unavailable" || record.status === "skipped") && Array.isArray(record.tags) && record.tags.length > 0 && record.tags.length <= 8) {
-            const validTags = record.tags.filter(safeTag);
-            if (validTags.length !== record.tags.length) return;
-            if (record.status === "unavailable") {
-              if (record.reason === "missing-mission") {
-                console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}) without mission context: mission tag is missing; row was created.`);
-              } else if (record.reason === undefined) {
-                console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}): could not run scope check on this host; row was created.`);
-              }
-            } else {
-              console.error(`Note: queue create scope check skipped for cross-host write (${validTags.join(", ")}); row was forwarded.`);
+        const emitScopeAdvisories = (created: Record<string, unknown>) => {
+          const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
+          for (const value of advisories) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            const advisory = value as { code?: unknown; message?: unknown };
+            if (typeof advisory.message !== "string") continue;
+            switch (advisory.code) {
+              case "scope_check_skipped":
+                console.error(`Note: ${advisory.message}`);
+                break;
+              case "unresolved_scope":
+              case "ambiguous_scope":
+              case "empty_scope":
+              case "conflicting_scope":
+              case "scope_check_unavailable":
+                console.error(`Warning: ${advisory.message}`);
+                break;
             }
           }
         };
@@ -1310,10 +1274,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
         };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered?: "neutral" | "remote") => {
+        const finish = async (created: Record<string, unknown>, status: number, recovered?: "neutral" | "remote") => {
           if (status < 400) {
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
-            else emitScopeAdvisory(headers);
+            else emitScopeAdvisories(created);
           }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
@@ -1344,7 +1308,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "neutral");
+              await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
               return;
             }
           }
@@ -1361,7 +1325,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200, undefined, late.remoteConfirmed ? "remote" : "neutral");
+            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
@@ -1372,7 +1336,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         if (refusal) console.error(`No row was created: ${refusal}`);
         const hint = hostSubstitutionHint(res.status, res.data, opts.destination, opts.host, hostResolved, `, keeping --id ${shellQuote(qitemId)}`);
         if (hint) console.error(hint);
-        await finish(res.data, res.status, res.headers);
+        await finish(res.data, res.status);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
