@@ -69,7 +69,8 @@ export async function checkSeatAttention(client: DaemonClient, seats: readonly s
         found.add(seat);
         if (node.needsAttention === undefined) { check.unknown.push({ seat, why: "the daemon served no attention evidence for it" }); continue; }
         if (!node.needsAttention) continue;
-        const question = node.arbitratedNeedsInput === true || node.agentActivity?.state === "needs_input";
+        // The daemon's own precedence: its arbitrated answer, and the hook only when it has none.
+        const question = node.arbitratedNeedsInput ?? (node.agentActivity?.state === "needs_input");
         check.attention.push({ seat, reason: attentionReason(node), waitingOnPerson: question });
       }
     }

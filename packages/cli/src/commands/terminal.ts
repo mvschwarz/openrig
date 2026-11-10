@@ -74,7 +74,7 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
-  /** Opened seats on another host, with that host. */
+  /** Opened seats on another host, with that host: complete when sent, so its absence (an older daemon) means unknown. */
   remote?: Array<{ seat: string; host: string }>;
   absent: { seat: string; host: string | null; reason: string }[];
   degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
@@ -139,11 +139,16 @@ function humanOpen(r: OpenViewResult): string {
 }
 
 /** Names the opened seats that need attention (a startup prompt, a sign-in, a failed start), so a held seat doesn't
- *  read as an open that failed for no reason. Local seats are checked on this daemon; a seat on another host is
- *  reported unchecked, never matched to a local seat of the same name. */
+ *  read as an open that failed for no reason. Local seats are checked on this daemon; a seat on another host, or one
+ *  whose host the result doesn't say, is reported unchecked, never matched to a local seat of the same name. */
 async function withHeldSeats(client: DaemonClient, r: OpenViewResult): Promise<OpenViewResult> {
-  const remote = new Map((r.remote ?? []).map(({ seat, host }) => [seat, host]));
   const seats = [...new Set([...r.opened, ...(r.following?.tiles.map(t => t.seat) ?? [])])];
+  if (!Array.isArray(r.remote)) {
+    // An older daemon names opened seats without saying which are remote: none can be checked locally by name.
+    const lines = seats.length ? attentionLines({ attention: [], unknown: seats.map(seat => ({ seat, why: "the daemon didn't say which host each tile is on" })) }, "tile") : [];
+    return lines.length ? { ...r, notes: [...(r.notes ?? []), ...lines] } : r;
+  }
+  const remote = new Map(r.remote.map(({ seat, host }) => [seat, host]));
   const check = await checkSeatAttention(client, seats.filter(seat => !remote.has(seat)));
   for (const [seat, host] of remote) check.unknown.push({ seat, why: `it's on host ${host}, which this daemon doesn't check` });
   const lines = attentionLines(check, "tile");

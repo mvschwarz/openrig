@@ -29,6 +29,28 @@ const nodes = [
   { canonicalSessionName: "old@r", startupStatus: "ready", latestError: null },
 ];
 
+it("honours the daemon's needs-input precedence: a served 'no' beats a stale hook; the hook counts only without an answer", async () => {
+  const precedence = [
+    // Broad attention (missing guidance), the arbitrated answer is no question, and a stale needs_input hook remains.
+    { canonicalSessionName: "stale@r", needsAttention: true, arbitratedNeedsInput: false, startupStatus: "ready", latestError: null,
+      startedWithoutRequired: ["/seat/AGENTS.md"], agentActivity: { state: "needs_input", reason: "permission_prompt" } },
+    // The same stale hook as the only reason: its reason isn't revived either.
+    { canonicalSessionName: "staleonly@r", needsAttention: true, arbitratedNeedsInput: false, startupStatus: "ready", latestError: null,
+      agentActivity: { state: "needs_input", reason: "permission_prompt" } },
+    // No arbitrated answer: the hook decides, with its reason.
+    { canonicalSessionName: "hook@r", needsAttention: true, arbitratedNeedsInput: null, startupStatus: "ready", latestError: null,
+      agentActivity: { state: "needs_input", reason: "permission_prompt" } },
+  ];
+  const { client: c } = client({ "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "r" }] }, "/api/rigs/r1/nodes": { status: 200, data: [...nodes, ...precedence] } });
+  const check = await checkSeatAttention(c, ["stale@r", "staleonly@r", "hook@r", "question@r"]);
+  expect(check.attention).toEqual([
+    { seat: "question@r", reason: "selection_prompt", waitingOnPerson: true },
+    { seat: "stale@r", reason: "missing required AGENTS.md", waitingOnPerson: false },
+    { seat: "staleonly@r", reason: "reason unavailable", waitingOnPerson: false },
+    { seat: "hook@r", reason: "permission_prompt", waitingOnPerson: true },
+  ]);
+});
+
 it("labels only a served live question as waiting on a person; the broad flag reads 'needs attention' with its reason", async () => {
   const { client: c } = client({ "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "r" }] }, "/api/rigs/r1/nodes": { status: 200, data: nodes } });
   const check = await checkSeatAttention(c, ["question@r", "guidance@r", "failed@r", "login@r", "fine@r", "old@r"]);

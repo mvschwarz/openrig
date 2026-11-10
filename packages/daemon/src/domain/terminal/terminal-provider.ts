@@ -130,7 +130,8 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
-  /** Opened seats on another host, with that host: `opened` names them by seat alone. */
+  /** Opened seats on another host, with that host: `opened` names them by seat alone. Always the complete list when
+   *  this service sends it (empty when every opened seat is local), so its absence means provenance is unknown. */
   remote?: Array<{ seat: string; host: string }>;
   absent: AbsentSeat[];
   degraded: DegradedSeat[];

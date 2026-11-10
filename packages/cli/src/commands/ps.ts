@@ -721,8 +721,9 @@ function startedWithoutLine(files: string[]): string {
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    ?? (n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null : null)
-    ?? (n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null)
+    // The served question's reason, with the daemon's precedence: the arbitrated answer, the hook only without one.
+    ?? (n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null
+      : n.arbitratedNeedsInput == null && n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null)
     ?? "reason unavailable";
 }
 

@@ -309,13 +309,18 @@ describe("desktop terminal view", () => {
     expect(f.deps.launch).not.toHaveBeenCalled();
   });
 
-  it("names an opened tile's other host, so its seat isn't mistaken for a local one of the same name", async () => {
+  it("carries the preview's remote list, so an opened tile's other host isn't mistaken for a local seat", async () => {
     const f = fixture({ herdr: false });
-    const tile = composeView("kernel", [{ seat: "advisor", label: "advisor", tmuxSession: "advisor", host: "edge", readOnly: false, alive: true }],
-      { resolveHost: id => ({ id, transport: "ssh", target: "fixture" }) as never }).opened[0]!;
-    Object.assign(f.preview.composed.opened[1]!, tile);
+    Object.assign(f.preview, { remote: [{ seat: "advisor", host: "edge" }] });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: true, opened: ["tui", "advisor", "operator"], remote: [{ seat: "advisor", host: "edge" }] });
+  });
+
+  it("an older daemon's preview without a remote list leaves provenance unknown, never local", async () => {
+    const f = fixture({ herdr: false });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result.ok).toBe(true);
+    expect(result.remote).toBeUndefined();
   });
 
   it("creates only a new tmux viewer with the composed three-column ordering", async () => {

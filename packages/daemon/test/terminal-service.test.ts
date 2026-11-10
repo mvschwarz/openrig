@@ -89,7 +89,8 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
         resolveHost: id => id === "edge" ? { id, transport: "ssh", target: "fixture" } : null,
       });
       const svc = new TerminalService(deps);
-      const preview = await svc.previewView({ view: "remote" }) as { planId: string };
+      const preview = await svc.previewView({ view: "remote" }) as { planId: string; remote: unknown };
+      expect(preview.remote).toEqual([{ seat: "worker@edge", host: "edge" }]);
       const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
       expect(result.ok).toBe(true);
       expect(result.code).toBeUndefined();
@@ -191,6 +192,8 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(res.provider).toBe("herdr");
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["dev-driver@acme-build", "rev-r1@acme-build"]);
+    // Provenance is explicit: an empty remote list says every opened seat is local (absence would mean unknown).
+    expect(res.remote).toEqual([]);
     // interactive → no `-r` in the composed pane commands
     expect(herdr.lastView?.opened.every((p) => p.readOnly === false)).toBe(true);
     expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'dev-driver@acme-build'");

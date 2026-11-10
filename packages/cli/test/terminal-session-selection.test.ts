@@ -55,8 +55,7 @@ describe("terminal --session", () => {
   it("previews and opens the selected session without a desktop for an explicit provider", async () => {
     const f = fixture();
     await f.run(["open", "prod", "--provider", "herdr", "--session", "prod", "--json"]);
-    // The preview, then the opened seats' attention read (the node route `rig ps --nodes` uses).
-    expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/preview?view=prod&provider=herdr&session=prod", "/api/ps"]);
+    expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/preview?view=prod&provider=herdr&session=prod");
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "prod", provider: "herdr", session: "prod", expectedPlan: "plan-prod" }, { timeoutMs: 45_000 });
     expect(f.exec).not.toHaveBeenCalled();
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, session: "prod" });
@@ -74,7 +73,7 @@ describe("terminal --session", () => {
     const f = fixture();
     await f.run(["open", "prod", "--session", "prod", "--json"]);
     expect(process.exitCode).toBeUndefined();
-    expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/preview?view=prod&provider=herdr&session=prod", "/api/terminal/status?provider=herdr&session=prod", "/api/ps"]);
+    expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/preview?view=prod&provider=herdr&session=prod", "/api/terminal/status?provider=herdr&session=prod"]);
     const desktop = f.exec.mock.calls.find(([file]) => file === "/usr/bin/osascript");
     expect(desktop?.[1].join(" ")).toContain("HERDR_SOCKET_PATH='/fixture/prod/herdr.sock'");
     for (const [, args] of f.exec.mock.calls.filter(([file]) => file === "/usr/bin/env")) {
