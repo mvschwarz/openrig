@@ -965,6 +965,41 @@ describe("GET /api/slices observed queue counts", () => {
     expect.soft(done[0]!.queueCounts, "same route after real completion").toEqual({ ...ZERO, done: 1 });
   });
 
+  it.each([
+    {
+      order: "default then foo",
+      projects: [{ id: "default", root: "." }, { id: "foo", root: "projects/foo" }],
+    },
+    {
+      order: "foo then default",
+      projects: [{ id: "foo", root: "projects/foo" }, { id: "default", root: "." }],
+    },
+  ])("counts a nested foo slice in either catalog order ($order)", async ({ projects }) => {
+    catalog(projects);
+    write(path.join(root, "SPEC.md"), "---\nid: default\n---\n# Default project\n");
+    write(path.join(root, "project.yaml"), "id: default\nmissions:\n  root: missions\n");
+    write(path.join(root, "projects/foo/SPEC.md"), "---\nid: foo\n---\n# Foo project\n");
+    write(path.join(root, "projects/foo/project.yaml"), "id: foo\nmissions:\n  root: missions\n");
+    const defaultSlicePath = addSlice(".", "shipping", "shared");
+    const fooSlicePath = addSlice("projects/foo", "shipping", "shared");
+    const fooMissionsRoot = path.join(root, "projects/foo/missions");
+    const config = path.join(root, "settings.json");
+    write(config, JSON.stringify({ workspace: { root, catalogPath: path.join(root, "workspace.yaml"), slicesRoot: fooMissionsRoot } }));
+    settings = new SettingsStore(config);
+
+    expect(defaultSlicePath).not.toBe(fooSlicePath);
+    row("foo-pending", "pending", ["project:foo", "mission:shipping", "slice:shared"]);
+    row("default-decoy-pending", "pending", ["project:default", "mission:shipping", "slice:shared"]);
+
+    const { app, indexer } = route("foo", false, fooMissionsRoot);
+    expect(indexer.projectId).toBeUndefined();
+    const entries = await list(app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: fooSlicePath, status: "active", rawStatus: "active" });
+    authoredUnchanged();
+    expect(entries[0]!.queueCounts, "the default project's same-name decoy must not inflate foo").toEqual({ ...ZERO, pending: 1 });
+  });
+
   it.each(["unidentified root", "ambiguous project root"])("reports null rather than observed zero for %s", async reason => {
     let slicesRoot: string;
     if (reason === "unidentified root") {
