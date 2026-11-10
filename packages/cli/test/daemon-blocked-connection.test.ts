@@ -304,14 +304,16 @@ describe("sandboxed liveness: EPERM on kill(pid, 0) is not a dead daemon", () =>
     expect(guard.fact).not.toMatch(/not running/i);
   });
 
-  it("unknown liveness plus a refused probe is still a stopped daemon with down advice", async () => {
+  // #2860: a refusal from a shell that can't inspect the pid is "stopped" only with the daemon's clean-shutdown receipt.
+  it("unknown liveness plus a refused probe and no clean shutdown is unverified, not stopped", async () => {
     const status = await getDaemonStatus(withState({
       isProcessAlive: () => false,
       processLiveness: sandboxLiveness,
       fetch: probeFailing("ECONNREFUSED"),
     }));
-    expect(status.state).toBe("stopped");
-    expect(statusGuardMessage(status).fact).toMatch(/not running/i);
+    expect(status.state).toBe("unverified");
+    expect(status.pidUnseen).toBe(true);
+    expect(statusGuardMessage(status).fact).toMatch(/couldn't connect.*from this shell/i);
   });
 
   it("unknown liveness plus a healthy probe is running", async () => {
