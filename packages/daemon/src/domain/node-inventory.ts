@@ -32,7 +32,7 @@ import {
 } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
-import { builtinLaunchPosture } from "./permission-policy/policy-ref.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/policy-ref.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -60,9 +60,13 @@ interface InventoryRow {
   codex_permissions_json: string | null;
   node_permission_policy: string | null;
   node_policy_origin: string | null;
+  node_policy_resolved_target: string | null;
+  node_policy_declaring_dir: string | null;
   node_policy_launch_posture: string | null;
   rig_permission_policy: string | null;
   rig_policy_origin: string | null;
+  rig_policy_resolved_target: string | null;
+  rig_policy_declaring_dir: string | null;
   rig_policy_launch_posture: string | null;
   rig_non_interruptive: number | null;
   claude_mcp: ClaudeMcp | null;
@@ -129,24 +133,22 @@ interface BindingRow {
 
 // -- Helpers --
 
-function asLaunchPosture(value: string | null | undefined): "floor" | "full_bypass" | "auto" | undefined {
-  return value === "floor" || value === "full_bypass" || value === "auto" ? value : undefined;
-}
-
 function resolveBasePolicyPosture(row: InventoryRow): "floor" | "full_bypass" | "auto" {
-  if (row.node_policy_origin != null && row.node_policy_launch_posture != null) {
-    return asLaunchPosture(row.node_policy_launch_posture) ?? "floor";
-  }
-  if (row.node_permission_policy != null) {
-    return builtinLaunchPosture(row.node_permission_policy);
-  }
-  if (row.rig_policy_origin != null && row.rig_policy_launch_posture != null) {
-    return asLaunchPosture(row.rig_policy_launch_posture) ?? "floor";
-  }
-  if (row.rig_permission_policy != null) {
-    return builtinLaunchPosture(row.rig_permission_policy);
-  }
-  return "floor";
+  return resolvePersistedRestorePosture(
+    {
+      nodeOrigin: row.node_policy_origin,
+      nodeLaunchPosture: row.node_policy_launch_posture,
+      nodeResolvedTarget: row.node_policy_resolved_target,
+      nodeDeclaringDir: row.node_policy_declaring_dir,
+      nodeRef: row.node_permission_policy,
+      rigOrigin: row.rig_policy_origin,
+      rigLaunchPosture: row.rig_policy_launch_posture,
+      rigResolvedTarget: row.rig_policy_resolved_target,
+      rigDeclaringDir: row.rig_policy_declaring_dir,
+      rigRef: row.rig_permission_policy,
+    },
+    { readFile: (target) => fs.readFileSync(target, "utf-8") },
+  );
 }
 
 type CodexResumeResolution =
@@ -829,9 +831,13 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("codex_permissions_json")} as codex_permissions_json,
       ${nodeColumnOrNull("permission_policy")} as node_permission_policy,
       ${nodeColumnOrNull("policy_origin")} as node_policy_origin,
+      ${nodeColumnOrNull("policy_resolved_target")} as node_policy_resolved_target,
+      ${nodeColumnOrNull("policy_declaring_dir")} as node_policy_declaring_dir,
       ${nodeColumnOrNull("policy_launch_posture")} as node_policy_launch_posture,
       ${rigColumnOrNull("permission_policy")} as rig_permission_policy,
       ${rigColumnOrNull("rig_policy_origin")} as rig_policy_origin,
+      ${rigColumnOrNull("rig_policy_resolved_target")} as rig_policy_resolved_target,
+      ${rigColumnOrNull("rig_policy_declaring_dir")} as rig_policy_declaring_dir,
       ${rigColumnOrNull("rig_policy_launch_posture")} as rig_policy_launch_posture,
       ${rigColumnOrNull("non_interruptive")} as rig_non_interruptive,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,

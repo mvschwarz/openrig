@@ -1,5 +1,8 @@
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import type Database from "better-sqlite3";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -8,6 +11,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
+import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { observeCodexSandbox, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../src/domain/codex-member-permissions.js";
 import {
@@ -604,4 +609,372 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     const claudeEntry = single.find((e) => e.logicalId === "ops.claude")!;
     expect(claudeEntry.resumeCommandLabel).toBeNull();
   });
+
+  it("QA-001 & QA-002: resolves display posture through real RestoreOrchestrator rules (legacy policy-without-provenance floor, node-over-rig provenance precedence, and kernel legacy policy suppression)", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+
+    const restoreOrchestrator = new RestoreOrchestrator({
+      db,
+      rigRepo,
+      sessionRegistry: registry,
+      eventBus: new EventBus(db),
+      snapshotRepo: { db },
+      checkpointStore: { db },
+      snapshotCapture: { db },
+      nodeLauncher: { db },
+    } as unknown as RestoreOrchestratorDeps);
+
+    const runRealRestoreResolvedResume = async (nodeId: string, rigId: string, token: string): Promise<string> => {
+      const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
+      const override = permStore.launchOverride(nodeId, "codex");
+      const effectivePosture = override.launchPosture ?? resolvedPosture;
+      const nonInterruptive = rigRepo.getRigNonInterruptive(rigId);
+      const profileRow = db
+        .prepare("SELECT codex_config_profile FROM nodes WHERE id = ?")
+        .get(nodeId) as { codex_config_profile: string | null } | undefined;
+      const sent: string[] = [];
+      const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
+        sleep: async () => {},
+        maxWaitMs: 0,
+        exec: async () => "",
+      });
+      const res = await adapter.resume(
+        "pane-1",
+        "codex_id",
+        token,
+        "/work",
+        profileRow?.codex_config_profile ?? null,
+        effectivePosture,
+        undefined,
+        undefined,
+        nonInterruptive,
+        override.kernelAuthority === true,
+        override.teamPermissionDefault === true,
+        undefined,
+        override.codexPermissions,
+      );
+      expect(res.ok).toBe(true);
+      return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
+    };
+
+    // 1. Legacy node permission_policy = 'builtin:yolo' WITHOUT saved provenance (NULL origin/posture):
+    //    real restore resolves "floor" (-s workspace-write), never raw builtinLaunchPosture('builtin:yolo').
+    const legacyNodeRig = rigRepo.createRig("legacy-node-rig");
+    const legacyNode = rigRepo.addNode(legacyNodeRig.id, "dev.legacy", { runtime: "codex", cwd: "/work/ln" });
+    const sLegacyNode = registry.registerSession(legacyNode.id, "dev-legacy@legacy-node-rig");
+    registry.updateResumeToken(sLegacyNode.id, "codex_id", "tok-legacy-node", "hook");
+    db.prepare(
+      "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = NULL, policy_launch_posture = NULL WHERE id = ?",
+    ).run(legacyNode.id);
+    observations.recordGeneration(
+      registry.currentOccupantTenure(legacyNode.id)!.generationUuid,
+      observeCodexSandbox("-s workspace-write"),
+    );
+
+    const legacyNodeEntry = getNodeInventory(db, legacyNodeRig.id)[0]!;
+    const legacyNodeDetail = getNodeDetail(db, legacyNodeRig.id, "dev.legacy")!;
+    expect(legacyNodeEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-legacy-node'`);
+    expect(legacyNodeEntry.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(legacyNode.id, legacyNodeRig.id, "tok-legacy-node"),
+    );
+    expect(legacyNodeEntry.resumeCommandLabel).toBeNull();
+    expect(legacyNodeDetail.resumeCommandLabel).toBeNull();
+    expect(legacyNodeDetail.recoveryGuidance?.commands[0]).toBe(legacyNodeEntry.resumeCommand);
+    expect(legacyNodeDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
+
+    // 2. Legacy rig permission_policy = 'builtin:yolo' WITHOUT saved rig provenance (NULL rig_policy_origin/posture):
+    //    real restore also resolves "floor" (-s workspace-write).
+    const legacyRig = rigRepo.createRig("legacy-rig");
+    db.prepare(
+      "UPDATE rigs SET permission_policy = 'builtin:yolo', rig_policy_origin = NULL, rig_policy_launch_posture = NULL WHERE id = ?",
+    ).run(legacyRig.id);
+    const legacyRigNode = rigRepo.addNode(legacyRig.id, "dev.riglegacy", { runtime: "codex", cwd: "/work/lr" });
+    const sLegacyRig = registry.registerSession(legacyRigNode.id, "dev-riglegacy@legacy-rig");
+    registry.updateResumeToken(sLegacyRig.id, "codex_id", "tok-legacy-rig", "hook");
+
+    const legacyRigEntry = getNodeInventory(db, legacyRig.id)[0]!;
+    expect(legacyRigEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-legacy-rig'`);
+    expect(legacyRigEntry.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(legacyRigNode.id, legacyRig.id, "tok-legacy-rig"),
+    );
+    expect(legacyRigEntry.resumeCommandLabel).toBe("flags from current settings");
+
+    // 3. Node provenance overrides rig provenance in BOTH directions.
+    const precRig = rigRepo.createRig("prec-rig");
+    db.prepare("UPDATE rigs SET non_interruptive = 1, permission_policy = 'builtin:yolo', rig_policy_origin = 'builtin', rig_policy_launch_posture = 'full_bypass' WHERE id = ?").run(precRig.id);
+
+    const floorOverYolo = rigRepo.addNode(precRig.id, "dev.locked", { runtime: "codex", cwd: "/work/l" });
+    rigRepo.setNodePermissionPolicy(floorOverYolo.id, "builtin:locked");
+    rigRepo.setNodePolicyProvenance(floorOverYolo.id, {
+      origin: "builtin",
+      resolvedTarget: "policies/builtin/locked.policy.md",
+      declaringDir: null,
+      launchPosture: "floor",
+    });
+    const sLocked = registry.registerSession(floorOverYolo.id, "dev-locked@prec-rig");
+    registry.updateResumeToken(sLocked.id, "codex_id", "tok-locked", "hook");
+
+    const inheritRigYolo = rigRepo.addNode(precRig.id, "dev.inherit", { runtime: "codex", cwd: "/work/i" });
+    const sInherit = registry.registerSession(inheritRigYolo.id, "dev-inherit@prec-rig");
+    registry.updateResumeToken(sInherit.id, "codex_id", "tok-inherit", "hook");
+
+    const precEntries = new Map(getNodeInventory(db, precRig.id).map((e) => [e.logicalId, e]));
+    expect(precEntries.get("dev.locked")?.resumeCommand).toBe(
+      `codex -s workspace-write ${UPDATE_OFF} resume 'tok-locked'`,
+    );
+    expect(precEntries.get("dev.locked")?.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(floorOverYolo.id, precRig.id, "tok-locked"),
+    );
+    expect(precEntries.get("dev.inherit")?.resumeCommand).toBe(
+      `codex -s danger-full-access -a never ${UPDATE_OFF} ${HIDE_NOTICES} resume 'tok-inherit'`,
+    );
+    expect(precEntries.get("dev.inherit")?.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(inheritRigYolo.id, precRig.id, "tok-inherit"),
+    );
+
+    // 4. Kernel rig with legacy raw member permission_policy = 'builtin:yolo' and NULL provenance:
+    //    member_policy suppresses kernel default AND missing provenance resolves to "floor".
+    const kernelLegacyRig = rigRepo.createRig("kernel");
+    const kernelLegacyNode = rigRepo.addNode(kernelLegacyRig.id, "ops.legacy", { runtime: "codex", cwd: "/work/kl" });
+    const sKernelLegacy = registry.registerSession(kernelLegacyNode.id, "ops-legacy@demo-rig");
+    registry.updateResumeToken(sKernelLegacy.id, "codex_id", "tok-kl", "hook");
+    db.prepare(
+      "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = NULL, policy_launch_posture = NULL WHERE id = ?",
+    ).run(kernelLegacyNode.id);
+
+    const klEntry = getNodeInventory(db, kernelLegacyRig.id)[0]!;
+    expect(klEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-kl'`);
+    expect(klEntry.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(kernelLegacyNode.id, kernelLegacyRig.id, "tok-kl"),
+    );
+  });
+
+  it("QA-002: reopens and re-derives readable valid custom policies while retaining persisted posture on malformed or missing files, matching RestoreOrchestrator", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-2989-custom-policy-"));
+    try {
+      const policiesDir = path.join(tmpDir, "policies");
+      fs.mkdirSync(policiesDir, { recursive: true });
+      const nodePolicyPath = path.join(policiesDir, "seat-flag.policy.md");
+      const rigPolicyPath = path.join(policiesDir, "rig-flag.policy.md");
+
+      const makeValidFlagPolicy = (posture: "floor" | "full_bypass"): string =>
+        [
+          "---",
+          "source: custom",
+          "name: synthetic-flag-policy",
+          "surface: flag",
+          `launch_posture: ${posture}`,
+          "policy_schema_version: 1",
+          "description: Synthetic test flag policy",
+          "---",
+          "Policy prose body.",
+          "",
+        ].join("\n");
+
+      const restoreOrchestrator = new RestoreOrchestrator({
+        db,
+        rigRepo,
+        sessionRegistry: registry,
+        eventBus: new EventBus(db),
+        snapshotRepo: { db },
+        checkpointStore: { db },
+        snapshotCapture: { db },
+        nodeLauncher: { db },
+      } as unknown as RestoreOrchestratorDeps);
+
+      const runRealRestoreResolvedResume = async (nodeId: string, rigId: string, token: string): Promise<string> => {
+        const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
+        const override = permStore.launchOverride(nodeId, "codex");
+        const effectivePosture = override.launchPosture ?? resolvedPosture;
+        const sent: string[] = [];
+        const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
+          sleep: async () => {},
+          maxWaitMs: 0,
+          exec: async () => "",
+        });
+        const res = await adapter.resume(
+          "pane-1",
+          "codex_id",
+          token,
+          "/work",
+          null,
+          effectivePosture,
+          undefined,
+          undefined,
+          rigRepo.getRigNonInterruptive(rigId),
+          override.kernelAuthority === true,
+          override.teamPermissionDefault === true,
+          undefined,
+          override.codexPermissions,
+        );
+        expect(res.ok).toBe(true);
+        return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
+      };
+
+      const rig = rigRepo.createRig("custom-rig");
+      // Rig-level custom policy initially persisted as full_bypass, file later edited to floor.
+      fs.writeFileSync(rigPolicyPath, makeValidFlagPolicy("floor"), "utf8");
+      db.prepare(
+        "UPDATE rigs SET permission_policy = ?, rig_policy_origin = 'custom', rig_policy_resolved_target = ?, rig_policy_declaring_dir = ?, rig_policy_launch_posture = 'full_bypass' WHERE id = ?",
+      ).run("policies/rig-flag.policy.md", rigPolicyPath, tmpDir, rig.id);
+
+      const rigCustomNode = rigRepo.addNode(rig.id, "dev.rigcustom", { runtime: "codex", cwd: "/work/rc" });
+      const sRigCustom = registry.registerSession(rigCustomNode.id, "dev-rigcustom@custom-rig");
+      registry.updateResumeToken(sRigCustom.id, "codex_id", "tok-rig-custom", "hook");
+
+      // Node-level custom policy persisted as floor, file edited to full_bypass.
+      fs.writeFileSync(nodePolicyPath, makeValidFlagPolicy("full_bypass"), "utf8");
+      const nodeCustom = rigRepo.addNode(rig.id, "dev.nodecustom", { runtime: "codex", cwd: "/work/nc" });
+      rigRepo.setNodePermissionPolicy(nodeCustom.id, "policies/seat-flag.policy.md");
+      rigRepo.setNodePolicyProvenance(nodeCustom.id, {
+        origin: "custom",
+        resolvedTarget: nodePolicyPath,
+        declaringDir: tmpDir,
+        launchPosture: "floor",
+      });
+      const sNodeCustom = registry.registerSession(nodeCustom.id, "dev-nodecustom@custom-rig");
+      registry.updateResumeToken(sNodeCustom.id, "codex_id", "tok-node-custom", "hook");
+      observations.recordGeneration(
+        registry.currentOccupantTenure(nodeCustom.id)!.generationUuid,
+        observeCodexSandbox("-s workspace-write"),
+      );
+
+      // Step A: Readable changed valid custom policies re-derive in BOTH directions.
+      let entries = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e]));
+      expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
+        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-node-custom'`,
+      );
+      expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(nodeCustom.id, rig.id, "tok-node-custom"),
+      );
+      expect(entries.get("dev.nodecustom")?.resumeCommandLabel).toBe(
+        "launched with -s workspace-write (approval unrecorded); a resume now uses -s danger-full-access -a never",
+      );
+      const nodeDetail = getNodeDetail(db, rig.id, "dev.nodecustom")!;
+      expect(nodeDetail.recoveryGuidance?.commands[0]).toBe(entries.get("dev.nodecustom")?.resumeCommand);
+      expect(nodeDetail.recoveryGuidance?.notes).toContain(
+        "launched with -s workspace-write (approval unrecorded); a resume now uses -s danger-full-access -a never",
+      );
+
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-rig-custom'`,
+      );
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+      );
+
+      // Step B: Malformed custom policy file on disk retains persisted posture (full_bypass on rigCustomNode).
+      fs.writeFileSync(rigPolicyPath, "---\nsource: custom\nsurface: flag\n---\ninvalid missing fields\n", "utf8");
+      entries = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e]));
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-rig-custom'`,
+      );
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+      );
+
+      // Step C: Deleted/unreadable custom policy file retains persisted posture (full_bypass on rigCustomNode, floor on nodeCustom).
+      fs.unlinkSync(rigPolicyPath);
+      fs.unlinkSync(nodePolicyPath);
+      entries = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e]));
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-rig-custom'`,
+      );
+      expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+      );
+      expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-node-custom'`,
+      );
+      expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(nodeCustom.id, rig.id, "tok-node-custom"),
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["never", "on-request", "untrusted"] as const)(
+    "QA-003: persists approval=%s end-to-end through CodexRuntimeAdapter -> AppliedLaunchObservationStore -> getNodeInventory and getNodeDetail",
+    async (approval) => {
+      const rig = rigRepo.createRig(`env-${approval}`);
+      const node = rigRepo.addNode(rig.id, "dev.envseat", { runtime: "codex", cwd: "/work/env" });
+      const session = registry.registerSession(node.id, `dev-envseat@env-${approval}`);
+      registry.updateResumeToken(session.id, "codex_id", `tok-${approval}`, "hook");
+
+      const envelope: CodexMemberPermissions = { sandbox: "read-only", approval };
+      await lifecycle.setPermissions({
+        seatRef: `dev-envseat@env-${approval}`,
+        codexPermissions: envelope,
+        actor: `op@env-${approval}`,
+        reason: `Test ${approval}`,
+      });
+
+      const adapter = new CodexRuntimeAdapter({
+        tmux: makeMockTmux(),
+        fsOps: inertFsOps(),
+        listProcesses: () => [],
+        sleep: async () => {},
+      });
+      const binding: NodeBinding = permStore.apply(
+        {
+          id: `b-${approval}`,
+          nodeId: node.id,
+          tmuxSession: `dev-envseat@env-${approval}`,
+          tmuxWindow: null,
+          tmuxPane: null,
+          cmuxWorkspace: null,
+          cmuxSurface: null,
+          updatedAt: "",
+          cwd: "/work/env",
+          launchPosture: "floor",
+        },
+        "codex",
+      );
+      const launched = await adapter.launchHarness(binding, { name: `dev-envseat@env-${approval}` });
+      expect(launched.ok).toBe(true);
+      const applied = (launched as { appliedLaunch?: AppliedLaunchObservation }).appliedLaunch!;
+      expect(applied).toMatchObject({
+        runtime: "codex",
+        axis: "sandbox",
+        state: "observed",
+        value: "read-only",
+        approvalPolicy: approval,
+      });
+
+      const genUuid = registry.currentOccupantTenure(node.id)!.generationUuid;
+      expect(observations.recordGeneration(genUuid, applied)).toBe(true);
+
+      // Verify raw persisted SQLite row in applied_launch_observations.
+      const rawRow = db
+        .prepare("SELECT value, approval_policy FROM applied_launch_observations WHERE generation_uuid = ?")
+        .get(genUuid) as { value: string | null; approval_policy: string | null } | undefined;
+      expect(rawRow).toEqual({ value: "read-only", approval_policy: approval });
+
+      // Recorded match -> label is null in both projections; command uses independent expected literal flags.
+      let entry = getNodeInventory(db, rig.id)[0]!;
+      let detail = getNodeDetail(db, rig.id, "dev.envseat")!;
+      expect(entry.resumeCommand).toBe(`codex -s read-only -a ${approval} ${UPDATE_OFF} resume 'tok-${approval}'`);
+      expect(entry.resumeCommandLabel).toBeNull();
+      expect(detail.resumeCommandLabel).toBeNull();
+      expect(detail.recoveryGuidance?.commands[0]).toBe(entry.resumeCommand);
+      expect(detail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
+
+      // Switch seat to floor -> recorded_difference names the exact stored approval policy.
+      await lifecycle.setPermissions({
+        seatRef: `dev-envseat@env-${approval}`,
+        mode: "floor",
+        actor: `op@env-${approval}`,
+        reason: "Switch to floor",
+      });
+      entry = getNodeInventory(db, rig.id)[0]!;
+      detail = getNodeDetail(db, rig.id, "dev.envseat")!;
+      const expectedLabel = `launched with -s read-only -a ${approval}; a resume now uses -s workspace-write`;
+      expect(entry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-${approval}'`);
+      expect(entry.resumeCommandLabel).toBe(expectedLabel);
+      expect(detail.resumeCommandLabel).toBe(expectedLabel);
+      expect(detail.recoveryGuidance?.notes).toContain(expectedLabel);
+    },
+  );
 });
