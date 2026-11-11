@@ -630,10 +630,30 @@ function runsForThisSeatsProject(env = process.env) {
         "",
         ...body,
       ]).join("\n");
+  let additionalContext = payload;
+  let contextOutput;
+  if (runtime() === "codex") {
+    // Keep the handler declaration unchanged; Codex's default is 2,500 tokens, ceil(UTF-8 bytes / 4).
+    const limitTokens = 2_500;
+    const bytes = Buffer.from(payload);
+    contextOutput = { status: "full", limitTokens, originalBytes: bytes.length, outputBytes: bytes.length, omittedBytes: 0 };
+    if (bytes.length > limitTokens * 4) {
+      let fullPath = `${stateFile}.${crypto.randomUUID()}.context.txt`;
+      try { fs.writeFileSync(fullPath, payload, { flag: "wx", mode: 0o600 }); }
+      catch { fullPath = null; }
+      const location = fullPath ? `Full text saved to: ${fullPath}` : "Full text could not be saved.";
+      // Reserve the notice before taking the prefix; streaming decode drops an incomplete final UTF-8 character.
+      const prefix = new TextDecoder().decode(bytes.subarray(0, Math.max(0, limitTokens * 4 - Buffer.byteLength(location) - 256)), { stream: true });
+      const prefixBytes = Buffer.byteLength(prefix);
+      const omittedBytes = bytes.length - prefixBytes;
+      additionalContext = `${prefix}\n\n[REFOCUS SHORTENED: omitted ${omittedBytes} trailing UTF-8 bytes from the assembled trace, role and standing instructions. ${location}]`;
+      contextOutput = { status: "shortened", limitTokens, originalBytes: bytes.length, outputBytes: Buffer.byteLength(additionalContext), prefixBytes, omittedBytes, fullPath };
+    }
+  }
   const output = JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
-      additionalContext: payload,
+      additionalContext,
     },
   });
   process.stdout.write(output, (error) => {
@@ -661,6 +681,9 @@ function runsForThisSeatsProject(env = process.env) {
         if (size > 0 && latest.lastReset?.at === state.lastReset?.at) latest.lastBytes = size;
         latest.firedAt = new Date().toISOString();
         latest.firedOn = event;
+        // Writer completion, not a model-context receipt. A shortened output names its omitted tail and full-text file.
+        if (contextOutput) latest.contextOutput = contextOutput;
+        else delete latest.contextOutput;
         if (samePending) {
           delete latest.pendingOn;
           delete latest.pendingAt;
