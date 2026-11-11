@@ -14,6 +14,8 @@ import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSe
 import { unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import { readRefocusRecord, type RefocusRecord } from "./refocus-record.js";
+import { readGuidanceProjection, type GuidanceProjection, type GuidanceSession } from "./guidance-projection.js";
+import { readNodeStartupSnapshot, seatGuidanceFile } from "./restore-guidance.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -59,6 +61,9 @@ export interface SeatStatus {
   /** A Claude seat's own subscription token: its reference (never the value), and whether the file would give Claude the
    *  token at the next launch. When it wouldn't, Claude starts on the config dir's stored login, and `notice` says so. */
   claude_token?: { kind?: "api-key"; label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
+  /** A running Claude or Codex seat: OpenRig's blocks in its guidance file, set against when the running agent loaded
+   *  that file. Whether a block could be in the agent's context, never whether the agent read it. */
+  guidance?: GuidanceProjection;
   terminalPolicy: ReturnType<TerminalPolicyStore["account"]> | { state: "unknown"; error: string };
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
@@ -184,6 +189,7 @@ export class SeatStatusService {
       restore_outcome: entry.restoreOutcome,
       ...this.runtimeHomeStatus(entry.nodeId, entry.runtime),
       ...this.claudeTokenStatus(entry.nodeId, entry.runtime),
+      ...this.guidanceStatus(entry),
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
@@ -203,6 +209,22 @@ export class SeatStatusService {
     // The same home the hook resolves (refocus.cjs).
     const home = this.env.OPENRIG_HOME || path.join(this.env.HOME || "/tmp", ".openrig");
     return { refocus: readRefocusRecord(home, entry.canonicalSessionName, entry.resumeToken ?? null) };
+  }
+
+  private guidanceStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "guidance"> {
+    if ((entry.runtime !== "claude-code" && entry.runtime !== "codex") || entry.sessionStatus !== "running" || !entry.cwd) return {};
+    const db = this.rigRepo.db;
+    let recorded: string | null = null;
+    try { recorded = readNodeStartupSnapshot(db, entry.nodeId)?.guidanceFile ?? null; } catch { /* the runtime's default file */ }
+    const file = seatGuidanceFile(entry.runtime, entry.cwd, this.rigRepo.getRigClaudeManagedBlockFile(entry.rigId), recorded);
+    if (!file) return {};
+    let session: GuidanceSession | null = null;
+    try {
+      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(entry.nodeId) as { origin: string; created_at: string | null; startup_completed_at: string | null } | undefined;
+      if (row) session = { origin: row.origin === "claimed" ? "claimed" : "launched", createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
+    } catch { /* no session to place the blocks against: they read unknown */ }
+    return { guidance: readGuidanceProjection({ db, file, runtime: entry.runtime, session }) };
   }
 
   private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {
