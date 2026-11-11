@@ -275,14 +275,15 @@ describe("SSE events route", () => {
       expect(ids(await readSSEEvents(await app.request("/api/events?replay=2"), 3))).toEqual(seqs);
     });
 
-    it("live delivery evidence and input-boundary records aren't written to the stream, so a viewer's cache never holds them, and a reconnect's replay skips them", async () => {
+    it("live delivery evidence and prompt observations aren't written to the stream, so a viewer's cache never holds them, and a reconnect's replay skips them", async () => {
       const rig = rigRepo.createRig("r01");
       const [first] = emitMany(rig.id, 1);
       const live = await app.request("/api/events?replay=0");
       setTimeout(() => {
         evidence(0);
-        eventBus.emit({ type: "transport.input_boundary", sessionName: "dev-impl@my-rig", occupantGeneration: "g", messageId: "m0", attemptId: "a0",
-          observed: "UserPromptSubmit", runtime: "claude-code", nativePromptId: null, nativeTurnId: null, observedAt: new Date().toISOString() });
+        eventBus.emit({ type: "transport.prompt_observation", sessionName: "dev-impl@my-rig", occupantGeneration: "g", runtime: "claude-code",
+          source: "UserPromptSubmit", nativeSessionId: null, nativePromptId: null, nativeTurnId: null, promptSha256: "a".repeat(64), promptBytes: 1,
+          observedAt: new Date().toISOString() });
         eventBus.emit({ type: "rig.created", rigId: rig.id });
       }, 10);
       expect((await readSSEEvents(live, 2)).map((e) => JSON.parse(e.data).type)).toEqual(["rig.created"]);

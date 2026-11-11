@@ -116,10 +116,10 @@ export const PRUNABLE_EVENT_TYPES = [
   "queue.claimed",
   "queue.unclaimed",
   "queue.handed_off",
-  // One delivery-evidence record per send, and at most one input-boundary record per send; kept only as long as the
-  // other high-volume event types.
+  // One delivery-evidence record per send, and one prompt observation per prompt hook; kept only as long as the other
+  // high-volume event types.
   "transport.delivery_evidence",
-  "transport.input_boundary",
+  "transport.prompt_observation",
 ] as const;
 
 export interface RetentionOptions {

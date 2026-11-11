@@ -189,8 +189,8 @@ export type RigEvent =
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
-   *  result shows reached the input; `terminalObserved` is today's screen check, verbatim; `inputBoundary` is unknown
-   *  until a harness hook is correlated. Never acceptance, a claim or completion. It names no node, so a node's own event
+   *  result shows reached the input; `terminalObserved` is today's screen check, verbatim; `inputBoundary` is unknown:
+   *  no harness here reports a prompt's origin, so no hook attributes one. Never acceptance, a claim or completion. It names no node, so a node's own event
    *  reads never see it: the session and occupant generation name the seat. */
   | { type: "transport.delivery_evidence"; sessionName: string; seatKind: "tmux" | "external_cli" | "unknown";
       pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
@@ -198,11 +198,13 @@ export type RigEvent =
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
-  /** A harness's own prompt hook matched to the one message OpenRig wrote (same session and occupant generation, an equal
-   *  text fingerprint, a single candidate): that message reached the input boundary. Never a claim, completion or
-   *  acceptance. It names no node. */
-  | { type: "transport.input_boundary"; sessionName: string; occupantGeneration: string; messageId: string; attemptId: string;
-      observed: "UserPromptSubmit"; runtime: string | null; nativePromptId: string | null; nativeTurnId: string | null; observedAt: string }
+  /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
+   *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
+   *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
+   *  input boundary stays unknown. It names no node. */
+  | { type: "transport.prompt_observation"; sessionName: string; occupantGeneration: string | null; runtime: string | null;
+      source: "UserPromptSubmit"; nativeSessionId: string | null; nativePromptId: string | null; nativeTurnId: string | null;
+      promptSha256: string; promptBytes: number; observedAt: string | null }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
