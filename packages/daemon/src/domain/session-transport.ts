@@ -282,6 +282,7 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
 const CLAUDE_STATUS_WARNINGS = [
   /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
   /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
+  /^✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai\/claude-c…$/,
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
   // #1641: Claude 2.1.293's update banner, whatever installer it names.
