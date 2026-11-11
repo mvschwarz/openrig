@@ -218,8 +218,8 @@ describe("a registered remote host in the topology tree (#2049)", () => {
         VPS,
       ],
       aggregateHosts: [
-        { hostId: "aggregate-unknown", status: "unknown" },
-        { hostId: "aggregate-down", status: "unreachable" },
+        { hostId: "agg-u", status: "unknown" },
+        { hostId: "agg-d", status: "unreachable" },
         { hostId: "vps", status: "ok" },
       ],
     };
@@ -230,14 +230,14 @@ describe("a registered remote host in the topology tree (#2049)", () => {
       "ssh-unknown": null,
       "ssh-down": false,
       vps: true,
-      "aggregate-unknown": null,
-      "aggregate-down": false,
+      "agg-u": null,
+      "agg-d": false,
     });
     expect(overview.text).toContain("ssh-unknown (unknown)");
     expect(overview.text).not.toContain("ssh-unknown (unreachable)");
-    expect(overview.text).toContain("aggregate-unknown (unknown)");
+    expect(overview.text).toContain("agg-u (unknown)");
     expect(overview.text).toContain("ssh-down (unreachable)");
-    expect(overview.text).toContain("aggregate-down (unreachable)");
+    expect(overview.text).toContain("agg-d (unreachable)");
 
     const detail = await page(fake, "host ssh-unknown");
     expect(detail.text).toContain("host ssh-unknown · unknown");
