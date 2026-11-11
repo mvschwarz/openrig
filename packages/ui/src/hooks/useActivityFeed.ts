@@ -30,6 +30,8 @@ export function useActivityFeed(): UseActivityFeedResult {
   const [feedOpen, setFeedOpen] = useState(false);
 
   const addEvent = useCallback((parsed: TopologyEvent) => {
+    // One delivery-evidence record per send is diagnostic, not activity for this feed.
+    if (parsed["type"] === "transport.delivery_evidence") return;
     const event: ActivityEvent = {
       seq: typeof parsed["seq"] === "number" ? parsed["seq"] : Date.now(),
       type: (parsed["type"] as string) ?? "unknown",

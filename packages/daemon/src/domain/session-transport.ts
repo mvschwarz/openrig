@@ -156,6 +156,21 @@ export interface PaneActivityClassification {
   evidence: string | null;
 }
 
+/** What a send's own result shows reached the seat's input. A send that succeeded without being retained issued the text
+ *  and Enter, whether or not it checked the screen, except a bare Enter and a prompt answer typed without Enter;
+ *  `inputPhase` tells an attempted write (it may have landed) from text left before Enter; a send that wrote nothing
+ *  says so. Anything else the result doesn't establish is unknown, never a guess. */
+export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "uncertain" | "none" | "unknown" {
+  if (result.ok && result.outcome !== "retained") {
+    if (result.submitOnly) return "submit_only";
+    return result.promptInteraction === "unverified" ? "text_only" : "submitted";
+  }
+  if (result.inputPhase === "attempted") return "uncertain";
+  if (result.inputPhase === "written") return "text_only";
+  if (result.inputPhase === "not_reached" || result.sent === false) return "none";
+  return "unknown";
+}
+
 function trimPaneLines(paneContent: string): string[] {
   return paneContent
     .split("\n")
@@ -2618,6 +2633,7 @@ export class SessionTransport {
    * agent input; a confirmed render does not prove agent consumption. */
   /** The managed compaction state OpenRig has recorded for a seat (the compaction enforcer's), for the sender's notice. */
   private compactionObserver?: (sessionName: string) => { stage: string; detail: string } | null;
+  private evidenceFailureLogged = false;
   setCompactionObserver(observer: (sessionName: string) => { stage: string; detail: string } | null): void {
     this.compactionObserver = observer;
   }
@@ -2647,6 +2663,49 @@ export class SessionTransport {
   }
 
   private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // The seat and occupant this send is for, frozen before it runs: a later handover doesn't relabel its evidence.
+    const seat = this.evidenceSeat(sessionName);
+    const result = await this.sendMarkingUrgent(sessionName, text, opts);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result);
+    return result;
+  }
+
+  /** The seat a send is for, when evidence is recorded at all: its kind, pane and current occupant generation. */
+  private evidenceSeat(sessionName: string): { kind: "tmux" | "external_cli" | "unknown"; pane: string | null; occupant: string | null } | null {
+    if (!this.eventBus) return null;
+    try {
+      const meta = this.getSessionMeta(sessionName);
+      return { kind: resolveSeatKind(meta.attachmentType).kind, pane: meta.pane, occupant: meta.occupant };
+    } catch {
+      return { kind: "unknown", pane: null, occupant: null };
+    }
+  }
+
+  /** One additive record of what this send's result says, beside it. Best effort: a record that
+   *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
+   *  unknown. Only an outbox row that exists counts as admitted. */
+  private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult): void {
+    if (!this.eventBus || !seat) return;
+    try {
+      const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
+      const outbox = new OutboxHandler(this.db);
+      const admitted = outboxIds.filter((id) => { try { return Boolean(outbox.getById(id)); } catch { return false; } });
+      const attemptId = randomUUID();
+      this.eventBus.emit({
+        type: "transport.delivery_evidence", sessionName: result.sessionName ?? sessionName, seatKind: seat.kind,
+        pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
+        admitted: admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
+        terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
+      });
+    } catch (err) {
+      if (!this.evidenceFailureLogged) {
+        this.evidenceFailureLogged = true;
+        console.warn(`[transport] delivery evidence wasn't recorded; sends are unaffected: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  private async sendMarkingUrgent(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     if (!opts?.urgent) return this.sendClassified(sessionName, text, opts);
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);

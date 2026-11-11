@@ -116,6 +116,8 @@ export const PRUNABLE_EVENT_TYPES = [
   "queue.claimed",
   "queue.unclaimed",
   "queue.handed_off",
+  // One delivery-evidence record per send; kept only as long as the other high-volume event types.
+  "transport.delivery_evidence",
 ] as const;
 
 export interface RetentionOptions {
