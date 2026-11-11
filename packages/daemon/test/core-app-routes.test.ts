@@ -526,3 +526,74 @@ it("does not advertise a functional job when the current registry or schema is u
   const schema = await f.send("/v1/capabilities", undefined, f.token);
   expect(schema.status).toBe(503); expect(await schema.json()).toEqual({ error: "app_job_unavailable" });
 });
+
+it.each(["handover", "withdrawal"] as const)("fences a typed permission answer when %s makes the live request unavailable during its return await", async change => {
+  const f = await permissionFixture();
+  const original = f.repo.createHumanAnswer.bind(f.repo), before = f.repo.getById(f.askId)!;
+  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+    expectedRevision: f.repo.decisionRevision(before), answer: { kind: "typed-reply", text: "Please allow this" } };
+  let afterInterventionSeq = -1;
+  vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(async input => {
+    const returned = await original(input);
+    if (change === "handover") {
+      f.sessions.registerSession(f.node.id, "runner@test", "handover");
+      expect(f.repo.decisionRevision(f.repo.getById(f.askId)!)).toBe(binding.expectedRevision);
+    } else {
+      expect(f.permissions.withdraw(null, f.askId, "turn_ended")).toMatchObject({ state: "withdrawn" });
+    }
+    afterInterventionSeq = f.bus.maxSeq();
+    return returned;
+  });
+  const answerId = `answer_live_${change}`;
+  const response = await f.send(`/v1/answers/${answerId}`, binding, f.token);
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ retrySameSubmission: false });
+  expect(f.repo.getById(f.askId)?.humanAnswers ?? {}).toEqual({});
+  expect(f.repo.relatedTo(f.askId).filter(edge => edge.relation === "handed-off-from")).toEqual([]);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.askId)).toEqual({ n: 0 });
+  expect(f.log.countAll()).toBe(0); expect(f.bus.maxSeq()).toBe(afterInterventionSeq);
+  const changes = f.db.prepare("SELECT total_changes() n").get();
+  const status = await f.send(`/v1/answers/${answerId}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+  expect(await status.json()).toMatchObject({ submission: { state: "conflict" }, retrySameSubmission: false });
+  expect((await f.send(`/v1/answers/${answerId}`, binding, f.token)).status).toBe(409);
+  expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+
+it("keeps an original committed permission receipt immutable after a later generation handover", async () => {
+  const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
+  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+    expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } };
+  const first = await f.send("/v1/answers/answer_committed_generation", binding, f.token);
+  expect(first.status).toBe(200); const receipt = await first.json();
+  await new Promise(resolve => setImmediate(resolve));
+  f.sessions.registerSession(f.node.id, "runner@test", "handover");
+  const changes = f.db.prepare("SELECT total_changes() n").get(), seq = f.bus.maxSeq();
+  const replay = await f.send("/v1/answers/answer_committed_generation", binding, f.token);
+  expect(replay.status).toBe(200); expect(await replay.json()).toMatchObject({ submission: receipt.submission, replayed: true });
+  expect(await (await f.send(`/v1/answers/answer_committed_generation?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json())
+    .toMatchObject({ submission: receipt.submission, replayed: true });
+  expect(await (await f.send(`/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json())
+    .toMatchObject({ permissionDecision: { status: "stale", nativeEffect: "unknown" } });
+  expect(f.log.countAll()).toBe(1); expect(f.bus.maxSeq()).toBe(seq);
+  expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+
+it("retains an unfinished permission submission's own choice/checkpoint while ending retry authority after handover", async () => {
+  const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
+  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+    expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } };
+  vi.spyOn(f.repo, "createHumanAnswer").mockRejectedValueOnce(new Error("fixture interruption after choice, before return"));
+  expect((await f.send("/v1/answers/answer_choice_generation", binding, f.token)).status).toBe(503);
+  expect(f.repo.getById(f.askId)?.humanAnswers).toEqual({ permission: "allow" });
+  const path = `/v1/answers/answer_choice_generation?actor=${encodeURIComponent(PERSON)}`;
+  expect(await (await f.send(path, undefined, f.token)).json()).toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true });
+  const evidence = f.db.prepare("SELECT binding_json, checkpoint_json, receipt_json FROM core_app_submissions WHERE answer_id = ?").get("answer_choice_generation");
+  f.sessions.registerSession(f.node.id, "runner@test", "handover");
+  const changes = f.db.prepare("SELECT total_changes() n").get(), seq = f.bus.maxSeq();
+  expect(await (await f.send(path, undefined, f.token)).json()).toMatchObject({ submission: { state: "conflict", conflictCode: "request_stale" }, retrySameSubmission: false });
+  expect((await f.send("/v1/answers/answer_choice_generation", binding, f.token)).status).toBe(409);
+  expect(f.db.prepare("SELECT binding_json, checkpoint_json, receipt_json FROM core_app_submissions WHERE answer_id = ?").get("answer_choice_generation")).toEqual(evidence);
+  expect(f.repo.getById(f.askId)?.humanAnswers).toEqual({ permission: "allow" });
+  expect(f.repo.relatedTo(f.askId)).toEqual([]); expect(f.log.countAll()).toBe(0);
+  expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});

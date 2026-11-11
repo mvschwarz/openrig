@@ -253,6 +253,9 @@ export class CoreAppJob {
     if (action?.auditNotes?.appReceipt) return { receipt: action.auditNotes.appReceipt as Record<string, unknown>, revision: null, retry: false };
     if (!item || item.contentErasedAt) return { code: "source_unavailable", revision: null, retry: false };
     const current = this.queue.decisionRevision(item);
+    // Occupant authority can end without changing dr1. Reuse the pure live-support check before any unfinished
+    // repair/write; immutable completed action evidence above still wins, and own closes keep their existing repair.
+    if (this.unsupported(item) === "request_stale") return { code: "request_stale", revision: current, retry: false };
     const withoutOwnReply = this.queue.decisionRevision(item, { excludeOperationReply: operation });
     const original = checkpoint?.before;
     // Another surface may have finished closing this exact original return. Its own close/answer fields are excluded
