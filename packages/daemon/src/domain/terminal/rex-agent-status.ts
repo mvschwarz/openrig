@@ -17,11 +17,13 @@ export interface RexStatusClients {
   listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null>;
 }
 
+/** A seat's activity and runtime at one reading. */
 export interface SeatActivity { activity: AgentActivity | null; runtime: string | null }
 
 /** A seat's current activity and runtime, resolved the way `rig ps --nodes` resolves them. */
 export type ResolveSeatActivity = (sessionName: string) => SeatActivity;
 
+/** The Rex state for an OpenRig activity; unknown becomes `clear`, never idle. */
 export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
   switch (activity?.state) {
     case "running": return { state: "working" };
@@ -34,6 +36,7 @@ export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
 /** The runtime as Rex names the app; a runtime it doesn't know is passed as OpenRig names it. */
 const rexApp = (runtime: string): string => runtime.replace(/[^A-Za-z0-9_.+-]/g, "-").slice(0, 32);
 
+/** The OSC 7501 report for a status, or null when a state has no runtime to name. */
 export function rexStatusReport(status: RexAgentStatus, runtime: string | null): string | null {
   let fields: string;
   if (status.state === "clear") fields = "state=clear";
@@ -46,81 +49,138 @@ export function rexStatusReport(status: RexAgentStatus, runtime: string | null):
 
 const isRex = (termtype: string): boolean => /^rex\b/i.test(termtype);
 
-/** How long a seat found without a Rex client is left alone, so a Rex client attached by hand, or by Rex after an app
- *  restart, is still found. */
+/** How long a seat found without a Rex client is left alone before it is looked at again, so a Rex client attached
+ *  by hand, or by Rex after an app restart, is still found. */
 export const REX_CLIENT_RECHECK_MS = 5 * 60_000;
+/** How often a seat with Rex clients is looked at again without an activity change: to reach a newly attached
+ *  client and to retry a report a client missed. Within it, an unchanged report costs no tmux call. */
+export const REX_CLIENT_REFRESH_MS = 5_000;
 
 async function writeTty(tty: string, text: string): Promise<void> {
   // O_NOCTTY: never take the client's terminal as the daemon's own. O_NONBLOCK: a stalled terminal drops the report
   // instead of holding the seat's later reports behind it.
   const handle = await open(tty, constants.O_WRONLY | constants.O_NOCTTY | constants.O_NONBLOCK);
-  try { await handle.write(text); } finally { await handle.close(); }
+  try {
+    const { bytesWritten } = await handle.write(text);
+    if (bytesWritten !== Buffer.byteLength(text)) throw new Error(`wrote ${bytesWritten} of ${Buffer.byteLength(text)} bytes`);
+  } finally {
+    await handle.close();
+  }
 }
+
+/** A seat with Rex clients: the report each client last took ("" when that isn't known), and when the clients were
+ *  last listed. */
+interface ShownSeat { delivered: Map<string, string>; listedAt: number }
 
 export class RexAgentStatusRelay {
   private readonly clients: RexStatusClients;
   private readonly resolve: ResolveSeatActivity;
   private readonly write: (tty: string, text: string) => Promise<void>;
-  /** The last report delivered per seat, so a seat is written only when what Rex should show changes. */
-  private readonly last = new Map<string, string>();
-  /** When a seat was last found without a Rex client. Such a seat isn't looked at again until a Rex view opens it or
-   *  REX_CLIENT_RECHECK_MS passes. */
-  private readonly unshownAt = new Map<string, number>();
   private readonly now: () => number;
+  private readonly sweeps: boolean;
+  private readonly shown = new Map<string, ShownSeat>();
+  /** When a seat was last found without a Rex client. */
+  private readonly unshownAt = new Map<string, number>();
   /** One report at a time per seat, so two quick changes reach the tile in order. */
   private readonly pending = new Map<string, Promise<void>>();
+  private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: {
     clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void>; now?: () => number;
+    /** False keeps the periodic sweep off; tests call sweep() themselves. */
+    sweep?: boolean;
   }) {
     this.clients = deps.clients;
-    this.now = deps.now ?? Date.now;
     this.resolve = deps.resolve;
     this.write = deps.writeTty ?? writeTty;
+    this.now = deps.now ?? Date.now;
+    this.sweeps = deps.sweep ?? true;
   }
 
   /** A Rex view just opened these seats' tiles: show each one's current state. */
   async tilesOpened(seats: string[]): Promise<void> {
-    await Promise.all(seats.map((seat) => {
-      this.unshownAt.delete(seat);
-      this.last.delete(seat);
-      return this.report(seat, true);
-    }));
+    await Promise.all(seats.map((seat) => this.report(seat, { opening: true })));
   }
 
   /** The seat's activity may have changed; `current` is its activity when the caller already resolved it. */
   activityChanged(seat: string, current?: SeatActivity): Promise<void> {
-    const unshown = this.unshownAt.get(seat);
-    if (unshown !== undefined && this.now() - unshown < REX_CLIENT_RECHECK_MS) return Promise.resolve();
-    return this.report(seat, false, current);
+    return this.report(seat, { current });
   }
 
-  private report(seat: string, opening: boolean, current?: SeatActivity): Promise<void> {
-    const next = (this.pending.get(seat) ?? Promise.resolve()).then(() => this.reportNow(seat, opening, current)).catch(() => {});
+  /** Look again, with no activity change, at seats whose clients are due a listing: retries, new clients, rechecks. */
+  async sweep(): Promise<void> {
+    const now = this.now();
+    const due = [
+      ...[...this.shown].filter(([, s]) => now - s.listedAt >= REX_CLIENT_REFRESH_MS).map(([seat]) => seat),
+      ...[...this.unshownAt].filter(([, at]) => now - at >= REX_CLIENT_RECHECK_MS).map(([seat]) => seat),
+    ];
+    await Promise.all(due.map((seat) => this.report(seat, {})));
+  }
+
+  /** Stop the periodic sweep. */
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private report(seat: string, opts: { opening?: boolean; current?: SeatActivity }): Promise<void> {
+    const next = (this.pending.get(seat) ?? Promise.resolve()).then(() => this.reportNow(seat, opts)).catch(() => {});
     this.pending.set(seat, next);
     void next.then(() => { if (this.pending.get(seat) === next) this.pending.delete(seat); });
     return next;
   }
 
-  private async reportNow(seat: string, opening: boolean, current?: SeatActivity): Promise<void> {
+  private async reportNow(seat: string, { opening = false, current }: { opening?: boolean; current?: SeatActivity }): Promise<void> {
+    const now = this.now();
+    const unshown = this.unshownAt.get(seat);
+    if (!opening && unshown !== undefined && now - unshown < REX_CLIENT_RECHECK_MS) return;
+    // Inside the queue, so a report still in flight can't record a delivery the opening has to repeat.
+    if (opening) for (const [tty] of this.shown.get(seat)?.delivered ?? []) this.shown.get(seat)!.delivered.set(tty, "");
+
     const { activity, runtime } = current ?? this.resolve(seat);
     const status = rexAgentStatus(activity);
-    // A tile that just opened has nothing to clear.
-    if (opening && status.state === "clear") return;
     const report = rexStatusReport(status, runtime);
-    if (!report || this.last.get(seat) === report) return;
+    if (!report) return;
+    const known = this.shown.get(seat);
+    const everyClientHasIt = known !== undefined && known.delivered.size > 0 && [...known.delivered.values()].every((r) => r === report);
+    if (everyClientHasIt && now - known.listedAt < REX_CLIENT_REFRESH_MS) return;
+
     const clients = await this.clients.listSessionClientTerminals(seat);
-    // tmux couldn't be read: try again on the next reading, without deciding the seat has no Rex client.
+    // tmux couldn't be read: try again later without deciding the seat has no Rex client.
     if (clients === null) return;
     const ttys = clients.filter((c) => isRex(c.termtype)).map((c) => c.tty);
     if (ttys.length === 0) {
-      this.unshownAt.set(seat, this.now());
-      this.last.delete(seat);
+      this.shown.delete(seat);
+      this.unshownAt.set(seat, now);
+      this.startSweeping();
       return;
     }
     this.unshownAt.delete(seat);
-    // Recorded only when every Rex client took it, so a client that missed it gets it on the next reading.
-    const written = await Promise.all(ttys.map((tty) => this.write(tty, report).then(() => true, () => false)));
-    if (written.every(Boolean)) this.last.set(seat, report);
+    const seatState: ShownSeat = known ?? { delivered: new Map(), listedAt: now };
+    seatState.listedAt = now;
+    for (const tty of [...seatState.delivered.keys()]) if (!ttys.includes(tty)) seatState.delivered.delete(tty);
+    this.shown.set(seat, seatState);
+    this.startSweeping();
+
+    // A client that never got a report has nothing to clear.
+    const targets = ttys.filter((tty) => {
+      const had = seatState.delivered.get(tty);
+      return had !== report && !(status.state === "clear" && had === undefined);
+    });
+    await Promise.all(targets.map(async (tty) => {
+      try {
+        await this.write(tty, report);
+        seatState.delivered.set(tty, report);
+      } catch {
+        // What it shows is now unknown, so the next look sends it the current report, whatever that is.
+        seatState.delivered.set(tty, "");
+      }
+    }));
+  }
+
+  private startSweeping(): void {
+    if (this.timer || !this.sweeps) return;
+    this.timer = setInterval(() => { void this.sweep(); }, REX_CLIENT_REFRESH_MS);
+    this.timer.unref?.();
   }
 }

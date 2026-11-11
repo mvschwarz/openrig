@@ -185,7 +185,9 @@ turned on in its Settings, under Rex Server.
 Each local seat's tile shows the seat's runtime (such as Claude Code or Codex) and
 its activity: working, idle, or blocked (with a permission kind for a permission
 prompt). The tile gets the current activity once it opens and each change after
-that, as `rig ps --nodes` resolves it. When OpenRig doesn't know a seat's activity,
+that, as `rig ps --nodes` resolves it. A Rex tile attached to the seat some other way, by
+hand or by Rex after an app restart, is caught up within about ten seconds, or within
+five minutes when no Rex tile was showing the seat before. When OpenRig doesn't know a seat's activity,
 the tile shows none rather than idle. OpenRig writes these reports only to the
 tmux clients attached to the seat that identify themselves as Rex, so other
 terminals attached to the seat get nothing and no tmux option changes.

@@ -399,10 +399,12 @@ After the check, the local seats whose tiles opened go to `RexAgentStatusRelay`
 (`rex-agent-status.ts`), which writes an OSC 7501 report to the tty of each tmux
 client attached to the seat whose `client_termtype` (its XTVERSION reply) names
 Rex. Later activity changes (the same hook-or-pane resolution that recovers
-prompt wakes in `startup.ts`) are written once per change; an unknown activity is
-written as `state=clear`. A seat found without a Rex client is not looked at
-again until a Rex view opens it or five minutes pass; a failed `list-clients`
-leaves that verdict unchanged.
+prompt wakes in `startup.ts`) are written to each Rex client that doesn't already
+have that report; an unknown activity is written as `state=clear`. The relay
+records what each client last took, and a sweep every 5 s lists a shown seat's
+clients again, so a new client or a failed write is caught up without another
+activity change. A seat found without a Rex client is looked at again when a Rex
+view opens it or after five minutes; a failed `list-clients` leaves it as it was.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 

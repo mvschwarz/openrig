@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   REX_CLIENT_RECHECK_MS,
+  REX_CLIENT_REFRESH_MS,
   RexAgentStatusRelay,
   rexAgentStatus,
   rexStatusReport,
@@ -14,19 +15,27 @@ const activity = (state: AgentActivityState, reason = "hook"): AgentActivity =>
 const osc = (fields: string) => `\x1b]7501;${fields}\x1b\\`;
 const REX = "rex 0.0.1793890641-gaf0c20";
 
-function fakeTmux(clients: Record<string, Array<{ tty: string; termtype: string }> | null>) {
+type Clients = Record<string, Array<{ tty: string; termtype: string }> | null>;
+
+/** A tmux with the given clients per seat, a clock, and terminals that can be told to refuse writes. */
+function rig(clients: Clients, seats: Record<string, SeatActivity> = {}) {
   const writes: Array<{ tty: string; text: string }> = [];
+  const refusing = new Set<string>();
   let listings = 0;
-  const tmux = {
-    async listSessionClientTerminals(session: string) { listings++; return session in clients ? clients[session] : []; },
-  };
-  const writeTty = async (tty: string, text: string) => { writes.push({ tty, text }); };
-  return { tmux, writes, writeTty, listings: () => listings };
+  const clock = { now: 0 };
+  const relay = new RexAgentStatusRelay({
+    clients: { async listSessionClientTerminals(session) { listings++; return session in clients ? clients[session]! : []; } },
+    resolve: (seat) => seats[seat] ?? { activity: null, runtime: null },
+    writeTty: async (tty, text) => { if (refusing.has(tty)) throw new Error("EAGAIN"); writes.push({ tty, text }); },
+    now: () => clock.now,
+    sweep: false,
+  });
+  const to = (tty: string) => writes.filter((w) => w.tty === tty).map((w) => w.text);
+  return { relay, writes, refusing, clock, to, listings: () => listings };
 }
 
-function relayWith(f: ReturnType<typeof fakeTmux>, seats: Record<string, SeatActivity>) {
-  return new RexAgentStatusRelay({ clients: f.tmux, resolve: (seat) => seats[seat] ?? { activity: null, runtime: null }, writeTty: f.writeTty });
-}
+const at = (state: AgentActivityState, runtime = "claude-code", reason?: string): SeatActivity => ({ activity: activity(state, reason), runtime });
+const rex = (tty: string) => ({ tty, termtype: REX });
 
 describe("rex agent status: mapping", () => {
   it("maps running, idle and needs_input, and keeps unknown as a clear rather than idle", () => {
@@ -48,92 +57,123 @@ describe("rex agent status: mapping", () => {
 
 describe("rex agent status: relay", () => {
   it("writes an opened seat's current state to its Rex clients only", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }, { tty: "/dev/ttys2", termtype: "iTerm2 3.6" }, { tty: "/dev/ttys3", termtype: "" }] });
-    await relayWith(f, { "op@kernel": { activity: activity("idle"), runtime: "claude-code" } }).tilesOpened(["op@kernel"]);
-    expect(f.writes).toEqual([{ tty: "/dev/ttys1", text: osc("state=idle:app=claude-code") }]);
+    const r = rig({ "op@k": [rex("/dev/t1"), { tty: "/dev/t2", termtype: "iTerm2 3.6" }, { tty: "/dev/t3", termtype: "" }] }, { "op@k": at("idle") });
+    await r.relay.tilesOpened(["op@k"]);
+    expect(r.writes).toEqual([{ tty: "/dev/t1", text: osc("state=idle:app=claude-code") }]);
   });
 
   it("writes nothing for a newly opened seat whose state is unknown", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
-    await relayWith(f, { "op@kernel": { activity: activity("unknown"), runtime: "claude-code" } }).tilesOpened(["op@kernel"]);
-    expect(f.writes).toEqual([]);
+    const r = rig({ "op@k": [rex("/dev/t1")] }, { "op@k": at("unknown") });
+    await r.relay.tilesOpened(["op@k"]);
+    expect(r.writes).toEqual([]);
   });
 
-  it("writes each change once, uses the caller's reading, and clears when the state becomes unknown", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
-    const relay = relayWith(f, {});
-    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
-    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
-    await relay.activityChanged("op@kernel", { activity: activity("unknown"), runtime: "claude-code" });
-    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
+  it("writes each change once, without listing clients again for an unchanged report, and clears on unknown", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1")] });
+    await r.relay.activityChanged("op@k", at("running"));
+    await r.relay.activityChanged("op@k", at("running"));
+    expect(r.listings()).toBe(1);
+    await r.relay.activityChanged("op@k", at("unknown"));
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
+  });
+
+  it("brings back a client that missed a change when the seat returns to the state it had", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1"), rex("/dev/t2")] });
+    await r.relay.activityChanged("op@k", at("idle"));
+    r.refusing.add("/dev/t2");
+    await r.relay.activityChanged("op@k", at("running"));
+    r.refusing.clear();
+    await r.relay.activityChanged("op@k", at("idle"));
+    expect(r.to("/dev/t1").at(-1)).toBe(osc("state=idle:app=claude-code"));
+    expect(r.to("/dev/t2").at(-1)).toBe(osc("state=idle:app=claude-code"));
+  });
+
+  it("clears a client whose last write failed when the state becomes unknown", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1")] });
+    await r.relay.activityChanged("op@k", at("idle"));
+    r.refusing.add("/dev/t1");
+    await r.relay.activityChanged("op@k", at("running"));
+    r.refusing.clear();
+    await r.relay.activityChanged("op@k", at("unknown"));
+    expect(r.to("/dev/t1").at(-1)).toBe(osc("state=clear"));
+  });
+
+  it("retries a missed report on the sweep, with no activity change", async () => {
+    const seats = { "op@k": at("running") };
+    const r = rig({ "op@k": [rex("/dev/t1")] }, seats);
+    r.refusing.add("/dev/t1");
+    await r.relay.activityChanged("op@k");
+    r.refusing.clear();
+    r.clock.now = REX_CLIENT_REFRESH_MS;
+    await r.relay.sweep();
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
+  });
+
+  it("reaches a client that replaced the old one while the state stayed the same", async () => {
+    const clients: Clients = { "op@k": [rex("/dev/t1")] };
+    const r = rig(clients, { "op@k": at("idle") });
+    await r.relay.activityChanged("op@k");
+    clients["op@k"] = [rex("/dev/t2")];
+    await r.relay.activityChanged("op@k");
+    expect(r.to("/dev/t2")).toEqual([]);
+    r.clock.now = REX_CLIENT_REFRESH_MS;
+    await r.relay.sweep();
+    expect(r.to("/dev/t2")).toEqual([osc("state=idle:app=claude-code")]);
+  });
+
+  it("sends the state to a tile that opens while a report for the seat is still in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const clients: Clients = { "op@k": [rex("/dev/t1")] };
+    const writes: string[] = [];
+    let first = true;
+    const relay = new RexAgentStatusRelay({
+      clients: { async listSessionClientTerminals(s) { if (first) { first = false; await gate; } return clients[s]!; } },
+      resolve: () => at("idle"),
+      writeTty: async (tty) => { writes.push(tty); },
+      sweep: false,
+    });
+    const inFlight = relay.activityChanged("op@k");
+    const opening = relay.tilesOpened(["op@k"]);
+    release();
+    await Promise.all([inFlight, opening]);
+    expect(writes).toEqual(["/dev/t1", "/dev/t1"]);
   });
 
   it("looks for Rex clients on a seat without one again only after a Rex view opens it or the recheck time passes", async () => {
-    const clients: Record<string, Array<{ tty: string; termtype: string }> | null> = { "dev@r": [] };
-    const f = fakeTmux(clients);
-    let now = 0;
-    const seats = { "dev@r": { activity: activity("running"), runtime: "codex" } };
-    const relay = new RexAgentStatusRelay({ clients: f.tmux, resolve: (seat) => seats[seat as "dev@r"], writeTty: f.writeTty, now: () => now });
-    await relay.activityChanged("dev@r");
-    seats["dev@r"].activity = activity("idle");
-    await relay.activityChanged("dev@r");
-    expect(f.listings()).toBe(1);
-    clients["dev@r"] = [{ tty: "/dev/ttys9", termtype: REX }];
-    now = REX_CLIENT_RECHECK_MS;
-    await relay.activityChanged("dev@r");
-    expect(f.writes).toEqual([{ tty: "/dev/ttys9", text: osc("state=idle:app=codex") }]);
+    const clients: Clients = { "dev@r": [] };
+    const seats = { "dev@r": at("running", "codex") };
+    const r = rig(clients, seats);
+    await r.relay.activityChanged("dev@r");
+    seats["dev@r"] = at("idle", "codex");
+    await r.relay.activityChanged("dev@r");
+    await r.relay.sweep();
+    expect(r.listings()).toBe(1);
+    clients["dev@r"] = [rex("/dev/t9")];
+    r.clock.now = REX_CLIENT_RECHECK_MS;
+    await r.relay.sweep();
+    expect(r.to("/dev/t9")).toEqual([osc("state=idle:app=codex")]);
     clients["dev@r"] = [];
-    seats["dev@r"].activity = activity("running");
-    await relay.activityChanged("dev@r");
-    clients["dev@r"] = [{ tty: "/dev/ttys9", termtype: REX }];
-    await relay.tilesOpened(["dev@r"]);
-    expect(f.writes.at(-1)).toEqual({ tty: "/dev/ttys9", text: osc("state=working:app=codex") });
+    seats["dev@r"] = at("running", "codex");
+    r.clock.now += REX_CLIENT_REFRESH_MS;
+    await r.relay.activityChanged("dev@r");
+    clients["dev@r"] = [rex("/dev/t9")];
+    await r.relay.tilesOpened(["dev@r"]);
+    expect(r.to("/dev/t9").at(-1)).toBe(osc("state=working:app=codex"));
   });
 
   it("keeps updating an open tile after tmux couldn't be read once", async () => {
-    const clients: Record<string, Array<{ tty: string; termtype: string }> | null> = { "op@kernel": null };
-    const f = fakeTmux(clients);
-    const relay = relayWith(f, {});
-    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
-    clients["op@kernel"] = [{ tty: "/dev/ttys1", termtype: REX }];
-    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
-    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code")]);
+    const clients: Clients = { "op@k": null };
+    const r = rig(clients);
+    await r.relay.activityChanged("op@k", at("running"));
+    clients["op@k"] = [rex("/dev/t1")];
+    await r.relay.activityChanged("op@k", at("running"));
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
   });
 
-  it("writes again to every Rex client when one of them missed the last report", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }, { tty: "/dev/ttys2", termtype: REX }] });
-    let failNext = true;
-    const relay = new RexAgentStatusRelay({
-      clients: f.tmux,
-      resolve: () => ({ activity: activity("running"), runtime: "claude-code" }),
-      writeTty: async (tty, text) => { if (tty === "/dev/ttys2" && failNext) { failNext = false; throw new Error("EAGAIN"); } f.writes.push({ tty, text }); },
-    });
-    await relay.activityChanged("op@kernel");
-    await relay.activityChanged("op@kernel");
-    expect(f.writes.map((w) => w.tty)).toEqual(["/dev/ttys1", "/dev/ttys1", "/dev/ttys2"]);
-  });
-
-  it("retries a report no Rex client took on the next activity reading", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
-    let attempts = 0;
-    const relay = new RexAgentStatusRelay({
-      clients: f.tmux,
-      resolve: () => ({ activity: activity("running"), runtime: "claude-code" }),
-      writeTty: async (tty, text) => { if (attempts++ === 0) throw new Error("EAGAIN"); f.writes.push({ tty, text }); },
-    });
-    await relay.activityChanged("op@kernel");
-    expect(f.writes).toEqual([]);
-    await relay.activityChanged("op@kernel");
-    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code")]);
-  });
-
-  it("leaves the tile on the latest state after two quick changes", async () => {
-    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
-    const relay = relayWith(f, {});
-    await Promise.all([
-      relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "codex" }),
-      relay.activityChanged("op@kernel", { activity: activity("idle"), runtime: "codex" }),
-    ]);
-    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=codex"), osc("state=idle:app=codex")]);
+  it("delivers two quick changes in order", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1")] });
+    await Promise.all([r.relay.activityChanged("op@k", at("running", "codex")), r.relay.activityChanged("op@k", at("idle", "codex"))]);
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=codex"), osc("state=idle:app=codex")]);
   });
 });
