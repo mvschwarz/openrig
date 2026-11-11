@@ -123,8 +123,8 @@ export interface Session {
 
 // -- Event types --
 
-/** What a delivery-evidence record says was admitted: the outbox rows that exist, or none. */
-export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none";
+/** What a delivery-evidence record says was admitted: the outbox rows that exist, none, or unknown when they couldn't be read. */
+export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
 
@@ -195,7 +195,7 @@ export type RigEvent =
   | { type: "transport.delivery_evidence"; sessionName: string; seatKind: "tmux" | "external_cli" | "unknown";
       pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
       admitted: DeliveryEvidenceAdmitted;
-      written: "submitted" | "submit_only" | "text_only" | "uncertain" | "none" | "unknown";
+      written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result" }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =

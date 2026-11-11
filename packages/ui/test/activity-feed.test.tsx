@@ -241,25 +241,6 @@ describe("Activity Feed", () => {
     });
   });
 
-  it("per-send delivery evidence never takes the feed's places", async () => {
-    renderHookHarness();
-
-    await waitFor(() => expect(instances).toHaveLength(1));
-    const es = getLastInstance();
-
-    act(() => {
-      es.simulateMessage(JSON.stringify({ type: "rig.created", rigId: "r-1", seq: 1, createdAt: new Date().toISOString() }));
-      for (let i = 0; i < 150; i++) {
-        es.simulateMessage(JSON.stringify({ type: "transport.delivery_evidence", sessionName: "dev-impl@my-rig", seq: 2 + i, createdAt: new Date().toISOString() }));
-      }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("event-count").textContent).toBe("1");
-      expect(screen.getAllByTestId("hook-event").map((entry) => entry.textContent)).toEqual(["rig.created"]);
-    });
-  });
-
   it("shows recent-log disclosure copy and capped-history footer", async () => {
     const events = Array.from({ length: 100 }, (_, i) =>
       makeEvent({ type: "rig.created", seq: i + 1, payload: { rigId: `r-${i}` } })

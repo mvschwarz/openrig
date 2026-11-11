@@ -2806,11 +2806,14 @@ describe("SessionTransport", () => {
         { ok: true, sessionName: s, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" },
         { ok: true, sessionName: s, outcome: "retained", sent: false, verified: false },
         { ok: false, sessionName: s, outcome: "failed", inputPhase: "attempted" },
-        { ok: false, sessionName: s, outcome: "failed", inputPhase: "written" },
+        { ok: false, sessionName: s, outcome: "failed", inputPhase: "written", reason: "submit_failed" },
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "submit_refused" },
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "draft_input_changed" },
         { ok: false, sessionName: s, sent: false, inputPhase: "not_reached" },
         { ok: false, sessionName: s, reason: "transport_unavailable" },
       ].map((result) => writtenFact(result as Parameters<typeof writtenFact>[0])))
-        .toEqual(["submitted", "submitted", "submitted", "submit_only", "text_only", "none", "uncertain", "text_only", "none", "unknown"]);
+        .toEqual(["submitted", "submitted", "submitted", "submit_only", "text_only", "none", "uncertain",
+          "text_submit_unknown", "text_submit_unknown", "text_only", "none", "unknown"]);
     });
 
     it("counts as admitted only an outbox row that was written, and names the message by the first outbox id", async () => {
@@ -2840,17 +2843,60 @@ describe("SessionTransport", () => {
       expect(evidence()).toMatchObject([{ seatKind: "external_cli", written: "none", terminalObserved: { outcome: null, verified: null } }]);
     });
 
-    it("a write that may have landed reads uncertain and is written once, never resent; text left before a failed Enter reads text only", async () => {
+    it("a write that may have landed reads uncertain and is written once, never resent", async () => {
       seedCanonicalRig();
       let writes = 0;
       const killed = mockTmux({ sendText: async () => { writes += 1; return { ok: false, code: "tmux_error", message: "execution deadline exceeded; client killed" }; } });
       const unknown = await createTransport(killed, { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
       expect(unknown).toMatchObject({ outcome: "failed", inputPhase: "attempted" });
       expect(writes).toBe(1);
-      const noEnter = mockTmux({ capturePaneContent: async () => "hello", sendKeys: async () => ({ ok: false, code: "tmux_error", message: "boom" }) });
-      const textOnly = await createTransport(noEnter, { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
-      expect(textOnly).toMatchObject({ outcome: "failed", inputPhase: "written" });
-      expect(evidence().map((fact) => fact.written)).toEqual(["uncertain", "text_only"]);
+      expect(evidence().map((fact) => fact.written)).toEqual(["uncertain"]);
+    });
+
+    it("text whose Enter failed or threw keeps the submission unknown; only a pre-Enter refusal reads text only", async () => {
+      seedCanonicalRig();
+      const send = (sendKeys: () => Promise<{ ok: false; code: string; message: string }>) =>
+        createTransport(mockTmux({ capturePaneContent: async () => "hello", sendKeys }), { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
+      expect(await send(async () => ({ ok: false, code: "tmux_error", message: "boom" }))).toMatchObject({ inputPhase: "written", reason: "submit_failed" });
+      // A thrown Enter is caught on the guarded path, which reports the text written and the Enter attempted.
+      const thrown = mockTmux({ capturePaneContent: async () => "hello", sendKeys: async () => { throw new Error("send-keys: lost reply"); } });
+      attachGuard(thrown);
+      const lost = await createTransport(thrown, { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
+      expect(lost).toMatchObject({ inputPhase: "written" });
+      expect(lost.error).toContain("the submission (Enter) outcome is unconfirmed");
+      expect(await send(async () => ({ ok: false, code: "draft_input_changed", message: "Human input arrived during this delivery." })))
+        .toMatchObject({ inputPhase: "written", reason: "draft_input_changed" });
+      expect(evidence().map((fact) => fact.written)).toEqual(["text_submit_unknown", "text_submit_unknown", "text_only"]);
+    });
+
+    it("an outbox read that fails leaves admission unknown, even beside a row that was read, and the send unchanged", async () => {
+      seedCanonicalRig();
+      db.exec(outboxEntriesSchema.sql);
+      const row = new OutboxHandler(db).record({ senderSession: "sender@my-rig", destinationSession: "dev-impl@my-rig", body: "hello" });
+      const real = OutboxHandler.prototype.getById;
+      const read = vi.spyOn(OutboxHandler.prototype, "getById").mockImplementation(function (this: OutboxHandler, id: string) {
+        if (id === "outbox-unreadable") throw new Error("database is locked");
+        return real.call(this, id);
+      });
+      const opts = { committedOutboxIds: [row.outboxId, "outbox-unreadable"] };
+      const plain = await createTransport(typing()).send("dev-impl@my-rig", "hello", opts);
+      const result = await createTransport(typing(), { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello", opts);
+      read.mockRestore();
+      expect(result).toEqual(plain);
+      expect(evidence()).toMatchObject([{ admitted: "unknown" }]);
+    });
+
+    it("names a kind only from a binding the seat has: no session or no binding reads unknown, a binding written without a kind reads tmux", async () => {
+      const { node } = seedCanonicalRig();
+      const transport = () => createTransport(typing(), { eventBus: new EventBus(db) });
+      await transport().send("ghost@nowhere", "hello");
+      const binding = db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(node.id) as Record<string, unknown>;
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      await transport().send("dev-impl@my-rig", "hello");
+      // A binding row written the legacy way, naming no kind, takes the column's default.
+      db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane) VALUES (?, ?, ?, ?)").run(binding.id, node.id, binding.tmux_session, binding.tmux_pane);
+      await transport().send("dev-impl@my-rig", "hello");
+      expect(evidence().map((fact) => fact.seatKind)).toEqual(["unknown", "unknown", "tmux"]);
     });
 
     it("a record that can't be written leaves the send and its result untouched", async () => {

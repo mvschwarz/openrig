@@ -156,17 +156,24 @@ export interface PaneActivityClassification {
   evidence: string | null;
 }
 
+/** Refusal codes from the checks that run before Enter reaches the adapter (the seat's input guard, the expected
+ *  conversation and managed compaction): a written send that stopped with one left its text without Enter. */
+function enterWithheld(reason: string | undefined): boolean {
+  return typeof reason === "string" && (reason.startsWith("expected_identity_") || reason.startsWith("draft_") || reason === "managed_compaction_pending");
+}
+
 /** What a send's own result shows reached the seat's input. A send that succeeded without being retained issued the text
- *  and Enter, whether or not it checked the screen, except a bare Enter and a prompt answer typed without Enter;
- *  `inputPhase` tells an attempted write (it may have landed) from text left before Enter; a send that wrote nothing
- *  says so. Anything else the result doesn't establish is unknown, never a guess. */
-export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "uncertain" | "none" | "unknown" {
+ *  and Enter, whether or not it checked the screen, except a bare Enter and a prompt answer typed without Enter. A
+ *  write that may have landed is uncertain. Text that was written reads text only when a pre-Enter check refused the
+ *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
+ *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
+export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown" {
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
   }
   if (result.inputPhase === "attempted") return "uncertain";
-  if (result.inputPhase === "written") return "text_only";
+  if (result.inputPhase === "written") return enterWithheld(result.reason) ? "text_only" : "text_submit_unknown";
   if (result.inputPhase === "not_reached" || result.sent === false) return "none";
   return "unknown";
 }
@@ -2675,7 +2682,9 @@ export class SessionTransport {
     if (!this.eventBus) return null;
     try {
       const meta = this.getSessionMeta(sessionName);
-      return { kind: resolveSeatKind(meta.attachmentType).kind, pane: meta.pane, occupant: meta.occupant };
+      // The kind is the node's binding's; with no session row or no binding there's no kind to name.
+      const binding = meta.nodeId ? this.sessionRegistry.getBindingForNode(meta.nodeId) : null;
+      return { kind: binding ? resolveSeatKind(binding.attachmentType).kind : "unknown", pane: meta.pane, occupant: meta.occupant };
     } catch {
       return { kind: "unknown", pane: null, occupant: null };
     }
@@ -2689,12 +2698,14 @@ export class SessionTransport {
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
       const outbox = new OutboxHandler(this.db);
-      const admitted = outboxIds.filter((id) => { try { return Boolean(outbox.getById(id)); } catch { return false; } });
+      // An outbox read that fails leaves admission unknown, never none or a partial list.
+      let admissionUnknown = false;
+      const admitted = outboxIds.filter((id) => { try { return Boolean(outbox.getById(id)); } catch { admissionUnknown = true; return false; } });
       const attemptId = randomUUID();
       this.eventBus.emit({
         type: "transport.delivery_evidence", sessionName: result.sessionName ?? sessionName, seatKind: seat.kind,
         pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
-        admitted: admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
+        admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
       });
     } catch (err) {

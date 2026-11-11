@@ -28,6 +28,11 @@ interface ActiveEnvelope {
   registered: Set<PersistedEvent>;
 }
 
+/** The SQL condition leaving `omit` out, bound as parameters: empty when there's nothing to leave out. */
+function typesLeftOut(omit: readonly string[]): string {
+  return omit.length ? ` AND type NOT IN (${omit.map(() => "?").join(", ")})` : "";
+}
+
 export class EventBus {
   private subscribers = new Set<Subscriber>();
   private activeEnvelope: ActiveEnvelope | null = null;
@@ -292,28 +297,30 @@ export class EventBus {
     return rows.map((row) => this.rowToPersistedEvent(row));
   }
 
-  private pageStatements?: { all: Database.Statement; rig: Database.Statement };
+  private pageStatements = new Map<string, Database.Statement>();
 
-  /** Up to `limit` events after `seq` and up to `upTo`, oldest first, of one rig when `rigId` is given: a replay read a
-   *  page at a time, which events stored meanwhile never lengthen. */
-  replayPage(seq: number, upTo: number, limit: number, rigId?: string): PersistedEvent[] {
-    this.pageStatements ??= {
-      all: this.db.prepare("SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT ?"),
-      rig: this.db.prepare("SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE rig_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?"),
-    };
-    const rows = (rigId ? this.pageStatements.rig.all(rigId, seq, upTo, limit) : this.pageStatements.all.all(seq, upTo, limit)) as EventRow[];
+  /** Up to `limit` events after `seq` and up to `upTo`, oldest first, of one rig when `rigId` is given, leaving out the
+   *  `omit` types: a replay read a page at a time, which events stored meanwhile never lengthen. */
+  replayPage(seq: number, upTo: number, limit: number, rigId?: string, omit: readonly string[] = []): PersistedEvent[] {
+    const key = `${rigId ? "rig" : "all"}:${omit.length}`;
+    let statement = this.pageStatements.get(key);
+    if (!statement) {
+      statement = this.db.prepare(`SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE ${rigId ? "rig_id = ? AND " : ""}`
+        + `seq > ? AND seq <= ?${typesLeftOut(omit)} ORDER BY seq LIMIT ?`);
+      this.pageStatements.set(key, statement);
+    }
+    const rows = statement.all(...(rigId ? [rigId] : []), seq, upTo, ...omit, limit) as EventRow[];
     return rows.map((row) => this.rowToPersistedEvent(row));
   }
 
-  /** The seq after which the newest `count` events start (of one rig when `rigId` is given): 0 when there are no more
-   *  than `count`, the newest seq for 0. A count past a safe integer is more than any log holds: never an OFFSET SQLite
-   *  cannot take. */
-  seqBeforeNewest(count: number, rigId?: string): number {
+  /** The seq after which the newest `count` events start (of one rig when `rigId` is given), not counting the `omit`
+   *  types: 0 when there are no more than `count`, the newest seq for 0. A count past a safe integer is more than any log
+   *  holds: never an OFFSET SQLite cannot take. */
+  seqBeforeNewest(count: number, rigId?: string, omit: readonly string[] = []): number {
     if (count === 0) return this.maxSeq();
     if (!Number.isSafeInteger(count)) return 0;
-    const row = (rigId
-      ? this.db.prepare("SELECT seq FROM events WHERE rig_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?").get(rigId, count)
-      : this.db.prepare("SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?").get(count)) as { seq: number } | undefined;
+    const row = this.db.prepare(`SELECT seq FROM events WHERE ${rigId ? "rig_id = ?" : "1"}${typesLeftOut(omit)} ORDER BY seq DESC LIMIT 1 OFFSET ?`)
+      .get(...(rigId ? [rigId] : []), ...omit, count) as { seq: number } | undefined;
     return row?.seq ?? 0;
   }
 
