@@ -7,6 +7,8 @@ import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_li
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
 import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
+import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
+import { networkReceiptsSchema } from "./migrations/161_network_receipts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -321,4 +323,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueErasureBatchesSchema,
   queueInboxCheckinsSchema,
   queueItemsHandedOffFromIndexSchema,
+  networkBindingsSchema,
+  networkReceiptsSchema,
 ];
