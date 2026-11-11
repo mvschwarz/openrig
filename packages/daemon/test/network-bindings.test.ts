@@ -107,6 +107,9 @@ describe("network bindings", () => {
     const binding = connect("a@lab");
     store.recordError(binding.id, "hub answered 503");
     expect(store.get(binding.id)!.lastError).toBe("hub answered 503");
+    // Hub text can carry terminal escapes; status prints it, so control characters are replaced.
+    store.recordError(binding.id, "hub said \u001b[31mred\u0007");
+    expect(store.get(binding.id)!.lastError).toBe("hub said  [31mred ");
     store.recordContact(binding.id, new Date("2026-11-11T18:30:00.000Z"));
     expect(store.get(binding.id)).toMatchObject({ lastContactAt: "2026-11-11T18:30:00.000Z", lastError: null });
     expect(store.markRevoked(binding.id, "the hub refused the credential")).toMatchObject({ state: "revoked", stateReason: "the hub refused the credential" });

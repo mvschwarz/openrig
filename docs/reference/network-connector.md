@@ -25,16 +25,21 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 
 ## What the connector does
 
-The daemon runs the connector for every active binding, about every 30 seconds (`OPENRIG_NETWORK_POLL_SECONDS`, at
-least 5). With no active binding it makes no network call.
+The daemon runs the connector for every active binding. It normally polls every 30 seconds
+(`OPENRIG_NETWORK_POLL_SECONDS`, at least 5); a failing hub, backoff or a backlog can delay it. Each binding's pass has
+a deadline of 60 seconds, so one slow hub doesn't hold the others. With no active binding it makes no network call.
 
 1. It lists the participant's own items on the hub, claims each pending one, and creates a local queue item for the
-   seat's current address. The local item comes from OpenRig itself, and its body names the requester and the hub item.
+   seat's current address. The local item comes from OpenRig itself, and it says where the work came from first: its
+   summary starts "From <requester> via network hub", and its body opens with the requester, the hub and the hub item,
+   before the requester's own words.
 2. It reports each stage on the hub item, kept apart:
    - **Queued:** the hub claim means the connector holds the item. The note says "Not picked up yet."
    - **Picked up:** once the seat claims the local item.
    - **The result:** once the local item closes, following any local handoffs to the item that finished. The hub item
-     closes with its resolution, and with the closure reason `canceled` or `denied` when the local item ended that way.
+     closes the way its queue closes one: done with the resolution and the closure reason (`no-follow-on`, `canceled`
+     or `denied`), or failed when the local item failed. A close with no resolution sends the closer's own note on that
+     close, or "Closed without a stated result." No other note on the item is sent.
 
 To answer, close the local item with your result:
 
@@ -44,9 +49,14 @@ rig queue update <local item> --state done --closure-reason no-follow-on --resol
 
 ## Retries, restarts and unknown outcomes
 
-- Each hub item maps to one local item, under an id derived from the binding and the hub item. A lost answer, a retry
-  or a daemon restart lands on that same item, so the work isn't started twice.
-- If the local record of an item is gone, the hub item says its outcome is unknown, and it is never run again.
+- Each hub item maps to one local item, under an id derived from the seat's node, the hub, the participant and the hub
+  item. A lost answer, a retry, a daemon restart, or disconnecting and connecting the same seat to the same hub and
+  participant again lands on that same item, so it isn't queued twice. A new binding reports what the earlier one
+  took.
+- If the local record of an item is gone, or it was handed on without one successor here, the hub item says its outcome
+  is unknown, and it is never run again.
+- If someone else closed the hub item first (its requester canceled it, say), the local result stays here, and the
+  connector doesn't count it as delivered.
 - The derived id makes the queue item unique, not the work's outside effects. Anything your agent did outside OpenRig
   before a crash is neither undone nor deduplicated.
 
@@ -62,9 +72,9 @@ connector's view: each binding's next pass, backoff and last pass.
 ## When things go wrong
 
 - **The seat has no session:** its hub items stay pending and unclaimed, and the last error says why. They're taken
-  once the seat has a session again.
-- **The hub can't be reached:** the binding stays active, the error is recorded, and retries back off, doubling up to
-  5 minutes.
+  once the seat has a session again. A stopped seat still has its session, so it still takes items; they wait for it.
+- **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
+  retries back off, doubling up to 5 minutes. A failure on this machine is recorded as local, not as the hub's.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 
@@ -83,7 +93,10 @@ each time it starts.
 
 ## Limits
 
-- The connector polls, so new work can wait up to one interval before it reaches the seat.
+- The connector polls, so new work normally waits up to one interval before it reaches the seat, and longer when the
+  hub fails or a backlog builds.
+- After a disconnect or a revocation, work already taken keeps running here, but its pickup and result no longer reach
+  the hub item, which stays at its last reported stage.
 - **Plain http needs your choice.** `rig network connect` refuses an `http:` hub URL until you add `--allow-http`, because
   the participant's token and its work then cross the network unencrypted, where they can be read. Use the hub's
   `https:` URL where it has one. The choice is recorded on that binding, so the connector doesn't ask again, and

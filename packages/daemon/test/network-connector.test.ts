@@ -1,7 +1,8 @@
 // The outbound connector against a hub that behaves like an external grant's queue: it lists the participant's own items,
-// a claim moves an item out of pending, and a close stores the resolution. Each test counts executions as local items
-// carrying the hub item: a lost answer, a restart or a revoke must never make a second one.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+// a claim moves an item out of pending, and a close stores the resolution. Each test counts the local queue items that
+// carry a hub item: a lost answer, a restart, a rebinding or a revoke must never make a second one. No agent consumes
+// these items here, so the cells prove one local item per hub item, not one agent run.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,9 +11,9 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { QueueRepository } from "../src/domain/queue-repository.js";
+import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { NetworkBindingStore, networkCredentialFile } from "../src/domain/network/network-bindings.js";
-import { HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
+import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { NetworkConnectorService, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
 const PARTICIPANT = "alex@team";
@@ -25,13 +26,19 @@ class FakeHub {
   /** The next claim or close of these ids takes effect, then its answer is lost. */
   readonly loseClaimAnswer = new Set<string>();
   readonly loseCloseAnswer = new Set<string>();
+  /** The next note on these ids fails; later ones land. */
+  readonly failNote = new Set<string>();
+  /** Shows of these ids wait until the pass closes its connection. */
+  readonly stallShow = new Set<string>();
+  /** Runs while a show is waiting on the hub, before it answers. */
+  duringShow: ((id: string) => void) | null = null;
   closes = 0;
 
   add(qitemId: string, body = "Summarize the release notes", destination = PARTICIPANT): void {
-    this.items.set(qitemId, { qitemId, sourceSession: "assistant@team", destinationSession: destination, state: "pending", body, summary: body, resolution: null, notes: [] });
+    this.items.set(qitemId, { qitemId, sourceSession: "assistant@team", destinationSession: destination, state: "pending", body, summary: body, resolution: null, closureReason: null, notes: [] });
   }
 
-  readonly connect: HubConnect = async (_url, token) => {
+  readonly connect: HubConnect = async (_url, token, signal) => {
     this.tokens.push(token);
     if (this.revoked) throw new HubError("revoked", "The hub refused this participant's credential.");
     if (this.down) throw new HubError("unavailable", "The hub couldn't be reached: connect ECONNREFUSED");
@@ -49,14 +56,23 @@ class FakeHub {
         item.state = "in-progress";
         if (this.loseClaimAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
       },
-      show: async (id) => { const { notes: _notes, ...item } = get(id); return { ...item }; },
-      note: async (id, note) => { get(id).notes.push(note); },
+      show: async (id) => {
+        this.duringShow?.(id);
+        if (this.stallShow.has(id)) {
+          await new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new HubError("unavailable", "The hub couldn't be reached: closed")), { once: true }));
+        }
+        const { notes: _notes, ...item } = get(id);
+        return { ...item };
+      },
+      note: async (id, note) => {
+        if (this.failNote.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
+        get(id).notes.push(note);
+      },
       close: async (id, input) => {
         this.closes++;
         const item = get(id);
-        if (item.state === "done" || item.state === "canceled") throw new HubError("refused", `qitem ${id} is already closed`);
-        item.state = input.closureReason === "canceled" ? "canceled" : "done";
-        item.resolution = input.resolution;
+        if (["done", "canceled", "denied", "failed"].includes(item.state)) throw new HubError("refused", `qitem ${id} is already closed`);
+        Object.assign(item, { state: input.state, closureReason: input.closureReason, resolution: input.resolution });
         if (this.loseCloseAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
       },
       end: async () => {},
@@ -84,14 +100,14 @@ describe("network connector", () => {
     hub = new FakeHub();
     deps = { db, queueRepo: repo, bindings, home, connect: hub.connect };
   });
-  afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  afterEach(() => { vi.restoreAllMocks(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
   const bind = () => bindings.create({ session: "dev-impl@lab", hubUrl: "https://hub.example/mcp", hubSeat: PARTICIPANT, token: "tok-1" });
   const pass = (bindingId: string) => runNetworkBindingPass(deps, bindings.get(bindingId)!);
-  /** Executions: local items carrying this hub item. */
+  /** The local items carrying this hub item. */
   const runs = (hubId: string) => repo.list({ limit: 500 }).filter((i) => (i.tags ?? []).includes(`network-hub-item:${hubId}`));
 
-  it("takes a hub item into the bound seat once, then carries pickup and the result back in order", async () => {
+  it("takes a hub item into the bound seat once, says where it came from first, then carries pickup and the result back in order", async () => {
     const b = bind();
     hub.add("hub-1");
     const first = await pass(b.id);
@@ -99,9 +115,11 @@ describe("network connector", () => {
     expect(first.error).toBeUndefined();
     expect(hub.tokens).toEqual(["tok-1"]);
     const [local] = runs("hub-1");
-    expect(local).toMatchObject({ qitemId: networkLocalItemId(b.id, "hub-1"), sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", state: "pending" });
+    expect(local).toMatchObject({ qitemId: networkLocalItemId(b, "hub-1"), sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", state: "pending",
+      summary: "From assistant@team via network hub: Summarize the release notes" });
+    // Where it came from is read before the requester's own words.
+    expect(local!.body!.split("\n")[0]).toBe("From assistant@team through the network hub https://hub.example/mcp, as alex@team (hub item hub-1).");
     expect(local!.body).toContain("Summarize the release notes");
-    expect(local!.body).toContain("From assistant@team through the network hub https://hub.example/mcp, as alex@team (hub item hub-1).");
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
     expect(hub.items.get("hub-1")).toMatchObject({ state: "in-progress" });
     expect(hub.items.get("hub-1")!.notes).toEqual([`Queued for the connected local seat as ${local!.qitemId}. Not picked up yet.`]);
@@ -140,7 +158,7 @@ describe("network connector", () => {
     const b = bind();
     hub.add("hub-3");
     hub.items.get("hub-3")!.state = "in-progress"; // claimed before the restart
-    await repo.create({ qitemId: networkLocalItemId(b.id, "hub-3"), sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", body: "already made",
+    await repo.create({ qitemId: networkLocalItemId(b, "hub-3"), sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", body: "already made",
       tags: [`network-binding:${b.id}`, "network-hub-item:hub-3"] });
     await pass(b.id);
     expect(runs("hub-3")).toHaveLength(1);
@@ -161,7 +179,7 @@ describe("network connector", () => {
     expect(settled).toMatchObject({ resultsSent: 1 });
     expect(settled.error).toBeUndefined();
     expect(hub.items.get("hub-4")!.resolution).toBe("done it");
-    expect(db.prepare("SELECT outcome, result_sent_at IS NOT NULL AS sent FROM network_receipts WHERE hub_qitem_id = 'hub-4'").get()).toEqual({ outcome: "done", sent: 1 });
+    expect(db.prepare("SELECT outcome, settled_at IS NOT NULL AS sent FROM network_receipts WHERE hub_qitem_id = 'hub-4'").get()).toEqual({ outcome: "done", sent: 1 });
   });
 
   it("a revoked credential ends the binding: no new work comes in, and the work already taken stays", async () => {
@@ -211,7 +229,7 @@ describe("network connector", () => {
     const [local] = runs("hub-7");
     db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(local!.qitemId);
     expect(await pass(b.id)).toMatchObject({ unknown: 1 });
-    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe(`This item's local record (${local!.qitemId}) is gone, so its outcome is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe(`This item's local record (${local!.qitemId}) is gone, so whether it ran is unknown. It won't be run again.`);
     expect(hub.items.get("hub-7")!.state).toBe("in-progress");
     await pass(b.id);
     expect(runs("hub-7")).toHaveLength(0);
@@ -295,6 +313,201 @@ describe("network connector", () => {
     } finally {
       await hubServer.close();
       await other.close();
+    }
+  });
+
+  it("a local handoff's result comes back from its successor; failed and denied closes come back as themselves; no successor reads unknown", async () => {
+    const b = bind();
+    for (const id of ["hub-h1", "hub-h2", "hub-h3", "hub-h4"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    repo.claim({ qitemId: local("hub-h1").qitemId, destinationSession: "dev-impl@lab" });
+    const { created } = await repo.handoff({ qitemId: local("hub-h1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    repo.claim({ qitemId: created.qitemId, destinationSession: "review@lab" });
+    await repo.update({ qitemId: created.qitemId, actorSession: "review@lab", state: "done", closureReason: "no-follow-on", resolution: "Reviewed: fine." });
+    await repo.update({ qitemId: local("hub-h2").qitemId, actorSession: "dev-impl@lab", state: "failed", transitionNote: "The build broke." });
+    // The queue's own refusal form: done with closure reason denied.
+    await repo.update({ qitemId: local("hub-h3").qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "denied", resolution: "Not mine to do." });
+    // Handed on with no successor here, as a handoff to another host leaves it.
+    db.prepare("UPDATE queue_items SET state = 'handed-off' WHERE qitem_id = ?").run(local("hub-h4").qitemId);
+
+    expect(await pass(b.id)).toMatchObject({ resultsSent: 3, unknown: 1 });
+    expect(hub.items.get("hub-h1")).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "Reviewed: fine." });
+    expect(hub.items.get("hub-h2")).toMatchObject({ state: "failed", closureReason: null, resolution: "The build broke." });
+    expect(hub.items.get("hub-h3")).toMatchObject({ state: "done", closureReason: "denied", resolution: "Not mine to do." });
+    expect(hub.items.get("hub-h4")).toMatchObject({ state: "in-progress" });
+    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe(`This item was handed on from ${local("hub-h4").qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+  });
+
+  it("a disconnect while a hub answer is pending starts no local work, and work already queued stays", async () => {
+    const b = bind();
+    hub.add("hub-d1");
+    await pass(b.id);
+    hub.add("hub-d2");
+    hub.duringShow = (id) => { if (id === "hub-d2") bindings.disconnect(b.id); };
+    await pass(b.id);
+    expect(runs("hub-d2")).toHaveLength(0);
+    expect(runs("hub-d1")).toHaveLength(1);
+    expect(hub.items.get("hub-d2")).toMatchObject({ state: "in-progress", notes: [] });
+  });
+
+  it("disconnecting and connecting the same seat, hub and participant again keeps one local item per hub item, unknown included", async () => {
+    const first = bind();
+    for (const id of ["r-queued", "r-picked", "r-done", "r-gone"]) hub.add(id);
+    await pass(first.id);
+    const local = (id: string) => runs(id)[0]!;
+    repo.claim({ qitemId: local("r-picked").qitemId, destinationSession: "dev-impl@lab" });
+    repo.claim({ qitemId: local("r-done").qitemId, destinationSession: "dev-impl@lab" });
+    await repo.update({ qitemId: local("r-done").qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Finished before the reconnect." });
+    const gone = local("r-gone").qitemId;
+    db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(gone);
+    bindings.disconnect(first.id);
+
+    const second = bind();
+    expect(second.id).not.toBe(first.id);
+    expect(await pass(second.id)).toMatchObject({ taken: 0, pickupsSent: 2, resultsSent: 1, unknown: 1 });
+    for (const id of ["r-queued", "r-picked", "r-done"]) expect(runs(id)).toHaveLength(1);
+    expect(runs("r-gone")).toHaveLength(0);
+    expect(hub.items.get("r-picked")!.notes.at(-1)).toMatch(/^Picked up by the local seat at /);
+    expect(hub.items.get("r-done")).toMatchObject({ state: "done", resolution: "Finished before the reconnect." });
+    expect(hub.items.get("r-gone")!.notes.at(-1)).toBe(`This item's local record (${gone}) is gone, so whether it ran is unknown. It won't be run again.`);
+    expect(db.prepare("SELECT DISTINCT binding_id FROM network_receipts").all()).toEqual([{ binding_id: second.id }]);
+    await pass(second.id);
+    expect(runs("r-gone")).toHaveLength(0);
+    expect(hub.items.get("r-gone")!.notes.filter((n) => n.includes("is unknown"))).toHaveLength(1);
+  });
+
+  it("a stage note that fails is sent on the next pass, and an unknown outcome is marked sent only once its note lands", async () => {
+    const b = bind();
+    hub.add("hub-n1");
+    hub.failNote.add("hub-n1");
+    expect(await pass(b.id)).toMatchObject({ taken: 1, error: "unavailable" });
+    expect(hub.items.get("hub-n1")!.notes).toEqual([]);
+    await pass(b.id);
+    expect(hub.items.get("hub-n1")!.notes).toEqual([`Queued for the connected local seat as ${runs("hub-n1")[0]!.qitemId}. Not picked up yet.`]);
+
+    // An id used before and erased: the queue refuses it, so whether it ran is unknown.
+    hub.add("hub-n2");
+    vi.spyOn(repo, "create").mockRejectedValueOnce(new QueueRepositoryError("qitem_erased", "erased"));
+    hub.failNote.add("hub-n2");
+    expect(await pass(b.id)).toMatchObject({ error: "unavailable" });
+    const receipt = () => db.prepare("SELECT outcome, settled_at FROM network_receipts WHERE hub_qitem_id = 'hub-n2'").get() as { outcome: string; settled_at: string | null };
+    expect(receipt()).toMatchObject({ outcome: "unknown", settled_at: null });
+    await pass(b.id);
+    expect(hub.items.get("hub-n2")!.notes).toEqual([expect.stringMatching(/is gone, so whether it ran is unknown\. It won't be run again\.$/)]);
+    expect(receipt().settled_at).not.toBeNull();
+    expect(runs("hub-n2")).toHaveLength(0);
+  });
+
+  it("a hub item someone else closed first isn't taken as our result: the receipt says so and the local result stays", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    await pass(b.id);
+    const [local] = runs("hub-c1");
+    Object.assign(hub.items.get("hub-c1")!, { state: "done", closureReason: "canceled", resolution: "Not needed any more." });
+    await repo.update({ qitemId: local!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Here it is." });
+    expect(await pass(b.id)).toMatchObject({ resultsSent: 0 });
+    expect(hub.items.get("hub-c1")).toMatchObject({ state: "done", closureReason: "canceled", resolution: "Not needed any more." });
+    expect(db.prepare("SELECT outcome, settled_at IS NOT NULL AS settled, last_error FROM network_receipts WHERE hub_qitem_id = 'hub-c1'").get()).toEqual({
+      outcome: "closed_on_hub", settled: 1,
+      last_error: `The hub item was closed elsewhere (done, canceled) before this result reached it. The result stays on ${local!.qitemId}.`,
+    });
+    expect(repo.getById(local!.qitemId)!.resolution).toBe("Here it is.");
+  });
+
+  it("a close without a resolution sends only the closer's own closing note, never another note on the item", async () => {
+    const b = bind();
+    hub.add("hub-w1");
+    hub.add("hub-w2");
+    await pass(b.id);
+    const [w1] = runs("hub-w1");
+    const [w2] = runs("hub-w2");
+    db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES (?, ?, 'pending', ?, 'daemon@kernel')")
+      .run(w1!.qitemId, new Date().toISOString(), "Stuck sweep: dev-impl@lab idle 17 min, recovery qitem-recovery-x.");
+    await repo.update({ qitemId: w1!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on" });
+    await repo.update({ qitemId: w2!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", transitionNote: "Done; the notes are in the item." });
+    await pass(b.id);
+    expect(hub.items.get("hub-w1")!.resolution).toBe("Closed without a stated result.");
+    expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");
+  });
+
+  it("a failure here is recorded as local, not as the hub's", async () => {
+    const b = bind();
+    hub.add("hub-l1");
+    vi.spyOn(repo, "create").mockRejectedValueOnce(new Error("disk I/O error"));
+    expect(await pass(b.id)).toMatchObject({ error: "local" });
+    expect(bindings.get(b.id)!.lastError).toBe("A local error stopped this pass: disk I/O error");
+  });
+
+  it("reporting looks at a bounded batch per pass and rotates it, so a later item isn't hidden behind older open ones", async () => {
+    const b = bind();
+    for (const id of ["hub-q1", "hub-q2", "hub-q3"]) hub.add(id);
+    let tick = Date.parse("2026-11-11T19:00:00.000Z");
+    const limited = { ...deps, reportLimit: 1, now: () => new Date(tick += 1000) };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    // q1 and q2 stay unclaimed and open; q3 is picked up.
+    repo.claim({ qitemId: runs("hub-q3")[0]!.qitemId, destinationSession: "dev-impl@lab" });
+    for (let i = 0; i < 3; i++) await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect(hub.items.get("hub-q3")!.notes.at(-1)).toMatch(/^Picked up by the local seat at /);
+  });
+
+  it("a pass whose hub stalls is closed at its deadline before any late local work, and the next binding still gets its turn", async () => {
+    const node = new RigRepository(db).addNode(new RigRepository(db).listRigs()[0]!.id, "review", { runtime: "claude-code" });
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s9', ?, 'dev-review@lab', 'running')").run(node.id);
+    const slow = bind();
+    hub.add("hub-s1");
+    hub.stallShow.add("hub-s1");
+    const other = new FakeHub();
+    other.add("hub-o1");
+    const fast = bindings.create({ session: "dev-review@lab", hubUrl: "https://other-hub.example/mcp", hubSeat: PARTICIPANT, token: "tok-2" });
+    const connect: HubConnect = (url, token, signal) => (url === "https://other-hub.example/mcp" ? other : hub).connect(url, token, signal);
+    const service = new NetworkConnectorService({ ...deps, connect, passTimeoutMs: 200 }, { intervalMs: 1000 });
+    await service.round();
+    expect(bindings.get(slow.id)!.lastError).toBe("This pass took longer than 200 ms, so its connection to the hub was closed. The next pass tries again.");
+    expect(runs("hub-s1")).toHaveLength(0);
+    // The other binding's pass ran in the same round and took its item.
+    expect(runs("hub-o1")).toEqual([expect.objectContaining({ destinationSession: "dev-review@lab" })]);
+    expect(bindings.get(fast.id)!.lastError).toBeNull();
+  });
+
+  it("an initialize the hub answers but a stalled initialized notification is closed at the deadline, and stop doesn't wait for a pass", async () => {
+    const { createServer } = await import("node:http");
+    const waiting: Array<() => void> = [];
+    const held: Array<import("node:http").ServerResponse> = [];
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        const message = raw ? JSON.parse(raw) as { id?: number; method?: string; params?: { protocolVersion?: string } } : {};
+        if (message.method === "initialize") {
+          res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+            result: { protocolVersion: message.params?.protocolVersion, capabilities: {}, serverInfo: { name: "stalling hub", version: "1" } } }));
+        } else {
+          held.push(res); // notifications/initialized: never answered
+          waiting.shift()?.();
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`;
+    try {
+      const b = bindings.create({ session: "dev-impl@lab", hubUrl: url, hubSeat: PARTICIPANT, token: "tok-stall", allowHttp: true });
+      const real = { ...deps, connect: connectMcpHub };
+      expect(await runNetworkBindingPass({ ...real, passTimeoutMs: 300 }, bindings.get(b.id)!)).toMatchObject({ error: "unavailable" });
+      expect(bindings.get(b.id)!.lastError).toBe("This pass took longer than 300 ms, so its connection to the hub was closed. The next pass tries again.");
+
+      const service = new NetworkConnectorService({ ...real, passTimeoutMs: 60_000 }, { intervalMs: 1000 });
+      const stalled = new Promise<void>((resolve) => waiting.push(resolve));
+      service.start();
+      await stalled;
+      const asked = Date.now();
+      await service.stop();
+      expect(Date.now() - asked).toBeLessThan(5_000);
+      expect(bindings.get(b.id)!.lastError).toBe("The connector stopped during this pass and closed its connection to the hub.");
+    } finally {
+      for (const res of held) res.destroy();
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

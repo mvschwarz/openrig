@@ -12,6 +12,7 @@ export interface HubItem {
   body?: string | null;
   summary?: string | null;
   resolution?: string | null;
+  closureReason?: string | null;
 }
 
 /** `revoked`: the hub refused the credential (401), so the binding ends. `unavailable`: the hub or its grant authority
@@ -29,11 +30,13 @@ export interface HubSession {
   claim(qitemId: string): Promise<void>;
   show(qitemId: string): Promise<HubItem>;
   note(qitemId: string, note: string): Promise<void>;
-  close(qitemId: string, input: { closureReason: string; resolution: string; note?: string }): Promise<void>;
+  /** Close the way the queue closes an item: done with a closure reason (no-follow-on, canceled or denied), or failed. */
+  close(qitemId: string, input: { state: "done" | "failed"; closureReason: string | null; resolution: string }): Promise<void>;
   end(): Promise<void>;
 }
 
-export type HubConnect = (hubUrl: string, token: string) => Promise<HubSession>;
+/** `signal` closes the connection when it aborts, which ends any call still waiting on the hub. */
+export type HubConnect = (hubUrl: string, token: string, signal?: AbortSignal) => Promise<HubSession>;
 
 /** A failure, sorted. The hub's own MCP endpoint answers 401 for an unknown or revoked credential and 503 when its grant
  *  authority can't answer (`packages/cli/src/mcp-http.ts`). */
@@ -67,21 +70,26 @@ const item = (value: unknown): HubItem => {
     body: typeof row.body === "string" ? row.body : null,
     summary: typeof row.summary === "string" ? row.summary : null,
     resolution: typeof row.resolution === "string" ? row.resolution : null,
+    closureReason: typeof row.closureReason === "string" ? row.closureReason : null,
   };
 };
 
 /** Connect to a hub as one participant. The bearer goes only in this transport's Authorization header. The SDK's
  *  same-origin policy, set explicitly, follows a redirect only within the hub's origin (or its https form on the same
  *  host), so the bearer never goes to another origin; any other redirect fails with its target named. */
-export const connectMcpHub: HubConnect = async (hubUrl, token) => {
+export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
   const transport = new StreamableHTTPClientTransport(new URL(hubUrl), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
     redirectPolicy: "same-origin",
   });
   const client = new Client({ name: "openrig-network-connector", version: "1" });
+  const close = () => { void client.close().catch(() => {}); };
+  if (signal?.aborted) throw new HubError("unavailable", "The pass ended before it reached the hub.");
+  signal?.addEventListener("abort", close, { once: true });
   try {
     await client.connect(transport);
   } catch (error) {
+    signal?.removeEventListener("abort", close);
     await client.close().catch(() => {});
     throw hubFailure(error);
   }
@@ -105,8 +113,8 @@ export const connectMcpHub: HubConnect = async (hubUrl, token) => {
     },
     note: async (qitemId, note) => { await call("rig_queue_update", { qitemId, note }); },
     close: async (qitemId, input) => {
-      await call("rig_queue_update", { qitemId, state: "done", closureReason: input.closureReason, resolution: input.resolution, ...(input.note ? { note: input.note } : {}) });
+      await call("rig_queue_update", { qitemId, state: input.state, ...(input.closureReason ? { closureReason: input.closureReason } : {}), resolution: input.resolution });
     },
-    end: async () => { await client.close().catch(() => {}); },
+    end: async () => { signal?.removeEventListener("abort", close); await client.close().catch(() => {}); },
   };
 };

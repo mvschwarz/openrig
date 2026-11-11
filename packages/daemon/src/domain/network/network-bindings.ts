@@ -193,10 +193,11 @@ export class NetworkBindingStore {
       .run(at.toISOString(), at.toISOString(), id);
   }
 
-  /** The connector couldn't reach the hub as this binding, or the hub answered with an error; the binding stays active. */
+  /** The connector couldn't reach the hub as this binding, or the hub answered with an error; the binding stays active.
+   *  Control characters are replaced, since the text can come from the hub and `rig network status` prints it. */
   recordError(id: string, message: string): void {
     this.db.prepare("UPDATE network_bindings SET last_error = ?, updated_at = ? WHERE id = ?")
-      .run(message.slice(0, 500), this.now().toISOString(), id);
+      .run(message.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 500), this.now().toISOString(), id);
   }
 
   /** The binding ends first, so no new work comes in even if the credential can't be removed; removal is tried on every

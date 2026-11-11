@@ -92,8 +92,9 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(first.error).toBeUndefined();
   expect(first).toMatchObject({ taken: 1 });
   const [local] = localRepo.list({ limit: 50 });
-  expect(local).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", summary: "Summarize the notes", state: "pending" });
-  expect(local!.body!.startsWith(body)).toBe(true);
+  expect(local).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: "dev-impl@lab", summary: "From lead@team via network hub: Summarize the notes", state: "pending" });
+  expect(local!.body!.split("\n")[0]).toBe(`From lead@team through the network hub ${hubUrl}, as alex@team (hub item ${task.qitemId}).`);
+  expect(local!.body).toContain(body);
   expect(hubRepo.getById(task.qitemId)!.state).toBe("in-progress");
   expect(notes().at(-1)).toBe(`Queued for the connected local seat as ${local!.qitemId}. Not picked up yet.`);
   expect(hubRepo.listTransitions(task.qitemId).find((t) => t.state === "in-progress")?.actorSession).toMatch(/^alex@team/);
@@ -110,6 +111,17 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(await pass()).toMatchObject({ resultsSent: 1 });
   expect(hubRepo.getById(task.qitemId)).toMatchObject({ state: "done", resolution: "Three changes; none breaking." });
   expect(bindings.get(binding.id)!.lastError).toBeNull();
+
+  // A failure and a cancel close the hub item the way its queue takes them: failed, and done with closure reason canceled.
+  const failing = await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Build it", body: "Build the release.", nudge: false } as never);
+  const dropped = await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Skip it", body: "Maybe not.", nudge: false } as never);
+  expect(await pass()).toMatchObject({ taken: 2 });
+  const byHub = (id: string) => localRepo.list({ limit: 50 }).find((i) => (i.tags ?? []).includes(`network-hub-item:${id}`))!;
+  await localRepo.update({ qitemId: byHub(failing.qitemId).qitemId, actorSession: "dev-impl@lab", state: "failed", transitionNote: "The build broke." });
+  await localRepo.update({ qitemId: byHub(dropped.qitemId).qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "canceled", resolution: "Not needed." });
+  expect(await pass()).toMatchObject({ resultsSent: 2 });
+  expect(hubRepo.getById(failing.qitemId)).toMatchObject({ state: "failed", resolution: "The build broke." });
+  expect(hubRepo.getById(dropped.qitemId)).toMatchObject({ state: "done", closureReason: "canceled", resolution: "Not needed." });
 
   await revokeGrant(tokenFile, "alex");
   expect(await pass()).toMatchObject({ error: "revoked" });
