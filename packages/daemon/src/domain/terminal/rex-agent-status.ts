@@ -147,6 +147,7 @@ export class RexAgentStatusRelay {
     // tmux couldn't be read: the sweep tries again, without deciding the seat has no Rex client.
     if (clients === null) {
       if (!known) this.shown.set(seat, { delivered: new Map(), listedAt: now });
+      this.unshownAt.delete(seat);
       this.startSweeping();
       return;
     }

@@ -191,6 +191,18 @@ describe("rex agent status: relay", () => {
     expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
   });
 
+  it("retries on the next sweep when a Rex view opens a seat found without a client and tmux can't be read", async () => {
+    const clients: Clients = { "op@k": [] };
+    const r = rig(clients, { "op@k": at("running") });
+    await r.relay.activityChanged("op@k");
+    clients["op@k"] = null;
+    await r.relay.tilesOpened(["op@k"]);
+    clients["op@k"] = [rex("/dev/t1")];
+    r.clock.now = REX_CLIENT_REFRESH_MS;
+    await r.relay.sweep();
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
+  });
+
   it("delivers two quick changes in order", async () => {
     const r = rig({ "op@k": [rex("/dev/t1")] });
     await Promise.all([r.relay.activityChanged("op@k", at("running", "codex")), r.relay.activityChanged("op@k", at("idle", "codex"))]);
