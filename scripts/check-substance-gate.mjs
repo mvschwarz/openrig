@@ -19,6 +19,7 @@ import {
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
 import { LEAK_GUARD_RULES_ENV, leakGuardRulesPath } from "./leak-guard-rules.mjs";
+import { packEntries } from "./npm-pack-json.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = "Genericize the content, cite its public home, or re-home it to the internal pack root.";
@@ -161,7 +162,13 @@ function derivePackageArtifacts(packageRoot) {
   } catch (error) {
     throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
   }
-  const rawFiles = parsed?.[0]?.files;
+  let entries = [];
+  try {
+    entries = packEntries(parsed);
+  } catch {
+    // not a shape npm prints: reported below as no files array
+  }
+  const rawFiles = entries[0]?.files;
   if (!Array.isArray(rawFiles)) throw new Error("npm artifact enumeration returned no files array");
   const files = rawFiles.map((entry) => entry?.path).filter((path) => typeof path === "string");
   if (files.length !== rawFiles.length || files.length === 0) {

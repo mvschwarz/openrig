@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { packEntry } from "./npm-pack-json.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(root, "packages", "cli");
@@ -47,8 +48,8 @@ async function assertDelayedSplits(entry, pkgDir) {
 
 try {
   execFileSync("npm", ["run", "build:package"], { cwd: root, stdio: "inherit" });
-  const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], { cwd: cli, encoding: "utf8" }));
-  const tarball = path.join(temp, packed[0].filename);
+  const packed = packEntry(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], { cwd: cli, encoding: "utf8" }));
+  const tarball = path.join(temp, packed.filename);
   execFileSync("tar", ["-xzf", tarball, "-C", temp]);
 
   const pkgDir = path.join(temp, "package");
@@ -68,7 +69,7 @@ try {
   });
   assert.equal(launched.status, 0, launched.stderr || `packed TUI exited ${launched.status}`);
   await assertDelayedSplits(entry, pkgDir);
-  console.log(`packed TUI launch PASS: ${packed[0].filename}`);
+  console.log(`packed TUI launch PASS: ${packed.filename}`);
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }
