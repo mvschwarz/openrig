@@ -688,8 +688,16 @@ export class WorkflowSpecCache {
         .run(sourcePath, existing?.spec_id ?? "").changes
       : 0;
     if (existing && existing.status !== "error" && existing.status !== RETAINED_STATUS && !moved && existing.source_hash === sourceHash) {
-      // A repair back to the cached bytes records this scan, so the next scan skips the file.
-      if (cleared > 0) {
+      // A verified same-hash read is itself an observation, even when it cleared no diagnostic. Advance only forward:
+      // this pre-read stamp is safe for stat-only skips, while a backwards clock must not replace a newer observation.
+      const existingCachedAtMs = Date.parse(existing.cached_at);
+      const capturedAtMs = Date.parse(capturedAt);
+      const shouldAdvanceObservation = Number.isFinite(capturedAtMs) && (
+        Number.isFinite(existingCachedAtMs)
+          ? existingCachedAtMs < capturedAtMs
+          : cleared > 0
+      );
+      if (shouldAdvanceObservation) {
         this.db.prepare(`UPDATE workflow_specs SET cached_at = ? WHERE spec_id = ?`).run(capturedAt, existing.spec_id);
         existing.cached_at = capturedAt;
       }
