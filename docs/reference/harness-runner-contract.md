@@ -314,8 +314,9 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
   - It accepts only an option the agent offered.
   - It records an agent's decision: who decided, why, and the person's words.
   - A request that's no longer pending comes back as it is, and nothing is written.
-- **If the agent closes its row without deciding,** the person's answer stands by the table above: a choice is that
-  option, and a plain no is the reject. Other words keep the request waiting.
+- **A kept answer counts only through an explicit decision.** If the row is closed without one (an agent's or a
+  person's ordinary close), the answer stays kept and the request waits; `rig seat decide-permission` still settles it.
+  A refusing close (denied) is still a no.
 - **With no agent that can decide,** any answer is kept, the request waits, and the person is told once that the tool
   hasn't run and how to decide directly (`rig seat decide-permission`) or set up a receiving agent. A handoff that fails
   leaves the request waiting the same way.

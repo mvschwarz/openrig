@@ -266,20 +266,28 @@ export class RunnerPermissions {
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
-    // A row handed on to decide that closed without a decision of its own (an agent's ordinary close) leaves the person's
-    // own answer on the ask they answered: it stands, by the same rules, so their no is never turned into a permit.
+    // The person's answer, from the live row or back along the rows the request was handed through.
     const answer = this.personAnswer(item);
     // The options travel with the ask: a row handed to an agent to decide carries none of its own.
     const offered = this.deps.queueRepo.permissionQuestionsFor(item)?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
-    if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
-    // A plain no in words, or a deny from the Feed, is the agent's reject, and never a grant; a plain yes is its allow.
     const allowId = tagValue(item, ALLOW_TAG), rejectId = tagValue(item, REJECT_TAG);
-    const said = item.closureReason === "denied" || item.state === "denied" ? "no" : typedYesOrNo(answer);
-    if (said === "no") return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
-    if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
-    // The person's own words that nobody decided on (a close without a decision, by them or an agent) are kept, never
-    // the default permit: the request waits for an explicit decision (`rig seat decide-permission`), or the turn's end.
-    if (typedWords(answer)) return { ok: true, state: "pending" };
+    // A refusing close (denied) is the agent's reject, and never a grant.
+    if (item.closureReason === "denied" || item.state === "denied") {
+      return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
+    }
+    if (answer != null) {
+      // An answer counts only through an explicit decision (`rig seat decide-permission`, or a person's own direct reply
+      // where no agent is wired to decide). An ordinary close without one leaves it waiting: never a direct action from
+      // a kept click or plain yes or no, and never the default permit over the person's answer.
+      if (!this.explicitlyDecided(item)) return { ok: true, state: "pending" };
+      if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
+      // A plain no in words is the agent's reject, and never a grant; a plain yes is its allow.
+      const said = typedYesOrNo(answer);
+      if (said === "no") return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
+      if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
+      // Other words nobody decided on are kept: the request waits for an explicit decision, or the turn's end.
+      return { ok: true, state: "pending" };
+    }
     // Closed with no answer at all is no answer, so OpenRig's default applies: permit.
     if (!allowId) return { ok: true, state: "refused", reason: "no_allow_offered" };
     this.recordClosedAsk(asked, item, origin.nodeId, allowId);
@@ -355,7 +363,7 @@ export class RunnerPermissions {
     const typed = this.personAnswer(live) as { kind?: unknown; text?: unknown } | string | undefined;
     const words = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
     this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
-      transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${clip(words, MAX_AGENT_TEXT)}"` : ""}` });
+      transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${clip(words, MAX_AGENT_TEXT)}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}` });
     return this.read(null, askId);
   }
 
@@ -380,6 +388,17 @@ export class RunnerPermissions {
     const live = asked ? this.liveEnd(asked) : null;
     const said = typedWords(live ? this.personAnswer(live) : undefined);
     return said ? { ...result, said } : result;
+  }
+
+  /** Whether the row's close is an explicit decision: `rig seat decide-permission`'s, recorded on the row (also after an
+   *  agent's ordinary close), or a person's own direct reply where no agent is wired to decide. */
+  private explicitlyDecided(item: QueueItem): boolean {
+    const transitions = this.deps.queueRepo.listTransitions(item.qitemId);
+    for (let i = transitions.length - 1; i >= 0 && transitions[i]!.state === item.state; i--) {
+      const t = transitions[i]!;
+      if (t.transitionNote?.startsWith("runner-permission-decided") || t.ownerNotificationKind === "human-decision-resolved") return true;
+    }
+    return false;
   }
 
   /** The answer the request holds: the live row's own, else the nearest one back along the rows it was handed through

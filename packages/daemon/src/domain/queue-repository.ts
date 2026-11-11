@@ -4285,9 +4285,10 @@ export class QueueRepository {
       const item = this.getById(input.qitemId);
       if (!item) return null;
       const answers: HumanAnswers = { ...item.humanAnswers, [input.questionId]: input.optionId };
-      // A row its agent closed without deciding: the decision is recorded on it, with its own transition; the runner's
-      // next read takes it.
-      if (item.state === "done" && item.humanAnswers?.[input.questionId] == null) {
+      // A row closed without a decision (an agent's or a person's ordinary close): the decision is recorded on it, with
+      // its own transition, over any kept answer (which the transition names); the runner's next read takes it.
+      // (The caller read it first: a row already decided explicitly never reaches here.)
+      if (item.state === "done") {
         this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
         this.transitionLog.append({ qitemId: item.qitemId, state: "done", actorSession: input.actorSession, transitionNote: input.transitionNote });
         return { persistedEvents: [] as PersistedEvent[] };

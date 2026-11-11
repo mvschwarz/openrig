@@ -679,7 +679,7 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)?.humanAnswers?.permission).toBeUndefined();
   });
 
-  it("an agent that closes the handed row without deciding leaves the person's own answer standing: their no is a reject, never a permit", async () => {
+  it("an agent that closes the handed row without deciding leaves the person's answer waiting: never a permit, and a direct decision settles it", async () => {
     for (const choice of [{ decision: "no" }, { optionId: "reject" }] as const) {
       const f = fixture({ decider: DECIDER });
       const askId = String((await f.submit()).body.askId);
@@ -687,8 +687,9 @@ describe("an answered request goes to the receiving agent, which decides while t
       const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
       // The agent's usual close, not decide-permission.
       await f.queueRepo.update({ qitemId: handed.qitemId, actorSession: DECIDER, state: "done", closureReason: "no-follow-on" });
-      expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+      expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
       expect(f.permits()).toHaveLength(0);
+      expect(await f.decide(askId, "reject", PERSON, "decided directly")).toMatchObject({ body: { state: "answered", optionId: "reject" } });
     }
   });
 
@@ -759,7 +760,7 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     expect(handedFrom(f, askId)!.body).toContain(`they wrote "only the test file"`);
   });
 
-  it("a person's no on a row handed to them stands when the agent it went to closes without deciding (two handoffs)", async () => {
+  it("a person's no on a row handed to them is kept when the agent it went to closes without deciding (two handoffs)", async () => {
     const f = fixture({ decider: "lead-two@perm-rig" });
     const askId = String((await f.submit()).body.askId);
     await f.act(askId, "handoff", { destinationSession: OTHER_PERSON });
@@ -768,8 +769,9 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     const toAgent = handedFrom(f, toDana.qitemId)!;
     expect(toAgent.destinationSession).toBe("lead-two@perm-rig");
     await f.queueRepo.update({ qitemId: toAgent.qitemId, actorSession: "lead-two@perm-rig", state: "done", closureReason: "no-follow-on" });
-    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
+    expect(await f.decide(askId, "reject", OTHER_PERSON)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
   });
 
   it("the agent gets the person's whole words, with where they're recorded, however long", async () => {
@@ -823,7 +825,7 @@ describe("an answered request: the round-1 controls with the daemon's own decide
     expect(told[0]!.body).toContain(`rig seat decide-permission ${askId} --option <id>`);
   });
 
-  it("a Reject click on a row handed to a colleague stands when the agent it went to closes without deciding (two handoffs)", async () => {
+  it("a Reject click on a row handed to a colleague is kept when the agent it went to closes without deciding (two handoffs)", async () => {
     const f = fixture({ decider: "lead-two@perm-rig" });
     const askId = String((await f.submit()).body.askId);
     await f.act(askId, "handoff", { destinationSession: OTHER_PERSON });
@@ -831,7 +833,8 @@ describe("an answered request: the round-1 controls with the daemon's own decide
     await f.answer(toDana.qitemId, { optionId: "reject" }, OTHER_PERSON);
     const toAgent = handedFrom(f, toDana.qitemId)!;
     await f.queueRepo.update({ qitemId: toAgent.qitemId, actorSession: "lead-two@perm-rig", state: "done", closureReason: "no-follow-on" });
-    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
   });
 
   it("qualified words the agent closed without deciding stay waiting; a direct decision still settles them", async () => {
@@ -843,5 +846,28 @@ describe("an answered request: the round-1 controls with the daemon's own decide
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
     expect(await f.decide(askId, "allow", PERSON, "the test file only")).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+  });
+});
+
+describe("a kept answer counts only through an explicit decision (Root's source finding at c0a5d7b1)", () => {
+  it("with no agent that can decide, a kept click or plain yes followed by an ordinary close still waits: no direct action, no permit", async () => {
+    for (const choice of [{ optionId: "allow" }, { decision: "yes" }, { optionId: "reject" }] as const) {
+      const f = fixture({ decider: null });
+      const askId = String((await f.submit()).body.askId);
+      await f.answer(askId, choice);
+      // An ordinary close by the person or an agent: not a decision.
+      await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+      expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+      expect(f.permits()).toHaveLength(0);
+      // The explicit decision still settles it, recorded on the closed row.
+      expect(await f.decide(askId, "allow", PERSON, "decided directly")).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    }
+  });
+
+  it("a request closed with no answer at all keeps the default permit", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
   });
 });
