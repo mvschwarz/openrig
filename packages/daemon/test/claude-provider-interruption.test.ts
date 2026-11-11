@@ -154,6 +154,8 @@ describe("Claude provider interruptions (#99)", () => {
       "resets 4pm ()",
       "resets in 2 months", // not two minutes
       "resets in 2h 30x",
+      "resets in 2h, 30x", // a separator doesn't end the fragment
+      "resets in 2h and 30x",
       "resets in soon",
       "resets Feb 30, 4pm (UTC)",
       "resets Mar 1, 4pm (UTC)", // more than a week away: not a usage window

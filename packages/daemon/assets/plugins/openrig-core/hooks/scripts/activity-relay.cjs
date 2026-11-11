@@ -168,9 +168,10 @@ function claudeLimitResetAt(text, nowDate) {
     resetMs = Number(epoch[1]) * 1000;
   } else if (RESET_IN_LEAD_RE.test(text)) {
     const relative = RESET_IN_RE.exec(text);
-    // The whole fragment must be read: nothing numeric may follow what was ("in 2h 30x" is not two hours).
+    // The whole fragment must be read: nothing numeric may follow what was, across a separator either
+    // ("in 2h 30x", "in 2h, 30x" and "in 2h and 30x" are not two hours).
     if (!relative || !(relative[1] || relative[2] || relative[3])
-      || /^\s*\d/.test(text.slice(relative.index + relative[0].length))) return null;
+      || /^(?:\s|[,;&+]|and\b)*\d/i.test(text.slice(relative.index + relative[0].length))) return null;
     resetMs = nowMs + ((Number(relative[1] || 0) * 24 + Number(relative[2] || 0)) * 60 + Number(relative[3] || 0)) * 60_000;
   } else {
     const wall = RESET_AT_RE.exec(text);
