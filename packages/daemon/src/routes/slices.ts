@@ -210,16 +210,32 @@ export function slicesRoutes(): Hono {
   return app;
 }
 
-function qualifiedEvidenceRoot(projectRoot: string, missionsRoot: string): string | null {
+const UNAVAILABLE_EVIDENCE_ROOT_CODES = new Set([
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "ENOTDIR",
+  "ELOOP",
+  "EIO",
+  "ENAMETOOLONG",
+  "ESTALE",
+]);
+
+export function qualifiedEvidenceRoot(projectRoot: string, missionsRoot: string): string | null {
   const candidate = path.join(path.dirname(missionsRoot), "dogfood-evidence");
   const relative = path.relative(path.resolve(projectRoot), path.resolve(candidate));
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
-  try { fs.lstatSync(candidate); }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+  try {
+    const resolved = insideProject(projectRoot, candidate);
+    fs.accessSync(resolved, fs.constants.R_OK | fs.constants.X_OK);
+    fs.readdirSync(resolved);
+    return resolved;
+  } catch (err) {
+    if (err instanceof ProjectReadError && err.code === "project_path_escape") return null;
+    const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+    if (typeof code === "string" && UNAVAILABLE_EVIDENCE_ROOT_CODES.has(code)) return null;
     throw err;
   }
-  return insideProject(projectRoot, candidate);
 }
 
 function selectSliceDeps(
