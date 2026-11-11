@@ -1,5 +1,6 @@
 import { fieldLine, sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { FleetSnapshot, ViewState } from "../types.js";
+import { pairingLines } from "./pairing.js";
 
 export interface ConfigEntry {
   key: string;
@@ -232,6 +233,8 @@ function configContentLines(state: ViewState, snap: FleetSnapshot, width: number
     { text: `Next: ${snap.connections?.nextAction ?? "rig gateway status"}` },
     { text: "Guidance only; verification contacts Slack explicitly." },
   ], width));
+  // A pairing request is decided directly here (the Feed's pairing item opens this page on it).
+  if (category === "instance") lines.push(...pairingLines(snap.pairRequests, state.configFocus, width), { text: "" });
   if (category === "display") lines.push(...wrapDetailLines([{ text: `Client timezone: ${state.timeZone} (selected at TUI start)` }], width));
   lines.push({ text: `${entries.length} settings${state.filter ? ` matching “${state.filter}”` : ""} · Enter opens full value/source` }, { text: "" });
   lines.push({ text: "  SETTING / VALUE / SOURCE · env > file > default" });

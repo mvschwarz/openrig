@@ -100,6 +100,8 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
           lines.push({ text: `Or answer in your own words: reply <text>, ${as}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
         }
       }
+      // The settings page that decides this request directly (a pairing request's Approve and Deny), opened on it.
+      if (d.item.settingsLink) lines.push(listItem(d.item.settingsLink.label, { type: "config-category", category: d.item.settingsLink.category, focus: d.item.settingsLink.focus }));
       // Chat, as on the Feed card: open the asker's own terminal to answer in your own words.
       if (d.item.asker) {
         const view = seatViewOf(snap, d.item.asker);

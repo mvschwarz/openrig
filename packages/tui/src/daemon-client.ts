@@ -428,6 +428,15 @@ export class DaemonClient {
   reviewFleet() {
     return this.get(`/api/review/fleet`);
   }
+  /** This host's open pairing requests (read-only; nothing in it is a credential). */
+  pairRequests() { return this.get("/api/hosts/pair-requests") as Promise<{ requests: import("./config/pairing.js").PairRequest[] }>; }
+  /** Decide a pairing request directly, as `rig host approve|deny` does (POST /api/hosts/pair-decision), with the operator's
+   *  action headers. Returns the HTTP outcome; a timeout or a lost connection throws, and then the outcome is unknown. */
+  async pairDecision(request: string, decision: "approve" | "deny"): Promise<{ status: number; body: Record<string, unknown> | null }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/hosts/pair-decision`, { method: "POST",
+      headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
+    return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
+  }
   /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
   missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
     return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
