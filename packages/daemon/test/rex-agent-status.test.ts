@@ -51,7 +51,7 @@ describe("rex agent status: mapping", () => {
     expect(rexStatusReport({ state: "idle" }, "claude-code")).toBe(osc("state=idle:app=claude-code"));
     expect(rexStatusReport({ state: "blocked", kind: "permission" }, "codex")).toBe(osc("state=blocked:app=codex:kind=permission"));
     expect(rexStatusReport({ state: "clear" }, null)).toBe(osc("state=clear"));
-    expect(rexStatusReport({ state: "working" }, null)).toBeNull();
+    expect(rexStatusReport({ state: "working" }, null)).toBe(osc("state=clear"));
   });
 });
 
@@ -168,6 +168,26 @@ describe("rex agent status: relay", () => {
     await r.relay.activityChanged("op@k", at("running"));
     clients["op@k"] = [rex("/dev/t1")];
     await r.relay.activityChanged("op@k", at("running"));
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
+  });
+
+  it("clears a delivered state when the seat's runtime is no longer known, and sends nothing to a fresh tile", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1")] });
+    await r.relay.activityChanged("op@k", at("idle"));
+    await r.relay.activityChanged("op@k", { activity: activity("idle"), runtime: null });
+    expect(r.to("/dev/t1")).toEqual([osc("state=idle:app=claude-code"), osc("state=clear")]);
+    const fresh = rig({ "op@k": [rex("/dev/t2")] }, { "op@k": { activity: activity("idle"), runtime: null } });
+    await fresh.relay.tilesOpened(["op@k"]);
+    expect(fresh.writes).toEqual([]);
+  });
+
+  it("recovers through the sweep when the seat's first tmux listing fails", async () => {
+    const clients: Clients = { "op@k": null };
+    const r = rig(clients, { "op@k": at("running") });
+    await r.relay.activityChanged("op@k");
+    clients["op@k"] = [rex("/dev/t1")];
+    r.clock.now = REX_CLIENT_REFRESH_MS;
+    await r.relay.sweep();
     expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
   });
 

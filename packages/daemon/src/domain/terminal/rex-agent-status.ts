@@ -36,16 +36,15 @@ export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
 /** The runtime as Rex names the app; a runtime it doesn't know is passed as OpenRig names it. */
 const rexApp = (runtime: string): string => runtime.replace(/[^A-Za-z0-9_.+-]/g, "-").slice(0, 32);
 
-/** The OSC 7501 report for a status, or null when a state has no runtime to name. */
-export function rexStatusReport(status: RexAgentStatus, runtime: string | null): string | null {
-  let fields: string;
-  if (status.state === "clear") fields = "state=clear";
-  else {
-    if (!runtime) return null;
-    fields = [`state=${status.state}`, `app=${rexApp(runtime)}`, ...(status.kind ? [`kind=${status.kind}`] : [])].join(":");
-  }
+/** The OSC 7501 report for a status; a state with no runtime to name is a `clear`, so no earlier state lingers. */
+export function rexStatusReport(status: RexAgentStatus, runtime: string | null): string {
+  const fields = status.state === "clear" || !runtime
+    ? "state=clear"
+    : [`state=${status.state}`, `app=${rexApp(runtime)}`, ...(status.kind ? [`kind=${status.kind}`] : [])].join(":");
   return `\x1b]7501;${fields}\x1b\\`;
 }
+
+const CLEAR = rexStatusReport({ state: "clear" }, null);
 
 const isRex = (termtype: string): boolean => /^rex\b/i.test(termtype);
 
@@ -140,14 +139,17 @@ export class RexAgentStatusRelay {
     const { activity, runtime } = current ?? this.resolve(seat);
     const status = rexAgentStatus(activity);
     const report = rexStatusReport(status, runtime);
-    if (!report) return;
     const known = this.shown.get(seat);
     const everyClientHasIt = known !== undefined && known.delivered.size > 0 && [...known.delivered.values()].every((r) => r === report);
     if (everyClientHasIt && now - known.listedAt < REX_CLIENT_REFRESH_MS) return;
 
     const clients = await this.clients.listSessionClientTerminals(seat);
-    // tmux couldn't be read: try again later without deciding the seat has no Rex client.
-    if (clients === null) return;
+    // tmux couldn't be read: the sweep tries again, without deciding the seat has no Rex client.
+    if (clients === null) {
+      if (!known) this.shown.set(seat, { delivered: new Map(), listedAt: now });
+      this.startSweeping();
+      return;
+    }
     const ttys = clients.filter((c) => isRex(c.termtype)).map((c) => c.tty);
     if (ttys.length === 0) {
       this.shown.delete(seat);
@@ -165,7 +167,7 @@ export class RexAgentStatusRelay {
     // A client that never got a report has nothing to clear.
     const targets = ttys.filter((tty) => {
       const had = seatState.delivered.get(tty);
-      return had !== report && !(status.state === "clear" && had === undefined);
+      return had !== report && !(report === CLEAR && had === undefined);
     });
     await Promise.all(targets.map(async (tty) => {
       try {
