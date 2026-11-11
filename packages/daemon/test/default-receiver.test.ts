@@ -145,4 +145,19 @@ describe("the settings view", () => {
       .toBe("Not chosen: when the connector starts, unrouted messages go to the default receiving agent (Agents & runtime).");
     expect(settingsBrowser(store, null, home).entries.some((entry) => entry.key === "agents.default_receiver")).toBe(false);
   });
+
+  it("withholds the receiving agent's description when the setting holds unsafe text; with no receiver, Slack's line says where unrouted messages go", () => {
+    const home = mkdtempSync(join(tmpdir(), "default-receiver-browser-"));
+    closes.push(() => rmSync(home, { recursive: true, force: true }));
+    const store = new SettingsStore(join(home, "config.json"));
+    const unsafe = "token=synthetic-example-value";
+    store.set("agents.operator_session", unsafe);
+    const view = settingsBrowser(store, null, home, { session: null, source: "none", state: "missing",
+      note: `agents.operator_session is "${unsafe}", which isn't an agent's session, so it's ignored` });
+    const row = view.entries.find((entry) => entry.key === "agents.default_receiver")!;
+    expect(row.application).toBe("Withheld: agents.operator_session holds credential-bearing or unsafe text, so the receiving agent isn't described here. Inspect it at its source.");
+    expect(JSON.stringify(view)).not.toContain("synthetic-example-value");
+    expect(view.entries.find((entry) => entry.key === "slack.inboundDestination")?.application)
+      .toBe(`Not chosen: this host has no receiving agent (Agents & runtime), so when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`);
+  });
 });

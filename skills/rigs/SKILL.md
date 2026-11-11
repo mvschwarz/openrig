@@ -146,7 +146,8 @@ person needs in their project or home folder and name that path.
   A declared name is a claim, not a seat's own identity: for a team that acts only on seat identity, the attached
   shell above is the route.
 - **Who answers OpenRig's questions:** read `rig gateway participants` (its `default:` line) before the handoff.
-  - A default person is there: say requests and asks go to them, and don't offer again.
+  - A default person is there: say requests and asks that name nobody go to them (a pairing request or an ask can
+    name someone else), and don't offer again.
   - Several people with no default: ask which should get requests nobody is named for (`rig gateway default <id>`),
     or leave it. Never pick one yourself.
   - Nobody is registered: offer it in a sentence or two. OpenRig's questions, such as another machine asking to pair,

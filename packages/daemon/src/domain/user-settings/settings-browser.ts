@@ -4,7 +4,7 @@ import { join, isAbsolute } from "node:path";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { SETTINGS_VALID_KEYS, type SettingsStore, type ResolvedSetting } from "./settings-store.js";
 import { connectionsProjection, readConnectionConfiguration } from "../gateway/connections-projection.js";
-import { DEFAULT_CONFIG, INHERIT_INBOUND_DESTINATION } from "../gateway/slack/config.js";
+import { DEFAULT_CONFIG, INHERIT_INBOUND_DESTINATION, LEGACY_INBOUND_DESTINATION } from "../gateway/slack/config.js";
 import { projectionPath } from "../gateway/human-registry.js";
 import { loadHostRegistry } from "../hosts/hosts-registry-reader.js";
 import { DEFAULT_HEALTH_POLICY, validateHealthPolicy } from "../health-policy.js";
@@ -144,9 +144,14 @@ export function settingsBrowser(store: SettingsStore, gateway: Record<string, un
   // Derived, not a setting: the agent that receives answers nothing else reads, from agents.operator_session or the
   // kernel operator. Shown with where it came from and its state; changed with rig config set agents.operator_session.
   if (receiver) {
+    // The description names the session and can quote the setting: when either is withheld, so is the description.
+    const unsafe = [receiver.session, resolved?.["agents.operator_session"]?.value]
+      .some((v) => typeof v === "string" && v !== "" && safeValue(v, "identity", redact).value === null);
     add("agents.default_receiver", "general", receiver.session ?? "", undefined,
       receiver.source === "setting" ? resolved?.["agents.operator_session"]?.source ?? "unreported" : "default", "identity",
-      "Displayed daemon instance", describeDefaultReceiver(receiver));
+      "Displayed daemon instance", unsafe
+        ? "Withheld: agents.operator_session holds credential-bearing or unsafe text, so the receiving agent isn't described here. Inspect it at its source."
+        : describeDefaultReceiver(receiver));
   }
   if (resolved) {
     for (const host of store.listFeedHostSubscriptions()) {
@@ -171,7 +176,10 @@ export function settingsBrowser(store: SettingsStore, gateway: Record<string, un
     const unchosen = key === "inboundDestination" && (!cfg || cfg[key] === INHERIT_INBOUND_DESTINATION);
     add("slack." + key, "slack", cfg ? flatten(cfg[key]) : null, flatten(defs[key]),
       cfg ? read.fields.includes(key) ? "file" : "default" : "unavailable", kind, undefined,
-      unchosen ? "Not chosen: when the connector starts, unrouted messages go to the default receiving agent (Agents & runtime)." : undefined);
+      unchosen ? receiver?.session
+        ? "Not chosen: when the connector starts, unrouted messages go to the default receiving agent (Agents & runtime)."
+        : `Not chosen: this host has no receiving agent (Agents & runtime), so when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`
+        : undefined);
   }
   // #192: the channel map as one read-only line, "match: channel" per entry.
   add("slack.channelMap", "slack", read.cfg ? c.configuration!.channelMap.map((e) => `${e.match ?? "withheld"}: ${e.channel ?? "withheld"}`).join(", ") : null, "",
