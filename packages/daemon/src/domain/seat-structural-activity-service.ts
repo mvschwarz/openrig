@@ -159,7 +159,7 @@ export class SeatStructuralActivityService {
     // Null/failed, blank and unrecognized captures cannot establish recovery.
     if (runtime === "codex" && this.bannerEmitter) {
       const banner = detectCodexLimitBanner(content);
-      if (banner || (content.trim().length > 0 && c.state !== "unknown")) {
+      if (banner || (content.trim().length > 0 && obs.state !== "unknown")) {
         this.bannerEmitter(sessionName, banner, at);
       }
     }

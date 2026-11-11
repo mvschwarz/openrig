@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import {
   detectCodexLimitBanner,
@@ -497,6 +498,11 @@ describe("codex-limit-banner — store mapping and seat status", () => {
   it.each([
     { name: "whitespace-only capture", frame: " \n\t\n  " },
     { name: "unrecognized non-empty capture", frame: "unclassified output" },
+    ...["completed", "working"].map(state => ({
+      name: `unsupported client version on a ${state} layout`,
+      frame: "  >_ OpenAI Codex (v99.0.0)\n" + readFileSync(
+        new URL(`./fixtures/input-box/codex-0.167.0/${state}.txt`, import.meta.url), "utf8"),
+    })),
     { name: "banner above draft composer", frame: `${BANNER}\n› Continue the task` },
     { name: "banner above indented empty composer", frame: `${BANNER}\n  › Ask Codex to do anything` },
   ])("does not clear a current limit for $name", async ({ frame }) => {
