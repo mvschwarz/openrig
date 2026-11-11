@@ -406,7 +406,7 @@ export class SeatActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime, b.tmux_pane as tmux_pane,
+        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
           COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness,
           ${sessionCommunityRunnerSelect(db)} as community_runner
         FROM nodes n
@@ -415,7 +415,7 @@ export class SeatActivityService {
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; tmux_pane: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -447,12 +447,13 @@ export class SeatActivityService {
           this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
         }
         if (r.runtime === "codex") {
-          // The occupant as OpenRig records it: the binding's pane, and the pane process the identity reconciler last
-          // verified as this session's Codex in that pane. It follows OpenRig's own in-place restart.
+          // The occupant as OpenRig records it, from the identity reconciler's last verdict for this session: the
+          // binding's pane it checked, and the pane process it verified as this session's Codex there. It follows
+          // OpenRig's own in-place restart. No verdict (or a defensive read of a store without one) leaves both unknown.
           const verdict = identities.getForNode(r.node_id);
-          const verified = verdict?.verdict === "verified" && verdict.sessionName === r.session_name
-            && !!r.tmux_pane && verdict.evidence.registeredPane === r.tmux_pane;
-          this.recordCodexOccupant(r.node_id, { paneId: r.tmux_pane, pid: verified ? verdict!.evidence.observedPanePid ?? null : null });
+          const current = verdict?.sessionName === r.session_name ? verdict : null;
+          this.recordCodexOccupant(r.node_id, { paneId: current?.evidence.registeredPane ?? null,
+            pid: current?.verdict === "verified" && current.evidence.registeredPane ? current.evidence.observedPanePid ?? null : null });
         }
       }
 
