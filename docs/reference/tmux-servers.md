@@ -164,8 +164,8 @@ or removing its state when isolation or a deferred migration pins it. Ordinary
 an old advisory socket is not used to redirect it. Cleanup kills only registered
 session names on the selected server.
 
-Dedicated selection requires POSIX tmux. On Windows, psmux retains its existing
-server behavior; requesting `isolated` produces a status note and a pending choice.
+Dedicated selection requires POSIX tmux. On Windows (not a supported platform;
+see the [README](../../README.md)), psmux retains its existing server behavior; requesting `isolated` produces a status note and a pending choice.
 
 ## Two instances on one machine
 

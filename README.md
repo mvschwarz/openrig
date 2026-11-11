@@ -328,7 +328,7 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 - **Connect** Slack through an app you create in your own workspace; the experimental `rig slack manifest` prints that app's manifest ([setup guide](docs/reference/slack-app-setup.md))
 - **Evolve** running topologies with `rig grow`, `rig shrink`, `rig launch`, `rig remove`
 
-Every agent runs in a tmux session you can attach to, inspect, and work with directly.
+Every terminal seat runs in a tmux session you can attach to, inspect, and work with directly. [Hosted members](docs/reference/hosted-members.md) join through OpenRig's MCP server and have no pane.
 
 ## Teams
 

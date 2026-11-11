@@ -15,7 +15,8 @@ last-updated: 2026-11-09
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
+Verified against the source commit in this page's `last-verified-against-source`
+frontmatter.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
