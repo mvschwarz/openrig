@@ -16,6 +16,7 @@ import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -890,15 +891,18 @@ describe("SeatLifecycleService.launchFresh", () => {
     const processRow = (pid: number, ppid: number, startedAt: Date, command: string): ProcessTableRow =>
       ({ pid, ppid, pgid: pid, tpgid: -1, executableName: command.split(" ")[0]!, startedAt: lstart(startedAt), command });
     const observed = new Date(Date.now() - 60_000);
-    const releasedWithLostSocket = () => {
+    const releasedWithLostSocket = async () => {
       const seat = seedSeat({ adopted: true });
       const server = modelServerLifetime();
-      releaseAdopted(seat);
+      // Recorded while the adopted seat ran; then released, and the daemon's identity sweep (every 5 s) runs.
       new SeatIdentityStore(db).upsert({
         nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
         evidence: { registeredPane: "%old", observedPid: 5151, observedPanePid: 5150, observedCommand: "claude", matchedLayer: 1 },
         sessionName: seat.sessionName, observedAt: observed.toISOString(),
       });
+      releaseAdopted(seat);
+      const blindPoll = { listSessions: async () => [] } as unknown as ConstructorParameters<typeof SeatIdentityReconciler>[0]["tmux"];
+      await new SeatIdentityReconciler({ db, tmux: blindPoll }).reconcileAll();
       alive.delete(seat.sessionName);
       livePanes.delete(seat.sessionName);
       server.up = false;
@@ -906,7 +910,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     };
 
     it("keeps refusing a released seat's fresh launch while its recorded process still runs behind a lost socket", async () => {
-      const { seat } = releasedWithLostSocket();
+      const { seat } = await releasedWithLostSocket();
       const before = new Date(observed.getTime() - 10 * 60_000);
       readProcesses = async () => [processRow(5150, 900, before, "zsh"), processRow(900, 1, before, "tmux new-session")];
 
@@ -926,7 +930,7 @@ describe("SeatLifecycleService.launchFresh", () => {
         rows: async () => [processRow(5150, 1, new Date(observed.getTime() + 30_000), "vim")] },
       { name: "the process table can't be read", rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
     ])("reopens the server for a released seat when $name", async ({ rows }) => {
-      const { seat, server } = releasedWithLostSocket();
+      const { seat, server } = await releasedWithLostSocket();
       readProcesses = rows;
 
       const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
