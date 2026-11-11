@@ -24,8 +24,15 @@ import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAl
 import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
-import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
-import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import {
+  buildCodexResumeDisplay,
+  buildNativeResumeCommand,
+  buildNativeResumeDisplay,
+  type CodexResumeDisplayInput,
+} from "./native-resume-probe.js";
+import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
+import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import { builtinLaunchPosture } from "./permission-policy/policy-ref.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -50,6 +57,14 @@ interface InventoryRow {
   effort: string | null;
   effort_choice: string | null;
   codex_config_profile: string | null;
+  codex_permissions_json: string | null;
+  node_permission_policy: string | null;
+  node_policy_origin: string | null;
+  node_policy_launch_posture: string | null;
+  rig_permission_policy: string | null;
+  rig_policy_origin: string | null;
+  rig_policy_launch_posture: string | null;
+  rig_non_interruptive: number | null;
   claude_mcp: ClaudeMcp | null;
   launch_wrapper: string | null;
   agent_ref: string | null;
@@ -114,8 +129,132 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
+function asLaunchPosture(value: string | null | undefined): "floor" | "full_bypass" | "auto" | undefined {
+  return value === "floor" || value === "full_bypass" || value === "auto" ? value : undefined;
+}
+
+function resolveBasePolicyPosture(row: InventoryRow): "floor" | "full_bypass" | "auto" {
+  if (row.node_policy_origin != null && row.node_policy_launch_posture != null) {
+    return asLaunchPosture(row.node_policy_launch_posture) ?? "floor";
+  }
+  if (row.node_permission_policy != null) {
+    return builtinLaunchPosture(row.node_permission_policy);
+  }
+  if (row.rig_policy_origin != null && row.rig_policy_launch_posture != null) {
+    return asLaunchPosture(row.rig_policy_launch_posture) ?? "floor";
+  }
+  if (row.rig_permission_policy != null) {
+    return builtinLaunchPosture(row.rig_permission_policy);
+  }
+  return "floor";
+}
+
+type CodexResumeResolution =
+  | { ok: true; input: CodexResumeDisplayInput }
+  | { ok: false; diagnostic: string };
+
+function resolveCodexResumeResolution(
+  row: InventoryRow,
+  recordedLaunch: StoredAppliedLaunchObservation | undefined,
+  selection: { runtime: string; mode: string } | undefined,
+): CodexResumeResolution {
+  // Match NativePermissionStore.launchOverride + RestoreOrchestrator.attemptResume validation and precedence so
+  // display never fabricates a floor command when real resume refuses invalid or conflicting settings.
+  if (selection !== undefined) {
+    if (
+      (selection.runtime !== "codex" && selection.runtime !== "claude-code")
+      || !/^[A-Za-z][A-Za-z0-9_]*$/.test(selection.mode)
+      || (selection.runtime === "codex" && selection.mode !== "floor" && selection.mode !== "full_bypass")
+    ) {
+      return { ok: false, diagnostic: "Permission selection: Invalid persisted native permission selection; launch refused." };
+    }
+  }
+  let codexPermissions: CodexMemberPermissions | undefined;
+  if (row.codex_permissions_json != null) {
+    try {
+      codexPermissions = validateCodexMemberPermissions(JSON.parse(row.codex_permissions_json));
+    } catch (error) {
+      const seat = row.logical_id ? `${row.node_id} (${row.logical_id})` : row.node_id;
+      return {
+        ok: false,
+        diagnostic: `Permission selection: Seat ${seat}: cannot read codex_permissions (${(error as Error).message}). Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>, or choose a mode with --mode, before launching.`,
+      };
+    }
+  }
+  if (selection !== undefined && selection.runtime !== "codex") {
+    return {
+      ok: false,
+      diagnostic: "Permission selection: Seat runtime changed since permission selection; explicitly select again or inherit.",
+    };
+  }
+  if (codexPermissions !== undefined && selection !== undefined) {
+    return {
+      ok: false,
+      diagnostic: `Permission selection: Seat ${row.node_id} records both a Codex permission envelope and the ${selection.mode} mode; launch refused. Choose one with rig seat set-permissions <seat> --codex-permissions <file> or --mode <mode> --reason <reason>.`,
+    };
+  }
+
+  const nonInterruptive = row.rig_non_interruptive === 1;
+  const base: CodexResumeDisplayInput = {
+    codexConfigProfile: row.codex_config_profile,
+    codexDaemonOptOut: recordedLaunch?.daemonOptOut,
+    recordedLaunch: recordedLaunch ?? null,
+    nonInterruptive,
+  };
+  if (selection !== undefined) {
+    return {
+      ok: true,
+      input: {
+        ...base,
+        resolvedPosture: selection.mode as "floor" | "full_bypass",
+        kernelAuthority: false,
+        teamPermissionDefault: false,
+      },
+    };
+  }
+  if (codexPermissions !== undefined) {
+    return {
+      ok: true,
+      input: {
+        ...base,
+        codexPermissions,
+        resolvedPosture: resolveBasePolicyPosture(row),
+        kernelAuthority: false,
+        teamPermissionDefault: false,
+      },
+    };
+  }
+  const hasPolicyOrProfile = row.node_permission_policy != null
+    || row.rig_permission_policy != null
+    || Boolean(row.codex_config_profile?.trim());
+  if (!hasPolicyOrProfile && row.rig_name === "kernel") {
+    return {
+      ok: true,
+      input: { ...base, resolvedPosture: "full_bypass", kernelAuthority: true, teamPermissionDefault: false },
+    };
+  }
+  return {
+    ok: true,
+    input: {
+      ...base,
+      resolvedPosture: resolveBasePolicyPosture(row),
+      kernelAuthority: false,
+      teamPermissionDefault: !hasPolicyOrProfile,
+    },
+  };
+}
+
+function readPermissionSelectionsMap(db: Database.Database): Map<string, { runtime: string; mode: string }> {
+  try {
+    const rows = db.prepare("SELECT node_id, runtime, mode FROM node_permission_selections").all() as Array<{
+      node_id: string;
+      runtime: string;
+      mode: string;
+    }>;
+    return new Map(rows.map((row) => [row.node_id, { runtime: row.runtime, mode: row.mode }]));
+  } catch {
+    return new Map();
+  }
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
@@ -129,9 +268,10 @@ function computeRecoveryGuidance(input: {
   codexConfigProfile?: string | null;
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
+  codexResolution?: CodexResumeResolution;
   claudeMcp?: ClaudeMcp;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, codexResolution, claudeMcp } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -161,35 +301,54 @@ function computeRecoveryGuidance(input: {
   }
 
   if (runtime === "codex") {
+    if (codexResolution && !codexResolution.ok) {
+      return {
+        summary: `Cannot derive Codex resume command — ${codexResolution.diagnostic}`,
+        commands: [],
+        notes: [codexResolution.diagnostic],
+      };
+    }
     const commands: string[] = [];
     const notes: string[] = [];
+    const codexDisplay = codexResolution?.input;
+    const displayInput: CodexResumeDisplayInput = {
+      ...codexDisplay,
+      codexConfigProfile: codexDisplay?.codexConfigProfile !== undefined ? codexDisplay.codexConfigProfile : codexConfigProfile,
+      codexDaemonOptOut: codexDisplay?.codexDaemonOptOut !== undefined ? codexDisplay.codexDaemonOptOut : codexDaemonOptOut,
+    };
+    const effectiveDaemonChoice = displayInput.codexDaemonOptOut ?? displayInput.recordedLaunch?.daemonOptOut;
+    const primaryDisplay = resumeToken
+      ? buildCodexResumeDisplay(resumeToken, displayInput)
+      : buildCodexResumeDisplay("", displayInput, { useLast: true });
 
-    const daemonOptOut = codexDaemonOptOut === true;
     if (resumeToken) {
-      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(primaryDisplay.command);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(primaryDisplay.command);
     }
 
+    if (primaryDisplay.label) {
+      notes.push(primaryDisplay.label);
+    }
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
-    if (codexConfigProfile) {
-      notes.push(`Preserve Codex config profile: ${codexConfigProfile}`);
+    if (displayInput.codexConfigProfile) {
+      notes.push(`Preserve Codex config profile: ${displayInput.codexConfigProfile}`);
     }
     if (sessionName) {
       notes.push(`If the identity anchor was captured, the picker may include: ${sessionName}`);
     }
-    if (codexDaemonOptOut === undefined) {
+    if (effectiveDaemonChoice === undefined) {
       notes.push(CODEX_DAEMON_CHOICE_NOT_RECORDED);
     }
 
     return {
       summary: resumeToken
-        ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
-        : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
+        ? `Try native Codex resume first (${primaryDisplay.command}).`
+        : `No stored Codex resume token. Try ${primaryDisplay.command} from the seat workspace.`,
       commands,
       notes,
     };
@@ -611,12 +770,21 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // map = the prior WHERE rig_id=? filter; oriented history follows the rig's nodes.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
   const orienteds = buildOrientedMap(db, rigId);
-  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
+  const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations();
+  const permissionSelections = readPermissionSelectionsMap(db);
 
   const rows = queryInventoryRows(db, rigId);
 
   return rows.map((row) =>
-    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts }),
+    buildInventoryEntry(db, row, {
+      usableSnapshot,
+      workspaceSpec,
+      identityVerdicts,
+      restoreOutcomes,
+      orienteds,
+      currentLaunchObservations,
+      permissionSelections,
+    }),
   );
 }
 
@@ -640,6 +808,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
   const nodeColumns = new Set(db.prepare("PRAGMA table_info(nodes)").all()
     .map((row) => (row as { name?: string }).name));
   const nodeColumnOrNull = (name: string) => nodeColumns.has(name) ? `n.${name}` : "NULL";
+  const rigColumns = new Set(db.prepare("PRAGMA table_info(rigs)").all()
+    .map((row) => (row as { name?: string }).name));
+  const rigColumnOrNull = (name: string) => rigColumns.has(name) ? `r.${name}` : "NULL";
   const codexConfigProfileSelect = nodeColumnOrNull("codex_config_profile");
   const stmt = db.prepare(`
     SELECT
@@ -655,6 +826,14 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
+      ${nodeColumnOrNull("codex_permissions_json")} as codex_permissions_json,
+      ${nodeColumnOrNull("permission_policy")} as node_permission_policy,
+      ${nodeColumnOrNull("policy_origin")} as node_policy_origin,
+      ${nodeColumnOrNull("policy_launch_posture")} as node_policy_launch_posture,
+      ${rigColumnOrNull("permission_policy")} as rig_permission_policy,
+      ${rigColumnOrNull("rig_policy_origin")} as rig_policy_origin,
+      ${rigColumnOrNull("rig_policy_launch_posture")} as rig_policy_launch_posture,
+      ${rigColumnOrNull("non_interruptive")} as rig_non_interruptive,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
       n.agent_ref,
@@ -729,8 +908,10 @@ interface InventoryBuildContext {
   // batched path) and looked up O(1) here instead of a query per node.
   restoreOutcomes: Map<string, RestoreProjection>;
   orienteds: Map<string, NodeOriented>;
-  /** Each node's current recorded Codex daemon choice (one read per projection); absent = not recorded. */
-  codexDaemonOptOuts: Map<string, boolean>;
+  /** Each node's current recorded launch observation (one read per projection); absent = not recorded. */
+  currentLaunchObservations: Map<string, StoredAppliedLaunchObservation>;
+  /** Explicit per-seat native permission selections (one read per projection); absent = none. */
+  permissionSelections: Map<string, { runtime: string; mode: string }>;
 }
 
 /**
@@ -743,12 +924,38 @@ function buildInventoryEntry(
   row: InventoryRow,
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
-  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
+  const {
+    usableSnapshot,
+    workspaceSpec,
+    identityVerdicts,
+    restoreOutcomes,
+    orienteds,
+    currentLaunchObservations,
+    permissionSelections,
+  } = ctx;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
     throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
   }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
+  const codexResolution = row.runtime === "codex"
+    ? resolveCodexResumeResolution(
+      row,
+      currentLaunchObservations.get(row.node_id),
+      permissionSelections.get(row.node_id),
+    )
+    : undefined;
+  const resumeDisplay = codexResolution && !codexResolution.ok
+    ? { command: null, label: row.resume_token ? codexResolution.diagnostic : null }
+    : buildNativeResumeDisplay(
+      row.runtime,
+      row.resume_token,
+      null,
+      row.codex_config_profile,
+      codexResolution?.input.codexDaemonOptOut,
+      row.claude_mcp,
+      codexResolution?.input,
+    );
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
@@ -823,7 +1030,8 @@ function buildInventoryEntry(
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()
       ? { tmuxServerMode: daemonTmuxServerInfo()!.mode } : {}),
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp),
+    resumeCommand: resumeDisplay?.command ?? null,
+    resumeCommandLabel: resumeDisplay?.label ?? null,
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -920,7 +1128,8 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
   // events, so each node's value equals the single-rig path.
   const restoreOutcomes = buildRestoreOutcomeMap(db); // one fleet restore-outcome scan
   const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
-  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts(); // one launch-fact read
+  const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations(); // one launch-fact read
+  const permissionSelections = readPermissionSelectionsMap(db);
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -929,7 +1138,8 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
       identityVerdicts: verdictsByRig.get(row.rig_id) ?? new Map(),
       restoreOutcomes,
       orienteds,
-      codexDaemonOptOuts,
+      currentLaunchObservations,
+      permissionSelections,
     });
     let list = out.get(row.rig_id);
     if (!list) { list = []; out.set(row.rig_id, list); }
@@ -1124,6 +1334,16 @@ export function getNodeDetail(
     guidanceCount: installedResources.filter((r) => r.category === "guidance" || r.category === "guidance_merge").length,
   };
 
+  const codexDetailRow = entry.runtime === "codex"
+    ? runInventoryRowQuery(db, "WHERE n.id = ?", "n.created_at", [nodeId])[0]
+    : undefined;
+  const currentObs = entry.runtime === "codex"
+    ? new AppliedLaunchObservationStore(db).readCurrent(nodeId) ?? undefined
+    : undefined;
+  const codexResolution = codexDetailRow
+    ? resolveCodexResumeResolution(codexDetailRow, currentObs, readPermissionSelectionsMap(db).get(nodeId))
+    : undefined;
+
   return {
     ...entry,
     // OPR.0.4.0.26: the LIST omits recoveryGuidance to stay slim; the
@@ -1135,7 +1355,8 @@ export function getNodeDetail(
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
-      codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
+      codexDaemonOptOut: currentObs?.daemonOptOut,
+      codexResolution,
       claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
     }),
     binding,

@@ -65,7 +65,7 @@ export function codexMemberEnvelope(permissions: CodexMemberPermissions): CodexP
 /** What an emitted envelope's arguments ask for; the native result still needs its own observation. */
 export function observeCodexEnvelope(envelope: CodexPermissionEnvelope): AppliedLaunchObservation {
   return { runtime: "codex", axis: "sandbox", state: "observed", value: envelope.sandboxPolicy.type,
-    reason: "emitted_launch_arguments", ...(envelope.approvalPolicy === "never" ? { approvalPolicy: "never" } : {}) };
+    approvalPolicy: envelope.approvalPolicy, reason: "emitted_launch_arguments" };
 }
 
 /** Read the current seat, not its original spec or a snapshot. Minimal old fixtures have no column. */

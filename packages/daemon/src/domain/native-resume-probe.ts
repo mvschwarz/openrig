@@ -1,7 +1,15 @@
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
+import { operationalLaunchArg } from "../adapters/kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
+import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
+import { codexMemberEnvelope, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import {
+  observeCodexSandbox,
+  type AppliedLaunchObservation,
+  type CodexObservedApprovalPolicy,
+} from "./permission-drift.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -32,6 +40,25 @@ export interface ProbeShellReadyInput {
   paneContent: string | null;
 }
 
+export type CodexResumeLabelStatus = "recorded_match" | "recorded_difference" | "no_recorded_launch";
+
+export interface CodexResumeDisplayInput {
+  codexConfigProfile?: string | null;
+  codexDaemonOptOut?: boolean;
+  codexPermissions?: CodexMemberPermissions;
+  resolvedPosture?: "floor" | "full_bypass" | "auto";
+  nonInterruptive?: boolean;
+  kernelAuthority?: boolean;
+  teamPermissionDefault?: boolean;
+  recordedLaunch?: AppliedLaunchObservation | null;
+}
+
+export interface CodexResumeDisplay {
+  command: string;
+  status: CodexResumeLabelStatus;
+  label: string | null;
+}
+
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 // Provider model identifiers are not limited to the default gpt-* family.
 // Keep the fallback structural so ordinary status prose cannot prove readiness.
@@ -44,6 +71,132 @@ const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|l
 const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
 const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
+function formatCurrentCodexFlags(
+  sandbox: string,
+  approval: CodexObservedApprovalPolicy | null | undefined,
+): string {
+  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox}`;
+}
+
+function formatRecordedCodexFlags(
+  sandbox: string,
+  approval: CodexObservedApprovalPolicy | null | undefined,
+): string {
+  // Historical launch observations (and floor launches without an explicit -a flag) store approval_policy as NULL;
+  // never infer an approval value from current settings or claim NULL proves no -a flag was emitted.
+  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox} (approval unrecorded)`;
+}
+
+export function buildCodexResumeDisplay(
+  resumeToken: string,
+  input: CodexResumeDisplayInput = {},
+  opts?: { useLast?: boolean },
+): CodexResumeDisplay {
+  const profile = input.codexConfigProfile ?? null;
+  const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
+  const effectivePosture = input.resolvedPosture ?? "floor";
+  const envelope = input.codexPermissions ? codexMemberEnvelope(input.codexPermissions) : undefined;
+  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (member permission envelope,
+  // resolved posture with an empty env so ambient OPENRIG_YOLO never leaks, and operationalLaunchArg).
+  const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, {}, effectivePosture);
+  const postureArg = posture + operationalLaunchArg(
+    "codex",
+    envelope
+      ? { nonInterruptive: input.nonInterruptive }
+      : {
+          kernelAuthority: input.kernelAuthority,
+          teamPermissionDefault: input.teamPermissionDefault,
+          nonInterruptive: input.nonInterruptive,
+          launchPosture: effectivePosture,
+        },
+  );
+  const daemonOptOut = (input.codexDaemonOptOut ?? input.recordedLaunch?.daemonOptOut) === true;
+  const command = buildCodexResumeCore(
+    resumeToken,
+    profile,
+    opts?.useLast,
+    undefined,
+    effectivePosture,
+    undefined,
+    postureArg,
+    daemonOptOut,
+  );
+
+  let currentSandbox: string | null = null;
+  let currentApproval: CodexObservedApprovalPolicy | null = null;
+  let currentFlags: string;
+  if (envelope) {
+    currentSandbox = envelope.sandboxPolicy.type;
+    currentApproval = envelope.approvalPolicy;
+    currentFlags = formatCurrentCodexFlags(currentSandbox, currentApproval);
+  } else {
+    const obs = observeCodexSandbox(posture);
+    if (obs.state === "observed" && obs.value) {
+      currentSandbox = obs.value;
+      currentApproval = obs.approvalPolicy ?? null;
+      currentFlags = formatCurrentCodexFlags(currentSandbox, currentApproval);
+    } else {
+      currentFlags = posture.trim();
+    }
+  }
+
+  const recorded = input.recordedLaunch ?? null;
+  const hasObservedRecord = recorded !== null
+    && recorded.runtime === "codex"
+    && recorded.axis === "sandbox"
+    && recorded.state === "observed"
+    && recorded.value !== null;
+
+  if (!hasObservedRecord) {
+    return { command, status: "no_recorded_launch", label: "flags from current settings" };
+  }
+
+  const recordedApproval = recorded.approvalPolicy ?? null;
+  // A historical read-only envelope never launched without -a, so a NULL approval_policy on read-only is always
+  // incomplete historical data rather than a match.
+  const canMatchApproval = recordedApproval === currentApproval
+    && !(recorded.value === "read-only" && recordedApproval === null);
+  if (currentSandbox !== null && recorded.value === currentSandbox && canMatchApproval) {
+    return { command, status: "recorded_match", label: null };
+  }
+
+  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  return {
+    command,
+    status: "recorded_difference",
+    label: `launched with ${recordedFlags}; a resume now uses ${currentFlags}`,
+  };
+}
+
+export function buildNativeResumeDisplay(
+  runtime: string | null,
+  resumeToken: string | null,
+  sessionName?: string | null,
+  codexConfigProfile?: string | null,
+  /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
+  codexDaemonOptOut?: boolean,
+  claudeMcp?: ClaudeMcp | null,
+  codexDisplay?: CodexResumeDisplayInput,
+): { command: string; label: string | null; status?: CodexResumeLabelStatus } | null {
+  if (!resumeToken) return null;
+  if (runtime === "claude-code") {
+    const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
+    const mcpSuffix = claudeMcpArgs(claudeMcp).map(arg => ` ${shellQuote(arg)}`).join("");
+    return {
+      command: `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`,
+      label: null,
+    };
+  }
+  if (runtime === "codex") {
+    return buildCodexResumeDisplay(resumeToken, {
+      ...codexDisplay,
+      codexConfigProfile: codexDisplay?.codexConfigProfile !== undefined ? codexDisplay.codexConfigProfile : codexConfigProfile,
+      codexDaemonOptOut: codexDisplay?.codexDaemonOptOut !== undefined ? codexDisplay.codexDaemonOptOut : codexDaemonOptOut,
+    });
+  }
+  return null;
+}
+
 export function buildNativeResumeCommand(
   runtime: string | null,
   resumeToken: string | null,
@@ -52,17 +205,17 @@ export function buildNativeResumeCommand(
   /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
   codexDaemonOptOut?: boolean,
   claudeMcp?: ClaudeMcp | null,
+  codexDisplay?: CodexResumeDisplayInput,
 ): string | null {
-  if (!resumeToken) return null;
-  if (runtime === "claude-code") {
-    const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
-    const mcpSuffix = claudeMcpArgs(claudeMcp).map(arg => ` ${shellQuote(arg)}`).join("");
-    return `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`;
-  }
-  if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
-  }
-  return null;
+  return buildNativeResumeDisplay(
+    runtime,
+    resumeToken,
+    sessionName,
+    codexConfigProfile,
+    codexDaemonOptOut,
+    claudeMcp,
+    codexDisplay,
+  )?.command ?? null;
 }
 
 /** Managed Codex seats run tool commands in a non-login shell, so they keep the seat's own environment, including the
