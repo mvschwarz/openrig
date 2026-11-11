@@ -2190,6 +2190,34 @@ export class QueueRepository {
       .map((row) => ({ qitemId: row.qitem_id, body: row.body ?? "" }));
   }
 
+  /** Every answer row returned to this ask, by its structural link (reply_to and the human-answer tag, or an older Slack
+   *  reply's id), oldest first, whoever answered: who, when, their words without the footer, the park it answered (null
+   *  for the ask itself or an older Slack reply), and the identity recorded when the answer row was created. An ask answered
+   *  in place (a runner's permission request, a host pairing request) has no answer row: its answer is on the ask. */
+  answersForAsk(askId: string): Array<{ qitemId: string; by: string; at: string; text: string; episode: string | null;
+    recordedIdentity: { provenance: string | null; principal: string | null } | null }> {
+    if (!this.hasReplyToColumn) return [];
+    const rows = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE reply_to = ?
+        AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
+          OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
+      ORDER BY ts_created, rowid`).all(askId) as Array<{ qitem_id: string }>;
+    if (rows.length === 0) return [];
+    // An answer to a park's question has the ID made from that park's episode, so the episode is read back from the ID.
+    const episodes = new Map(this.transitionLog.listForQitem(askId)
+      .filter((transition) => transition.ownerNotificationKind === "human-required")
+      .map((transition) => `${askId}:${transition.transitionId}`)
+      .map((key) => [humanAnswerId(askId, key), key] as const));
+    return rows.flatMap(({ qitem_id }) => {
+      const row = this.getById(qitem_id);
+      if (!row) return [];
+      const created = this.transitionLog.listForQitem(qitem_id)[0];
+      return [{ qitemId: row.qitemId, by: row.sourceSession, at: row.tsCreated, text: humanAnswerText(row.body),
+        episode: episodes.get(row.qitemId) ?? null,
+        recordedIdentity: created ? { provenance: created.identityProvenance, principal: created.identityPrincipal } : null }];
+    });
+  }
+
   /** This person's answer to the current question of a decision parked on them, if one was returned. */
   currentEpisodeAnswer(qitemId: string, actorSession: string): QueueItem | null {
     const episode = this.currentHumanRequiredEpisode(qitemId);

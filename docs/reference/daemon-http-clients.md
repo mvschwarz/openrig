@@ -151,6 +151,39 @@ An outbox entry's `deliveryState` reports the send attempt; only `delivered` con
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
 
+### What needs a person, and how their answers link back (`team-operations.v1`)
+
+`GET /api/team-operations/capabilities` says which team-operations jobs this daemon supports, separately from its
+build:
+
+```json
+{ "contract": "team-operations.v1",
+  "capabilities": { "needs-me.read": "supported", "needs-me.answer": "not-supported", "needs-me.follow": "not-supported" },
+  "build": { "semver": "…", "commit": "…" } }
+```
+
+A capability reads `supported`, `not-supported` or `unknown`, and a missing key means `unknown`. A daemon without the
+route (HTTP 404) predates the contract: keep reading what it already returns. `build` is null in a source run.
+
+With `needs-me.read` supported:
+
+- **What needs the person:** `GET /api/attention?view=<person-id>` (the same read as the Feed). Each queue item adds
+  `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
+  `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
+  read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
+  about the open rows blocked on it (at most 100; empty when none are recorded).
+- **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
+  `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
+  already reflected in it. Recording one answer of several emits no event yet, so re-read the snapshot (or the row)
+  rather than relying on events alone for partial answers.
+- **The answers returned to a request:** `GET /api/queue/<qitemId>` adds `answers`, oldest first, each
+  `{ qitemId, by, at, text, episode, recordedIdentity }`. They are found by the answer row's link to the request, not
+  by its text, so don't parse the `In reply to:` line in an answer's body. `text` is the person's answer without that
+  footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
+  recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
+  set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
+  or a host pairing request is answered in place, with no answer row.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
