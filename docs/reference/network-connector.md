@@ -20,18 +20,44 @@ rig network connect <seat> --as <name>
 
 - `enroll` trades the code, with this daemon's host id, for an installation key. The key is stored like a participant's
   token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A code is
-  single-use and short-lived; a refused one says why, so get a new one from the page.
-- The installation key goes only to the site you enrolled at: a redirect from it isn't followed, and a call to the
-  account that doesn't answer within 20 seconds ends with an error.
+  single-use and short-lived; a refused one says why, so get a new one from the page. If the account doesn't answer,
+  whether it took the code is unknown: try again with the same code, and get a new one if that's refused.
+- Enrolling trusts the site with where your connected seats' work goes: for each name, the account answers the front
+  and rig the binding reaches.
+- The installation key goes only to the site you enrolled at: a redirect from it isn't followed. Each `enroll`,
+  `connect` or `disconnect` spends at most 30 seconds with the account in all, and the command waits 45 seconds for the
+  daemon, so you see the account's own answer or error.
+- The account keeps one list of the installation's names, and every change sends the whole list. Changes to it run one
+  at a time on this daemon, each reading the names to keep in its turn, so two connects started together both stay
+  connected.
 - `connect --as <name>` lists the name with the account, which answers that participant's bearer, its MCP front and its
   rig. The binding then reaches that front as `<name>@<rig>`, the same as a direct connect. A name is lowercase letters,
   digits and inner dashes, up to 32. One that another connection to the account uses is refused.
 - If the answer to a connect is lost, the next connect drops the name and lists it again, which gets a fresh bearer and
   ends the old one.
-- `disconnect` ends the binding here, then has the account stop listing the name, which revokes it there. If the account
-  can't be reached, the binding is still ended, and the error names the `rig network disconnect <binding id>` to run
-  again.
+- If the account listed the name but the binding can't be made here, OpenRig asks the account to drop the name again.
+  That's best effort: if it fails too, the error says the account may still list the name.
+- `disconnect` ends the binding here, then has the account stop listing the name, which revokes it there. Once the
+  account's answer no longer lists the name, `disconnect` says the account stopped listing it. If the account can't be
+  reached or its answer is lost, the binding is still ended, the error says OpenRig couldn't confirm the account dropped
+  the name and names the `rig network disconnect <binding id>` to run again, and `rig network status` keeps showing it
+  as unconfirmed. A later answer from the account that no longer lists the name marks it dropped.
 - `rig network status` shows the enrollment above the bindings.
+
+### Enroll again after a lost key or a removed installation
+
+When the installation key is missing, or the account no longer recognizes the installation, the error says to enroll
+again with a new code from the account page:
+
+```bash
+rig network enroll <code> --site <site URL> --replace
+```
+
+Without `--replace`, a second enroll at the same site is refused and the code isn't spent. With it, the new key takes the
+old one's place only after the account accepts the new code, so a failed replace leaves the old enrollment working. The
+bindings made through the old installation end, and `enroll` names them: the old installation may still list their
+names, and the new key can't drop them, so remove them on the account page. `rig network status` marks each of them as
+possibly still listed under the old installation.
 
 ## Connect with a hub URL and a token
 
@@ -94,8 +120,9 @@ rig queue update <local item> --state done --closure-reason no-follow-on --resol
 rig network status [--json]
 ```
 
-Each binding shows its seat, participant, hub, state, and its last contact or last error. `--json` adds the
-connector's view: each binding's next pass, backoff and last pass.
+Each binding shows its seat, participant, hub, state, and its last contact or last error. An ended binding made through
+the account also says when the account hasn't confirmed it dropped the name, or when the name may still be listed under
+a replaced installation. `--json` adds the connector's view: each binding's next pass, backoff and last pass.
 
 ## When things go wrong
 
@@ -113,7 +140,8 @@ rig network disconnect <binding-or-seat> [--reason "<why>"]
 ```
 
 The binding ends here, so no new work comes in through it, and its credential is removed. Local items and results
-stay. The hub still lists the participant until it's removed there too.
+stay. A binding made through the account is then dropped there too (see above). For a binding made with a hub URL and
+a token, the hub still lists the participant until it's removed there too.
 
 If the credential can't be removed, the binding still ends, and the error names the
 `rig network disconnect <binding id>` to run again. The daemon also removes credentials whose binding isn't active
@@ -129,6 +157,9 @@ each time it starts.
   An atomic close-if-open needs the hub to offer a conditional close.
 - After a disconnect or a revocation, work already taken keeps running here, but its pickup and result no longer reach
   the hub item, which stays at its last reported stage.
+- If the daemon stops between storing a new installation key and recording the enrollment, that key's folder under
+  `network-secrets/` stays with no enrollment, and nothing removes it. It's private to you and unused, so remove it by
+  hand.
 - **Plain http needs your choice.** `rig network connect` refuses an `http:` hub URL until you add `--allow-http`, because
   the participant's token and its work then cross the network unencrypted, where they can be read. Use the hub's
   `https:` URL where it has one. The choice is recorded on that binding, so the connector doesn't ask again, and

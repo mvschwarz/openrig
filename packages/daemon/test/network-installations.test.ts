@@ -4,9 +4,10 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -17,10 +18,13 @@ import { networkRoutes } from "../src/routes/network.js";
 const KEY = `oik1_cust_inst-1_${"k".repeat(43)}`;
 
 class FakeAccount {
-  readonly codes = new Set(["ec1.good"]);
+  readonly codes = new Set(["ec1.good", "ec1.next"]);
+  /** Each enrollment is a new installation with its own key and an empty list. */
+  enrollments = 0;
+  key = KEY;
   readonly used = new Set<string>();
   instance: string | null = null;
-  readonly names = new Map<string, { gen: number; state: "connected" | "revoked" }>();
+  names = new Map<string, { gen: number; state: "connected" | "revoked" }>();
   readonly elsewhere = new Set(["taken"]);
   readonly puts: string[][] = [];
   calls = 0;
@@ -35,6 +39,13 @@ class FakeAccount {
   mcp = "https://account.example/mcp";
   /** The next participant lists the account can't apply, because something else changed the installation. */
   dropFails = 0;
+  /** How long a participant list waits before it's applied, so concurrent requests overlap. */
+  delayMs = 0;
+  /** After this many applied lists, the account goes down. */
+  downAfterPuts: number | null = null;
+
+  /** The owner removed this installation on the account page. */
+  forget(): void { this.instance = null; }
 
   readonly fetch: AccountFetch = async (url, init) => {
     this.calls++;
@@ -50,10 +61,14 @@ class FakeAccount {
       if (!this.codes.has(body.code!)) return reply(400, { error: "code_not_current" });
       this.used.add(body.code!);
       this.instance = body.instance!;
-      return reply(200, { installation: { id: "inst-1", name: "lab" }, key: KEY });
+      this.enrollments++;
+      this.key = `${KEY}${this.enrollments}`;
+      this.names = new Map();
+      return reply(200, { installation: { id: `inst-${this.enrollments}`, name: "lab" }, key: this.key });
     }
     if (path === "/api/connector/identities" && init.method === "PUT") {
-      if (init.headers.Authorization !== `Bearer ${KEY}` || body.instance !== this.instance) return reply(401, { error: "not_enrolled" });
+      if (init.headers.Authorization !== `Bearer ${this.key}` || body.instance !== this.instance) return reply(401, { error: "not_enrolled" });
+      if (this.delayMs) await sleep(this.delayMs);
       const list = body.participants!;
       if (list.some((n) => this.elsewhere.has(n))) return reply(409, { error: "name_taken" });
       if (this.dropFails > 0) { this.dropFails--; return reply(409, { error: "drop_failed" }); }
@@ -66,6 +81,7 @@ class FakeAccount {
         this.names.set(name, { gen, state: "connected" });
         return { name, state: "connected", bearer: `bear-${name}-${gen}` };
       });
+      if (this.downAfterPuts !== null && this.puts.length >= this.downAfterPuts) this.down = true;
       if (this.loseNext) { this.loseNext = false; throw new Error("socket hang up"); }
       return reply(200, { participants, mcp: this.mcp, rig: "acct" });
     }
@@ -79,7 +95,9 @@ let rigs: RigRepository;
 let account: FakeAccount;
 let app: Hono;
 let seq = 0;
+let hostId: string | null = "host-a";
 beforeEach(() => {
+  hostId = "host-a";
   db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   rigs = new RigRepository(db);
@@ -87,7 +105,7 @@ beforeEach(() => {
   account = new FakeAccount();
   app = new Hono();
   app.use("*", async (c, next) => { c.set("rigRepo" as never, rigs as never); await next(); });
-  app.route("/api/network", networkRoutes({ home, accountFetch: account.fetch, selfHostId: () => "host-a", accountTimeoutMs: 200 }));
+  app.route("/api/network", networkRoutes({ home, accountFetch: account.fetch, selfHostId: () => hostId, accountTimeoutMs: 1000 }));
 });
 afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
 
@@ -110,7 +128,7 @@ it("enrolling trades the code for a key kept privately; a used code is refused w
   expect(account.instance).toBe("host-a");
   const keyFile = networkInstallationKeyFile(home, enrolled.data.id);
   expect(statSync(keyFile).mode & 0o777).toBe(0o600);
-  expect(readPrivateToken(keyFile, () => "missing")).toBe(KEY);
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(account.key);
   const listed = await (await app.request("/api/network/bindings")).text();
   expect(listed).toContain(enrolled.data.id);
   expect(listed).not.toContain(KEY);
@@ -152,6 +170,19 @@ it("a lost answer to the participant list is recovered on the next connect: the 
   expect(readNetworkCredential(home, again.data.id)).toBe("bear-alpha-2");
 });
 
+it("one deadline covers all of a command's account calls: a connect that needs three lists runs out of time instead of waiting for each", async () => {
+  seat("a@lab");
+  await enroll();
+  account.loseNext = true;
+  await connect("a@lab", "alpha");
+  // Each list now takes 600 ms against this daemon's 1 s deadline, and recovering the lost answer needs three.
+  account.delayMs = 600;
+  const late = await connect("a@lab", "alpha");
+  expect(late).toMatchObject({ status: 503, data: { error: "account_unavailable" } });
+  expect(late.data.message).toContain("this command's time with the account ran out");
+  expect(account.puts.at(-1)).toEqual([]);
+});
+
 it("a name another connection holds is refused, and a seat that can't be connected sends nothing to the account", async () => {
   seat("a@lab");
   await enroll();
@@ -172,12 +203,16 @@ it("disconnect drops the name at the account; when the account can't be reached 
   await connect("b@lab", "beta");
   account.down = true;
   const failed = await post("/bindings/a@lab/disconnect", {});
-  expect(failed).toMatchObject({ status: 502, data: { error: "account_update_failed" } });
-  expect(failed.data.message).toContain(`Run \`rig network disconnect ${alpha.data.id}\` again to retry.`);
+  expect(failed).toMatchObject({ status: 502, data: { error: "account_update_unconfirmed" } });
+  expect(failed.data.message).toContain("couldn't confirm that the account dropped alpha");
+  expect(failed.data.message).toContain(`Run \`rig network disconnect ${alpha.data.id}\` again.`);
   expect(account.names.get("alpha")!.state).toBe("connected");
+  // Status keeps saying it's unconfirmed until an answered list shows otherwise.
+  const status = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ id: string; accountRemoval: string | null }> };
+  expect(status.bindings.find((b) => b.id === alpha.data.id)!.accountRemoval).toBe("unconfirmed");
   account.down = false;
   const ended = await post(`/bindings/${alpha.data.id}/disconnect`, {});
-  expect(ended).toMatchObject({ status: 200, data: { state: "disconnected" } });
+  expect(ended).toMatchObject({ status: 200, data: { state: "disconnected", accountRemoval: "confirmed" } });
   expect(ended.data.accountRemovedAt).not.toBeNull();
   expect(account.puts.at(-1)).toEqual(["beta"]);
   expect(account.names.get("alpha")!.state).toBe("revoked");
@@ -218,6 +253,112 @@ it("the installation key goes only to the enrolled site: a redirect isn't follow
   const stalled = await connect("a@lab", "alpha");
   expect(stalled).toMatchObject({ status: 503, data: { error: "account_unavailable" } });
   expect(account.inits.every((i) => i.redirect === "error")).toBe(true);
+});
+
+it("concurrent account writes keep every active name: two connects started together, and a disconnect racing a connect", async () => {
+  seat("a@lab"); seat("b@lab"); seat("c@lab");
+  await enroll();
+  account.delayMs = 20;
+  const [alpha, beta] = await Promise.all([connect("a@lab", "alpha"), connect("b@lab", "beta")]);
+  expect([alpha.status, beta.status]).toEqual([201, 201]);
+  expect(account.names.get("alpha")!.state).toBe("connected");
+  expect(account.names.get("beta")!.state).toBe("connected");
+  const [dropped, gamma] = await Promise.all([post(`/bindings/${alpha.data.id}/disconnect`, {}), connect("c@lab", "gamma")]);
+  expect(dropped).toMatchObject({ status: 200, data: { accountRemoval: "confirmed" } });
+  expect(gamma.status).toBe(201);
+  expect(account.names.get("alpha")!.state).toBe("revoked");
+  expect(account.names.get("beta")!.state).toBe("connected");
+  expect(account.names.get("gamma")!.state).toBe("connected");
+  expect(readNetworkCredential(home, gamma.data.id)).toBe(`bear-gamma-1`);
+});
+
+it("enroll --replace repairs an installation the account forgot: the old key works until the new code is accepted, and old bindings are ended and named", async () => {
+  seat("a@lab"); seat("b@lab");
+  const first = await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  account.forget();
+  const refused = await connect("b@lab", "beta");
+  expect(refused).toMatchObject({ status: 401, data: { error: "not_enrolled" } });
+  expect(refused.data.message).toContain("rig network enroll <code> --site https://account.example/ --replace");
+  expect(await enroll()).toMatchObject({ status: 409, data: { error: "already_enrolled" } });
+
+  // A refused new code changes nothing.
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  const oldKey = readPrivateToken(keyFile, () => "missing");
+  expect(await post("/installations", { code: "ec1.spent", site: "https://account.example", replace: true })).toMatchObject({ status: 400 });
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(oldKey);
+
+  const replaced = await post("/installations", { code: "ec1.next", site: "https://account.example", replace: true });
+  expect(replaced).toMatchObject({ status: 201, data: { id: first.data.id, installationId: "inst-2",
+    replaced: { endedBindings: [{ id: alpha.data.id, localSession: "a@lab", participantName: "alpha" }] } } });
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(account.key);
+  const status = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ id: string; state: string; accountRemoval: string | null }> };
+  expect(status.bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "disconnected", accountRemoval: "old-installation" });
+  expect((await connect("b@lab", "beta")).status).toBe(201);
+});
+
+it("a lost installation key is repaired the same way, and a failed replace keeps the old enrollment working", async () => {
+  seat("a@lab"); seat("b@lab");
+  const first = await enroll();
+  await connect("a@lab", "alpha");
+  // A refused replace leaves the old key in use.
+  expect(await post("/installations", { code: "ec1.spent", site: "https://account.example", replace: true })).toMatchObject({ status: 400 });
+  expect((await connect("b@lab", "beta")).status).toBe(201);
+
+  rmSync(join(networkInstallationKeyFile(home, first.data.id), ".."), { recursive: true });
+  seat("c@lab");
+  const missing = await connect("c@lab", "gamma");
+  expect(missing).toMatchObject({ status: 404, data: { error: "credential_missing" } });
+  expect(missing.data.message).toContain("--replace");
+  expect((await post("/installations", { code: "ec1.next", site: "https://account.example", replace: true })).status).toBe(201);
+  expect((await connect("c@lab", "gamma")).status).toBe(201);
+});
+
+it("a replace that fails here after the account accepted the new code puts the old key back", async () => {
+  const first = await enroll();
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  const oldKey = readPrivateToken(keyFile, () => "missing");
+  db.exec("CREATE TRIGGER fail_replace BEFORE UPDATE ON network_installations BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  const res = await app.request("/api/network/installations", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: "ec1.next", site: "https://account.example", replace: true }) });
+  expect(res.status).toBe(500);
+  expect(account.used.has("ec1.next")).toBe(true);
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(oldKey);
+  expect(readdirSync(dirname(keyFile))).toEqual(["key.json"]);
+  const status = await (await app.request("/api/network/bindings")).json() as { installations: Array<{ installationId: string }> };
+  expect(status.installations.map((i) => i.installationId)).toEqual(["inst-1"]);
+});
+
+it("an unresolved host id reads as try again, not enroll again, and sends nothing", async () => {
+  seat("a@lab");
+  await enroll();
+  hostId = null;
+  const calls = account.calls;
+  expect(await connect("a@lab", "alpha")).toMatchObject({ status: 503, data: { error: "instance_unknown" } });
+  expect(account.calls).toBe(calls);
+});
+
+it("a failed bind whose drop at the account also fails says the account may still list the name", async () => {
+  seat("a@lab");
+  await enroll();
+  account.mcp = "http://account.example/mcp";
+  account.downAfterPuts = 1;
+  const refused = await connect("a@lab", "alpha");
+  expect(refused).toMatchObject({ status: 400, data: { error: "http_not_allowed" } });
+  expect(refused.data.message).toContain("OpenRig couldn't confirm the account dropped alpha again");
+  expect(account.names.get("alpha")!.state).toBe("connected");
+});
+
+it("an unconfirmed removal is confirmed by a later answered list that no longer has the name", async () => {
+  seat("a@lab"); seat("b@lab");
+  await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  account.down = true;
+  expect((await post(`/bindings/${alpha.data.id}/disconnect`, {})).data.error).toBe("account_update_unconfirmed");
+  account.down = false;
+  expect((await connect("b@lab", "beta")).status).toBe(201);
+  const status = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ id: string; accountRemoval: string | null }> };
+  expect(status.bindings.find((b) => b.id === alpha.data.id)!.accountRemoval).toBe("confirmed");
 });
 
 it("a name-only connect without an enrollment says how to enroll", async () => {

@@ -17,6 +17,8 @@ let db: Database.Database;
 let home: string;
 let app: Hono;
 let rigs: RigRepository;
+/** Each write the CLI sent, with how long it would wait for the daemon. */
+const posts: Array<{ url: string; timeoutMs?: number }> = [];
 /** An account that answers the connector routes: a key for the one-time code, a bearer for each newly listed name. */
 const listed = new Set<string>();
 const accountFetch = async (url: string, init: { method: string; body: string }) => {
@@ -41,6 +43,7 @@ beforeEach(() => {
   db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s1', ?, 'dev-impl@lab', 'running')").run(node.id);
   home = mkdtempSync(join(tmpdir(), "openrig-network-cli-"));
   app = routesWith(null);
+  posts.length = 0;
 });
 afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = undefined; });
 
@@ -56,7 +59,10 @@ function cli(tokenFile: Record<string, string> = {}) {
   };
   const deps: NetworkDeps = {
     lifecycleDeps,
-    clientFactory: () => ({ get: (url: string) => call("GET", url), post: (url: string, body: unknown, options?: { headers?: Record<string, string> }) => call("POST", url, body, options?.headers) }) as never,
+    clientFactory: () => ({ get: (url: string) => call("GET", url), post: (url: string, body: unknown, options?: { headers?: Record<string, string>; timeoutMs?: number }) => {
+      posts.push({ url, timeoutMs: options?.timeoutMs });
+      return call("POST", url, body, options?.headers);
+    } }) as never,
     readTokenFile: (path) => { if (!(path in tokenFile)) throw new Error("no such file"); return tokenFile[path]!; },
   };
   return new Command().exitOverride().addCommand(networkCommand(deps));
@@ -73,7 +79,7 @@ it("connects a seat with its token file, shows it in status without the token, a
   expect(status).not.toContain("tok-abc");
 
   await cli().parseAsync(["node", "rig", "network", "disconnect", "dev-impl@lab", "--reason", "done"]);
-  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Disconnected netb-[0-9a-f]{20}  dev-impl@lab -> alex@team .*disconnected \(done\)/);
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Disconnected netb-[0-9a-f]{20}  dev-impl@lab -> alex@team .*disconnected \(done\)\nRemove the participant on the hub too/);
   expect(process.exitCode).toBeUndefined();
 });
 
@@ -143,6 +149,15 @@ it("enrolls with the account page's code, connects a seat by name through it, an
   expect(status[1]).toMatch(/^netb-[0-9a-f]{20}  dev-impl@lab -> alpha@acct at https:\/\/account\.example\/mcp/);
   await cli().parseAsync(["node", "rig", "network", "status", "--json"]);
   expect(String(out.mock.calls.at(-1)?.[0])).not.toMatch(/oik1_|bear-alpha/);
+
+  await cli().parseAsync(["node", "rig", "network", "disconnect", "dev-impl@lab"]);
+  expect(process.exitCode).toBeUndefined();
+  const disconnected = String(out.mock.calls.at(-1)?.[0]);
+  expect(disconnected).toMatch(/\nThe account stopped listing alpha, which revokes it there\.$/);
+  expect(disconnected).not.toContain("Remove the participant on the hub");
+  // Every network write waits past the daemon's 30 s account deadline, so the account's own answer is what's shown.
+  expect(posts.map((p) => p.url)).toEqual(["/api/network/installations", "/api/network/bindings", expect.stringMatching(/^\/api\/network\/bindings\/.+\/disconnect$/)]);
+  for (const p of posts) expect(p.timeoutMs).toBeGreaterThanOrEqual(45_000);
 });
 
 it("sends the operator bearer on its writes, so a daemon with one configured takes them", async () => {
