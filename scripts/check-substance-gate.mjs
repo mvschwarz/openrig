@@ -164,6 +164,10 @@ function derivePackageArtifacts(packageRoot) {
     if (error instanceof SyntaxError) throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
     // not a shape npm prints: reported below as no files array
   }
+  // One package is packed here; scanning only the first of several would issue a receipt for part of the artifact.
+  if (entries.length > 1) {
+    throw new Error(`npm artifact enumeration listed ${entries.length} packages where one was packed`);
+  }
   const rawFiles = entries[0]?.files;
   if (!Array.isArray(rawFiles)) throw new Error("npm artifact enumeration returned no files array");
   const files = rawFiles.map((entry) => entry?.path).filter((path) => typeof path === "string");

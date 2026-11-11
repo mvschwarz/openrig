@@ -423,6 +423,27 @@ test("npm output that is a JSON string is refused, even when the string holds a 
   });
 });
 
+test("npm output that lists more than one package is refused before any scan or receipt", () => {
+  const first = { name: "first", files: [{ path: "package.json" }, { path: "public/guide.md" }] };
+  const second = { name: "second", files: [{ path: "package.json" }, { path: "public/other.md" }] };
+  for (const printed of [[first, second], { first, second }]) {
+    withFixture(({ root, repo, rules, review, receipt }) => {
+      write(join(repo, "public/guide.md"), "Generic product guidance.\n");
+      commitAll(repo, "two package output fixture");
+      writeFileSync(review, JSON.stringify({ surfaces: [] }));
+      const bin = join(root, "bin");
+      write(join(bin, "npm"), `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify(printed))});\n`);
+      chmodSync(join(bin, "npm"), 0o755);
+
+      const result = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo),
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /npm artifact enumeration listed 2 packages where one was packed/);
+      assert.equal(existsSync(receipt), false);
+    });
+  }
+});
+
 test("the release ceremony names the gate and its durable receipt", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(pkg.scripts["gate:substance"], "node scripts/check-substance-gate.mjs");
