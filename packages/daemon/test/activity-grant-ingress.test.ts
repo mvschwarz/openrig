@@ -1,3 +1,6 @@
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { piUsageEntriesSchema } from "../src/db/migrations/107_pi_usage_entries.js";
+import { piUsageChargesSchema } from "../src/db/migrations/108_pi_usage_charges.js";
 // A seat activity grant on the existing hook ingress, through the real route, store, occupant ledger and oracle. The
 // grant is resolved first; only then is the seat and generation a post claims accepted. A refused post records nothing,
 // so the seat's activity stays unknown. The install-wide token keeps today's behaviour.
@@ -45,6 +48,7 @@ function fixture(options: { guest?: boolean } = {}) {
     c.set("agentActivityStore" as never, store as never);
     if (!options.guest) c.set("activityHookToken" as never, INSTALL_TOKEN as never);
     c.set("sessionRegistry" as never, sessions as never);
+    c.set("eventBus" as never, new EventBus(db) as never);
     c.set("seatActivityService" as never, oracle as never);
     await next();
   });
@@ -90,7 +94,7 @@ function fixture(options: { guest?: boolean } = {}) {
   const recorded = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get() as { n: number }).n;
   const activity = (nodeId: string) => oracle.getSeatState(nodeId)?.activity ?? "unknown";
   const replace = (reserved?: string) => occupy(guest.id, GUEST, "handover", reserved);
-  return { guest, other, sessions, grants, generation, issue, post, heldPost, raw, event, recorded, activity, replace };
+  return { db, app, guest, other, sessions, grants, generation, issue, post, heldPost, raw, event, recorded, activity, replace };
 }
 
 describe("a seat activity grant on the hook ingress", () => {
@@ -114,6 +118,71 @@ describe("a seat activity grant on the hook ingress", () => {
         .toMatchObject({ status: 200 });
       expect(f.activity(nodeId)).toBe("working");
     }
+  });
+
+  it("requires bound authority for a claimed run even when install and generation are known", async () => {
+    const f = fixture();
+    const legacy = f.issue();
+    for (const token of [INSTALL_TOKEN, legacy.token]) {
+      expect(await f.post(token, f.event("Stop", "end_turn", { sessionName: GUEST, runId: "claimed-run" })))
+        .toMatchObject({ status: 403, body: { code: "run_grant_required" } });
+    }
+    expect(f.recorded()).toBe(0);
+  });
+
+  it("checks activation, run ID and the concrete binding before accepting run activity", async () => {
+    const f = fixture();
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.guest.id, GUEST);
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "launch", run: {
+      runId: "actual-attempt", sessionId: row.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 409, body: { code: "activity_grant_pending" } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: "forged" }))).toMatchObject({ status: 409 });
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 200 });
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.guest.id);
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 409 });
+    expect(f.recorded()).toBe(1);
+  });
+
+  it("allows a retained Pi run to reannounce identity after explicit same-process adoption", async () => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(f.guest.id);
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.guest.id, GUEST);
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "launch", run: {
+      runId: "retained-pi", sessionId: row.id, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    f.grants.activate(grant.grantId);
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.guest.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: null,
+      sessionName: GUEST, observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPid: 101,
+        observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    f.sessions.registerClaimedSession(f.guest.id, GUEST, "adopt");
+    expect(await f.post(grant.token, { runtime: "pi", eventFamily: "session_identity", hookEvent: "SessionStart",
+      sessionName: GUEST, sessionId: "native-id", sessionFile: "/tmp/retained.jsonl", generation: grant.generation, runId: grant.runId }))
+      .toMatchObject({ status: 200, body: { tokenPersisted: true } });
+  });
+
+  it("accepts bound Pi usage while preserving legacy install-token usage", async () => {
+    const f = fixture();
+    f.db.exec(piUsageEntriesSchema.sql!);
+    f.db.exec(piUsageChargesSchema.sql!);
+    f.db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(f.guest.id);
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.guest.id, GUEST);
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "launch", run: {
+      runId: "pi-attempt", sessionId: row.id, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    const post = (token: string, path: string, extra = {}) => f.app.request(`/api/activity/${path}`, { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ sessionName: GUEST, piSessionId: "pi-native-id", facts: [], charges: [], ...extra }) });
+    for (const path of ["pi-usage", "pi-usage-charges"]) expect((await post(grant.token, path)).status).toBe(409);
+    f.grants.activate(grant.grantId);
+    for (const path of ["pi-usage", "pi-usage-charges"]) {
+      expect((await post(grant.token, path)).status).toBe(200);
+      expect((await post(INSTALL_TOKEN, path)).status).toBe(200);
+      expect((await post(grant.token, path, { nodeId: f.other.id })).status).toBe(403);
+    }
+    f.grants.revoke({ grantId: grant.grantId }, "stopped");
+    expect((await post(grant.token, "pi-usage")).status).toBe(401);
   });
 
   const wrongSeat: Array<[string, (f: ReturnType<typeof fixture>) => Record<string, unknown>]> = [

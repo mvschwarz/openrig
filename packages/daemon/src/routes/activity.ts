@@ -158,6 +158,9 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (revoked && !permissionRoute) {
     return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
   }
+  if (grant.runId && body.runId !== undefined && body.runId !== grant.runId) {
+    return refuse(409, "activity_grant_stale", "This post names another run; nothing was recorded.");
+  }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
   if ((claimedNode && claimedNode !== grant.nodeId)
@@ -178,6 +181,11 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
  *  hasn't registered yet (pending). A `revoked` grant whose occupant wasn't replaced reads revoked: it was reissued for
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
+  if (grant.runId) {
+    const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
+    if (standing === "current") return null;
+    return c.json({ ok: false, code: `activity_grant_${standing}`, error: `This runner grant is ${standing}; ${outcome}` }, standing === "revoked" ? 401 : 409);
+  }
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -211,7 +219,10 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
-  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  const grantStore = new ActivityGrantStore(sessionRegistry.db);
+  const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
+  if (bearerToken !== expectedToken && headerToken !== expectedToken && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -222,6 +233,12 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  if (grant?.runId) {
+    const bound = bindToGrant(c, store, grant, body);
+    if ("refused" in bound) return { error: bound.refused };
+    if (grant.binding?.runtime !== "pi") return { error: c.json({ ok: false, code: "activity_grant_wrong_seat", error: "Pi usage requires a Pi run." }, 403) };
+    body = bound.body;
   }
   const sessionName = stringOrNull(body.sessionName);
   const piSessionId = stringOrNull(body.piSessionId);
@@ -326,6 +343,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
   }
 
+  if (Object.hasOwn(body, "runId") && !grant?.runId) {
+    return c.json({ ok: false, code: "run_grant_required", error: "Actual-run reports require their run-bound credential." }, 403);
+  }
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
   if (grant) {
     const bound = bindToGrant(c, store, grant, body);
@@ -466,7 +486,7 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (current.generationUuid !== generation && !(grant?.runId && grant.generation === generation)) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,

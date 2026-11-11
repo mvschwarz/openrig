@@ -827,7 +827,7 @@ export class RunnerCore {
 
   constructor(
     private io: RunnerIo,
-    private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
+    private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string; runId?: string },
     private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
       /** K4: the credential observation taken before Pi was spawned. */
       launchCredentialEvidence?: PiCredentialEvidence;
@@ -1314,11 +1314,11 @@ export class RunnerCore {
     }
   }
 
-  /** Re-deliver OMP identity until the daemon confirms the resume token.
+  /** Re-deliver OMP or managed run identity until the daemon confirms the resume token.
    *  Called from a timer so a daemon restart during the first turn cannot
    *  leave a seat with history but no restorable token. */
   retrySessionIdentity(): void {
-    if (this.runtime === "omp" && this.ready) this.postSessionIdentity();
+    if ((this.runtime === "omp" || this.identity.runId) && this.ready) this.postSessionIdentity();
   }
 
   /** A resume that came up on another session file started a different session: the requested one stays the seat's. */
@@ -1330,9 +1330,10 @@ export class RunnerCore {
     // Never the identity of a session other than the one this launch resumes: it would replace the seat's resume token.
     if (this.resumedElsewhere()) return;
     if (this.runtime === "omp" && (!this.sessionFile || !this.io.sessionFileExists?.(this.sessionFile))) return;
-    if (this.runtime === "omp" && (this.identityPersisted || this.identityInFlight)) return;
+    if ((this.runtime === "omp" || this.identity.runId) && (this.identityPersisted || this.identityInFlight)) return;
     const result = this.io.postActivity({
       eventFamily: "session_identity",
+      ...(this.identity.runId ? { runId: this.identity.runId } : {}),
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId ?? null,
       runtime: this.runtime,
@@ -1342,7 +1343,7 @@ export class RunnerCore {
       sessionFile: this.sessionFile ?? null,
       occurredAt: this.io.now(),
     });
-    if (this.runtime !== "omp" || !result) return;
+    if ((this.runtime !== "omp" && !this.identity.runId) || !result) return;
     this.identityInFlight = true;
     void result.then(
       (body) => { if (body?.tokenPersisted === true) this.identityPersisted = true; },
@@ -1360,6 +1361,7 @@ export class RunnerCore {
     if (hookEvent === "Stop") this.lastHeartbeatMs = Date.parse(this.io.now());
     return {
       sequence: ++this.activitySequence,
+      ...(this.identity.runId ? { runId: this.identity.runId } : {}),
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId ?? null,
       generation: this.identity.generation ?? null,
@@ -1822,7 +1824,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
-      .then(async (response) => response.ok && runtime === "omp" ? await response.json() as Record<string, unknown> : null)
+      .then(async (response) => response.ok && (runtime === "omp" || process.env.OPENRIG_RUN_ID) ? await response.json() as Record<string, unknown> : null)
       .catch(() => null)
       .finally(() => clearTimeout(timeout));
   });
@@ -1838,9 +1840,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const result = postInOrder(payload).catch(() => null);
-      // OMP reads the acknowledgement so identity delivery can retry; null
+      // Managed runs and OMP read the acknowledgement so identity delivery can retry; null
       // (transport failure or a non-OK reply) means "not yet persisted".
-      if (runtime === "omp") return result;
+      if (runtime === "omp" || process.env.OPENRIG_RUN_ID) return result;
     },
     writeSidecar: (state) => {
       try {
@@ -1889,6 +1891,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
+    runId: process.env.OPENRIG_RUN_ID,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
     requestedSessionFile: args.sessionFile });
 
@@ -1905,8 +1908,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     core.handlePiLine(line);
   });
-  // Re-deliver OMP identity until the daemon confirms the resume token.
-  const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
+  // Re-deliver managed run identity after pending activation/cutover, and legacy OMP identity as before.
+  const identityRetry = runtime === "omp" || process.env.OPENRIG_RUN_ID ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
   const heartbeatTimer = startHeartbeatTimer(core, runtime);
   // The last few stderr lines, so an OMP that exits during startup is

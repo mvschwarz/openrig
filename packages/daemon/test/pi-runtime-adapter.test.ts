@@ -1135,3 +1135,38 @@ it("stages a Pi account successor with canonical identity and a separate state d
   expect(await adapter.checkReady(binding)).toMatchObject({ ready: true });
   expect(fs.files[predecessorPath]).toBe(readyState(SESSION_FILE, "old-launch"));
 });
+
+describe("run grant at the actual Pi dispatch", () => {
+  it.each([true, false])("uses the actual attempt, activates at dispatch, and finalizes readiness=%s", async ready => {
+    const fs = memFs();
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const calls: string[] = [];
+    const finish = vi.fn(async (ok: boolean) => { calls.push(`finish:${ok}`); });
+    const runnerGrants = vi.fn(async (_binding, runtime, runId, runner) => {
+      expect([runtime, runId, runner]).toEqual(["pi", "attempt-bound", 0]);
+      calls.push("issued");
+      return { wrap: (command: string) => `private-wrapper ${command}`, dispatched: () => { calls.push("dispatched"); }, finish };
+    });
+    const sendShellCommand = vi.fn(async (_target: string, command: string) => {
+      expect(command).toContain("private-wrapper");
+      expect(command).toContain("--launch-id 'attempt-bound'");
+      if (ready) fs.files[statePath] = readyState(SESSION_FILE, "attempt-bound");
+      return { ok: true as const };
+    });
+    const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER, runnerGrants, newLaunchId: () => "attempt-bound", sleep: async () => {} });
+    const result = await adapter.launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION });
+    expect(result.ok).toBe(ready);
+    expect(calls).toEqual(["issued", "dispatched", `finish:${ready}`]);
+    expect(runnerGrants).toHaveBeenCalledOnce();
+  });
+});
+
+it("keeps the run grant and its private transfer keys out of native Pi/tools", () => {
+  const child = buildPiChildEnv({ PATH: "/bin", OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_private",
+    OPENRIG_RUN_ID: "actual-run", OPENRIG_RUN_GRANT_TEST: "oag_private", OPENRIG_NODE_ID: "seat" },
+    { agentDir: "/agent", sessionsDir: "/sessions" });
+  expect(child.OPENRIG_NODE_ID).toBe("seat");
+  expect(JSON.stringify(child)).not.toContain("oag_private");
+  expect(child).not.toHaveProperty("OPENRIG_RUN_ID");
+});

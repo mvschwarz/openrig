@@ -10,7 +10,9 @@
 >   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
-> - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
+> - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
+>   This credential does not qualify new native input or cancellation behavior.
+> - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
 > - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
@@ -126,6 +128,20 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 - **OpenRig shows this identity as launcher-reported.** It doesn't observe the conversation itself.
 
 ## 4. Activity: report turn boundaries
+
+Managed hosted Pi, Pi-RPC presets and declared community runners receive an actual-launch credential in
+`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
+process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
+never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
+credential; knowing a generation or the install token does not supply run authority.
+
+Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
+successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
+Failed launches revoke their own credential. Relaunch replaces the active run; an explicit no-launch adoption can
+retain it only with the original concrete pane/process evidence and an adoption-only tenure continuation. These
+checks bind a runner's reports to its launch; they do not independently verify its claimed native identity. Existing
+host hooks, contained guest grants and install-token Pi usage keep their legacy behavior. Pi usage also accepts a
+current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to

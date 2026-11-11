@@ -1,7 +1,14 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 // The seat activity grant's store and the only activity values a guest receives.
 import { afterEach, describe, expect, it } from "vitest";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { runnerGrantIssuer } from "../src/domain/runner-grant-launch.js";
 import { ActivityGrantStore, grantGeneration, guestActivityEnv } from "../src/domain/activity-grants.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
@@ -73,6 +80,173 @@ describe("issuing a seat activity grant", () => {
     f.sessions.registerSession(f.node.id, "dev-guest@guest-rig", "handover", reserved);
     expect(grantGeneration(next, f.ledger)).toBe("current");
     expect(grantGeneration(current, f.ledger)).toBe("stale");
+  });
+});
+
+describe("actual run grants", () => {
+  function run() {
+    const f = fixture();
+    const session = f.db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(f.node.id) as { id: string };
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,'dev-guest@guest-rig','%1')").run(f.node.id);
+    const anchor = { runtime: "synth", runner: 1, pane: "%1", panePid: 101 };
+    f.db.prepare("UPDATE sessions SET agent_app = 'synth', agent_runner = 1 WHERE id = ?").run(session.id);
+    const issue = (runId: string) => f.grants.issue({ nodeId: f.node.id, generation: f.generation, issuedBy: "launch", run: { runId, sessionId: session.id, binding: anchor } });
+    return { ...f, session, anchor, issue };
+  }
+
+  it("stages a successor without replacing its predecessor; activation and late cleanup address exact grants", () => {
+    const f = run();
+    const first = f.issue("attempt-1");
+    expect(f.grants.standing(first.grantId)).toBe("pending");
+    expect(f.grants.activeForNode(f.node.id)).toBeNull();
+    expect(f.grants.activate(first.grantId)).toBe(true);
+    const failed = f.issue("attempt-2");
+    expect(f.grants.activeForNode(f.node.id)?.grantId).toBe(first.grantId);
+    f.grants.revoke({ grantId: failed.grantId }, "failed launch");
+    expect(f.grants.activate(failed.grantId)).toBe(false);
+    const next = f.issue("attempt-3");
+    expect(f.grants.activate(next.grantId)).toBe(true);
+    expect(f.grants.standing(first.grantId)).toBe("revoked");
+    f.grants.revoke({ grantId: first.grantId }, "late completion");
+    expect(f.grants.standing(next.grantId)).toBe("current");
+    expect(JSON.stringify(f.db.prepare("SELECT * FROM activity_grants").all())).not.toContain(next.token);
+  });
+
+  it("supersedes pending credentials for the same run without touching another staged attempt", () => {
+    const f = run();
+    const a = f.issue("a"), b = f.issue("b"), replacement = f.issue("a");
+    expect(f.grants.standing(a.grantId)).toBe("revoked");
+    expect(f.grants.standing(b.grantId)).toBe("pending");
+    expect(f.grants.standing(replacement.grantId)).toBe("pending");
+  });
+
+  it("does not let an older pending dispatch replace a newer active run", () => {
+    const f = run();
+    const older = f.issue("older"), newer = f.issue("newer");
+    expect(f.grants.activate(newer.grantId)).toBe(true);
+    expect(f.grants.activate(older.grantId)).toBe(false);
+    expect(f.grants.standing(newer.grantId)).toBe("current");
+  });
+
+  it("activates a staged runner only at the Core session and binding cutover", () => {
+    const f = run();
+    const first = f.issue("first");
+    f.grants.activate(first.grantId);
+    const generation = f.sessions.reserveOccupantGeneration()!;
+    const staged = f.grants.issue({ nodeId: f.node.id, generation, issuedBy: "launch", run: {
+      runId: "staged", binding: { ...f.anchor, pane: "%2", panePid: 202 } } });
+    expect(f.grants.activate(staged.grantId)).toBe(false);
+    expect(f.grants.activeForNode(f.node.id)?.grantId).toBe(first.grantId);
+    // The reconciler can have sampled the predecessor while the successor was staging.
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process",
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: "2999-01-01T00:00:00.000Z",
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
+    const successor = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "handover", generation);
+    expect(f.grants.standing(staged.grantId)).toBe("current");
+    expect(f.grants.get(staged.grantId)?.sessionId).toBe(successor.id);
+    expect(f.grants.standing(first.grantId)).toBe("revoked");
+  });
+
+  it("preserves explicit same-pane adoption only with retained concrete process evidence", () => {
+    const f = run();
+    const first = f.issue("first");
+    f.grants.activate(first.grantId);
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process",
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
+    expect(f.grants.standing(first.grantId)).toBe("current");
+    f.db.prepare("UPDATE seat_identity_verdicts SET evidence_pane_pid = 999 WHERE node_id = ?").run(f.node.id);
+    expect(f.grants.standing(first.grantId)).toBe("stale");
+  });
+
+  it("revokes the current run on an explicit stop or observed exit", () => {
+    const f = run();
+    const first = f.issue("first");
+    f.grants.activate(first.grantId);
+    f.sessions.markIntentionallyStopped(f.session.id);
+    expect(f.grants.standing(first.grantId)).toBe("revoked");
+  });
+
+  it("distributes privately, and late failed cleanup cannot revoke the replacement", async () => {
+    const f = run();
+    const env = new Map<string, string>();
+    const tmux = { getPaneCommand: async () => "bash", getPanePid: async () => 101,
+      setSessionEnv: async (_session: string, key: string, value: string) => { env.set(key, value); },
+      unsetSessionEnv: async (_session: string, key: string) => { env.delete(key); } };
+    const begin = runnerGrantIssuer(f.db, tmux);
+    const binding = { nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never;
+    const first = await begin(binding, "synth", "first", 1);
+    const token = [...env.values()][0]!;
+    expect(first.wrap("node runner.js")).not.toContain(token);
+    expect(first.wrap("node runner.js")).toContain("set +x");
+    expect(first.wrap("node runner.js")).toContain("set-environment");
+    first.dispatched();
+    const second = await begin(binding, "synth", "second", 1);
+    second.dispatched();
+    await first.finish(false);
+    expect(f.grants.activeForNode(f.node.id)?.runId).toBe("second");
+    expect(env.size).toBe(1);
+  });
+
+  it("preserves the active predecessor when private credential distribution fails after its write", async () => {
+    const f = run();
+    const first = f.issue("first"); f.grants.activate(first.grantId);
+    const env = new Map<string, string>();
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101,
+      setSessionEnv: async (_session: string, key: string, token: string) => { env.set(key, token); throw new Error("private transport unavailable"); },
+      unsetSessionEnv: async (_session: string, key: string) => { env.delete(key); } });
+    await expect(begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never,
+      "synth", "failed", 1)).rejects.toThrow("credential distribution failed");
+    expect(f.grants.standing(first.grantId)).toBe("current");
+    expect(f.grants.activeForNode(f.node.id)?.runId).toBe("first");
+    expect(env.size).toBe(0);
+  });
+
+  it("keeps the existing staged /bin/sh launch path for non-POSIX parent shells", async () => {
+    const f = run();
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101, setSessionEnv: async () => {}, unsetSessionEnv: async () => {} });
+    const launch = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never,
+      "synth", "shell-independent-bootstrap", 1);
+    expect(launch.wrap("node runner.js")).toMatch(/^\/bin\/sh -c /);
+    await launch.finish(false);
+  });
+
+  it("consumes the private tmux environment before exec without token text in argv or tracing", async () => {
+    const f = run();
+    const dir = mkdtempSync(join(tmpdir(), "run-grant-transfer-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const marker = join(dir, "consumed");
+    writeFileSync(join(dir, "tmux"), '#!/bin/sh\ncase "$1" in show-environment) printf "%s=%s\\n" "$TEST_KEY" "$TEST_PRIVATE";; set-environment) touch "$TEST_REMOVED";; *) exit 1;; esac\n');
+    chmodSync(join(dir, "tmux"), 0o700);
+    let token = "", key = "";
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101,
+      setSessionEnv: async (_session, name, value) => { key = name; token = value; }, unsetSessionEnv: async () => {} });
+    const launch = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never, "synth", "opaque-run", 1);
+    const program = `const t=process.env.OPENRIG_ACTIVITY_HOOK_TOKEN; process.stdout.write(JSON.stringify({bound:t===process.env.TEST_PRIVATE,run:process.env.OPENRIG_RUN_ID,argvLeak:process.argv.some(a=>a.includes(t))}));`;
+    const command = launch.wrap(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`);
+    expect(command).not.toContain(token);
+    const result = spawnSync("/bin/sh", ["-xc", command], { encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`,
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "legacy-install", TEST_KEY: key, TEST_PRIVATE: token, TEST_REMOVED: marker } });
+    expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ bound: true, run: "opaque-run", argvLeak: false });
+    expect(result.stderr).not.toContain(token);
+    expect(existsSync(marker)).toBe(true);
+    await launch.finish(false);
+  });
+
+  it("refuses activation and standing after concrete pane or recorded runtime changes", () => {
+    const f = run();
+    const first = f.issue("first");
+    expect(f.grants.activate(first.grantId)).toBe(true);
+    const staged = f.issue("staged");
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
+    expect(f.grants.standing(first.grantId)).toBe("stale");
+    expect(f.grants.activate(staged.grantId)).toBe(false);
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%1' WHERE node_id = ?").run(f.node.id);
+    f.db.prepare("UPDATE sessions SET agent_runner = 0 WHERE id = ?").run(f.session.id);
+    expect(f.grants.standing(first.grantId)).toBe("stale");
   });
 });
 
