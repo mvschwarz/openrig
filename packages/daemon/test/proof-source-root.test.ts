@@ -29,6 +29,9 @@ it("watches the owning project policy above a nested missions root", async () =>
     emit: (event: unknown) => events.push(event),
   } as unknown as EventBus);
   try {
+    // A creation event can dirty setup before it returns; start assertions at the settled observed basis.
+    await expect.poll(() => watch.observation().state, { timeout: 5000 }).toBe("watching");
+    events.length = 0; invalidated = 0;
     await new Promise(resolve => setTimeout(resolve, 250));
     expect(events).toHaveLength(0);
     const before = watch.observation().revision;

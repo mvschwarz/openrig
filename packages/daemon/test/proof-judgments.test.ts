@@ -298,6 +298,9 @@ describe("retained authority negative controls", () => {
     const events: Array<{ type: string; revision: string }> = []; let invalidated = 0;
     const watch = await watchProofSources(f.missions, () => { invalidated++; }, { emit: (e: { type: string; revision: string }) => events.push(e) } as unknown as EventBus);
     try {
+      // Creation events may interrupt asynchronous setup; count changes only after the initial basis settles.
+      await expect.poll(() => watch.observation().state, { timeout: 5000 }).toBe("watching");
+      events.length = 0; invalidated = 0;
       const file = join(f.alpha, "proof/evidence.md"); fs.writeFileSync(file, fs.readFileSync(file));
       await new Promise(r => setTimeout(r, 100)); expect(events).toEqual([]);
       fs.writeFileSync(file, "Measured outcome changed.\n");

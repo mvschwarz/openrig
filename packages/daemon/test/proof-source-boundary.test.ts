@@ -207,6 +207,84 @@ it.each(["changed", "unchanged"])("coalesces mid-read events and publishes only 
   instance.close();
 });
 
+it("publishes unchanged-revision coverage recovery only after an interrupted read settles cleanly", async () => {
+  vi.useFakeTimers();
+  const project = path.resolve("fixture/project"), missions = path.join(project, "missions");
+  resolveProjectRoot.mockReturnValue(project);
+  let call = 0;
+  readProjectReadiness.mockImplementation((_m: string, _r: unknown, _root: unknown, io?: Io) => {
+    io?.exists(path.join(project, "project.yaml"));
+    io?.readBytes(path.join(project, `input-${Math.min(call++, 2)}`, "report.md"));
+    return { missions: [] };
+  });
+  handle();
+  const emit = vi.fn();
+  const instance = await watchProofSources(missions, vi.fn(), { emit } as unknown as EventBus);
+  const settled = instance.observation();
+  expect(settled.state).toBe("unavailable"); // all three setup passes attached a previously unwatched dependency
+  const read = readProjectReadiness.getMockImplementation()!;
+  let finish!: (value: { missions: [] }) => void;
+  readProjectReadiness.mockImplementationOnce((...args: unknown[]) => {
+    read(...args);
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const notify = watch.mock.calls[0]![2];
+  notify("change", "report.md"); await vi.advanceTimersByTimeAsync(50);
+  notify("change", "report.md");
+  finish({ missions: [] }); await vi.advanceTimersByTimeAsync(0);
+  expect.soft(instance.observation()).toEqual(settled);
+  expect(emit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(50);
+  expect(instance.observation()).toEqual({ state: "watching", revision: settled.revision });
+  expect.soft(emit.mock.calls.map(([event]) => event.revision)).toEqual([settled.revision]);
+  instance.close();
+});
+
+it("reports watch errors immediately while a refresh is still awaiting its read", async () => {
+  vi.useFakeTimers();
+  const project = path.resolve("fixture/project"), missions = path.join(project, "missions");
+  resolveProjectRoot.mockReturnValue(project);
+  reads(() => [["exists", path.join(project, "project.yaml")]]);
+  let error!: () => void;
+  watch.mockImplementation(() => ({ on: (_event: string, callback: () => void) => { error = callback; }, close: vi.fn() }));
+  const emit = vi.fn();
+  const instance = await watchProofSources(missions, vi.fn(), { emit } as unknown as EventBus);
+  let finish!: (value: { missions: [] }) => void;
+  readProjectReadiness.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  watch.mock.calls[0]![2]("change", "report.md"); await vi.advanceTimersByTimeAsync(50);
+  error();
+  expect(instance.observation()).toEqual({ state: "unavailable", revision: "unavailable" });
+  expect(emit.mock.calls.at(-1)![0].revision).toBe("unavailable");
+  finish({ missions: [] }); await vi.advanceTimersByTimeAsync(0);
+  expect(instance.observation().state).toBe("unavailable");
+  expect(emit.mock.calls.every(([event]) => event.revision === "unavailable")).toBe(true);
+  instance.close();
+});
+
+it("does not publish an interrupted setup candidate before a clean refresh", async () => {
+  vi.useFakeTimers();
+  const project = path.resolve("fixture/project"), missions = path.join(project, "missions");
+  resolveProjectRoot.mockReturnValue(project);
+  reads(() => [["exists", path.join(project, "project.yaml")]]);
+  const read = readProjectReadiness.getMockImplementation()!;
+  let finish!: (value: { missions: [] }) => void;
+  readProjectReadiness.mockImplementationOnce((...args: unknown[]) => {
+    read(...args);
+    return new Promise(resolve => { finish = resolve; });
+  });
+  handle();
+  const emit = vi.fn(), opening = watchProofSources(missions, vi.fn(), { emit } as unknown as EventBus);
+  watch.mock.calls[0]![2]("change", "report.md");
+  finish({ missions: [] });
+  const instance = await opening;
+  expect(instance.observation()).toEqual({ state: "unavailable", revision: "unavailable" });
+  expect(emit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(50);
+  expect(instance.observation().state).toBe("watching");
+  expect(emit).toHaveBeenCalledTimes(1);
+  instance.close();
+});
+
 it("does not reattach watches or publish when an in-flight read finishes after close", async () => {
   vi.useFakeTimers();
   const project = path.resolve("fixture/project"), missions = path.join(project, "missions");

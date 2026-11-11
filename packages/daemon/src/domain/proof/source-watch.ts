@@ -164,13 +164,14 @@ export async function watchProofSources(missionsRoot: string, invalidate: () => 
   /** Read the sources and keep the subscriptions in step with what was read, even when the result is unchanged.
    *  Coverage is certified only by a read whose every dependency was already watched before it; if the dependencies
    *  keep moving past a small budget, the sources are reported unobserved rather than read forever. */
-  const evaluate = async (): Promise<string> => {
+  const evaluate = async (): Promise<{ hash: string; covered: boolean }> => {
     let read = await basis();
     for (let i = 0; ; i++) {
-      if (closed) return revision;
+      if (closed) return { hash: revision, covered: false };
       // A root whose real location is unknown or outside the project has no anchors there: never certified.
-      if (!resubscribe(read.watches)) { covered = recursiveReal !== null && within(recursiveReal, project); return read.hash; }
-      if (i === 2) { covered = false; return read.hash; }
+      // Coverage belongs to this candidate, just like the hash; neither escapes a discarded read.
+      if (!resubscribe(read.watches)) return { hash: read.hash, covered: recursiveReal !== null && within(recursiveReal, project) };
+      if (i === 2) return { hash: read.hash, covered: false };
       read = await basis();
     }
   };
@@ -185,8 +186,10 @@ export async function watchProofSources(missionsRoot: string, invalidate: () => 
       try {
         if (scopeDirty) { scopeDirty = false; notifyScope(); }
         const before = observed();
-        const next = await evaluate();
+        const candidate = await evaluate();
         if (closed || dirty) return;
+        const next = candidate.hash;
+        covered = candidate.covered && !failed;
         readable = true;
         // Deduplicate on what clients see: the revision and whether the sources are observed. Losing or regaining
         // coverage is news even when the proof result itself did not change.
@@ -212,7 +215,10 @@ export async function watchProofSources(missionsRoot: string, invalidate: () => 
   try {
     recursiveReal = canonical(missionsRoot);
     recursive = watchDir(missionsRoot, true);
-    try { revision = await evaluate(); readable = !dirty; } catch (e) {
+    try {
+      const candidate = await evaluate();
+      if (!dirty) { revision = candidate.hash; covered = candidate.covered && !failed; readable = true; }
+    } catch (e) {
       if (e instanceof WatchFailure) throw e;
       // Direct reads name unavailable inputs; watching may recover them.
       covered = true;
