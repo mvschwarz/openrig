@@ -77,10 +77,9 @@ the seat's activity next turns to running or idle, or when the whole restore com
 after the seat already reads running or idle, the daemon checks the live seat: its tmux
 session is alive, and the agent in its pane was started to resume the conversation the
 seat records. When the check passes, the restore outcome becomes `operator_recovered`, so
-the restore no longer makes the seat need attention. When it fails, the restore outcome
-stays and the seat still needs attention, which is true when the pane runs another
-conversation. A check that started before a newer restore of the seat doesn't settle
-the newer outcome.
+the restore no longer makes the seat need attention. When the check fails, the restore
+outcome stays and the seat still needs attention. The check uses launch evidence; it
+does not prove which conversation is open now.
 
 `rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
 command says which check failed, and `--reason` doesn't bypass it. If the seat records
