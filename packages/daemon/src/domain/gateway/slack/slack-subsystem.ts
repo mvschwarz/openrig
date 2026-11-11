@@ -21,7 +21,7 @@ import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from ".
 import { DispatchBuffer } from "../dispatch-buffer.js";
 import { downloadPrivateFile, isSlackHost, lookupBotApp, postChatMessage } from "./slack-api.js";
 import { botInboxProblems } from "./bot-inbox.js";
-import { effectiveInboundDestination, loadConfig } from "./config.js";
+import { effectiveInboundDestination, inboundDestinationNote, loadConfig } from "./config.js";
 import { resolveDefaultReceiver } from "../../default-receiver.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
@@ -312,8 +312,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
   // Read once, when the connector starts, like the rest of its configuration.
-  const inbound = effectiveInboundDestination(cfg, (() => { try { return resolveDefaultReceiver(opts.queueRepo.db).session; } catch { return null; } })());
-  const inboundRouting = { fallback: "local", destination: inbound.destination, destinationFrom: inbound.from };
+  const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
+  const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
+  const inboundNote = inboundDestinationNote(inbound, receiver);
+  if (inbound.from === "default") log(`slack inbound: ${inboundNote}`);
+  const inboundRouting = { fallback: "local", destination: inbound.destination, destinationFrom: inbound.from, ...(inboundNote ? { destinationNote: inboundNote } : {}) };
   const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
   const deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"));
   // Retained relays belong to their original host, even after forwarding configuration changes.

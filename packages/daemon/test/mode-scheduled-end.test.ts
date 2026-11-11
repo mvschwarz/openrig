@@ -89,6 +89,36 @@ describe("a mode's scheduled end", () => {
     } finally { vi.unstubAllEnvs(); }
   });
 
+  it("when the host's seats can't be read, no other recipient is chosen: the notice stays owed for the next pass", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // the applier would be routable
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const jobId = f.jobFor(app.applicationId)!.jobId;
+    const real = f.db.prepare.bind(f.db);
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("FROM sessions WHERE session_name = ? ORDER BY rowid")) throw new Error("sessions unreadable");
+      return real(sql);
+    }) as typeof f.db.prepare);
+    try {
+      expect(await f.run(jobId, END)).toMatchObject({ state: "notice-pending", why: expect.stringContaining("OpenRig couldn't tell whether this host has a receiving agent") });
+    } finally { spy.mockRestore(); }
+    expect(f.toOperator()).toEqual([]);
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)?.state).not.toBe("terminal");
+  });
+
+  it("a receiving agent used instead of an unusable setting is told why, in the notice", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-k', 'kernel')").run();
+    f.db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-op', 'r-k', 'operator.agent')").run();
+    f.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('s-op', 'n-op', ?)").run(KERNEL_OPERATOR_SESSION);
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "alex@external");
+    try {
+      expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: KERNEL_OPERATOR_SESSION });
+    } finally { vi.unstubAllEnvs(); }
+    expect(f.toOperator()[0]!.body).toContain(`Sent to ${KERNEL_OPERATOR_SESSION} because agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored.`);
+  });
+
   it("applied by a named operator outside any seat, with no kernel operator here, the person is told, as an update", async () => {
     const f = fixture();
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;

@@ -143,6 +143,8 @@ interface IssuedPair {
   freeReason?: "none" | "unroutable" | "unknown";
   /** The receiving agent the queue couldn't take rows to (`unroutable`). */
   freeSession?: string;
+  /** Why the owner is a receiver used instead of the chosen one (an unusable agents.operator_session). */
+  ownerNote?: string;
 }
 
 interface ClientPair {
@@ -186,12 +188,13 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
    *  operator), when the queue takes rows to it; else nobody, and the request is agent-free, with the reason. A stopped
    *  receiver still owns it: the person's answer waits in its queue, and the person is told it isn't running. A receiver
    *  the queue can't take rows to can't own it: the person's answer would be refused on its way there. */
-  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason" | "freeSession"> {
+  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason" | "freeSession" | "ownerNote"> {
     const repo = getRepo(c);
     try {
       const receiver = resolveDefaultReceiver(repo.db);
       if (!receiver.session) return { owner: null, freeReason: receiver.state === "unknown" ? "unknown" : "none" };
-      return repo.acceptsDestination(receiver.session) ? { owner: receiver.session } : { owner: null, freeReason: "unroutable", freeSession: receiver.session };
+      return repo.acceptsDestination(receiver.session) ? { owner: receiver.session, ...(receiver.note ? { ownerNote: receiver.note } : {}) }
+        : { owner: null, freeReason: "unroutable", freeSession: receiver.session };
     } catch { return { owner: null, freeReason: "unknown" }; }
   }
 
@@ -246,7 +249,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         `A remote operator (${requester}) is asking to pair with this host. "${requester}" is how the requesting machine describes itself.`,
         `Pairing code: ${code} — confirm it matches the code shown on the requesting side.`,
         ...(owner ? [
-          `Answer with Approve or Deny, or in your own words. ${owner} reads your answer and acts on it: a clear yes pairs, a clear no denies, and if your answer isn't clear it asks you back.`,
+          `Answer with Approve or Deny, or in your own words. ${owner} reads your answer and acts on it: a clear yes pairs, a clear no denies, and if your answer isn't clear it asks you back.${rec.ownerNote ? ` (${rec.ownerNote}, so ${owner} reads it instead.)` : ""}`,
           ...((running) => running === true ? [] : [`${running === false ? `${owner} isn't running right now, so your answer waits` : `OpenRig couldn't tell whether ${owner} is running, so your answer may wait`} until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host with its operator bearer token: rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`])(ownerRunning(c, owner)),
           `For ${owner}: when the person's answer to this request comes back, act on it. A clear yes or an Approve click: rig host approve ${code}. A clear no or a Deny click: rig host deny ${code}. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming pairing code ${code}, and act on what they answer.`,
         ] : [

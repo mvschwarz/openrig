@@ -8,7 +8,7 @@ import type { WatchdogJobsRepository } from "../watchdog-jobs-repository.js";
 import { HumanModeService, registryAvailability, type ModeApplication } from "../gateway/human-operating-modes.js";
 import { loadHumanRegistry } from "../gateway/human-registry.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
-import { KERNEL_OPERATOR_SESSION, resolveDefaultReceiver, type DefaultReceiver } from "../default-receiver.js";
+import { describeDefaultReceiver, KERNEL_OPERATOR_SESSION, resolveDefaultReceiver, type DefaultReceiver } from "../default-receiver.js";
 
 export const MODE_SCHEDULED_END_POLICY = "mode-scheduled-end";
 /** The kernel's operator agent (pod operator, member agent), whose role guidance covers giving the account. */
@@ -109,10 +109,13 @@ function recipientFor(input: ModeScheduledEndInput, ended: ModeApplication): Rec
   // A check that throws hasn't said no.
   const accepts = (to: string): boolean | Error => { try { return input.queueRepo.acceptsDestination(to); } catch (error) { return error as Error; } };
   const receiver = (input.receiver ?? resolveDefaultReceiver)(input.db);
+  // Not knowing whether there's a receiving agent isn't knowing there's none: the notice stays owed for the next pass.
+  if (!receiver.session && receiver.state === "unknown") return unknown(describeDefaultReceiver(receiver));
   if (receiver.session) {
     const ok = accepts(receiver.session);
     if (ok instanceof Error) return unknown(`checking ${receiver.session} failed: ${ok.message}`);
-    if (ok) return { ok: true, to: receiver.session, kind: "operator", why: null };
+    // A receiver used instead of an unusable choice is delivered to with the reason, never silently.
+    if (ok) return { ok: true, to: receiver.session, kind: "operator", why: receiver.note ?? null };
   }
   const noOperator = receiver.session ? `${receiver.session}, the receiving agent, isn't an address the queue accepts`
     : receiver.state === "unknown" ? "OpenRig couldn't tell whether this host has a receiving agent"

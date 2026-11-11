@@ -251,7 +251,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
         const connector = observation.connector as { configurationDigest?: string; inboundReady?: boolean; outboundReady?: boolean;
-          inboundRouting?: { fallback: string; destination: string };
+          inboundRouting?: { fallback: string; destination: string; destinationFrom?: string; destinationNote?: string };
           settlement?: { pending: number; lastFailure: string | null };
           deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string; relayAttemptsInFlight?: number;
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
@@ -268,6 +268,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             if (connector.settlement.lastFailure) log(`  Last ask-edit failure: ${connector.settlement.lastFailure}`);
           }
           if (connector.inboundRouting?.fallback === "local") log(`  Configured routing fallback: local to ${connector.inboundRouting.destination} (after forwarding, thread and channel routes)`);
+          if (connector.inboundRouting?.destinationNote) log(`  ${connector.inboundRouting.destinationFrom === "receiving-agent" ? "Default receiving agent" : "No receiving agent"}: ${connector.inboundRouting.destinationNote}`);
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
           for (const line of socketDeliveryLines(connector.inbound)) log(`  ${line}`);
           const recovery = connector.recovery;

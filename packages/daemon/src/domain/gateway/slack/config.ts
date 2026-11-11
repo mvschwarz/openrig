@@ -13,6 +13,7 @@ import { BASELINE_REQUIRED_SCOPES } from "./capabilities.js";
 import { unsupportedChannelMapFields, validateChannelMap, type ChannelMapEntry } from "./channel-map.js";
 import { botInboxProblems, type BotInboxConfig } from "./bot-inbox.js";
 import { forwardChannelProblems, type ForwardChannel } from "./forwarding.js";
+import { describeDefaultReceiver, type DefaultReceiver } from "../../default-receiver.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -78,6 +79,15 @@ export const LEGACY_INBOUND_DESTINATION = "operator-agent@kernel";
 export function effectiveInboundDestination(cfg: Pick<SlackConnectorConfig, "inboundDestination">, receiver: string | null): { destination: string; from: "config" | "receiving-agent" | "default" } {
   if (cfg.inboundDestination !== INHERIT_INBOUND_DESTINATION) return { destination: cfg.inboundDestination, from: "config" };
   return receiver ? { destination: receiver, from: "receiving-agent" } : { destination: LEGACY_INBOUND_DESTINATION, from: "default" };
+}
+
+/** What the status says about an inherited destination: the receiving agent and its recorded state, or, with none, that the
+ *  kernel operator's address is kept for compatibility, so it isn't presented as a resolved receiver. Nothing for a
+ *  destination saved in the config. */
+export function inboundDestinationNote(inbound: { destination: string; from: "config" | "receiving-agent" | "default" }, receiver: DefaultReceiver | null): string | undefined {
+  if (inbound.from === "config") return undefined;
+  const who = receiver ? describeDefaultReceiver(receiver) : "OpenRig couldn't tell whether this host has a receiving agent.";
+  return inbound.from === "receiving-agent" ? who : `${who} Unrouted messages go to ${inbound.destination} for compatibility, as before.`;
 }
 
 export const DEFAULT_CONFIG: SlackConnectorConfig = {

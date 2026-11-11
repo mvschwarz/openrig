@@ -1,12 +1,14 @@
 import type Database from "better-sqlite3";
-import { resolveRecoveryAgentSeat } from "./queue-owner.js";
+import { readReceivingAgentSetting } from "./queue-owner.js";
 
 /** The kernel's operator agent (pod operator, member agent): the receiving agent when none is set. */
 export const KERNEL_OPERATOR_SESSION = "operator-agent@kernel";
 
 export type DefaultReceiverSource = "setting" | "kernel-operator" | "none";
-/** `missing`: no seat by that name on this host. `unknown`: the seat couldn't be read. Never a reason to pick another seat. */
-export type ReceiverState = "running" | "stopped" | "missing" | "unknown";
+/** The seat's newest recorded session status, as recorded, never as proof it's reading: `running`, `idle` and `unknown`
+ *  are kept apart; `stopped` is an exited, detached or superseded one (`recorded` names which). `missing`: no seat by that
+ *  name on this host. `unknown` with no `recorded`: the seat couldn't be read. None of these picks another seat. */
+export type ReceiverState = "running" | "idle" | "stopped" | "missing" | "unknown";
 
 /** The agent that receives what a person answers when nothing else reads it: requests with no owner of their own, such
  *  as a pairing request or a mode's scheduled end, and Slack messages no thread or channel route claims. */
@@ -14,6 +16,11 @@ export interface DefaultReceiver {
   session: string | null;
   source: DefaultReceiverSource;
   state: ReceiverState;
+  /** The seat's newest recorded status, when there is one. */
+  recorded?: string;
+  /** Why the chosen agent couldn't be used (an unreadable setting, or one that isn't an agent's session), carried with
+   *  whatever was resolved instead, so a fallback is never presented as the choice. */
+  note?: string;
 }
 
 /** The chosen agent (`agents.operator_session`, an agent's canonical session), else the kernel operator when this host has
@@ -22,36 +29,46 @@ export interface DefaultReceiver {
  *  (`workspace.operator_seat_name`) is a separate setting. */
 export function resolveDefaultReceiver(
   db: Database.Database,
-  configured: () => string | null = resolveRecoveryAgentSeat,
+  configured: () => string | null | { session: string | null; problem?: string } = readReceivingAgentSetting,
 ): DefaultReceiver {
-  const chosen = configured();
-  if (chosen) return { session: chosen, source: "setting", state: seatState(db, chosen) };
+  const read = configured();
+  const chosen = typeof read === "object" && read !== null ? read : { session: read };
+  const note = chosen.problem ? { note: chosen.problem } : {};
+  if (chosen.session) return { session: chosen.session, source: "setting", ...seatState(db, chosen.session), ...note };
   const kernel = seatState(db, KERNEL_OPERATOR_SESSION);
-  if (kernel === "running" || kernel === "stopped") return { session: KERNEL_OPERATOR_SESSION, source: "kernel-operator", state: kernel };
-  return { session: null, source: "none", state: kernel };
+  if (kernel.state === "missing" || (kernel.state === "unknown" && !kernel.recorded)) return { session: null, source: "none", state: kernel.state, ...note };
+  return { session: KERNEL_OPERATOR_SESSION, source: "kernel-operator", ...kernel, ...note };
 }
 
-function seatState(db: Database.Database, session: string): ReceiverState {
+function seatState(db: Database.Database, session: string): Pick<DefaultReceiver, "state" | "recorded"> {
+  let row: { status: string | null } | undefined;
   try {
-    const row = db.prepare("SELECT COUNT(*) AS seats, COALESCE(MAX(status = 'running'), 0) AS running FROM sessions WHERE session_name = ?")
-      .get(session) as { seats: number; running: number };
-    return row.running ? "running" : row.seats ? "stopped" : "missing";
+    row = db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY rowid DESC LIMIT 1").get(session) as { status: string | null } | undefined;
   } catch {
-    return "unknown";
+    return { state: "unknown" };
   }
+  if (!row) return { state: "missing" };
+  const recorded = row.status ?? "unknown";
+  const state: ReceiverState = recorded === "running" || recorded === "idle" || recorded === "unknown" ? recorded : "stopped";
+  return { state, recorded };
 }
 
-/** One line on who receives answers here and in what state, for the person's settings and status views. */
+/** One line on who receives answers here and in what recorded state, for the person's settings and status views. It says
+ *  what's recorded, not that the agent is reading. */
 export function describeDefaultReceiver(receiver: DefaultReceiver): string {
+  const note = receiver.note ? `${receiver.note}. ` : "";
   if (!receiver.session) {
-    return receiver.state === "unknown"
-      ? "OpenRig couldn't tell whether this host has a receiving agent."
-      : `No receiving agent on this host: set one with rig config set agents.operator_session <seat>, or start the kernel (${KERNEL_OPERATOR_SESSION}).`;
+    return note + (receiver.state === "unknown"
+      ? "OpenRig couldn't tell whether this host has a receiving agent: its seats couldn't be read."
+      : `No receiving agent on this host: set one with rig config set agents.operator_session <seat>, or start the kernel (${KERNEL_OPERATOR_SESSION}).`);
   }
-  const from = receiver.source === "setting" ? "chosen in agents.operator_session" : "the kernel operator, since agents.operator_session is unset";
-  const state = receiver.state === "running" ? "running: it reads answers now"
-    : receiver.state === "stopped" ? "stopped: answers wait for it, and nothing is decided meanwhile"
-      : receiver.state === "missing" ? "no seat by that name on this host yet: answers wait until it exists"
-        : "its state couldn't be read: answers may wait";
-  return `${receiver.session}, ${from}; ${state}.`;
+  const from = receiver.source === "setting" ? "chosen in agents.operator_session"
+    : receiver.note ? "the kernel operator, used instead" : "the kernel operator, since agents.operator_session is unset";
+  const state = receiver.state === "running" ? "its session is recorded as running"
+    : receiver.state === "idle" ? "its session is recorded as idle"
+      : receiver.state === "stopped" ? `its session is recorded as ${receiver.recorded}: answers wait for it, and nothing is decided meanwhile`
+        : receiver.state === "missing" ? "no seat by that name on this host yet: answers wait until it exists"
+          : receiver.recorded ? "its session's state is recorded as unknown: answers may wait"
+            : "its seat couldn't be read: answers may wait";
+  return `${note}${receiver.session}, ${from}; ${state}.`;
 }
