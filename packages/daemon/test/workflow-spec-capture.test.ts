@@ -342,4 +342,61 @@ describe("workflow spec persisted capture and Library reads", () => {
     expect(row.cachedAt).toBe(NEWER_SQLITE_TIMESTAMP);
     expect(stored.cached_at).toBe(NEWER_SQLITE_TIMESTAMP);
   });
+
+  it.each([
+    ["without reading an identical copy", false],
+    ["after reading an identical copy", true],
+  ] as const)("re-reads the owning file's edit %s", (_scenario, readIdenticalCopy) => {
+    const file = join(folder, "owner.yaml");
+    const duplicateDir = join(root, "other");
+    fs.mkdirSync(duplicateDir);
+    const duplicate = join(duplicateDir, "copy.yaml");
+    const originalContents = VALID_YAML("duplicate-flow");
+    const editedContents = originalContents.replace("objective: capture fixture", "objective: edited capture fixture");
+    fs.writeFileSync(file, originalContents);
+    fs.writeFileSync(duplicate, originalContents);
+    let observedAt = CAPTURE_TIME;
+    const cache = new WorkflowSpecCache(db, () => observedAt);
+    cache.readThrough(file);
+
+    // P's bytes really change after T0, but the stat fixture is deterministic and precedes T2.
+    fileProbe.readPaths.length = 0;
+    fs.writeFileSync(file, editedContents);
+    statAt(file, TOUCHED_STAT_TIME);
+    observedAt = P3_REFRESH_TIME;
+    const copyRow = readIdenticalCopy ? cache.readThrough(duplicate) : null;
+    const beforeScan = db.prepare("SELECT source_path, cached_at FROM workflow_specs WHERE name = ? AND version = '1'").get("duplicate-flow") as {
+      source_path: string; cached_at: string;
+    };
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const afterScan = db.prepare("SELECT source_path, source_hash, purpose, cached_at FROM workflow_specs WHERE name = ? AND version = '1'").get("duplicate-flow") as {
+      source_path: string; source_hash: string; purpose: string; cached_at: string;
+    };
+
+    expect({
+      copySourcePath: copyRow?.sourcePath ?? null,
+      copyCachedAt: copyRow?.cachedAt ?? null,
+      copyReads: readsOf(duplicate),
+      ownerReads: readsOf(file),
+      beforeScanSourcePath: beforeScan.source_path,
+      beforeScanCachedAt: beforeScan.cached_at,
+      result,
+      afterScanSourcePath: afterScan.source_path,
+      afterScanHash: afterScan.source_hash,
+      afterScanPurpose: afterScan.purpose,
+      afterScanCachedAt: afterScan.cached_at,
+    }).toEqual({
+      copySourcePath: readIdenticalCopy ? file : null,
+      copyCachedAt: readIdenticalCopy ? CAPTURE_TIME.toISOString() : null,
+      copyReads: readIdenticalCopy ? 1 : 0,
+      ownerReads: 1,
+      beforeScanSourcePath: file,
+      beforeScanCachedAt: CAPTURE_TIME.toISOString(),
+      result: { scanned: 1, valid: 1, errors: 0, removed: 0, skipped: 0 },
+      afterScanSourcePath: file,
+      afterScanHash: captureHash(editedContents),
+      afterScanPurpose: "edited capture fixture",
+      afterScanCachedAt: P3_REFRESH_TIME.toISOString(),
+    });
+  });
 });
