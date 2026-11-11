@@ -79,6 +79,8 @@ Keys:
   ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
+  ui.terminal.max_live_terminals
+                         cap on simultaneously-live web-client terminals (effective default 2)
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
@@ -101,7 +103,7 @@ Keys:
                            permission prompts still reach a person,
                            choice prompts follow this setting; unavailable human delivery stays a visible row;
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
-  retention.*            enabled, transitions_days, watchdog_days,
+  retention.*            enabled, transitions_days, watchdog_days, usage_samples_days,
                          watchdog_keep_per_job, batch_size
   retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
                          than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
