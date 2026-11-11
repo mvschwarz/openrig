@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { lstatSync, readFileSync } from "node:fs";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, operatorAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
@@ -68,7 +68,7 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
       }
       const daemon = await client();
       if (!daemon) return;
-      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token });
+      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token }, { headers: operatorAuthHeaders() });
       finish(res.status, res.data, opts.json, (b) => `Connected ${line(b as unknown as Binding)}\nWork for ${opts.as} reaches ${seat} once the connector runs; rig network status shows its last contact.`);
     });
 
@@ -93,7 +93,7 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .action(async (ref: string, opts: { reason?: string; json?: boolean }) => {
       const daemon = await client();
       if (!daemon) return;
-      const res = await daemon.post<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/disconnect`, { reason: opts.reason });
+      const res = await daemon.post<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/disconnect`, { reason: opts.reason }, { headers: operatorAuthHeaders() });
       finish(res.status, res.data, opts.json, (b) => `Disconnected ${line(b as unknown as Binding)}\nRemove the participant on the hub too, so the account stops listing it.`);
     });
 

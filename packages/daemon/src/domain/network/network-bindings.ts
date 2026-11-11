@@ -4,7 +4,7 @@
 // The credential is a private file under the OpenRig home; this table only says where the binding stands.
 import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveSessionNodeId } from "../queue-owner.js";
 
@@ -27,7 +27,7 @@ export interface NetworkBinding {
 }
 
 export class NetworkBindingError extends Error {
-  constructor(readonly code: string, message: string, readonly status: 400 | 404 | 409 = 400) {
+  constructor(readonly code: string, message: string, readonly status: 400 | 404 | 409 | 500 = 400) {
     super(message);
   }
 }
@@ -62,8 +62,12 @@ export function readNetworkCredential(home: string, bindingId: string): string {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CREDENTIAL_BYTES || (stat.mode & 0o077) !== 0) {
     throw new NetworkBindingError("credential_unsafe", `${file} must be a regular file readable only by this user.`);
   }
-  const value = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown; token?: unknown };
-  if (value.version !== 1 || typeof value.token !== "string" || !value.token) {
+  // A parse error can quote the file's text, which holds the token: say only which file.
+  let value: { version?: unknown; token?: unknown };
+  try { value = JSON.parse(readFileSync(file, "utf8")) as typeof value; } catch {
+    throw new NetworkBindingError("credential_invalid", `${file} isn't a network credential.`);
+  }
+  if (value === null || typeof value !== "object" || value.version !== 1 || typeof value.token !== "string" || !value.token) {
     throw new NetworkBindingError("credential_invalid", `${file} isn't a network credential.`);
   }
   return value.token;
@@ -95,7 +99,12 @@ function validToken(raw: unknown): string {
 }
 
 export class NetworkBindingStore {
-  constructor(private readonly db: Database.Database, private readonly home: string, private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly home: string,
+    private readonly now: () => Date = () => new Date(),
+    private readonly newId: () => string = () => `netb-${randomBytes(10).toString("hex")}`,
+  ) {}
 
   list(): NetworkBinding[] {
     return (this.db.prepare("SELECT * FROM network_bindings ORDER BY created_at, id").all() as Row[]).map(project);
@@ -120,7 +129,8 @@ export class NetworkBindingStore {
   }
 
   /** Bind a local seat to a hub participant with that participant's token. The credential is written first, exclusively
-   *  and private; the row follows in one transaction, so a refused bind leaves no credential behind. */
+   *  and private, then the row. If either step fails, the credential this call created is removed, so a refused bind
+   *  leaves none behind; a file that was already at that path is never touched. */
   create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown }): NetworkBinding {
     const session = typeof input.session === "string" ? input.session.trim() : "";
     if (!session) throw new NetworkBindingError("invalid_seat", "Name the local seat to connect.");
@@ -134,16 +144,22 @@ export class NetworkBindingStore {
     const taken = this.db.prepare("SELECT id FROM network_bindings WHERE hub_url = ? AND hub_seat = ? AND state = 'active'").get(hubUrl, hubSeat) as { id: string } | undefined;
     if (taken) throw new NetworkBindingError("participant_already_connected", `${hubSeat} at ${hubUrl} is already connected (${taken.id}).`, 409);
 
-    const id = `netb-${randomBytes(10).toString("hex")}`;
+    const id = this.newId();
     const file = networkCredentialFile(this.home, id);
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    writeFileSync(file, `${JSON.stringify({ version: 1, token })}\n`, { flag: "wx", mode: 0o600 });
-    const at = this.now().toISOString();
+    let created = false;
+    let madeFolder: string | undefined;
     try {
+      madeFolder = mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+      const fd = openSync(file, "wx", 0o600);
+      created = true;
+      try { writeFileSync(fd, `${JSON.stringify({ version: 1, token })}\n`); } finally { closeSync(fd); }
+      const at = this.now().toISOString();
       this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`).run(id, nodeId, session, hubUrl, hubSeat, at, at);
     } catch (error) {
-      this.removeCredential(id);
+      // Only what this call made: the file it opened, or the folder it made for it. A collision touches nothing.
+      if (created) this.removeCredential(id);
+      else if (madeFolder === dirname(file)) rmSync(madeFolder, { recursive: true, force: true });
       throw error;
     }
     return this.get(id)!;
@@ -172,13 +188,21 @@ export class NetworkBindingStore {
       .run(message.slice(0, 500), this.now().toISOString(), id);
   }
 
+  /** The binding ends first, so no new work comes in even if the credential can't be removed; removal is tried on every
+   *  call, including again on an already ended binding, until its credential is gone. */
   private end(ref: string, state: "disconnected" | "revoked", reason: string): NetworkBinding {
     const binding = this.find(ref);
     if (!binding) throw new NetworkBindingError("binding_not_found", `No network binding or connected seat is named '${ref}'.`, 404);
-    if (binding.state !== "active") return binding;
-    this.db.prepare("UPDATE network_bindings SET state = ?, state_reason = ?, updated_at = ? WHERE id = ? AND state = 'active'")
-      .run(state, reason, this.now().toISOString(), binding.id);
-    this.removeCredential(binding.id);
+    if (binding.state === "active") {
+      this.db.prepare("UPDATE network_bindings SET state = ?, state_reason = ?, updated_at = ? WHERE id = ? AND state = 'active'")
+        .run(state, reason, this.now().toISOString(), binding.id);
+    }
+    try {
+      this.removeCredential(binding.id);
+    } catch (error) {
+      throw new NetworkBindingError("credential_cleanup_failed",
+        `${binding.id} is ${this.get(binding.id)!.state}, but its credential at ${networkCredentialFile(this.home, binding.id)} couldn't be removed (${(error as Error).message}). Disconnect it again to retry.`, 500);
+    }
     return this.get(binding.id)!;
   }
 

@@ -16,18 +16,23 @@ import { networkRoutes } from "../../daemon/src/routes/network.js";
 let db: Database.Database;
 let home: string;
 let app: Hono;
+let rigs: RigRepository;
+const routesWith = (bearerToken: string | null) => {
+  const next = new Hono();
+  next.use("*", async (c, n) => { c.set("rigRepo" as never, rigs as never); await n(); });
+  next.route("/api/network", networkRoutes({ home, bearerToken }));
+  return next;
+};
 beforeEach(() => {
   db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
-  const rigs = new RigRepository(db);
+  rigs = new RigRepository(db);
   const node = rigs.addNode(rigs.createRig("lab").id, "impl", { runtime: "claude-code" });
   db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s1', ?, 'dev-impl@lab', 'running')").run(node.id);
   home = mkdtempSync(join(tmpdir(), "openrig-network-cli-"));
-  app = new Hono();
-  app.use("*", async (c, next) => { c.set("rigRepo" as never, rigs as never); await next(); });
-  app.route("/api/network", networkRoutes({ home }));
+  app = routesWith(null);
 });
-afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); vi.restoreAllMocks(); process.exitCode = undefined; });
+afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = undefined; });
 
 function cli(tokenFile: Record<string, string> = {}) {
   const lifecycleDeps: LifecycleDeps = {
@@ -35,13 +40,13 @@ function cli(tokenFile: Record<string, string> = {}) {
     readFile: (p) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 19731, db: "/fixture/test.sqlite", startedAt: new Date().toISOString() }) : null,
     writeFile: vi.fn(), removeFile: vi.fn(), exists: (p) => p === STATE_FILE, mkdirp: vi.fn(), openForAppend: () => 3, isProcessAlive: () => true,
   } as LifecycleDeps;
-  const call = async (method: "GET" | "POST", url: string, body?: unknown) => {
-    const res = await app.request(url, { method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const call = async (method: "GET" | "POST", url: string, body?: unknown, headers: Record<string, string> = {}) => {
+    const res = await app.request(url, { method, headers: { "Content-Type": "application/json", ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: res.status, data: await res.json() };
   };
   const deps: NetworkDeps = {
     lifecycleDeps,
-    clientFactory: () => ({ get: (url: string) => call("GET", url), post: (url: string, body: unknown) => call("POST", url, body) }) as never,
+    clientFactory: () => ({ get: (url: string) => call("GET", url), post: (url: string, body: unknown, options?: { headers?: Record<string, string> }) => call("POST", url, body, options?.headers) }) as never,
     readTokenFile: (path) => { if (!(path in tokenFile)) throw new Error("no such file"); return tokenFile[path]!; },
   };
   return new Command().exitOverride().addCommand(networkCommand(deps));
@@ -72,4 +77,23 @@ it("names the daemon's refusal and exits 1, and an unreadable token file sends n
   expect(String(err.mock.calls.at(-1)?.[0])).toBe("Can't read the token file: no such file");
   expect(process.exitCode).toBe(1);
   expect((await app.request("/api/network/bindings").then((r) => r.json()) as { bindings: unknown[] }).bindings).toHaveLength(0);
+});
+
+it("sends the operator bearer on its writes, so a daemon with one configured takes them", async () => {
+  app = routesWith("op-secret");
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const connectArgs = ["node", "rig", "network", "connect", "dev-impl@lab", "--hub", "https://hub.example/mcp", "--as", "alex@team", "--token-file", "/tok"];
+  vi.stubEnv("OPENRIG_AUTH_BEARER_TOKEN", "wrong");
+  await cli({ "/tok": "tok-abc" }).parseAsync(connectArgs);
+  expect(process.exitCode).toBe(1);
+  expect(String(err.mock.calls.at(-1)?.[0])).toContain("bearer token does not match");
+  process.exitCode = undefined;
+  vi.stubEnv("OPENRIG_AUTH_BEARER_TOKEN", "op-secret");
+  await cli({ "/tok": "tok-abc" }).parseAsync(connectArgs);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Connected netb-/);
+  await cli().parseAsync(["node", "rig", "network", "disconnect", "dev-impl@lab"]);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Disconnected netb-/);
 });

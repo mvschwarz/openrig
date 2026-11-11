@@ -97,6 +97,56 @@ describe("network bindings", () => {
     expect(readFileSync(networkCredentialFile(home, binding.id), "utf8")).toContain("tok-123");
   });
 
+  it("a refused bind removes only what it created: a file already at the path stays, and a failed insert takes its credential with it", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    seat("a@lab");
+    const fixed = "netb-00000000000000000001";
+    const pinned = new NetworkBindingStore(db, home, () => new Date(), () => fixed);
+    const path = networkCredentialFile(home, fixed);
+    mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+    writeFileSync(path, "someone else's file", { mode: 0o600 });
+    expect(() => pinned.create({ session: "a@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "tok" })).toThrow(/EEXIST/);
+    expect(readFileSync(path, "utf8")).toBe("someone else's file");
+    expect(store.list()).toHaveLength(0);
+
+    db.exec("CREATE TRIGGER refuse_bind BEFORE INSERT ON network_bindings BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;");
+    const other = new NetworkBindingStore(db, home, () => new Date(), () => "netb-00000000000000000002");
+    expect(() => other.create({ session: "a@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "tok" })).toThrow(/refused for the test/);
+    expect(existsSync(networkCredentialFile(home, "netb-00000000000000000002"))).toBe(false);
+    expect(store.list()).toHaveLength(0);
+  });
+
+  it("a disconnect whose credential can't be removed still ends the binding, says so, and the next disconnect removes it", async () => {
+    const { chmodSync } = await import("node:fs");
+    seat("a@lab");
+    const binding = connect("a@lab");
+    const secrets = join(home, "network-secrets");
+    chmodSync(secrets, 0o500);
+    try {
+      expect(() => store.disconnect(binding.id)).toThrow(expect.objectContaining({ code: "credential_cleanup_failed", status: 500 }));
+      expect(store.get(binding.id)!.state).toBe("disconnected");
+      expect(store.active()).toHaveLength(0);
+    } finally {
+      chmodSync(secrets, 0o700);
+    }
+    expect(store.disconnect(binding.id).state).toBe("disconnected");
+    expect(existsSync(networkCredentialFile(home, binding.id))).toBe(false);
+  });
+
+  it("a corrupt credential file is refused by its path alone, without quoting what it holds", async () => {
+    const { writeFileSync } = await import("node:fs");
+    seat("a@lab");
+    const binding = connect("a@lab");
+    writeFileSync(networkCredentialFile(home, binding.id), "tok-SECRET-not-json", { mode: 0o600 });
+    let message = "";
+    try { readNetworkCredential(home, binding.id); } catch (error) {
+      expect(error).toMatchObject({ code: "credential_invalid" });
+      message = (error as Error).message;
+    }
+    expect(message).toContain(networkCredentialFile(home, binding.id));
+    expect(message).not.toContain("SECRET");
+  });
+
   describe("routes", () => {
     const app = (bearerToken: string | null = null) => {
       const router = new Hono();
