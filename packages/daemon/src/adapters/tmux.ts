@@ -2171,7 +2171,8 @@ export class TmuxAdapter {
   }
 
   /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
-   *  "" when it reported none). Empty when the session has no clients; null when tmux can't be read. */
+   *  "" when it reported none). Empty when the session has no clients, or when the session or the server is gone;
+   *  null when tmux can't be read. */
   async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null> {
     const exact = exactTarget(session, "session");
     const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
@@ -2183,8 +2184,8 @@ export class TmuxAdapter {
         const tty = line.slice(0, Math.max(separator, 0));
         return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
       });
-    } catch {
-      return null;
+    } catch (err) {
+      return isServerMissingError(err) || isSessionAbsenceError(tmuxReportedError(err)) ? [] : null;
     }
   }
 
