@@ -110,7 +110,7 @@ import { SeatStructuralActivityService } from "./domain/seat-structural-activity
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
@@ -132,6 +132,7 @@ import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
 import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
+import { describeDefaultReceiver, permissionDeciderFor } from "./domain/default-receiver.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
@@ -178,7 +179,7 @@ import { createAppWithWebSocket, type AppDeps } from "./server.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
 import { collectClaudeSignalsFromProviderUsageDirectory } from "./domain/provider/claude-usage-reader.js";
 import { legacyProviderUsageDirectory, providerUsageDirectory } from "./domain/telemetry-state-paths.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
@@ -474,9 +475,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
+    isSenderSendable: (sender) => sessionRegistry.senderIsSendable(sender),
     resolveSessionAddresses: (sessionName) => sessionRegistry.sessionAddresses(sessionName),
     // #2575: a prompt-clear wake retry waits for a managed compaction's owed steps, as parked-owner reminders do.
     hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
+    // A runner's permission ask its person answered goes to the receiving agent to decide, never to the requester itself.
+    permissionDecider: (_ask, requester) => {
+      const decider = permissionDeciderFor(db, requester);
+      return decider?.session ? { session: decider.session, describe: describeDefaultReceiver(decider) } : null;
+    },
   });
   // W1 (transactional closure): ONE OutboxHandler shared between the deps slot
   // (sender-side audit surface) and the queue repo's durable wake-intent
@@ -624,6 +631,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    // A seat seen running or idle is reachable: re-send wakes recorded unroutable before it was bound (#2789).
+    void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
+      .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
@@ -684,6 +694,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // by the seat-handover full-cycle composer when it creates a successor
   // session (OPR.0.4.3.04), so a handed-over successor self-identifies +
   // reports activity exactly like a launched seat.
+  const terminalTokenEnv = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
+  const terminalBearerToken = opts && Object.prototype.hasOwnProperty.call(opts, "terminalBearerToken")
+    ? opts.terminalBearerToken ?? null : terminalTokenEnv || null;
   const launchSessionEnv: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     OPENRIG_HOME,
@@ -693,6 +706,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     OPENRIG_HOST: openRigHost,
     OPENRIG_URL: resolvedActivityHookUrl,
     OPENRIG_ACTIVITY_HOOK_TOKEN: resolvedActivityHookToken,
+    ...(terminalBearerToken ? { OPENRIG_TERMINAL_BEARER_TOKEN: terminalBearerToken } : {}),
+    ...(opts?.bearerToken ? { OPENRIG_AUTH_BEARER_TOKEN: opts.bearerToken } : {}),
     ...providerAuthEnv,
     HOME: daemonHome,
     USER: process.env.USER,
@@ -1213,7 +1228,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup }),
+    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1278,7 +1293,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "omp": ompAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup });
+  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -1967,11 +1982,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // at route mount time (not per-request).
     deps.missionControlBearerToken = opts?.bearerToken ?? null;
 
-    const terminalTokenEnv = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
-    deps.terminalBearerToken =
-      opts && Object.prototype.hasOwnProperty.call(opts, "terminalBearerToken")
-        ? opts.terminalBearerToken ?? null
-        : terminalTokenEnv || null;
+    deps.terminalBearerToken = terminalBearerToken;
 
     // Notification dispatcher: chosen mechanism via env config.
     // OPENRIG_NOTIFICATIONS_MECHANISM=ntfy|webhook|none (default none).
@@ -2107,7 +2118,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.sliceIndexer = sliceIndexer;
     if (sliceIndexer.isReady()) {
       const { watchProofSources } = await import("./domain/proof/source-watch.js");
-      deps.proofSourceWatch = watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
+      deps.proofSourceWatch = await watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
         sliceIndexer.invalidate();
         eventBus.emit({ type: "scope.sources_changed", scope: sliceIndexer.slicesRoot });
       });
@@ -2187,6 +2198,23 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       rex: new RexAdapter({ transport: createRexCliTransport(opts?.rexRun ? { run: opts.rexRun, binary: () => "rex" } : {}) }),
     };
 
+    // herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a
+    // second OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a
+    // viewer ends outside OpenRig. Resolving a provider is passive (a status, a preview, the CLI's availability probe):
+    // the viewers folder and the watcher start only for owned-view work, or below, for views a journal already records.
+    const herdrAppDir = nodePath.join(OPENRIG_HOME, "private", "herdr-app");
+    const { createHcRunner, hcEnv, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
+    const herdrAppHcEnv = hcEnv();
+    const herdrApp = await createHerdrAppProviders({
+      herdrAppDir,
+      daemonInstance: createHash("sha256").update(nodePath.resolve(OPENRIG_HOME)).digest("hex").slice(0, 12),
+      hcEnv: herdrAppHcEnv,
+      hc: createHcRunner({ env: herdrAppHcEnv }),
+      defaultAppHome: () => resolveHerdrAppHome(process.env),
+    });
+    const resolveHerdrAppProvider = herdrApp.resolve;
+    const stopHerdrApp = herdrApp.stop;
+
     const scopeTasks = deps.sliceIndexer ? createScopedTaskResolver(db, deps.sliceIndexer, address =>
       resolveLocalTaskSeat(db, address, getSelfHostId(), sessionRegistry.resolveAddress(address)?.nodeId),
       () => deps.proofSourceWatch?.observation().state === "watching") : null;
@@ -2194,6 +2222,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       eventBus,
       resolveProvider: (name) => providerMap[name] ?? null,
       resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
+      resolveHerdrAppProvider,
+      stopHerdrApp,
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
@@ -2514,6 +2544,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     });
     deps.watchdogPolicyEngine = watchdogPolicyEngine;
     deps.watchdogScheduler = watchdogScheduler;
+    // The outbound network connector: a pass per active `rig network` binding. With none, it makes no network call.
+    {
+      const { NetworkConnectorService } = await import("./domain/network/network-connector.js");
+      const { NetworkBindingStore } = await import("./domain/network/network-bindings.js");
+      const pollSeconds = Number(process.env.OPENRIG_NETWORK_POLL_SECONDS);
+      deps.networkConnector = new NetworkConnectorService({
+        db: queueRepoInstance.db,
+        queueRepo: queueRepoInstance,
+        bindings: new NetworkBindingStore(queueRepoInstance.db, OPENRIG_HOME),
+        home: OPENRIG_HOME,
+        log: (line) => console.log(`[network] ${line}`),
+      }, Number.isFinite(pollSeconds) && pollSeconds >= 5 ? { intervalMs: pollSeconds * 1000 } : {});
+    }
 
     // OPR.0.5.6.24 F-14 — ONE parked-owner supervisor job per rig (mini-req 1):
     // ensured idempotently on the (policy, target_session) tuple; the anchor is
@@ -2838,4 +2881,150 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
+}
+
+/**
+ * herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a second
+ * OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a viewer ends
+ * outside OpenRig. Resolving a provider is passive (a status, a preview, the CLI's availability probe): the viewers
+ * folder and the watcher start only for owned-view work, or for views a recorded journal already owns, which get their
+ * provider back at start (`recovered`). `stop` ends only OpenRig's own watcher child and timers.
+ */
+export async function createHerdrAppProviders(opts: {
+  /** OpenRig's private herdr-app folder: `clients/` (journals) and `viewers/` (the viewers' cwd). */
+  herdrAppDir: string;
+  daemonInstance: string;
+  hcEnv: NodeJS.ProcessEnv;
+  hc: import("./domain/terminal/herdr-app-transport.js").HcRunner;
+  defaultAppHome: () => string;
+  spawnFn?: typeof spawn;
+}): Promise<{
+  resolve: (target: { appHome?: string }) => import("./domain/terminal/herdr-app-provider.js").HerdrAppProvider | null;
+  recovered: Promise<void>;
+  stop: () => void;
+}> {
+  const { HerdrAppProvider } = await import("./domain/terminal/herdr-app-provider.js");
+  const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
+  const { HerdrAppClient, createAppSocketExchange, herdrAppSocketPath } = await import("./domain/terminal/herdr-app-transport.js");
+  const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
+  const providers = new Map<string, InstanceType<typeof HerdrAppProvider>>();
+  let stopped = false;
+  const watch = createHerdrAppWatcher({
+    daemonInstance: opts.daemonInstance,
+    env: opts.hcEnv,
+    ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
+    reconcileAll: () => {
+      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+    },
+  });
+  const ownWork = () => {
+    if (stopped) return;
+    fs.mkdirSync(nodePath.join(opts.herdrAppDir, "viewers"), { recursive: true });
+    watch();
+  };
+  const resolve = (target: { appHome?: string }) => {
+    const appHome = target.appHome ? target.appHome : opts.defaultAppHome();
+    if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;
+    const key = nodePath.resolve(appHome);
+    let provider = providers.get(key);
+    if (!provider) {
+      provider = new HerdrAppProvider({
+        files: new HerdrAppClientFiles(key, nodePath.join(opts.herdrAppDir, "clients")),
+        app: new HerdrAppClient(createAppSocketExchange(herdrAppSocketPath(key))),
+        hc: opts.hc,
+        daemonInstance: opts.daemonInstance,
+        viewerCwd: nodePath.join(opts.herdrAppDir, "viewers"),
+        ensureMods: async () => {
+          const installed = await installRigMods(key);
+          if (!installed.ok) return { ok: false, error: describeModInstall(installed) };
+          // A folder the person changed stays theirs and the view opens with it; the open says so.
+          return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
+        },
+        ownWork,
+      });
+      providers.set(key, provider);
+    }
+    return provider;
+  };
+  // Views OpenRig already owns keep an owner across a restart: each journal that still records views or pending ends
+  // gets its provider back, the watcher starts, and a reconcile writes viewers that ended while the daemon was down.
+  const recovered = (async () => {
+    const clientsDir = nodePath.join(opts.herdrAppDir, "clients");
+    let journals: string[] = [];
+    try { journals = (await fs.promises.readdir(clientsDir)).filter((name) => name.endsWith(".json")); } catch { return; }
+    for (const name of journals) {
+      if (stopped) return;
+      try {
+        const recorded = JSON.parse(await fs.promises.readFile(nodePath.join(clientsDir, name), "utf8")) as { appHome?: unknown; views?: unknown[]; pendingEnds?: unknown[] };
+        if (typeof recorded.appHome !== "string" || !(recorded.views?.length || recorded.pendingEnds?.length)) continue;
+        const provider = resolve({ appHome: recorded.appHome });
+        if (!provider) continue;
+        ownWork();
+        await provider.reconcile().catch(() => {});
+        // A gate still pending when the daemon stopped is followed again, within its recorded window.
+        await provider.resumePendingGates().catch(() => {});
+      } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }
+    }
+  })();
+  const stop = () => {
+    stopped = true;
+    watch.stop();
+    for (const provider of providers.values()) provider.stop();
+  };
+  return { resolve, recovered, stop };
+}
+
+/** Watch `hc events` for this daemon's viewer terminals, retrying after exit or a spawn error. */
+export function createHerdrAppWatcher(opts: {
+  daemonInstance: string;
+  env: NodeJS.ProcessEnv;
+  reconcileAll: () => void;
+  spawnFn?: typeof spawn;
+  retryMs?: number;
+  maxRetryMs?: number;
+}): (() => void) & { stop(): void } {
+  const spawnChild = opts.spawnFn ?? spawn;
+  const retryMs = opts.retryMs ?? 5_000;
+  const maxRetryMs = opts.maxRetryMs ?? 5 * 60_000;
+  // Doubles after each child that ends without output (hc missing or failing), back to retryMs once one reports.
+  let nextRetryMs = retryMs;
+  let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
+  let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
+  let herdrAppRetry: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  const watchHerdrApp = () => {
+    if (herdrAppEvents || stopped) return;
+    const child = spawnChild("hc", ["events", "--json", "--label", `openrig.daemon=${opts.daemonInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: opts.env });
+    herdrAppEvents = child;
+    child.stdout?.on("data", () => {
+      nextRetryMs = retryMs;
+      if (herdrAppReconcile) return;
+      herdrAppReconcile = setTimeout(() => {
+        herdrAppReconcile = null;
+        opts.reconcileAll();
+      }, 200);
+      herdrAppReconcile.unref?.();
+    });
+    const restart = () => {
+      if (herdrAppEvents !== child) return;
+      herdrAppEvents = null;
+      if (stopped) return;
+      herdrAppRetry = setTimeout(() => { herdrAppRetry = null; watchHerdrApp(); }, nextRetryMs);
+      nextRetryMs = Math.min(nextRetryMs * 2, maxRetryMs);
+      herdrAppRetry.unref?.();
+    };
+    child.on("error", restart);
+    child.on("exit", restart);
+    child.unref();
+  };
+  // Shutdown: only OpenRig's own child and timers. Viewers, layouts and journals are left as they are.
+  const stop = () => {
+    stopped = true;
+    if (herdrAppRetry) { clearTimeout(herdrAppRetry); herdrAppRetry = null; }
+    if (herdrAppReconcile) { clearTimeout(herdrAppReconcile); herdrAppReconcile = null; }
+    const child = herdrAppEvents;
+    herdrAppEvents = null;
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+  };
+  return Object.assign(watchHerdrApp, { stop });
 }

@@ -21,7 +21,7 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
 | Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
-| Cancel | no | OpenRig has no verb that cancels a running turn. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
+| Cancel | no | OpenRig has no verb that cancels a running turn. A [runner preset](#runner-presets-runner-true) whose runner follows the contract takes `rig send <seat> "/abort" --raw` as its cancel, but not while the seat needs input, and only as a request (see [Cancel](harness-runner-contract.md#6-cancel-requested-isnt-the-same-as-done)). To a plain preset, `/abort` is ordinary input. Say in the preset's `limits` whether the harness has a cancel and how to use it. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
 
 **Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
@@ -193,6 +193,37 @@ one at a time and in order, without making the agent wait. It finds the address 
 - **A runner's full duties** (liveness, input, cancellation and permissions) are in the draft
   [harness and runner contract](harness-runner-contract.md).
 
+## Pi-compatible RPC harnesses (`protocol: pi-rpc`)
+
+For a community harness that is a fork of Pi or speaks Pi's CLI and JSONL RPC protocol (such as OmO Native on senpi or Prime Agent), set `protocol: pi-rpc`.
+
+```yaml
+format: 1
+name: omo
+command: omo
+maintainer: Your name or team
+protocol: pi-rpc
+resume: true                   # only after you've checked a real reopen
+limits:
+  - checked with omo 5.1.48 (senpi engine 2026.10.25-2)
+```
+
+- **OpenRig runs the harness through its existing Pi runner.** Instead of screen scraping, the harness runs under `pi-runner` inside the seat's pane. The runner provides input buffering, paste framing, prompt/steer RPC queueing, clean transcript mirroring, and typed activity hook reporting to the daemon.
+- **`command` is the executable.** OpenRig resolves `command` (e.g. `omo` or `/usr/local/bin/senpi`) against the seat pane's environment, resolving symlinks and version-manager shims (such as `mise`) safely.
+- **Session identity and resume come from the runner.** Transcripts and sessions are persisted as JSONL files under `$OPENRIG_HOME/state/pi/<session>/sessions/`, and the fork's `get_state` reports the session file, so `launch_result` and `names_conversation` aren't needed.
+  - **With `resume: true`** declared, resuming or restoring a seat continues that exact session file via `--session <file>`. Without it, the preset is launch-only; a restore that would resume its saved conversation waits for a fresh-start decision.
+  - **A fork that reports no session file** reads as needing attention, and the launch doesn't read ready.
+  - **A resume that comes up on another session file** is refused, and that file's identity isn't recorded, so the seat keeps the one it asked for. The seat reads as needing attention.
+- **Launch arguments a fork must accept.** When spawned under `pi-runner`, the executable named by `command` must accept Pi's core CLI arguments:
+  - `--mode rpc`
+  - `--session-dir <dir>`
+  - `--name <session-name>`
+  - `--approve` or `--no-approve` (depending on seat trust)
+  - And conditionally when configured or resuming/forking: `--model <provider/id>`, `--thinking <level>`, `--session <sessionFile>`, or `--fork <sessionFile>`.
+  Forks that reject these flags cannot currently run with `protocol: pi-rpc`.
+- **Skills, guidance, and model passthrough.** Skills are projected into `<agentDir>/skills/` and managed guidance into `AGENTS.md`. For a fork that reads Pi's variables (`PI_CODING_AGENT_DIR`, etc.), declared models are passed as `--model provider/id` with provider API key allowlisting, and effort is passed as `--thinking <level>`. Usage is not reported for a fork, and extension dialogs are handled as Pi's (cancelled when an extension requests interactive confirmation in a managed pane).
+- **Mutual exclusions:** `protocol: pi-rpc` manages session identity and activity through the Pi runner; it cannot be combined with `runner: true`, `launch_result: true`, `names_conversation: true`, `startup_assisted: true`, or `first_input: true`.
+
 ## An example: Hermes
 
 [`community-harness-examples/hermes/`](community-harness-examples/hermes/) has a preset and a small launcher for Hermes
@@ -315,8 +346,26 @@ Its [README](community-harness-examples/dsh/README.md) has the setup and a check
 and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner` or `passes_model` is refused by an older
+module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner`, `passes_model` or `launch_wrapper` is refused by an older
 OpenRig that doesn't know the field.
+
+## Community-maintained runner: nodecode (@smota)
+
+A runner preset for [nodecode](https://nodecode.ai), a self-modifying Common Lisp agent with a headless JSON-lines mode
+(`nodecode rpc`). Listed here so it can be found; it isn't certified, shipped with OpenRig or supported by OpenRig's maintainers.
+
+| | |
+|---|---|
+| Maintainer | [@smota](https://github.com/smota) |
+| Repository | [smota/openrig-nodecode](https://github.com/smota/openrig-nodecode), Apache-2.0, no npm dependencies |
+| Tested with | Unreleased OpenRig `main` at `7078c754d` (its package version reads 0.7.1), built from source without fork-only commits; nodecode `0.1.13+98dd6dc80`; Node 22.23.4. Not tested on a released OpenRig (none knows `launch_wrapper`). |
+| Needs | an OpenRig that knows `launch_wrapper` (this file documents it). OpenRig 0.7.10 and earlier refuse the preset with "unknown field launch_wrapper". |
+| Test record | connector `d8dd4e6`: 95 unit checks (fake and native nodecode), `npm run test:live` (6 steps against the author's daemon built from that `main`) and an opt-in native permission-question proof with a seeded `:NOBODY` failure; results are the author's, not reproduced by OpenRig |
+| Declares | `launch_result`, `runner`, `resume`, `first_input`, `passes_model`, `launch_wrapper` |
+| Resume | `nodecode rpc <session>`; a session the gateway doesn't know is refused with `error: "missing"` (exit 3) and never replaced. The installer adds `--resume-policy last-completed`: when the session's last turn failed or was cancelled, the runner moves the head back to the last completed turn before taking input, so a resumed seat continues from its last good state; `--resume-policy head` (the bare runner's default) resumes at the head as left. Pass either flag to `scripts/install-preset.mjs` to choose. |
+| Reports | `active`, `PreToolUse`, `Stop` and `session_identity` to `/api/activity/hooks`; permission questions through `/api/activity/permission-requests` |
+| Fork commits | none needed. Stock `main` accepts the runner's `session_identity` report (the hook answers ok and the identity event is published) but does not persist a community resume token from it; the seat's identity reads unconfirmed, as for any community harness. Two fork-only daemon commits (`be17fa528`, `cbb109b62`) add that plus model and context readings, and are not part of this entry. |
+| Limits | no turn cancel; permissions bridged from nodecode's `organism.questions` only, and that proof is driven by a model prompt, so it is opt-in; a question reaches OpenRig only when every choice reads as allow or reject (once or always), others are answered in the pane by typing the exact choice, and only the first four choices are offered through OpenRig; model, provider and effort apply to fresh sessions, a resumed one stays pinned; its gateway keeps running after `rig down`; the installed preset runs each seat in its own nodecode profile (`--seat-profile auto`, sharing the operator's memories and skills), while the bare runner uses the operator's organism unless `--profile` is set; `node` must be on the pane's `PATH` |
 
 ## Pass the first startup input at launch
 

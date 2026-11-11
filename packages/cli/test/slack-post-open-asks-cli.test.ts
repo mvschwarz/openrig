@@ -34,6 +34,21 @@ describe("rig slack post-open-asks", () => {
     expect(logs.join("\n")).toMatch(/Run `rig slack post-open-asks` again later .* reuses each ask's decision rather than offering it again/);
   });
 
+  it("prints an ask that may already be in Slack as uncertain, with the no-receipt line, never as a transport failure", async () => {
+    const { d, logs } = deps({ status: 200, data: { ok: true, asks: [
+      { qitemId: "q-7", recipient: "alex@external", summary: "Approve?", outcome: "uncertain",
+        detail: "may already be in Slack (its reply couldn't be read); the gateway checks Slack for its marker before any resend when it next starts" },
+      { qitemId: "q-8", recipient: "alex@external", summary: "Ship?", outcome: "uncertain",
+        detail: "may already be in Slack (its reply couldn't be read); no resend is pending" },
+    ] } });
+    await run(d, ["post-open-asks"]);
+    expect(logs[0]).toBe("2 open ask(s): 2 uncertain");
+    expect(logs[1]).toBe("  uncertain: q-7 for alex@external: Approve? (may already be in Slack (its reply couldn't be read); the gateway checks Slack for its marker before any resend when it next starts)");
+    expect(logs[2]).toBe("  uncertain: q-8 for alex@external: Ship? (may already be in Slack (its reply couldn't be read); no resend is pending)");
+    expect(logs.join("\n")).toMatch(/Queued or uncertain asks have no Slack receipt yet/);
+    expect(logs.join("\n")).not.toMatch(/transport fail/i);
+  });
+
   it("says the daemon's reason and exits 1 when Slack isn't posting, and when the daemon can't be reached", async () => {
     for (const response of [
       { status: 409, data: { error: "slack_not_posting", message: "Slack isn't enabled on this machine, so no ask was shown. Run rig slack enable first, then this." } },

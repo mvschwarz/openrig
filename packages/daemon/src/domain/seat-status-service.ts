@@ -4,7 +4,7 @@ import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
-import { sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
@@ -13,6 +13,9 @@ import { seatAccountHome, RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } 
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
+import { readRefocusRecord, type RefocusRecord } from "./refocus-record.js";
+import { readGuidanceProjection, type GuidanceProjection, type GuidanceSession } from "./guidance-projection.js";
+import { readNodeStartupSnapshot, seatGuidanceFile } from "./restore-guidance.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -21,6 +24,9 @@ export interface SeatStatus {
    * Completion applies only to the displayed actor; other actors' pending state is unknown. */
   permission_stop?: PermissionStopStatus;
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
+  /** Claude and Codex seats: what OpenRig's own refocus hook has recorded for this seat, from its state files. Evidence
+   *  of what ran, not readiness from configuration. */
+  refocus?: RefocusRecord;
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -55,6 +61,9 @@ export interface SeatStatus {
   /** A Claude seat's own subscription token: its reference (never the value), and whether the file would give Claude the
    *  token at the next launch. When it wouldn't, Claude starts on the config dir's stored login, and `notice` says so. */
   claude_token?: { kind?: "api-key"; label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
+  /** A running Claude or Codex seat: OpenRig's blocks in its guidance file, set against when the running agent loaded
+   *  that file. Whether a block could be in the agent's context, never whether the agent read it. */
+  guidance?: GuidanceProjection;
   terminalPolicy: ReturnType<TerminalPolicyStore["account"]> | { state: "unknown"; error: string };
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
@@ -157,6 +166,7 @@ export class SeatStatusService {
     return {
       permission_stop: this.permissionStopStatus(entry),
       ...this.compactionStatus(entry),
+      ...this.refocusStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,
       rig_name: entry.rigName,
@@ -179,6 +189,7 @@ export class SeatStatusService {
       restore_outcome: entry.restoreOutcome,
       ...this.runtimeHomeStatus(entry.nodeId, entry.runtime),
       ...this.claudeTokenStatus(entry.nodeId, entry.runtime),
+      ...this.guidanceStatus(entry),
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
@@ -193,6 +204,29 @@ export class SeatStatusService {
     catch { return unavailablePermissionStop(); }
   }
 
+  private refocusStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "refocus"> {
+    if ((entry.runtime !== "claude-code" && entry.runtime !== "codex") || !entry.canonicalSessionName) return {};
+    // The same home the hook resolves (refocus.cjs).
+    const home = this.env.OPENRIG_HOME || path.join(this.env.HOME || "/tmp", ".openrig");
+    return { refocus: readRefocusRecord(home, entry.canonicalSessionName, entry.resumeToken ?? null) };
+  }
+
+  private guidanceStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "guidance"> {
+    if ((entry.runtime !== "claude-code" && entry.runtime !== "codex") || entry.sessionStatus !== "running" || !entry.cwd) return {};
+    const db = this.rigRepo.db;
+    let recorded: string | null = null;
+    try { recorded = readNodeStartupSnapshot(db, entry.nodeId)?.guidanceFile ?? null; } catch { /* the runtime's default file */ }
+    const file = seatGuidanceFile(entry.runtime, entry.cwd, this.rigRepo.getRigClaudeManagedBlockFile(entry.rigId), recorded);
+    if (!file) return {};
+    let session: GuidanceSession | null = null;
+    try {
+      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(entry.nodeId) as { origin: string; created_at: string | null; startup_completed_at: string | null } | undefined;
+      if (row) session = { origin: row.origin === "claimed" ? "claimed" : "launched", createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
+    } catch { /* no session to place the blocks against: they read unknown */ }
+    return { guidance: readGuidanceProjection({ db, file, runtime: entry.runtime, session }) };
+  }
+
   private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {
     const enforcer = this.compactionEnforcer, session = entry.canonicalSessionName;
     if (!enforcer || entry.runtime !== "claude-code" || !session) return {};
@@ -205,7 +239,7 @@ export class SeatStatusService {
     const db = this.rigRepo.db;
     const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
       .get(nodeId) as { community_runner: number | null } | undefined;
-    return row?.community_runner === 1;
+    return recordedRunner(row?.community_runner);
   }
 
   private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {

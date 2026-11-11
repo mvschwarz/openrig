@@ -15,17 +15,18 @@ last-updated: 2026-11-11
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
+Verified against the source commit in this page's `last-verified-against-source`
+frontmatter.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **92 top-level registrations**, **439 registered command objects**
+There are **92 top-level registrations**, **440 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,456 explicitly registered option objects**, including the root version
+**1,460 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec` and `environment` families, the `roster` and `telemetry` rows, and the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions are all counted here.
+These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec` and `environment` families, the `roster` and `telemetry` rows, and the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions are all counted here, as are the herdr-app provider's `terminal close` row and its `--app-home` options.
 
 ## Reading this reference
 
@@ -354,6 +355,8 @@ the sections that were not read are `null`.
 | `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
 | `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
+| `rig host approve <request>` | — | `--bearer <token>`<br>`--json` |
+| `rig host deny <request>` | — | `--bearer <token>`<br>`--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
@@ -362,11 +365,57 @@ even when it is bound to a tailnet address and so starts without one: pairing ha
 over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
 `pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
 registered person can approve (none, or several with no default; name one with
-`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+`--human`) (`packages/daemon/src/routes/hosts.ts:379-398`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
-approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+approval says how long and until when, in UTC. A target that reports who was asked (`person`) and who reads their answer (`owner`), or why
+nobody does yet (`noReader`), has `rig host pair` name them; an older target's reply keeps the general text. With
+nobody registered on the target, its refusal (409 `pair_human_required`) says to register a person there:
+`rig gateway human add <entityId> --display-name <name> --delivery-class B --default`. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
+
+On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
+Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
+- **When the target has a receiving agent** (the one chosen in `agents.operator_session`, else its kernel operator
+  `operator-agent@kernel`), it asks. The person's answer, a click or their words, comes back to it as a reply, and it
+  decides with `rig host approve <code>` or `rig host deny <code>`. It asks the person back when the answer isn't clear.
+  The person is told once that their answer was received. If the agent isn't running, the request and that receipt say
+  so, and they name the direct controls (below). The request stays pending, never granted or denied, until a decision or
+  expiry. If the agent doesn't pick up the answer, the person is told at expiry that it didn't.
+- **When the target has no receiving agent** (or the queue can't send rows to it, or OpenRig couldn't read which; the
+  request says which, and names a chosen agent it couldn't use), the person's answer, a click or their words, is kept on
+  the request and decides nothing. (A Steering Deny or Drop, which closes the request, still refuses it.) The person
+  gets one receipt naming the direct controls. If a receiving agent is set
+  before the request expires, it gets their answer once and decides. (On 0.7.11, Approve and Deny decided at once here,
+  and words were asked again.)
+- **The direct controls:** the target's TUI pairing settings (`rig tui`, then Settings, Instance & work, Pairing
+  requests; the Feed's request opens it there), or `rig host approve|deny` below. The TUI lists the open requests from
+  `GET /api/hosts/pair-requests` (code, requester, expiry, status, who reads the answer, and the person's kept answer,
+  so an Approve over a kept Deny is made knowingly; no credential), reads the
+  request again before Approve or Deny, and decides through `POST /api/hosts/pair-decision` with its operator bearer
+  token. A decision it can't confirm (a timeout, a lost connection or a server error) reads "outcome unknown" and is
+  read again, never sent twice.
+- **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
+
+On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
+approval row id), run on the target from an agent seat or a plain terminal, decides it. It needs the target daemon's operator bearer
+token: an agent seat carries `OPENRIG_AUTH_BEARER_TOKEN`, and a person sets it or passes `--bearer <token>`. Without
+it the daemon answers 401, and nothing is decided. It decides once, and refuses an
+unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or already-decided (409
+`pair_request_decided`) request, including one its row already decided before the requester's next check (an agent
+seat's close naming Approve, or a refusing close). A close never approves over the person's recorded Deny. It records who decided: the seat, or `human@host` from a plain terminal. The person
+gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
+--resolution approve` on an unanswered request still approves, and any other close that carries no answer and isn't
+the person's own reply, or `--state denied`, refuses. To refuse a pairing, use Deny on the target's pairing settings or on Steering, run
+`rig host deny`, or let it expire (nothing is persisted). At its deadline a request's ask closes as expired, even when the requester stopped waiting, so a late click there isn't
+accepted. The decisions live in the daemon's memory, as the requests do, so a daemon restart drops an open request.
+
+A 0.7.10 or earlier target asks no question. Its person approves with the request's Approve, in the TUI (`rig tui`,
+then `attention`: open it; the TUI from 0.7.1) or on Steering, and from an agent seat `rig queue update <id> --state done
+--closure-reason no-follow-on` approves. There, every close that leaves the request `done` approves it, whatever its
+closure reason: a typed reply, or an agent seat's `rig queue update <id> --state done --closure-reason denied`,
+included. To refuse a pairing on such a target, let it expire, or from an agent seat set the request `denied`
+(`rig queue update <id> --state denied`); a `canceled` or `failed` state refuses too.
 
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
@@ -492,7 +541,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--host <id>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--source <name@external>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
@@ -511,6 +560,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue inbox-pending <destinationSession>` | — | `--json` |
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
+| `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
 
 ### slack
 
@@ -570,13 +620,16 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+| `rig terminal close <view>` | — | `--app-home <dir>`<br>`--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal attach <session>` | — | `--read-only` |
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
+herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside an answering herdr-app terminal versus `--window` for a desktop window, `close`, `--app-home`) are in
+[herdr-app](../reference/herdr-app.md).
 
 ### watchdog
 
@@ -686,7 +739,7 @@ Only Claude and Codex tenures can be woken.
 | `rig context preview <name-or-ref>` | — | `--json` |
 | `rig context get <name-or-ref>` | — | `--json` |
 | `rig context profile <name-or-ref>` | — | `--situation <situation>` **required**<br>`--runtime <runtime>`<br>`--profile <profile>`<br>`--budget <tokens>`<br>`--rig <rig>`<br>`--seat <seat>`<br>`--mission <mission>`<br>`--slice <slice>`<br>`--json` |
-| `rig context recap-write` | — | `--rig <rig>` **required**<br>`--seat <seat>` **required**<br>`--file <path>` **required** |
+| `rig context recap-write` | — | `--rig <rig>` (default: the calling seat's rig)<br>`--seat <seat>` (default: the calling seat; the part of its session name before `@`)<br>`--file <path>` **required** |
 | `rig context sync` | — | `--json` |
 | `rig context add <source>` | — | `--name <name>`<br>`--git`<br>`--checkout`<br>`--pack <path>`<br>`--json` |
 | `rig context source` | — | — |
@@ -1087,6 +1140,7 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
@@ -1132,6 +1186,28 @@ off, draft-aware and hold modes, immediate refusal results and held-message insp
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+
+A rebuild starts a new native conversation and primes it from durable artifacts. In the JSON result,
+`currentStatus.continuityOutcome` describes the executed source (`rebuilt`, `forked`, `fresh`, or unknown
+for a discovered successor); `sourceOutcome` lists the rebuild artifacts and gaps or the fork origin.
+The legacy `continuityTransferred` field is always `false`, not a transfer verdict. A complete binding
+does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back this handover's occupant
+tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
+
+For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
+successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the
+observed predecessor policy and retains the usual launch additions: workspace-write adds Git metadata,
+seat-folder and pod-state writable roots; read-only adds none. The result describes this launch policy,
+not an observed exact difference. A supported observed predecessor policy is carried without fresh
+directory additions when no newer saved selection replaces it.
+An unreadable or unsupported predecessor policy does not stop the rebuild; without a saved envelope,
+the ordinary launch settings apply and the result reports the missing comparison. Emitted arguments
+are not proof of the successor's native enforcement, and the named Codex config profile still loads.
+
+`sourceOutcome.model.requested` is the seat's configured Codex model pin, or `null` for the runtime's
+configuration/default. A rebuild reapplies that choice rather than the predecessor's in-pane model;
+`predecessorCompared: false` explicitly reports that no native model comparison was performed. This
+reports launch intent, not the model actually used by the successor. Older daemons omit this object.
 
 ### startup-proof
 

@@ -16,7 +16,7 @@ import {
   renderQueueHandoffNudge,
 } from "../src/domain/queue-nudge-text.js";
 
-function makeHarness() {
+function makeHarness(opts?: { isSenderSendable?: (sender: string) => boolean }) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   const calls: Array<{ session: string; text: string }> = [];
@@ -26,7 +26,7 @@ function makeHarness() {
       return { ok: true, verified: true };
     },
   };
-  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, ...opts });
   repo.attachTransport(transport);
   repo.attachOutbox(new OutboxHandler(db));
   return { db, repo, calls };
@@ -152,6 +152,22 @@ describe("queue wake nudge carries the stored summary", () => {
       await h.repo.create({ sourceSession: "lead@rig", destinationSession: "dev@rig", body: "work" });
       await vi.waitFor(() => expect(h.calls).toHaveLength(1));
       expect(h.calls[0]!.text.split("\n").at(-1)).toBe('↩ Reply: rig send lead@rig "..."');
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("#2895 (a): a create or handoff from a sender rig send can't reach ends with the plain note, not a rig send line", async () => {
+    const h = makeHarness({ isSenderSendable: (sender) => sender !== "planner@global" });
+    try {
+      const row = await h.repo.create({ sourceSession: "planner@global", destinationSession: "dev@rig", body: "work" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe("↩ No reply by rig send: planner@global has no session.");
+      await h.repo.handoff({ qitemId: row.qitemId, fromSession: "planner@global", toSession: "reviewer@rig", body: "next" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(2));
+      expect(h.calls[1]!.text.split("\n").at(-1)).toBe("↩ No reply by rig send: planner@global has no session.");
+      // A sender it can reach keeps the ordinary hint.
+      await h.repo.create({ sourceSession: "lead@rig", destinationSession: "dev@rig", body: "more" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(3));
+      expect(h.calls[2]!.text.split("\n").at(-1)).toBe('↩ Reply: rig send lead@rig "..."');
     } finally { await settle(); h.db.close(); }
   });
 

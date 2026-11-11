@@ -493,14 +493,14 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.startServer).not.toHaveBeenCalled();
   });
 
-  it("preserves the adopted seat name and names the release and rig down routes in plans and execution", async () => {
+  it("preserves the adopted seat name and names the release route in plans and execution", async () => {
     const seat = seedSeat({ adopted: true });
     const expected = {
       code: "claimed_session",
       message: `Seat "${seat.sessionName}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-      // B5: rig unclaim releases it (the process keeps running); rig down ends it with its rig.
+      // B5: rig unclaim releases it (the process keeps running); rig down leaves a session OpenRig didn't start.
       guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process yourself, then launch fresh. "
-        + "Or end it with rig down 'fresh-rig' (this rig has one seat, so it stops only this session; rig up 'fresh-rig' --existing brings the rig back).",
+        + "rig down 'fresh-rig' leaves a session OpenRig didn't start running.",
     };
     const before = db.serialize();
     expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true }))
@@ -510,6 +510,17 @@ describe("SeatLifecycleService.launchFresh", () => {
       .toMatchObject({ ok: false, ...expected });
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("names only the release route for an adopted seat joined with rig attach as an external CLI, since rig down leaves it running", async () => {
+    const seat = seedSeat({ adopted: true });
+    sessionRegistry.updateBinding(seat.node.id, { attachmentType: "external_cli", externalSessionName: seat.sessionName });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fixture" });
+    expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.guidance).toContain("rig unclaim 'dev-impl@fresh-rig'");
+    expect(result.guidance).not.toContain("rig down");
+    expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
   it("keeps stop effects unknown when pane identity cannot be observed", async () => {
@@ -1118,6 +1129,26 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(delivered.every((f) => f.required)).toBe(true);
     const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ absolutePath: string }>;
     expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
+  });
+
+  // A selection saved before the context-entry floor: the fresh launch delivers the floor beside openrig-start.md, from the
+  // running install, and records what it delivered, so the floor is saved once. Checked at the adapter, not the plan.
+  it("a fresh launch from a selection saved before the context-entry floor delivers it and saves it once", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldAssets = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
+    const running = path.resolve(import.meta.dirname, "../assets");
+    const stored = [{ path: "openrig-start.md", absolutePath: `${oldAssets}/guidance/openrig-start.md`, ownerRoot: oldAssets,
+      deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; deliveryHint: string; appliesOn: string[] }> = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...(files as typeof delivered)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "context-entry floor" });
+    expect(result.ok).toBe(true);
+    expect(delivered.map((f) => f.path)).toEqual(["openrig-start.md", "openrig-context-entry.md"]);
+    expect(delivered[1]).toMatchObject({ absolutePath: `${running}/guidance/openrig-context-entry.md`, ownerRoot: running,
+      required: false, deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"] });
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ path: string }>;
+    expect(persisted.filter((f) => f.path === "openrig-context-entry.md")).toHaveLength(1);
   });
 
   // #261 extension: shipped-spec projection resources follow the running install; a plugin stored

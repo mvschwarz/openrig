@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { helperCwd } from "../helper-cwd.js";
 import type { TerminalOpenResult } from "../daemon-client.js";
@@ -16,7 +19,27 @@ export function terminalWindowNotice(view: string, result: TerminalOpenResult): 
   ].join("\n");
 }
 
-const MARKER_KEYS = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR"];
+// herdr-core marks each of its terminals with HC_TERMINAL_ID / HC_TERMINAL_SOCKET; herdr-app's home decides its socket.
+const HERDR_APP_KEYS = ["HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SESSION", "HC_SOCKET", "HERDR_APP_HOME", "XDG_CONFIG_HOME"];
+const MARKER_KEYS = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR", ...HERDR_APP_KEYS];
+
+/** herdr-app's home, resolved the way herdr-app resolves it. */
+export function herdrAppHome(env: NodeJS.ProcessEnv): string {
+  return env["HERDR_APP_HOME"] || join(env["XDG_CONFIG_HOME"] || join(env["HOME"] || process.env["HOME"] || homedir(), ".config"), "herdr-app");
+}
+
+/** A terminal herdr-core runs, with a herdr-app window serving that home on this machine. The socket file is a hint
+ *  only: the daemon opens nothing unless the window answers. */
+export function inHerdrApp(env: NodeJS.ProcessEnv, exists: (path: string) => boolean = existsSync): boolean {
+  return !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(herdrAppHome(env), "herdr-app.sock"));
+}
+
+/** Where a terminal view opens from this TUI, so a preview's plan matches the open. */
+export type WindowTarget = { provider: "rex" | "herdr" | "cmux" } | { provider: "herdr-app"; appHome: string };
+
+const herdrAppTarget = (env: NodeJS.ProcessEnv): WindowTarget => ({
+  provider: "herdr-app", appHome: herdrAppHome(env),
+});
 
 const inHerdrPane = (env: NodeJS.ProcessEnv): boolean => env["HERDR_ENV"] === "1" && !!env["HERDR_PANE_ID"] && !!env["HERDR_SOCKET_PATH"];
 
@@ -68,21 +91,35 @@ export async function viewerTerminalEnv(): Promise<NodeJS.ProcessEnv | undefined
       const at = entry.indexOf("=");
       return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
     }));
-    return inHerdr(env) || inRex(env) ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
+    return inHerdr(env) || inRex(env) || inHerdrApp(env) ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
   } catch { return undefined; }
 }
 
 /** The viewer markers the window opener is given, or undefined when this TUI's own environment decides. */
 async function viewedFrom(viewer: () => Promise<NodeJS.ProcessEnv | undefined>): Promise<NodeJS.ProcessEnv | undefined> {
-  return inHerdr(process.env) || inRex(process.env) || inCmux(process.env) ? undefined : await viewer();
+  return inHerdr(process.env) || inRex(process.env) || inCmux(process.env) || inHerdrApp(process.env) ? undefined : await viewer();
+}
+
+/**
+ * The provider a terminal action uses from this TUI, for its preview and its open alike: Rex or cmux around this TUI;
+ * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine (or, for a shared
+ * TUI, when the client viewing it does); else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
+ * run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering.
+ * `--window` always asks for a new desktop window.
+ */
+export async function windowTarget(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<WindowTarget> {
+  if (inRex(process.env)) return { provider: "rex" };
+  if (inCmux(process.env)) return { provider: "cmux" };
+  if (!inHerdrPane(process.env) && inHerdrApp(process.env)) return herdrAppTarget(process.env);
+  const viewed = await viewedFrom(viewer);
+  if (viewed && inRex(viewed)) return { provider: "rex" };
+  if (viewed && !inHerdrPane(viewed) && inHerdrApp(viewed)) return herdrAppTarget(viewed);
+  return { provider: "herdr" };
 }
 
 /** The provider the terminal action will use from this TUI, so a preview's plan matches the open. */
-export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<"rex" | "herdr" | "cmux"> {
-  if (inRex(process.env)) return "rex";
-  if (inCmux(process.env)) return "cmux";
-  const viewed = await viewedFrom(viewer);
-  return viewed && inRex(viewed) ? "rex" : "herdr";
+export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<WindowTarget["provider"]> {
+  return (await windowTarget(viewer)).provider;
 }
 
 /** Reuse the installed CLI's desktop selection and fallback, preserving this TUI's daemon. In cmux, the view opens in that
@@ -94,7 +131,11 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   const base = { ...process.env };
   if (viewed) for (const key of MARKER_KEYS) delete base[key];
   const cmux = inCmux(process.env);
-  const placement = cmux ? ["--provider", "cmux"] : ["--window"];
+  const target = await windowTarget(viewer);
+  // herdr-app opens in that client's own window, through the daemon: no desktop window, no display needed.
+  const placement = target.provider === "herdr-app"
+    ? ["--provider", "herdr-app", "--app-home", target.appHome]
+    : cmux ? ["--provider", "cmux"] : ["--window"];
   const args = ["terminal", "open", ...placement, "--json", ...(expectedPlan !== undefined ? ["--expected-plan", expectedPlan] : []), "--", view];
   let stdout: string;
   let executionError: string | undefined;

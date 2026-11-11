@@ -55,6 +55,9 @@ export interface EnvelopeMeta {
    *  names it with --reply-to, so the answer joins the Slack thread the message came from (#822
    *  records that thread on the row). ABSENT ⇒ the hint stays the plain new-conversation form. */
   replyToQitem?: string;
+  /** #2895 (a): false when the caller looked the sender up and `rig send` can't reach it (no session here). The reply
+   *  line then names no command, since the one it would name is known to fail. ABSENT or true ⇒ today's hint. */
+  senderReachable?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability, ruling pin 2). */
@@ -135,6 +138,8 @@ export function wrapPaneEnvelope(
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
       : isOpenRigSender(senderLabel)
         ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
-        : `↩ Reply: rig send ${senderLabel} "..."`;
+        : meta?.senderReachable === false
+          ? `↩ No reply by rig send: ${senderLabel} has no session.`
+          : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }

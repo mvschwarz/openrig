@@ -570,7 +570,7 @@ it("keeps a real empty mission workspace enabled through Core with a mission wai
 describe("follow views kept from an earlier release", () => {
   const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
   it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
-    "a writable follow view kept from %s still adds and closes tiles, and moves to the current script", async (_, make) => {
+    "a kept %s follow view reuses sizing clients or names the explicit reopen step", async (_, make) => {
       const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
       // Rewrite the saved canvas and the viewer journal as that release left them.
       const earlier = (seat: string) => make("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
@@ -584,6 +584,13 @@ describe("follow views kept from an earlier release", () => {
       }
       writeFileSync(f.journal(), JSON.stringify(journal));
 
+      if (make !== tileAttachArgv0710) {
+        const before = f.calls.length;
+        expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("Close only the owned Herdr viewer pane") });
+        expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+        expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: unknown }) => t.target)).toEqual(canvas.tiles.map((t: { target: unknown }) => t.target));
+        return; // An operator closes the old viewer and opens a fresh ordinary view; no live-client migration claim.
+      }
       expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
       await f.follow(["a", "b", "d"]); f.advance(4000);
       expect(await f.follow(["a", "b", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "d"] });

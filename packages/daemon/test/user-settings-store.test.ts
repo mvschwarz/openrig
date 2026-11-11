@@ -25,7 +25,7 @@ const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md"
 
 function clearEnv(): () => void {
   const keys = [
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_TERMINAL_FIXED_GEOMETRY", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -99,6 +99,15 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
   });
 
+  it("web fixed geometry is off by default and explicitly selectable through file or environment", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: false, source: "default" });
+    store.set("terminal.fixed_geometry", "true");
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: true, source: "file" });
+    process.env.OPENRIG_TERMINAL_FIXED_GEOMETRY = "false";
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: false, source: "env" });
+  });
+
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
@@ -170,6 +179,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.tmux_server",
       "terminal.history_limit",
+      "terminal.fixed_geometry",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
@@ -196,6 +206,9 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.watchdog_days",
       "retention.usage_samples_days", // 51-08 A2 (plan-lock rev-1): the PM-ruled 14d telemetry window
       "retention.events_days", // the history-only event types of events
+      "retention.closed_content_days", // closed-work erasure: content
+      "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
@@ -266,6 +279,24 @@ describe("SettingsStore (User Settings v0)", () => {
     for (const raw of ["gemini", "both", "claude,", "Claude", "claude codex"]) {
       expect(() => store.set("provider.selected", raw)).toThrow(/provider\.selected/);
     }
+  });
+
+  it.each([
+    ["retention.closed_content_days", "closedContentDays", "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS"],
+    ["retention.closed_metadata_days", "closedMetadataDays", "OPENRIG_RETENTION_CLOSED_METADATA_DAYS"],
+  ] as const)("%s defaults to 0 (keep), resolves file then env, and refuses negative or non-integer values", (key, fileKey, envKey) => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne(key)).toMatchObject({ value: 0, source: "default" });
+    store.set(key, "30");
+    expect(store.resolveOne(key)).toMatchObject({ value: 30, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention[fileKey]).toBe(30);
+    process.env[envKey] = "7";
+    try {
+      expect(store.resolveOne(key)).toMatchObject({ value: 7, source: "env" });
+    } finally {
+      delete process.env[envKey];
+    }
+    for (const raw of ["-1", "2.5", "30days"]) expect(() => store.set(key, raw)).toThrow(new RegExp(key.replace(".", "\\.")));
   });
 
   it("retention.events_days defaults to 0 (keep), resolves file then env, accepts 0 and refuses negative or non-integer values", () => {

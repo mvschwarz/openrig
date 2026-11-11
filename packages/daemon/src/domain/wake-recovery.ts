@@ -8,11 +8,12 @@ export interface WakeRecovery {
   stop(): Promise<void>;
 }
 
-/** Notifications the pass didn't replay because their seats have no session or transport, named once. */
+/** Notifications the pass didn't replay because their seats have no receiver (no session or transport, or a bound
+ *  terminal seat, which no wake can reach), named once. */
 function waitingNote(waiting?: { notifications: number; seats: string[] }): string {
   if (!waiting) return "";
   const named = waiting.seats.slice(0, 10).join(", ") + (waiting.seats.length > 10 ? `, and ${waiting.seats.length - 10} more` : "");
-  return ` waiting=${waiting.notifications} (not replayed: no session or transport for ${named})`;
+  return ` waiting=${waiting.notifications} (not replayed: no receiver (no session or transport, or a terminal seat) for ${named})`;
 }
 
 /**

@@ -46,10 +46,12 @@ export function specLibraryRoutes(): Hono {
       const folder = c.get("workflowsFolderDir" as never) as string | undefined;
       const eventBus = c.get("eventBus" as never) as EventBus | undefined;
       const aliases: Array<{ name: string; version: string; sourcePath: string; sourceHash: string }> = [];
+      const verifiedSourceHashes = new Map<string, string>();
       if (cache && folder) {
         try {
           scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null, eventBus,
-            onBuiltinAlias: (name, version, sourcePath, sourceHash) => aliases.push({ name, version, sourcePath, sourceHash }) });
+            onBuiltinAlias: (name, version, sourcePath, sourceHash) => aliases.push({ name, version, sourcePath, sourceHash }),
+            onVerifiedSource: (sourcePath, sourceHash) => verifiedSourceHashes.set(sourcePath, sourceHash) });
         } catch { /* best-effort — folder scan failure must not break Library list */ }
       }
       // Re-scan workflow specs on each list request — cheap (single
@@ -70,9 +72,11 @@ export function specLibraryRoutes(): Hono {
       // Keep a source-specific link valid when an identical copy is edited and
       // becomes the cache's own user-file row. The normal row is listed once.
       if (folder && cache) {
-        const sourceHashes = new Map<string, string>();
+        // Reuse the scanner's persisted/stat-validated hash for ordinary user files. Alias copies intentionally keep
+        // their separate two-file byte check above because they have no persisted row of their own.
+        const sourceHashes = verifiedSourceHashes;
         for (const entry of [...workflowEntries]) {
-          if (entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
+          if (entry.id.startsWith("workflow-source:") || entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
           try {
             let sourceHash = sourceHashes.get(entry.sourcePath);
             if (sourceHash === undefined) {

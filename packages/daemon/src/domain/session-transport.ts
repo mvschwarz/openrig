@@ -6,7 +6,7 @@ import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CLAUDE_NOT_STATUS_LINE_ROW, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
@@ -51,6 +51,7 @@ import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
+import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -155,6 +156,36 @@ export interface PaneActivityClassification {
   evidence: string | null;
 }
 
+/** Refusal codes from the checks that run before Enter reaches the adapter (the seat's input guard, the expected
+ *  conversation and managed compaction): a written send that stopped with one left its text without Enter. */
+/** The written text's fingerprint, byte length and paste time, to match a harness's own prompt hook against; nulls when
+ *  nothing was pasted. The text itself is never recorded. */
+function wireFingerprint(wire: { text: string; at: string } | null): { wireSha256: string | null; wireBytes: number | null; writtenAt: string | null } {
+  if (wire === null) return { wireSha256: null, wireBytes: null, writtenAt: null };
+  const bytes = Buffer.from(wire.text, "utf8");
+  return { wireSha256: createHash("sha256").update(bytes).digest("hex"), wireBytes: bytes.length, writtenAt: wire.at };
+}
+
+function enterWithheld(reason: string | undefined): boolean {
+  return typeof reason === "string" && (reason.startsWith("expected_identity_") || reason.startsWith("draft_") || reason === "managed_compaction_pending");
+}
+
+/** What a send's own result shows reached the seat's input. A send that succeeded without being retained issued the text
+ *  and Enter, whether or not it checked the screen, except a bare Enter and a prompt answer typed without Enter. A
+ *  write that may have landed is uncertain. Text that was written reads text only when a pre-Enter check refused the
+ *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
+ *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
+export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown" {
+  if (result.ok && result.outcome !== "retained") {
+    if (result.submitOnly) return "submit_only";
+    return result.promptInteraction === "unverified" ? "text_only" : "submitted";
+  }
+  if (result.inputPhase === "attempted") return "uncertain";
+  if (result.inputPhase === "written") return enterWithheld(result.reason) ? "text_only" : "text_submit_unknown";
+  if (result.inputPhase === "not_reached" || result.sent === false) return "none";
+  return "unknown";
+}
+
 function trimPaneLines(paneContent: string): string[] {
   return paneContent
     .split("\n")
@@ -249,13 +280,15 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 const CLAUDE_STATUS_WARNINGS = [
-  /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
+  /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
+  /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
   // #1641: Claude 2.1.293's update banner, whatever installer it names.
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
   // "Restart to update" on its own row (Claude 2.1.319, #2605).
   /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
@@ -448,14 +481,18 @@ function closesFramedPromptAbove(lines: string[], open: number, indent: number, 
 const codexFooter = (line: string): boolean => isComposerFooter(line)
   || /(?:\b\d+% context left\b|\bContext \[)/.test(line);
 
-/** Preserve faint styling so autocomplete ghosts can be separated from authored
- * text. Color channel values must never be interpreted as style codes. */
+/** Preserve the styling used for autocomplete ghosts and the drawn cursor.
+ * Color channel values must never be interpreted as style codes. */
 function styledTextLines(screen: string) {
-  let faint = false;
+  let faint = false, inverse = false;
   return screen.replace(/\r\n/g, "\n").split("\n").map(raw => {
     let text = "", offset = 0;
-    const faintCells: boolean[] = [];
-    const append = (value: string) => { text += value; faintCells.push(...Array<boolean>(value.length).fill(faint)); };
+    const faintCells: boolean[] = [], inverseCells: boolean[] = [];
+    const append = (value: string) => {
+      text += value;
+      faintCells.push(...Array<boolean>(value.length).fill(faint));
+      inverseCells.push(...Array<boolean>(value.length).fill(inverse));
+    };
     for (const match of raw.matchAll(/\x1b\[([0-9;:]*)m/g)) {
       append(raw.slice(offset, match.index));
       const codes = match[1]!.split(";");
@@ -466,15 +503,18 @@ function styledTextLines(screen: string) {
           const skip = codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? (codes[i + 2] === "" ? 5 : 4) : 0;
           // Color channels are not style codes. Ambiguous compound sequences
           // provide no faint-style proof, rather than interpreting an RGB 2 as dim.
-          if (!skip || i + skip !== codes.length - 1) { faint = false; break; }
+          if (!skip || i + skip !== codes.length - 1) { faint = inverse = false; break; }
           i += skip;
-        } else if (code === "" || code === "0" || code === "22") faint = false;
+        } else if (code === "" || code === "0") faint = inverse = false;
+        else if (code === "22") faint = false;
         else if (code === "2") faint = true;
+        else if (code === "7") inverse = true;
+        else if (code === "27") inverse = false;
       }
       offset = match.index! + match[0].length;
     }
     append(raw.slice(offset));
-    return { text, faintCells };
+    return { text, faintCells, inverseCells };
   });
 }
 
@@ -569,7 +609,11 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       else if (cursorOffset >= 0 && !rows[cursorRow]!.slice(cursorOffset).trim()) visible[cursorRow] = rows[cursorRow]!.slice(0, cursorOffset);
     }
     const atStart = y === start && x === prefix;
-    const empty = atStart && rows.length === 1 && rows[0] === "";
+    // Claude can draw an inverse-video blank in the cursor cell (#2925). Only
+    // that single cell at the start is padding; ordinary/preceding spaces stay input.
+    const inverseCells = styled[start]!.inverseCells;
+    const cursorBlank = prompt.glyph === "❯" && rows[0] === " " && inverseCells[prefix] && !inverseCells[prefix - 1];
+    const empty = atStart && rows.length === 1 && (rows[0] === "" || cursorBlank);
     const last = visible.length - 1;
     const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
     const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;
@@ -969,7 +1013,7 @@ export async function probeSessionActivity(input: {
     };
   }
   const readTarget = binding?.pane ?? sessionName;
-  if (attachmentType === "external_cli") {
+  if (seatInboundTransport(resolveSeatKind(attachmentType)) === "none") {
     return {
       state: "unknown",
       reason: "unsupported_attachment",
@@ -1939,8 +1983,9 @@ export interface SendOpts {
    *  decision), with how the seat's level would treat each input now. It returns the members that still go with this send:
    *  their text and outbox ids. Never accepted from HTTP. */
   recheckMembers?: (holds: (input: AdmissionInput) => boolean, held: boolean) => { text: string; outboxIds: string[] };
-  /** Internal observation of a completed input effect; never a permission callback. */
-  onInputEffect?: (phase: "pasted" | "submitted") => void;
+  /** Internal observation of a completed input effect; never a permission callback. A paste reports the exact text it
+   *  wrote, for delivery evidence. */
+  onInputEffect?: (phase: "pasted" | "submitted", written?: { text: string }) => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
   /** Explicit internal composer-preservation request. Managed compaction instead uses ordinary draft-delivery defaults.
@@ -2569,7 +2614,7 @@ export class SessionTransport {
       const binding = this.sessionRegistry.getBindingForNode(node.id);
       const latestSession = latestByNode.get(node.id);
 
-      if (binding?.attachmentType === "external_cli" && binding.externalSessionName) {
+      if (resolveSeatKind(binding?.attachmentType).kind === "external_cli" && binding?.externalSessionName) {
         targets.push({
           sessionName: binding.externalSessionName,
           rigName,
@@ -2617,6 +2662,7 @@ export class SessionTransport {
    * agent input; a confirmed render does not prove agent consumption. */
   /** The managed compaction state OpenRig has recorded for a seat (the compaction enforcer's), for the sender's notice. */
   private compactionObserver?: (sessionName: string) => { stage: string; detail: string } | null;
+  private evidenceFailureLogged = false;
   setCompactionObserver(observer: (sessionName: string) => { stage: string; detail: string } | null): void {
     this.compactionObserver = observer;
   }
@@ -2646,6 +2692,61 @@ export class SessionTransport {
   }
 
   private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // The seat and occupant this send is for, frozen before it runs: a later handover doesn't relabel its evidence.
+    const seat = this.evidenceSeat(sessionName);
+    // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
+    let wire: { text: string; at: string } | null = null;
+    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: (phase, written) => {
+      if (phase === "pasted" && written) wire = { text: written.text, at: this.now().toISOString() };
+      opts?.onInputEffect?.(phase, written);
+    } } : opts;
+    const result = await this.sendMarkingUrgent(sessionName, text, observed);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire);
+    return result;
+  }
+
+  /** The seat a send is for, when evidence is recorded at all: its kind, pane and current occupant generation. */
+  private evidenceSeat(sessionName: string): { kind: "tmux" | "external_cli" | "unknown"; pane: string | null; occupant: string | null } | null {
+    if (!this.eventBus) return null;
+    try {
+      const meta = this.getSessionMeta(sessionName);
+      // The kind is the node's binding's; with no session row or no binding there's no kind to name.
+      const binding = meta.nodeId ? this.sessionRegistry.getBindingForNode(meta.nodeId) : null;
+      return { kind: binding ? resolveSeatKind(binding.attachmentType).kind : "unknown", pane: meta.pane, occupant: meta.occupant };
+    } catch {
+      return { kind: "unknown", pane: null, occupant: null };
+    }
+  }
+
+  /** One additive record of what this send's result says, beside it. Best effort: a record that
+   *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
+   *  unknown. Only an outbox row that exists counts as admitted. */
+  private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
+    wire: { text: string; at: string } | null): void {
+    if (!this.eventBus || !seat) return;
+    try {
+      const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
+      const outbox = new OutboxHandler(this.db);
+      // An outbox read that fails leaves admission unknown, never none or a partial list.
+      let admissionUnknown = false;
+      const admitted = outboxIds.filter((id) => { try { return Boolean(outbox.getById(id)); } catch { admissionUnknown = true; return false; } });
+      const attemptId = randomUUID();
+      this.eventBus.emit({
+        type: "transport.delivery_evidence", sessionName: result.sessionName ?? sessionName, seatKind: seat.kind,
+        pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
+        admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
+        terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
+        ...wireFingerprint(wire),
+      });
+    } catch (err) {
+      if (!this.evidenceFailureLogged) {
+        this.evidenceFailureLogged = true;
+        console.warn(`[transport] delivery evidence wasn't recorded; sends are unaffected: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  private async sendMarkingUrgent(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     if (!opts?.urgent) return this.sendClassified(sessionName, text, opts);
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
@@ -2900,7 +3001,7 @@ export class SessionTransport {
     // External CLI seats never wait: main refuses them before anything else,
     // and a probe or wait would only delay that refusal (or mistake it for
     // an absent session).
-    if (meta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(meta.attachmentType)) === "none") {
       return { ok: false, failure: {
         ok: false,
         sessionName,
@@ -3094,7 +3195,7 @@ export class SessionTransport {
     const waitMode = waitForIdleMs !== undefined;
     let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
 
-    if (sessionMeta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(sessionMeta.attachmentType)) === "none") {
       return {
         ok: false,
         sessionName,
@@ -3640,7 +3741,7 @@ export class SessionTransport {
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });
     }
-    try { opts?.onInputEffect?.("pasted"); } catch { /* Observation cannot change a completed paste. */ }
+    try { opts?.onInputEffect?.("pasted", { text }); } catch { /* Observation cannot change a completed paste. */ }
 
     // From the successful paste to Enter the text may sit in the seat's input. Any throw in this span is
     // tagged inputWritten, so no caller reports it as unsent; a step added here later stays covered.
@@ -4082,9 +4183,11 @@ export class SessionTransport {
       hookActivity.reason !== "permission_request_pending" &&
       hookActivity.reason !== "permission_prompt_cleared"
     ) {
-      // Fresh hook (within the 15s send window): authoritative for any state.
+      // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
+      // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
+      // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
-        if (hookActivity.state === "running" && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle") && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4097,7 +4200,9 @@ export class SessionTransport {
             captureObserver: privateInput ? undefined : this.captureObserver,
             binding,
           });
-          if (paneVeto.state === "needs_input") return paneVeto;
+          // After an idle hook only a dialog refuses: a draft or other input stays the delivery guard's.
+          if (paneVeto.state === "needs_input" && (hookActivity.state === "running"
+            || paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
         }
         return hookActivity;
       }
@@ -4360,7 +4465,7 @@ export class SessionTransport {
     readable?: { width: number; height: number }; readableBudget?: ReadableBudget }): Promise<CaptureResult> {
     sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
-    if (sessionMeta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(sessionMeta.attachmentType)) === "none") {
       return {
         ok: false,
         sessionName,
@@ -4600,6 +4705,8 @@ export class SessionTransport {
     const genUuid = opts?.envelopeSender
       ? (this.sessionRegistry.currentOccupantGenerationForSession(opts.envelopeSender) ?? undefined)
       : undefined;
+    // #2895 (a): once per fan-out too: a sender `rig send` can't reach gets no `rig send` reply line.
+    const unreachable = opts?.envelopeSender ? !this.sessionRegistry.senderIsSendable(opts.envelopeSender) : false;
 
     const results: SendResult[] = [];
     for (const session of resolved.sessions) {
@@ -4609,7 +4716,7 @@ export class SessionTransport {
       // Sent stamp, so a recipient tells DM from broadcast header-alone (anti-storm). Raw paths
       // (--raw / --dangerously-interact, absent envelopeSender) still deliver unwrapped.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, { scope, stampISO, genUuid })
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, { scope, stampISO, genUuid, ...(unreachable ? { senderReachable: false } : {}) })
         : text;
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).

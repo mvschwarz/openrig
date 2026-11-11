@@ -28,7 +28,7 @@ import {
 } from "./managed-blocks.js";
 import { decideManagedBlock, recordManagedBlockWrite, type ManagedBlockRecords } from "./managed-block-records.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "./seat-skill-storage.js";
 import { guidanceFileIsLink } from "./footprint-choice.js";
@@ -128,8 +128,7 @@ export function seatGuidance(
   // Every guidance startup file the last launch merged, whatever its appliesOn: a fresh-start-only
   // file (onboarding, an agent starter) was merged at that launch and stayed in the file until
   // `rig down` stripped it, so it is part of what the resumed conversation had.
-  for (const saved of startupCtx.resolvedStartupFiles) {
-    const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
+  for (const f of withContextEntryFloor(startupCtx.resolvedStartupFiles.map((saved) => reanchorBuiltinStartupFile(saved, undefined, undefined, exists)))) {
     // An "auto" file is classified from its content, as at launch (a `# SKILL` file is a skill,
     // not guidance). If the source can't be read it can't be classified: it is reported, not dropped.
     let hint: string = f.deliveryHint;
@@ -171,9 +170,9 @@ export function seatStartupTextFiles(
   readFile: (path: string) => string,
 ): SeatStartupTextFile[] {
   if (!startupCtx) return [];
-  const files = startupCtx.resolvedStartupFiles.flatMap((saved): SeatStartupTextFile[] => {
-    if (!saved.appliesOn.includes("fresh_start")) return [];
-    const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
+  const files = withContextEntryFloor(startupCtx.resolvedStartupFiles.map((saved) => reanchorBuiltinStartupFile(saved, undefined, undefined, exists)))
+    .flatMap((f): SeatStartupTextFile[] => {
+    if (!f.appliesOn.includes("fresh_start")) return [];
     const present = exists(f.absolutePath);
     let hint: string = f.deliveryHint;
     if (hint === "auto") {

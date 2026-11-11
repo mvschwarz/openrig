@@ -12,6 +12,7 @@ import { SessionAddressConflict, type SessionRegistry } from "./session-registry
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
 import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILITIES, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
@@ -62,6 +63,7 @@ export interface SeatHandoverMutationResult {
   ok: true;
   dryRun: false;
   mutated: true;
+  /** Legacy compatibility field, always false. Read currentStatus.continuityOutcome and sourceOutcome instead. */
   continuityTransferred: false;
   seat: SeatHandoverPlan["seat"];
   // The source reported to the operator is the ORIGINAL intent
@@ -100,7 +102,8 @@ export interface SeatHandoverMutationResult {
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity;
+        model?: { requested: string | null; predecessorCompared: false } };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
   /** #2456: the required startup files the successor started without, where a start would have failed. The seat reads as
@@ -116,7 +119,9 @@ export type SeatHandoverResult =
   | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "address_conflict" | "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "successor_create_failed" | "context_delivery_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
+  // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
+  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string }
   | Extract<SeatStatusResult, { ok: false }>;
 
 type ClaudeRestorePacketObservation =
@@ -237,7 +242,7 @@ interface SeatHandoverServiceDeps {
    * chain. Wired in production to seat-recap-store (listRecapChain) + the
    * topology.root seat layout.
    */
-  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string };
+  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string; optional?: true }> } | { emptyReason: string };
   /** OPR.0.5.5.5 — filesystem existence check for declared rebuild artifacts
    *  (the session-source-rebuild-resolver seam). Default: node:fs existsSync;
    *  tests inject. */
@@ -509,7 +514,15 @@ export class SeatHandoverService {
     let permissionContinuity: CodexPermissionContinuity | undefined;
     if (observedCodexPermissions) {
       const observed = observedCodexPermissions;
-      if (observed.state === "observed") {
+      if (permissionOverride.codexPermissions) {
+        // Saved envelopes retain ordinary launch additions; only an observed predecessor
+        // policy uses the exact carry path. Describe policy, not an observed native delta.
+        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+          ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
+          : "without additional writable directory grants, as on a read-only fresh launch";
+        permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
+          + (observed.state === "unverified" ? ` Predecessor permissions could not be compared: ${observed.reason}` : "") };
+      } else if (observed.state === "observed") {
         const selection = new NativePermissionStore(this.db).read(node.id);
         const selectedAt = selection ? parseSqliteUtcMs(selection.updatedAt) : NaN;
         const started = (lstartToMinTs(observed.processStartedAt) ?? Infinity) * 1000;
@@ -522,9 +535,7 @@ export class SeatHandoverService {
         // A saved choice made since this process started is for the successor, even if the
         // predecessor took a later turn. The same-second ordering is not distinguishable.
         // The seat's own envelope is its declared choice for every successor.
-        if (permissionOverride.codexPermissions) {
-          permissionContinuity = { state: "selection_used", detail: "The seat's own permission envelope was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
-        } else if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
+        if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
           || (changed && (!Number.isFinite(changedAt) || changedAt >= started))
           || (!!node.codex_config_profile?.trim() && node.codex_config_profile.trim() !== observed.profile)) {
           permissionContinuity = { state: "selection_used", detail: "The current saved permission choice or declared successor profile was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
@@ -580,6 +591,24 @@ export class SeatHandoverService {
       },
     });
     if (!launch.ok) {
+      // #2985: the harness was launched into the respawned pane and only readiness failed. The previous occupant is
+      // already ended and the successor may come up (or already be working) there, but the handover never commits,
+      // so its generation is never registered. Retrying the handover would end it, so the guidance says what may be
+      // in the pane instead of "retry". It claims only what holds for every runtime (a Codex successor's hooks are
+      // not held back by generation_uncommitted, which is Claude-only).
+      if (launch.step === "start_agent" && launch.replacementStarted && launch.successorLaunched) {
+        const pane = launch.tmuxPane ?? "unknown";
+        const session = latestSession.session_name;
+        const quoted = shellQuote(session);
+        return {
+          ok: false,
+          code: "successor_create_failed",
+          message: `Handover failed at step "${launch.step}": ${launch.message}`,
+          replacementStarted: true,
+          ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
+          guidance: `The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.`,
+        };
+      }
       return {
         ok: false,
         code: "successor_create_failed",
@@ -677,7 +706,7 @@ export class SeatHandoverService {
       const chain = this.rebuildPrimingResolver
         ? this.rebuildPrimingResolver(input.seatRef)
         : { emptyReason: "no rebuild priming resolver wired on this daemon" };
-      let primedArtifacts: Array<{ address: string; label: string }> = [];
+      let primedArtifacts: Array<{ address: string; label: string; optional?: true }> = [];
       let gaps: string[] = [];
       let emptyChainReason: string | undefined;
       if ("artifacts" in chain && chain.artifacts.length > 0) {
@@ -695,7 +724,9 @@ export class SeatHandoverService {
       } else {
         emptyChainReason = "artifacts" in chain ? "the durable chain resolved to zero artifacts" : chain.emptyReason;
       }
-      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}), ...(emptyChainReason ? { emptyChainReason } : {}) };
+      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}),
+        ...(node.runtime === "codex" ? { model: { requested: node.model?.trim() || null, predecessorCompared: false as const } } : {}),
+        ...(emptyChainReason ? { emptyChainReason } : {}) };
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
         runtime: node.runtime,
         seatRef: input.seatRef,
@@ -1024,7 +1055,7 @@ export class SeatHandoverService {
       seatRef: string;
       reason: string;
       departingSession: string;
-      primedArtifacts: Array<{ address: string; label: string }>;
+      primedArtifacts: Array<{ address: string; label: string; optional?: true }>;
       gaps: string[];
       emptyChainReason?: string;
       /** #2456: the line naming managed guidance blocks left as they are. */
@@ -1038,9 +1069,15 @@ export class SeatHandoverService {
     ];
     const startup = startupFilesSection(info.startupFiles ?? []);
     if (startup.length > 0) lines.push("", ...startup);
-    if (info.primedArtifacts.length > 0) {
+    const required = info.primedArtifacts.filter((artifact) => !artifact.optional);
+    const history = info.primedArtifacts.filter((artifact) => artifact.optional);
+    if (required.length > 0) {
       lines.push("", "Priming artifacts (read each, in order):");
-      for (const artifact of info.primedArtifacts) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      for (const artifact of required) lines.push(`- ${artifact.address} — ${artifact.label}`);
+    }
+    if (history.length > 0) {
+      lines.push("", "Older recaps, newest first (read these only if you need the seat's history):");
+      for (const artifact of history) lines.push(`- ${artifact.address} — ${artifact.label}`);
     }
     if (info.gaps.length > 0) {
       lines.push("", "Declared but MISSING on disk (known gaps, named so nothing is silently dropped):");

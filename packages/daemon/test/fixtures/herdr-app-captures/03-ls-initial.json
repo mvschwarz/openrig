@@ -1,0 +1,21 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "ls-initial",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"ls\":true}\n"
+  },
+  "reply": {
+    "line": "{\"spaces\":[],\"recent\":[]}\n",
+    "json": {
+      "spaces": [],
+      "recent": []
+    }
+  },
+  "elapsed_ms": 0,
+  "notes": "Spaces, tabs and their terminals as the window holds them at start."
+}

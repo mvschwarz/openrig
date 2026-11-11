@@ -79,6 +79,8 @@ Keys:
   ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
+  ui.terminal.max_live_terminals
+                         cap on simultaneously-live web-client terminals (effective default 2)
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
@@ -101,12 +103,20 @@ Keys:
                            permission prompts still reach a person,
                            choice prompts follow this setting; unavailable human delivery stays a visible row;
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
-  retention.*            enabled, transitions_days, watchdog_days,
+  retention.*            enabled, transitions_days, watchdog_days, usage_samples_days,
                          watchdog_keep_per_job, batch_size
   retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
                          than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
                          the telemetry export, the log and the feed, and can't be brought back. Read at the next sweep
                          (daily and at daemon start)
+  retention.closed_content_days  remove the content of closed queue work (done, canceled, denied, handed-off) N
+                         days after it closed; the row stays, without content. 0 keeps it (default). Can't be undone
+  retention.closed_metadata_days  delete closed queue rows N days after they closed, keeping only their ids so a retry
+                         can't recreate them. 0 keeps them (default). Both read at the next sweep; "rig queue erase
+                         --routine --apply" runs them now
+  retention.erasure_ledger  an absolute file where queue erasure appends each erased id and its action, one JSON
+                         line each, before it commits them; keep it outside backups and replay it with "rig queue
+                         erase --ids <file> --apply" after a restore. Empty keeps no ledger (default)
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   launch.codex_login_shell  defer to Codex's own login-shell setting in managed Codex seats (default off)
                          Off adds allow_login_shell=false: tool commands inherit the seat's environment, so plain rig
@@ -119,6 +129,7 @@ Keys:
                          POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
                          If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
+  terminal.fixed_geometry  use 90x27 web geometry while subscribed (default off; other viewers share the pinned size)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   terminal.tmux_server   inherit the launching server, or isolated per OpenRig home (restart required)
   terminal.history_limit rows of tmux scrollback per pane in the ~/.tmux.conf block rig setup writes (2000-1000000; default 10000).

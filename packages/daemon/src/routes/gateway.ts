@@ -9,7 +9,7 @@
 
 import { connectionsProjection } from "../domain/gateway/connections-projection.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import path from "node:path";
@@ -48,6 +48,7 @@ interface SubsystemHandle {
   dispatch?: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: true; decisionId: string } | { ok: false; error: string };
   connectorStatus?: () => Record<string, unknown>;
   acceptForwarded?: (env: unknown) => Promise<{ status: string; reason?: string } | null>;
+  releaseOutboundKey?: (key: string) => void;
 }
 
 export function gatewayRoutes(opts: {
@@ -64,25 +65,27 @@ export function gatewayRoutes(opts: {
   slack?: { fetchImpl?: FetchImpl; env?: NodeJS.ProcessEnv };
 } = {}): Hono {
   const app = new Hono();
+  const requireLoopbackPeer: MiddlewareHandler = async (c, next) => {
+    const remoteAddress = (
+      c.env as { incoming?: { socket?: { remoteAddress?: string | null } } } | undefined
+    )?.incoming?.socket?.remoteAddress;
+    if (!isDirectLoopbackPeer(remoteAddress)) {
+      return c.json(
+        {
+          error: "loopback_peer_required",
+          message: "Relay requests must originate from a direct local loopback TCP peer.",
+        },
+        403,
+      );
+    }
+    return next();
+  };
+  const resolveRelayHandler = (c: { get: (key: never) => unknown }): RelayInboundHandler | undefined =>
+    opts.relayInboundHandler ?? (c.get("relayInboundHandler" as never) as RelayInboundHandler | undefined);
 
   app.post(
     "/relay/inbound",
-    async (c, next) => {
-      const remoteAddress = (
-        c.env as { incoming?: { socket?: { remoteAddress?: string | null } } } | undefined
-      )?.incoming?.socket?.remoteAddress;
-      if (!isDirectLoopbackPeer(remoteAddress)) {
-        return c.json(
-          {
-            error: "loopback_peer_required",
-            message: "Relay inbound requests must originate from a direct local loopback TCP peer.",
-          },
-          403,
-        );
-      }
-
-      return next();
-    },
+    requireLoopbackPeer,
     bodyLimit({
       maxSize: RELAY_INBOUND_MAX_BODY_BYTES,
       onError: (c) =>
@@ -95,9 +98,7 @@ export function gatewayRoutes(opts: {
         ),
     }),
     async (c) => {
-      const handler =
-        opts.relayInboundHandler ??
-        (c.get("relayInboundHandler" as never) as RelayInboundHandler | undefined);
+      const handler = resolveRelayHandler(c);
       if (!handler) {
         return c.json(
           {
@@ -112,6 +113,42 @@ export function gatewayRoutes(opts: {
       const result = await handler.handle({
         authorizationHeader: c.req.header("Authorization") ?? c.req.header("authorization"),
         rawBody,
+      });
+      return c.json(result.body, result.status as never);
+    },
+  );
+
+  app.get("/relay/outbox", requireLoopbackPeer, async (c) => {
+    const handler = resolveRelayHandler(c);
+    if (!handler?.listOutbox) {
+      return c.json({ error: "relay_outbox_unavailable", message: "Relay outbox handler is not configured on this daemon." }, 503);
+    }
+    const result = await handler.listOutbox({
+      authorizationHeader: c.req.header("Authorization") ?? c.req.header("authorization"),
+      limitParam: c.req.query("limit"),
+    });
+    return c.json(result.body, result.status as never);
+  });
+
+  app.post(
+    "/relay/outbox/ack",
+    requireLoopbackPeer,
+    bodyLimit({
+      maxSize: RELAY_INBOUND_MAX_BODY_BYTES,
+      onError: (c) =>
+        c.json({ error: "payload_too_large", message: `relay outbox ack payload exceeds ${RELAY_INBOUND_MAX_BODY_BYTES} bytes` }, 413),
+    }),
+    async (c) => {
+      const handler = resolveRelayHandler(c);
+      if (!handler?.ackOutbox) {
+        return c.json({ error: "relay_outbox_unavailable", message: "Relay outbox handler is not configured on this daemon." }, 503);
+      }
+      const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+      const rawBody = await c.req.text();
+      const result = await handler.ackOutbox({
+        authorizationHeader: c.req.header("Authorization") ?? c.req.header("authorization"),
+        rawBody,
+        releaseOutboundKey: (key: string) => subsystem?.releaseOutboundKey?.(key),
       });
       return c.json(result.body, result.status as never);
     },

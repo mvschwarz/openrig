@@ -1,3 +1,4 @@
+import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./claude-continuation-launch.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -33,7 +34,7 @@ import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
 import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
@@ -102,6 +103,7 @@ import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -444,7 +446,7 @@ export class RestoreOrchestrator {
       for (const blocker of validation.blockers) {
         if (!SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId) continue;
         // A seat joined with `rig attach` as an external CLI isn't launched, so its startup files don't hold it.
-        if (this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType === "external_cli") continue;
+        if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType)) === "external") continue;
         const reason = `${blocker.message} ${blocker.remediation}`;
         heldForStartup.set(blocker.nodeId, heldForStartup.has(blocker.nodeId) ? `${heldForStartup.get(blocker.nodeId)} ${reason}` : reason);
       }
@@ -628,12 +630,14 @@ export class RestoreOrchestrator {
    *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. `keepEffort`, with
    *  `keepPane`: launch with that effort (the running process's own, kept by a provider switch) in place of the seat's
    *  saved one, unless the seat has an explicit choice when the launch reads it; it isn't saved as the seat's choice.
+   *  `keepClaudeLaunch`, for a token-only provider switch, captures current arguments/environment before stopping.
    *  `onLaunchEffort`, with `keepPane`, hears the effort the launch selected and why, whether or not one was kept. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     snapshotId?: string;
     keepPane?: boolean;
+    keepClaudeLaunch?: boolean;
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
@@ -647,6 +651,7 @@ export class RestoreOrchestrator {
     holdReason?: string;
     snapshotId?: string;
     keepPane?: boolean;
+    keepClaudeLaunch?: boolean;
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
@@ -704,12 +709,12 @@ export class RestoreOrchestrator {
       }
       if (opts.keepPane) {
         launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
-          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry,
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, keepClaudeLaunch: opts.keepClaudeLaunch, resumePeriodicCarry,
             ...(opts.keepEffort ? { keepEffort: opts.keepEffort } : {}), ...(opts.onLaunchEffort ? { onLaunchEffort: opts.onLaunchEffort } : {}) }, subsetWarnings));
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
-      const external = this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli";
+      const external = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external";
       const sessions = external ? [] : this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -824,7 +829,7 @@ export class RestoreOrchestrator {
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
       // A seat joined with `rig attach` as an external CLI has no tmux session to check, and restore leaves it attached.
-      if (this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external") continue;
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -900,7 +905,7 @@ export class RestoreOrchestrator {
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
       // An external CLI's claim has no tmux session; restore leaves it attached (restoreNodeWithCompensation).
-      if (this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") continue;
       try {
         // Replacement must preserve unknown transport state before any reconciliation write.
         if (selectedIds) {
@@ -1087,7 +1092,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1106,7 +1111,7 @@ export class RestoreOrchestrator {
 
     // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
     const external = this.sessionRegistry.getBindingForNode(nodeId);
-    if (external?.attachmentType === "external_cli") {
+    if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId) };
     }
 
@@ -1243,7 +1248,9 @@ export class RestoreOrchestrator {
       return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
     }
     // Read before takeover ends the process. An unavailable witness keeps normal launch resolution unchanged.
-    const claudeExecutable = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane) : undefined;
+    const continuation = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane, opts?.keepClaudeLaunch, this.sessionRegistry.getBindingForNode(node.id)?.tmuxSession ?? undefined) : undefined;
+    const claudeExecutable = continuation?.executable, claudeLaunch = continuation?.launch;
+    if (opts?.keepClaudeLaunch && keptPane && node.runtime === "claude-code") warnings?.push(...(claudeLaunch?.warnings ?? ["Running Claude launch capture unavailable; using ordinary launch settings."]));
 
     // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
     // delivery guard resolves the pane through it.
@@ -1415,14 +1422,14 @@ export class RestoreOrchestrator {
     }
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
 
-  private async claudeContinuationExecutable(pane: string): Promise<string | undefined> {
+  private async claudeContinuationExecutable(pane: string, keepLaunch = false, session?: string): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
     const native = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
     if (!native) return undefined;
@@ -1432,7 +1439,14 @@ export class RestoreOrchestrator {
     try {
       if (!executable || !isAbsolute(executable)) return undefined;
       accessSync(executable, constants.X_OK);
-      return statSync(executable).isFile() ? realpathSync(executable) : undefined;
+      if (!statSync(executable).isFile()) return undefined;
+      const selected = realpathSync(executable);
+      if (!keepLaunch) return { executable: selected };
+      const launch = await captureClaudeContinuation(native.process.pid, selected, session ? env => this.tmuxAdapter.differingSessionEnv(session, env) : undefined);
+      const current = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+      if (!current || current.process.pid !== native.process.pid || current.process.startedAt !== native.process.startedAt) return undefined;
+      return { executable: selected, launch };
     } catch { return undefined; }
   }
 
@@ -1667,7 +1681,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1888,7 +1902,7 @@ export class RestoreOrchestrator {
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
-          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
+          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeLaunch);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -2052,7 +2066,7 @@ export class RestoreOrchestrator {
           const existsFn = opts.fsOps?.exists ?? (() => true);
           const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
@@ -2122,6 +2136,7 @@ export class RestoreOrchestrator {
             guidanceFile: startupCtx.guidanceFile ?? null,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
+            ...(opts?.claudeLaunch ? { claudeLaunch: opts.claudeLaunch } : {}),
             cwd: launchCwd,
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
@@ -2486,6 +2501,7 @@ export class RestoreOrchestrator {
     advisor?: string | null,
     beforeNative?: () => boolean,
     claudeExecutable?: string,
+    claudeLaunch?: ClaudeContinuationLaunch,
   ): Promise<
     | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
@@ -2532,10 +2548,11 @@ export class RestoreOrchestrator {
       const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
-      const wrappedTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
+      const wrapperTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
+      const wrappedTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[]]));
+        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;

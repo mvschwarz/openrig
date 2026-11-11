@@ -19,9 +19,17 @@ export function hostLabel(host: HostNode): string {
   return name ? `${name} (${host.name})` : host.name;
 }
 
+export function hostReachabilityLabel(host: HostNode): "reachable" | "unreachable" | "unknown" {
+  return host.reachable === true ? "reachable" : host.reachable === false ? "unreachable" : "unknown";
+}
+
+export function hostReachabilitySuffix(host: HostNode): string {
+  return host.reachable === true ? "" : ` (${hostReachabilityLabel(host)})`;
+}
+
 /** Keep the command identity first, with room for the existing reachability suffix. */
 export function hostExplorerLabel(host: HostNode, width: number): string {
-  const suffix = host.reachable ? "" : " (unreachable)";
+  const suffix = hostReachabilitySuffix(host);
   const name = displayName(host);
   const room = width - host.name.length - suffix.length - 3; // " · "
   if (!name || room < 1) return host.name + suffix;

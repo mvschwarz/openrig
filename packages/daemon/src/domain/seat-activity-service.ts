@@ -13,11 +13,12 @@ import type {
   RungTrust,
 } from "./activity-taxonomy.js";
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
-import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
-import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
+import type { SeatStructuralActivityService, StructuralObservation } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation (a slower cadence from
@@ -222,14 +223,15 @@ export class SeatActivityService {
       const seat = this.ladder.get(seatNodeId);
       let codexFrameWorking = false;
       let codexFrameProofAt: string | undefined;
+      const frame = seat?.inventory?.runtime === "codex" && this.structuralActivity
+        ? this.structuralActivity.getStructuralActivity(paneId) : null;
       if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
-        const frame = this.structuralActivity.getStructuralActivity(paneId);
         const capturedAt = frame ? Date.parse(frame.observedAt) : NaN;
         const frameStarted = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.captureStartedAt) : NaN;
         const proofAt = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.proofAt) : NaN;
         const previousStarted = frame?.codexWorkingFrame?.previousCaptureStartedAt;
         codexFrameWorking = frame !== null && frame?.state !== "attention" && Number.isFinite(capturedAt)
-          && Number.isFinite(frameStarted) && frameStarted >= seat.inventorySinceMs
+          && Number.isFinite(frameStarted) && this.codexFrameQualifies(seat, frame!.codexWorkingFrame!.captureStartedAt, frame!.pane, "if-known")
           && (previousStarted === undefined || Date.parse(previousStarted) >= seat.inventorySinceMs)
           && Number.isFinite(proofAt) && proofAt <= capturedAt && proofAt <= observedAt.getTime()
           && observedAt.getTime() - proofAt < DEFAULT_STRUCTURAL_STALE_MS && frameStarted <= proofAt;
@@ -245,6 +247,23 @@ export class SeatActivityService {
         observedAt: paneOverridesQuietWindow ? codexFrameProofAt! : record.lastObservedAt,
         activity: isActiveWithinWindow || codexFrameWorking ? "working" : "idle-at-prompt",
       });
+      // #2515: a Codex choice prompt can be answered on screen with no hook after it. The same structural frame, under
+      // the working frame's boundary (captured after this seat's inventory began, and fresh), says whether a choice is
+      // showing (1) or the composer is complete and empty (0). Any other frame (a draft, work, an unrecognised screen)
+      // withdraws this source, so the prompt reads unknown again. A tracked tool approval keeps its own path.
+      if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
+        const prompt = frame && this.codexFrameQualifies(seat, frame.captureStartedAt, frame.pane, "required")
+          ? codexPromptObservation(frame, paneId) : null;
+        if (prompt) {
+          seat.structuralPrompt = { freshMs: Date.parse(frame!.checkedAt ?? frame!.observedAt),
+            startedMs: Date.parse(frame!.captureStartedAt!), pane: frame!.pane! };
+          this.reportEvidence({ seatNodeId, sessionName: paneId, rung: "needs-input-chrome", sourceId: CODEX_STRUCTURAL_PROMPT_SOURCE,
+            seq, observedAt: prompt.observedAt, needsInput: prompt.needsInput });
+        } else if (seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE)) {
+          seat.structuralPrompt = undefined;
+          this.arbitrate(seat);
+        }
+      }
       if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
         const evd = this.selfReportReader(paneId, seatNodeId);
         if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
@@ -416,15 +435,25 @@ export class SeatActivityService {
       // auto-declared from their runtime's inventory (claude authoritative standing,
       // codex hooks-at-trial, generic sampling floor) — production-complete without
       // touching the launch machinery.
+      const identities = new SeatIdentityStore(db);
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        const inventory = runtimeRungInventory(r.runtime, r.community_harness, r.community_runner === 1);
+        const inventory = runtimeRungInventory(r.runtime, r.community_harness, recordedRunner(r.community_runner));
         // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
         // A plain and a runner launch of the same app read differently, so a change between them re-declares too.
         const communityHarnessChanged = !!known && communityKind(known.inventory) !== communityKind(inventory);
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
           this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
+        }
+        if (r.runtime === "codex") {
+          // The occupant as OpenRig records it, from the identity reconciler's last verdict for this session: the
+          // binding's pane it checked, and the pane process it verified as this session's Codex there. It follows
+          // OpenRig's own in-place restart. No verdict (or a defensive read of a store without one) leaves both unknown.
+          const verdict = identities.getForNode(r.node_id);
+          const current = verdict?.sessionName === r.session_name ? verdict : null;
+          this.recordCodexOccupant(r.node_id, { paneId: current?.evidence.registeredPane ?? null,
+            pid: current?.verdict === "verified" && current.evidence.registeredPane ? current.evidence.observedPanePid ?? null : null });
         }
       }
 
@@ -495,10 +524,20 @@ export class SeatActivityService {
     this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
     seat.inventory = inventory;
     seat.inventorySinceMs = this.now().getTime();
+    // #2515: a new inventory is a new occupant boundary, so the copied prompt evidence from before it goes too.
+    seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+    seat.structuralPrompt = undefined;
     seat.trust.clear();
     for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
     seat.promotion.clear();
     this.arbitrate(seat);
+  }
+
+  /** A Codex seat's occupant as OpenRig records it (#2515): its binding's pane and its verified pane process, or null
+   *  where unknown. The sweep refreshes it every tick; the next arbitration applies it. */
+  recordCodexOccupant(seatNodeId: string, occupant: { paneId: string | null; pid: number | null }): void {
+    const seat = this.ladder.get(seatNodeId);
+    if (seat) seat.occupant = occupant;
   }
 
   /** Adapters push rung evidence (hooks, self-report, chrome, sampling). Per-source
@@ -875,8 +914,36 @@ export class SeatActivityService {
    *  instantly. Chosen against our 1Hz/3s cadence: the 3s silence window already
    *  absorbs sub-3s lulls; the 2-tick arbitration debounce absorbs the
    *  window-boundary flap. */
+  /** #2500's boundary for a Codex structural frame, shared by the working frame and the prompt evidence: captured after
+   *  this seat's current inventory began, and, when the capture names its pane, from the occupant's own pane and process
+   *  (`recordCodexOccupant`). A respawn, a reused pane id or another pane under the same name differs from them.
+   *  "required" refuses a frame that doesn't name its pane, or a seat whose process OpenRig hasn't verified. */
+  private codexFrameQualifies(seat: SeatLadderState, startedAt: string | undefined, pane: StructuralObservation["pane"],
+    identity: "required" | "if-known"): boolean {
+    const started = startedAt ? Date.parse(startedAt) : NaN;
+    if (!Number.isFinite(started) || started < seat.inventorySinceMs) return false;
+    if (!pane) return identity !== "required";
+    return this.fromCodexOccupant(seat, pane, identity);
+  }
+
+  private fromCodexOccupant(seat: SeatLadderState, pane: { id: string; pid: number }, identity: "required" | "if-known"): boolean {
+    const occupant = seat.occupant;
+    if (occupant?.paneId && occupant.paneId !== pane.id) return false;
+    if (occupant?.pid != null) return occupant.pid === pane.pid;
+    return identity !== "required";
+  }
+
   private arbitrate(seat: SeatLadderState): void {
     this.checkContradiction(seat);
+    // #2515: the copied Codex prompt evidence holds only while its frame would: fresh, from this inventory, and from the
+    // occupant's pane and process. Read here, so a getter, a failed window read, a new inventory or a new occupant sees
+    // it expire too.
+    const prompt = seat.structuralPrompt;
+    if (prompt && (this.now().getTime() - prompt.freshMs >= DEFAULT_STRUCTURAL_STALE_MS || prompt.startedMs < seat.inventorySinceMs
+        || !this.fromCodexOccupant(seat, prompt.pane, "required"))) {
+      seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+      seat.structuralPrompt = undefined;
+    }
     const candidate = this.rawCandidate(seat);
     let nextActivity: ActivityValue = candidate?.activity ?? "unknown";
     let decidedBy: EvidenceRungId | null = candidate?.rung ?? null;
@@ -998,6 +1065,21 @@ interface NeedsInputShape {
   reason: string | null;
 }
 
+const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
+
+/** What a qualified Codex structural frame says about a prompt: a choice or permission prompt on screen (1), or a
+ *  complete empty composer (0), observed at the capture's start. Null for anything else. */
+function codexPromptObservation(frame: StructuralObservation, sessionName: string):
+  { observedAt: string; needsInput: NeedsInputShape } | null {
+  if (frame.state === "attention" && (frame.reason === "selection_prompt" || frame.reason === "permission_prompt")) {
+    return { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } };
+  }
+  if (frame.idleFrame?.runtime === "codex" && frame.idleFrame.sessionName === sessionName) {
+    return { observedAt: frame.idleFrame.captureStartedAt, needsInput: { count: 0, reason: null } };
+  }
+  return null;
+}
+
 /** One relay route's consecutive agreements toward promoting a trial rung. */
 interface PromotionRun {
   agreements: number;
@@ -1015,6 +1097,10 @@ interface SeatLadderState {
   retired: boolean;
   inventory: AdapterRungInventory | null;
   inventorySinceMs: number;
+  /** The Codex occupant's pane and process as OpenRig records them, refreshed by the sweep (#2515). */
+  occupant?: { paneId: string | null; pid: number | null };
+  /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
+  structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;

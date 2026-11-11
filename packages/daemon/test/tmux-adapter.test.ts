@@ -334,6 +334,17 @@ describe("TmuxAdapter", () => {
       expect(exec).toHaveBeenCalledTimes(2);
     });
 
+    it("compares launch variables once and returns differing names without their values", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("MATCH=kept\nNPM_TOKEN=pane-value\nCLAUDE_CONFIG_DIR=/pane\n");
+      const adapter = new TmuxAdapter(exec);
+      const names = await adapter.differingSessionEnv("seat@rig", { MATCH: "kept", NPM_TOKEN: "synthetic-unrelated-secret-2853", MISSING: "also-private", CLAUDE_CONFIG_DIR: "/running" });
+      expect(names).toEqual(["MISSING", "NPM_TOKEN"]);
+      expect(JSON.stringify(names)).not.toMatch(/pane-value|synthetic-unrelated-secret|also-private/);
+      expect(exec).toHaveBeenCalledTimes(1);
+      exec.mockRejectedValueOnce(new Error("private failure"));
+      expect(await adapter.differingSessionEnv("seat@rig", { NPM_TOKEN: "private" })).toBeNull();
+    });
+
     it("makes every requested name unknown when the one listing fails, and lets no error text through", async () => {
       const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("can't find session: token=sk-private-value"));
       const presence = await new TmuxAdapter(exec).hasSessionEnvBatch("missing", ["OPENRIG_URL", "OPENRIG_RUNTIME"]);

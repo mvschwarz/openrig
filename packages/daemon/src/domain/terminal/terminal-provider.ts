@@ -38,6 +38,8 @@ export interface ComposedPane {
   attachArgv?: string[];
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */
   readOnly: boolean;
+  /** Structured host id of a remote (ssh) tile; absent for a local seat. The seat name alone doesn't say which host. */
+  host?: string;
 }
 
 /** A seat that could not be tiled because it has no live/attachable session. Named, never dropped. */
@@ -93,6 +95,13 @@ export interface ProviderStatus {
   capabilities: Record<string, boolean>;
   /** Herdr endpoint the local desktop client must attach to. */
   launch?: { socketPath: string; session?: string };
+  /** herdr-app: the herdr-core this daemon starts and ends viewers in. The app at that home must run on the same core:
+   *  terminal addresses are per core. */
+  core?: { session: string; socket?: string };
+  /** herdr-app: explicit statement of the shared herdr-core assumption between daemon and app window. */
+  assumption?: string;
+  /** herdr-app: count of viewer starts whose hc run outcome was unknown and are still being tracked for cleanup, or "unknown" when the journal could not be read. */
+  pendingStarts?: number | "unknown";
   /** The provider server's identity, so a caller can tell whether it talks to the same server (Rex). */
   server?: { instanceId: string };
 }
@@ -121,6 +130,9 @@ export interface OpenViewResult {
   session?: string;
   ok: boolean;
   opened: string[];
+  /** Opened seats on another host, with that host: `opened` names them by seat alone. Always the complete list when
+   *  this service sends it (empty when every opened seat is local), so its absence means provenance is unknown. */
+  remote?: Array<{ seat: string; host: string }>;
   absent: AbsentSeat[];
   degraded: DegradedSeat[];
   pages: number;

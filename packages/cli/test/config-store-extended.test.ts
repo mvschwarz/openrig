@@ -44,7 +44,7 @@ function clearEnv(): () => void {
     // its custom home into default-path resolution; UNSETTING it would fall through
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_TERMINAL_FIXED_GEOMETRY", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -149,6 +149,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines", "ui.timezone",
       "ui.enabled",
+      // The legacy web client's cap on simultaneously-live terminals; the daemon store
+      // resolves it, so `rig config` must accept it too.
+      "ui.terminal.max_live_terminals",
       "recovery.auto_drive_provider_prompts",
       "recovery.provider_auth_env_allowlist",
       // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
@@ -188,6 +191,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.tmux_server",
       "terminal.history_limit",
+      "terminal.fixed_geometry",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
@@ -212,10 +216,14 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.enabled",
       "retention.transitions_days",
       "retention.watchdog_days",
+      "retention.usage_samples_days", // how long usage samples are kept
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
       "retention.events_days", // the history-only event types of events
+      "retention.closed_content_days", // closed-work erasure: content
+      "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
@@ -883,6 +891,44 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(() => store.set("ui.preview.refresh_interval_seconds", "soon")).toThrow(/expected a number/);
   });
 
+  // Both keys below were resolved by the daemon store and served by `GET /api/config`,
+  // while `rig config get|set` rejected them as "Unknown config key". Their siblings in
+  // the same families — every other ui.* and retention.* key — were already settable, so
+  // this was drift between the two lockstep lists, not a deliberate CLI-only subset.
+  it("ui.terminal.max_live_terminals is settable, numeric and a positive integer", () => {
+    const store = new ConfigStore(configPath);
+    store.set("ui.terminal.max_live_terminals", "3");
+    expect(store.get("ui.terminal.max_live_terminals")).toBe(3);
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).ui.terminal.maxLiveTerminals).toBe(3);
+    for (const raw of ["0", "-1", "2.5", "2abc"]) {
+      expect(() => store.set("ui.terminal.max_live_terminals", raw), `must reject ${raw}`).toThrow();
+    }
+  });
+
+  it("retention.usage_samples_days defaults to 14 and keeps an integer >= 1", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("retention.usage_samples_days"))
+      .toMatchObject({ value: 14, source: "default", defaultValue: 14 });
+    store.set("retention.usage_samples_days", "30");
+    expect(store.get("retention.usage_samples_days")).toBe(30);
+    for (const raw of ["0", "-1", "1.5"]) {
+      expect(() => store.set("retention.usage_samples_days", raw), `must reject ${raw}`).toThrow();
+    }
+  });
+
+  it("both recovered keys honour their OPENRIG_* environment override", () => {
+    const store = new ConfigStore(configPath);
+    process.env.OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS = "7";
+    process.env.OPENRIG_RETENTION_USAGE_SAMPLES_DAYS = "9";
+    try {
+      expect(store.resolveWithSource("ui.terminal.max_live_terminals")).toMatchObject({ value: 7, source: "env" });
+      expect(store.resolveWithSource("retention.usage_samples_days")).toMatchObject({ value: 9, source: "env" });
+    } finally {
+      delete process.env.OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS;
+      delete process.env.OPENRIG_RETENTION_USAGE_SAMPLES_DAYS;
+    }
+  });
+
   // Constraint gap (Slice 27 residue): daemon.port had no KEY_CONSTRAINTS
   // entry, so `rig config set daemon.port 99999` stored 99999 and the next
   // daemon start died with a raw ERR_SOCKET_BAD_PORT from serve(). The
@@ -973,6 +1019,24 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.ui.preview.refreshIntervalSeconds).toBe(3);
     expect(cfg.ui.preview.maxPins).toBe(4);
     expect(cfg.ui.preview.defaultLines).toBe(50);
+  });
+
+  it("RiggedConfig carries both recovered settings, saved values included", () => {
+    const store = new ConfigStore(configPath);
+    const defaults = store.resolve();
+    expect(defaults.ui.terminal.maxLiveTerminals).toBe(2);
+    expect(defaults.retention.usageSamplesDays).toBe(14);
+    store.set("ui.terminal.max_live_terminals", "5");
+    store.set("retention.usage_samples_days", "21");
+    const saved = store.resolve();
+    expect(saved.ui.terminal.maxLiveTerminals).toBe(5);
+    expect(saved.retention.usageSamplesDays).toBe(21);
+    // `rig config --json` prints exactly this object, so a saved value reaches the
+    // structured output and not only `rig config get`.
+    expect(JSON.parse(JSON.stringify(saved))).toMatchObject({
+      ui: { terminal: { maxLiveTerminals: 5 } },
+      retention: { usageSamplesDays: 21 },
+    });
   });
 
   it("recovery.auto_drive_provider_prompts defaults false and coerces booleans", () => {

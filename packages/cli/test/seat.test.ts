@@ -788,6 +788,24 @@ describe("rig seat status", () => {
     else expect(logs.join("\n")).toContain(`Codex rebuild permissions: unverified. ${permissions.detail}`);
   });
 
+  it.each([[false, "chosen-model"], [false, null], [true, "chosen-model"], [true, null]] as const)(
+    "reports rebuild model selection without a native comparison (json=%s, model=%s)", async (json, requested) => {
+      const model = { requested, predecessorCompared: false };
+      const response = { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+        sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [], model } };
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCommand(makeDeps({ status: 200, data: response }, [])).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+          "--source", "rebuild", "--reason", "context wall", ...(json ? ["--json"] : [])]);
+      });
+      expect(exitCode).toBeUndefined();
+      if (json) expect(JSON.parse(logs.join("\n")).sourceOutcome.model).toEqual(model);
+      else {
+        expect(logs.join("\n")).toContain("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
+        expect(logs.join("\n")).toContain(requested ? `Codex rebuild model: requested ${requested}` : "Codex rebuild model: runtime configuration/default");
+        expect(logs.join("\n")).toContain("The predecessor's in-pane model was not compared or carried.");
+      }
+    });
+
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
 

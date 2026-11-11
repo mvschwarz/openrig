@@ -17,7 +17,7 @@ import type { ComposedPane, ComposedView, OpenViewResult, TerminalProvider } fro
 const local = (seat: string, readOnly = false): ViewMemberInput => ({ seat, label: seat, tmuxSession: seat, host: null, readOnly, alive: true });
 
 describe("#707 local tiles run the tmux the daemon resolves", () => {
-  it("a provider PATH without tmux fails the bare command; the resolved path views the seat, and neither mode attaches untyped", () => {
+  it("a provider PATH without tmux fails the bare command; the resolved path attaches writable tiles and observes read-only tiles", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-707-"));
     const narrow = join(root, "provider-path"); // the provider's PATH: system tools, no tmux
     const elsewhere = join(root, "elsewhere"); // where the daemon found tmux
@@ -48,11 +48,15 @@ esac
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
         rmSync(seen, { force: true });
+        rmSync(other, { force: true });
         const out = execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env, encoding: "utf8", timeout: 10000 });
-        expect(out).toContain("SCREEN");
-        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
-        // Nobody typed, so nothing attached or typed into the seat.
-        expect(existsSync(other)).toBe(false);
+        if (readOnly) expect(out).toContain("SCREEN");
+        if (readOnly) {
+          expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
+          expect(existsSync(other)).toBe(false);
+        } else {
+          expect(readFileSync(other, "utf8").trimEnd().split("\n")).toEqual(["attach", "-t", "session-id"]);
+        }
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
       }
     } finally {
@@ -80,8 +84,8 @@ esac
         const view = composeView("v", [local("seat", readOnly)], { resolveHost: () => null, localTmux: tmux });
         const result = spawnSync("/bin/sh", ["-c", view.opened[0]!.paneCommand], { env: { PATH: narrow }, encoding: "utf8", timeout: 10000 });
         expect(result.signal).toBeNull();
-        expect(result.status).toBe(1);
-        expect(result.stdout).toContain("SCREEN");
+        expect(result.status).toBe(readOnly ? 1 : 0);
+        if (readOnly) expect(result.stdout).toContain("SCREEN");
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -213,14 +217,37 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.degraded.map((d) => d.seat)).toEqual(["b", "c"]);
   });
 
-  it("an unlabelled remainder confirms no seats: every seat is degraded with a note", async () => {
+  it("an omitted filler label follows the same exited-seat rule as an empty label", async () => {
     const { adapter } = herdrOpening(() => listed(undefined));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-    expect(res.ok).toBe(false);
     expect(res.opened).toEqual([]);
-    expect(res.degraded.map(d => d.seat)).toEqual(["a", "b", "c"]);
-    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
-    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+    expect(res.degraded.map(d => d.reason)).toEqual(Array(3).fill(HERDR_PANE_EXITED_REASON));
+    expect(res.notes ?? []).not.toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+  });
+
+  it("seven live seats stay confirmed when Herdr omits both filler labels", async () => {
+    const seats = ["a", "b", "c", "d", "e", "f", "g"];
+    const { adapter } = herdrOpening(() => listed(...seats, undefined, undefined));
+    const res = await adapter.openView(viewOf(...seats.map(seat => pane(seat))));
+    expect(res.opened).toEqual(seats);
+    expect(res.degraded).toEqual([]);
+    expect(res.ok).toBe(true);
+  });
+
+  it("still reports a missing seat beside a live seat and an omitted filler label", async () => {
+    const { adapter } = herdrOpening(() => listed("a", "c", undefined));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.opened).toEqual(["a", "c"]);
+    expect(res.degraded).toEqual([{ seat: "b", host: "herdr", reason: HERDR_PANE_EXITED_REASON }]);
+  });
+
+  it.each([null, 42, {}])("a present malformed label %j keeps the page unconfirmed", async label => {
+    const { adapter } = herdrOpening(() => ({ type: "pane_list", panes: [
+      { tab_id: "w1:t1", label: "a" }, { tab_id: "w1:t1", label },
+    ] }));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed")).toBe(true);
   });
 
   it("a blank-labelled seat is degraded while its confirmed labelled siblings stay opened", async () => {

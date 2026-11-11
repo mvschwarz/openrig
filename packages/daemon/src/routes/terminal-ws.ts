@@ -37,12 +37,12 @@ export function registerTerminalAuthOnly(app: Hono, opts: { bearerToken: string 
 export function registerTerminalWs(
   app: Hono,
   upgradeWebSocket: Parameters<typeof import("@hono/node-ws").createNodeWebSocket>[0] extends { app: infer _A } ? never : never,
-  opts: { bearerToken: string | null },
+  opts: { bearerToken: string | null; fixedGeometry?: () => boolean },
 ): void;
 export function registerTerminalWs(
   app: Hono,
   upgradeWebSocket: (createHandler: (c: unknown) => unknown) => unknown,
-  opts: { bearerToken: string | null; livenessIntervalMs?: number },
+  opts: { bearerToken: string | null; livenessIntervalMs?: number; fixedGeometry?: () => boolean },
 ): void {
   const terminalAuth = terminalAuthMiddleware(opts);
 
@@ -53,7 +53,7 @@ export function registerTerminalWs(
   let registry: TerminalBrokerRegistry | null = null;
   const getRegistry = (tmux: BrokerTmux): TerminalBrokerRegistry => {
     if (!registry) {
-      registry = new TerminalBrokerRegistry(tmux, { livenessMs: opts.livenessIntervalMs });
+      registry = new TerminalBrokerRegistry(tmux, { livenessMs: opts.livenessIntervalMs, fixedGeometry: opts.fixedGeometry });
     }
     return registry;
   };

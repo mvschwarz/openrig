@@ -20,7 +20,7 @@ import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import { resolveStartupProof } from "./startup-resolver.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
@@ -54,6 +54,7 @@ import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/communi
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -71,32 +72,25 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 /**
- * The supported routes for a session registered as adopted (origin=claimed). `rig unclaim` releases
+ * The supported route for a session registered as adopted (origin=claimed): `rig unclaim` releases
  * it and leaves its process running, so ending that process in its own terminal ends only this seat.
- * `rig down` ends it with the rest of its rig, so it is the route only when the rig has one seat;
- * otherwise it is named for what it ends. Only the guidance names them; the refusal stands.
- * `seats` is the rig's node count when known. A seat handed over before 0.7.9 gets
- * earlierHandoverRefusal instead. A seat joined with `rig attach` as an external CLI has no tmux
- * session that `rig down` stops.
+ * `rig down` stops only a session carrying the seat's OpenRig marker, which OpenRig sets on the sessions
+ * it starts and an adopted, bound or self-attached session lacks, so it isn't a route here and the
+ * guidance says why. Only the guidance names the route; the refusal stands. A seat handed over before
+ * 0.7.9 gets earlierHandoverRefusal instead. A seat joined with `rig attach` as an external CLI has no
+ * tmux session that `rig down` stops.
  */
-export function claimedSessionRoutes(rigName: string, sessionName: string, seats: number | null, externalCli = false): string {
+export function claimedSessionRoutes(rigName: string, sessionName: string, externalCli = false): string {
   const session = shellQuote(sessionName);
   const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
   if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
-  if (seats === 1) return `To end the session, run ${rigDownRoute(rigName)}. ${release}`;
-  return `To end only this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
-    + `then end that process in its own terminal. ${rigDownScope(rigName, seats)}`;
+  return `To end this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
+    + `then end that process in its own terminal. ${rigDownLeavesIt(rigName)}`;
 }
 
-/** `rig down <rig>` as the route for a one-seat rig, and how the rig comes back. */
-function rigDownRoute(rigName: string): string {
-  const rig = shellQuote(rigName);
-  return `rig down ${rig} (this rig has one seat, so it stops only this session; rig up ${rig} --existing brings the rig back)`;
-}
-
-/** What `rig down <rig>` ends in a rig with more than one seat, or an unknown count. */
-function rigDownScope(rigName: string, seats: number | null): string {
-  return `rig down ${shellQuote(rigName)} ends ${seats !== null && seats > 1 ? `all ${seats} seats` : "every seat"} in this rig.`;
+/** Why `rig down <rig>` isn't the route for an adopted session. */
+function rigDownLeavesIt(rigName: string): string {
+  return `rig down ${shellQuote(rigName)} leaves a session OpenRig didn't start running.`;
 }
 
 /** Terminal session statuses — rows the clean verb must NOT touch (they already
@@ -1426,13 +1420,12 @@ export class SeatLifecycleService {
     const rows = this.nonTerminalSessions(nodeId);
     const claimed = rows.find(row => row.origin === "claimed");
     if (claimed) {
-      const seats = this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null;
-      const externalCli = this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType === "external_cli";
+      const externalCli = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType)) === "external";
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
         guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process yourself, then launch fresh.`
-          + (externalCli ? "" : seats === 1 ? ` Or end it with ${rigDownRoute(seat.rigName)}.` : ` ${rigDownScope(seat.rigName, seats)}`),
+          + (externalCli ? "" : ` ${rigDownLeavesIt(seat.rigName)}`),
       };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);
@@ -2151,7 +2144,10 @@ export class SeatLifecycleService {
       return this.malformedStartupContext(nodeId, (err as Error).message);
     }
 
-    const startupFiles = resolvedStartupFiles.map((file) => ({
+    // The plan and the delivery share one list, so a selection saved before the context-entry floor gets it delivered
+    // and then recorded by the launch. Reading the saved row doesn't change it.
+    const deliveredFiles = withContextEntryFloor(resolvedStartupFiles);
+    const startupFiles = deliveredFiles.map((file) => ({
       kind: file.kind,
       path: file.path,
       deliveryHint: file.deliveryHint,
@@ -2170,7 +2166,7 @@ export class SeatLifecycleService {
     const hash = createHash("sha256")
       .update(JSON.stringify([row.projection_entries_json, row.resolved_files_json, row.startup_actions_json, row.runtime]))
       .digest("hex");
-    return { ok: true, context: { plan, resolvedStartupFiles, startupActions, runtime: row.runtime, hash } };
+    return { ok: true, context: { plan, resolvedStartupFiles: deliveredFiles, startupActions, runtime: row.runtime, hash } };
   }
 
   private malformedStartupContext(
@@ -2288,8 +2284,8 @@ export class SeatLifecycleService {
 
   /** The claimed-session routes for this seat's rig (see claimedSessionRoutes). */
   private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
-    return claimedSessionRoutes(seat.rigName, sessionName, this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null,
-      this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType === "external_cli");
+    return claimedSessionRoutes(seat.rigName, sessionName,
+      seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
   }
 
   private describe(resolved: ResolvedSeat): SeatDescriptor {

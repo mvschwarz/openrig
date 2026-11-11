@@ -180,25 +180,28 @@ export class HerdrFollowView {
       // Validate ALL old identities before any change. One failed read retains
       // the whole view, rather than presenting an untrusted partial inventory.
       for (const tile of state.tiles) {
+        let expectedTarget = tile.target;
         const currentMember = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === tile.key);
         if (currentMember?.availability === "available") {
           const target = view.opened.find(p => p.seat === currentMember.seat);
-          // An upgrade can change only the tile script; the kept tile then follows the current target.
+          // Recognise an older generated script, but don't rewrite its saved target until the
+          // actual viewer is verified. An old live writable client may require an explicit reopen.
           if (target?.attachArgv && tile.target.attachArgv && target.paneCommand !== tile.target.paneCommand
             && target.readOnly === tile.target.readOnly && earlierTileAttachment(tile.target.attachArgv, target.attachArgv, target.readOnly)) {
-            tile.target = target;
+            expectedTarget = target;
           }
-          if (!target || target.paneCommand !== tile.target.paneCommand || target.readOnly !== tile.target.readOnly
-            || JSON.stringify(target.attachArgv) !== JSON.stringify(tile.target.attachArgv)) {
+          if (!target || target.paneCommand !== expectedTarget.paneCommand || target.readOnly !== expectedTarget.readOnly
+            || JSON.stringify(target.attachArgv) !== JSON.stringify(expectedTarget.attachArgv)) {
             throw new Error(`${tile.seat}: Core's current attachment differs from the retained viewer; keeping the previous view unconfirmed.`);
           }
         }
         let current: ViewerPane;
         try { current = await currentPane(tile.viewer); }
         catch (error) { throw new Error(`${tile.seat}: unknown: ${error instanceof Error ? error.message : String(error)}`); }
-        const verified = await viewers.lookup(tile.member, tile.target);
+        const verified = await viewers.lookup(tile.member, expectedTarget);
         if (!verified.ok) throw new Error(`${tile.seat}: ${viewerFailure(tile.key, tile.target, verified)} Keeping the whole view.`);
         if (JSON.stringify(verified.viewer) !== JSON.stringify(tile.viewer)) throw new Error(`${tile.seat}: Viewer mapping changed; keeping the whole view.`);
+        tile.target = expectedTarget;
         delete state.viewerFailures?.[tile.key];
         observations.set(tile.key, { focused: current.focused!, input: await this.deps.input?.(tile.target) ?? "unknown" });
       }

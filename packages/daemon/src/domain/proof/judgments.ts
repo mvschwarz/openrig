@@ -24,11 +24,17 @@ export interface ItemReadiness {
   id: string; text: string; revision: string; index: number; source: { file: string; line: number };
   state: "accepted" | "pending" | "rejected" | "withdrawn" | "unknown";
   reason: string; judgment: Judgment | null;
+  /** Each judge the policy names: its own latest receipt on this item, evaluated now. `decides` says whether that receipt
+   *  counts toward the item's state: every judge's under `everyJudge`, otherwise only the item's latest receipt. */
+  judges: JudgeReadiness[];
+}
+export interface JudgeReadiness {
+  actor: string; state: ItemReadiness["state"]; reason: string; sequence: number | null; decides: boolean;
 }
 export interface ScopeReadiness {
   configured: boolean; revision: string; state: "ready" | "not-ready" | "unknown" | "legacy";
   history: Array<{ ref: string; id: string; itemId: string; verdict: JudgmentVerdict; previous: string | null }>;
-  items: ItemReadiness[]; issues: string[]; policy: { judges: string[]; source: string; revision: string } | null;
+  items: ItemReadiness[]; issues: string[]; policy: { judges: string[]; everyJudge: boolean; source: string; revision: string } | null;
   /** Input for S04 attention consumers; no timer or delivery is implied. */
   attention: { scope: string; revision: string };
 }
@@ -79,10 +85,13 @@ function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest, rootOve
       const file = path.join(p, name), doc = readManifest(io, file);
       if (doc && Object.hasOwn(doc, "proofPolicy")) {
         const policy = mapping(doc.proofPolicy, `${file}: proofPolicy`);
-        if (Object.keys(policy).some(k => k !== "judges")) throw new JudgmentError("policy_invalid", `${file}: proofPolicy supports judges only`);
+        if (Object.keys(policy).some(k => k !== "judges" && k !== "everyJudge")) throw new JudgmentError("policy_invalid", `${file}: proofPolicy supports judges and everyJudge only`);
         if (!Array.isArray(policy.judges) || !policy.judges.length || policy.judges.some(x => typeof x !== "string" || !x.trim())) throw new JudgmentError("policy_invalid", `${file}: proofPolicy.judges must name authorized actors`);
-        const judges = [...new Set(policy.judges as string[])].sort();
-        return { judges, source: file, revision: hash(judges) };
+        if (policy.everyJudge !== undefined && typeof policy.everyJudge !== "boolean") throw new JudgmentError("policy_invalid", `${file}: proofPolicy.everyJudge must be true or false`);
+        const judges = [...new Set(policy.judges as string[])].sort(), everyJudge = policy.everyJudge === true;
+        // The default keeps the revision it always had, so judgments recorded before everyJudge existed stay current.
+        // Requiring every judge is a different policy: its revision differs, so earlier receipts can't certify it.
+        return { judges, everyJudge, source: file, revision: everyJudge ? hash({ judges, everyJudge }) : hash(judges) };
       }
     }
     if (p === root) return null;
@@ -181,35 +190,49 @@ export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readP
     items = promises.map(p => {
       const scope = path.relative(scopeRoot, dir).split(path.sep).join("/");
       const revision = hash([scope, p.id, p.text, policy?.revision ?? null]);
+      // `judgment` stays the item's latest receipt from any judge: corrections chain on it.
       const judgment = receipts.filter(r => r.itemId === p.id).at(-1) ?? null;
+      const evaluate = (j: Judgment): [ItemReadiness["state"], string] => {
+        if (!policy || j.scope !== scope || j.itemRevision !== revision || j.policyRevision !== policy.revision) return ["unknown", "Scope, item or policy changed; record a judgment on the current revision"];
+        if (j.verdict !== "accept") return [j.verdict === "reject" ? "rejected" : "withdrawn", j.reason];
+        if (!policy.judges.includes(j.actor)) return ["unknown", "Judgment actor is outside the selected policy"];
+        const valid = j.evidence.length > 0 && j.evidence.every(e => {
+          if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
+          try {
+            const address = parseAddress(e.ref), file = path.resolve(scopeRoot, address.ref);
+            observe?.(file);
+            if (io.readBytes) contained(scopeRoot, file);
+            const bytes = io.readBytes ? io.readBytes(file) : io.readFile(file);
+            if (bytes === null) return false;
+            const addressed = address.headerPath.length ? resolveAddress(typeof bytes === "string" ? bytes : Buffer.from(bytes).toString("utf8"), address.headerPath).text : bytes;
+            return createHash("sha256").update(addressed).digest("hex") === e.sha256;
+          } catch { return false; }
+        });
+        return valid ? ["accepted", j.reason] : ["unknown", "Evidence missing or changed; inspect the retained judgment"];
+      };
+      const judges: JudgeReadiness[] = (policy?.judges ?? []).map(actor => {
+        const own = receipts.filter(r => r.itemId === p.id && r.actor === actor).at(-1);
+        const [state, reason] = own ? evaluate(own) : ["pending" as const, "No judgment from this judge"];
+        return { actor, state, reason, sequence: own?.sequence ?? null, decides: !!own && (policy!.everyJudge || own.id === judgment?.id) };
+      });
       let state: ItemReadiness["state"] = "pending", reason = "No current attributed judgment";
-      if (judgment) {
-        if (!policy || judgment.scope !== scope || judgment.itemRevision !== revision || judgment.policyRevision !== policy.revision) { state = "unknown"; reason = "Scope, item or policy changed; record a judgment on the current revision"; }
-        else if (judgment.verdict !== "accept") { state = judgment.verdict === "reject" ? "rejected" : "withdrawn"; reason = judgment.reason; }
-        else if (!policy.judges.includes(judgment.actor)) { state = "unknown"; reason = "Judgment actor is outside the selected policy"; }
-        else {
-          const valid = judgment.evidence.length > 0 && judgment.evidence.every(e => {
-            if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
-            try {
-              const address = parseAddress(e.ref), file = path.resolve(scopeRoot, address.ref);
-              observe?.(file);
-              if (io.readBytes) contained(scopeRoot, file);
-              const bytes = io.readBytes ? io.readBytes(file) : io.readFile(file);
-              if (bytes === null) return false;
-              const addressed = address.headerPath.length ? resolveAddress(typeof bytes === "string" ? bytes : Buffer.from(bytes).toString("utf8"), address.headerPath).text : bytes;
-              return createHash("sha256").update(addressed).digest("hex") === e.sha256;
-            } catch { return false; }
-          });
-          state = valid ? "accepted" : "unknown"; reason = valid ? judgment.reason : "Evidence missing or changed; inspect the retained judgment";
-        }
-      }
-      return { ...p, revision, state, reason, judgment };
+      if (policy?.everyJudge) {
+        // #2765: each judge the policy names needs its own current acceptance. One judge's accept can't hide another's
+        // reject, withdraw, missing judgment or stale evidence: the worst disposition among them is the item's.
+        const worst = (["rejected", "unknown", "withdrawn", "pending"] as const).find(s => judges.some(j => j.state === s));
+        if (!worst) { state = "accepted"; reason = `Accepted by every judge: ${judges.map(j => j.actor).join(", ")}`; }
+        else if (worst === "pending") { state = "pending"; reason = `Waiting on ${judges.filter(j => j.state === "pending").map(j => j.actor).join(", ")}`; }
+        else { const by = judges.find(j => j.state === worst)!; state = worst; reason = `${by.actor}: ${by.reason}`; }
+      } else if (judgment) [state, reason] = evaluate(judgment);
+      return { ...p, revision, state, reason, judgment, judges };
     });
     if (policy && !items.length) issues.push("No authored proof contract");
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); }
   const configured = policy !== null || io.exists(path.join(dir, "proof", "judgments")) || (!policyRead && issues.length > 0);
   const state = issues.length ? "unknown" : !configured ? "legacy" : items.some(i => i.state === "unknown") ? "unknown" : items.length && items.every(i => i.state === "accepted") ? "ready" : "not-ready";
-  const revision = hash([policy?.revision, items, issues]);
+  // The per-judge view is derived from the same receipts and adds nothing the state doesn't, so it stays out of the
+  // revision: a wait or watcher that recorded a revision before it existed still sees the same one.
+  const revision = hash([policy?.revision, items.map(({ judges: _judges, ...item }) => item), issues]);
   const history = receipts.map(r => ({ ref: `${r.scope}/proof/judgments/${String(r.sequence).padStart(8, "0")}.md`, id: r.id, itemId: r.itemId, verdict: r.verdict, previous: r.previous }));
   return { configured, revision, state, history, items, issues, policy, attention: { scope: dir, revision } };
 }
@@ -366,6 +389,22 @@ function declaredNodeId(dir: string): string | null {
  *  from them); it defaults to the ordinary filesystem reader and changes nothing about the evaluation. */
 export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void) {
   const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io, observe) }));
+  return projectReadiness(missions);
+}
+
+/** The same semantic read, yielding between missions for daemon requests and source-watch refreshes.
+ * A single mission (including its evidence) is still synchronous; this is not a hard time bound or atomic snapshot. */
+export async function readProjectReadinessAsync(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void) {
+  const names = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory());
+  const missions: Array<MissionReadiness & { name: string }> = [];
+  for (const name of names) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    missions.push({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io, observe) });
+  }
+  return projectReadiness(missions);
+}
+
+function projectReadiness(missions: Array<MissionReadiness & { name: string }>) {
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
   return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

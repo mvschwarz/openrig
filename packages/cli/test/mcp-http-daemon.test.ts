@@ -246,7 +246,18 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const own = (await asCarol("rig_queue_create", { destination: "impl@team", body: "hand this on" })).structured.qitemId as string;
     const handoff = await fetch(`${daemonUrl}/api/queue/${own}/handoff`, { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "impl@team" }, body: JSON.stringify({ toSession: "qa@other", nudge: false }) });
     expect(handoff.status).toBe(201);
+    const next = ((await handoff.json()) as { created: { qitemId: string } }).created.qitemId;
     expect((await asCarol("rig_queue_show", { qitemId: own })).structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    // Nor do the daemon's own successor fields, which it fills without a caller's scope (here: 21 successors, so the list
+    // is cut too).
+    const more = db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, handed_off_from)
+      VALUES (?, '2026-10-26T00:00:00.000Z', '2026-10-26T00:00:00.000Z', 'impl@team', 'qa@other', 'pending', 'routine', 'x', ?)`);
+    for (let n = 0; n < 20; n++) more.run(`qitem-more-${n}`, own);
+    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ successorsTruncated: true, successors: expect.arrayContaining([expect.objectContaining({ qitemId: next })]) });
+    const handedOn = await asCarol("rig_queue_show", { qitemId: own });
+    for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(handedOn.structured.item).not.toHaveProperty(derived);
+    expect(handedOn.text).not.toContain(next);
+    expect(handedOn.text).not.toContain("qitem-more-");
 
     // Artifacts: a root outside the grant is out of reach, directly or through an item.
     fs.writeFileSync(path.join(shared, "report.md"), "ARTIFACT body");

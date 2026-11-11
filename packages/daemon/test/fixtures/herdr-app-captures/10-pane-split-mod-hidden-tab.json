@@ -1,0 +1,116 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "pane-split-mod-hidden-tab",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"pane.split\",\"args\":{\"direction\":\"down\",\"pane\":\"p06b82bca99c1514ecc9483b64f7bbf07\",\"mod\":\"files\"}}\n"
+  },
+  "reply": {
+    "line": "{\"pane\":\"ped84f31abb6722ac93a0ef90658e3055\"}\n",
+    "json": {
+      "pane": "ped84f31abb6722ac93a0ef90658e3055"
+    }
+  },
+  "elapsed_ms": 1,
+  "notes": "Split with a mod instead of a program (how a pad cell is placed). Mod panes carry no terminal.",
+  "effect": {
+    "status": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb70e7f8353f6c88eabaec3285f582089c",
+      "focused_pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    },
+    "ls": {
+      "spaces": [
+        {
+          "id": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+          "name": "person-space",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": true,
+          "tabs": [
+            {
+              "id": "tb70e7f8353f6c88eabaec3285f582089c",
+              "name": "1",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t1",
+                  "pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            },
+            {
+              "id": "tb-capture-view",
+              "name": "2",
+              "active": false,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t3",
+                  "pane": "pd82fe4e7183946941400159fd6f11245",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                },
+                {
+                  "terminal": "t4",
+                  "pane": "p06b82bca99c1514ecc9483b64f7bbf07",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "sp-capture-rig",
+          "name": "work",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": false,
+          "tabs": [
+            {
+              "id": "tb-capture-status",
+              "name": "1",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t2",
+                  "pane": "p15ba792b677c4588803c57f6b64d1bf8",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "recent": []
+    }
+  }
+}

@@ -84,6 +84,7 @@ export interface RiggedConfig {
     /** Serve the web UI and its terminal WebSocket. Off by default; the daemon reads it at start. */
     enabled: boolean;
     timezone: string;
+    terminal: { maxLiveTerminals: number };
     preview: {
       refreshIntervalSeconds: number;
       maxPins: number;
@@ -170,6 +171,7 @@ export interface RiggedConfig {
     tmuxServer: "inherit" | "isolated";
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
+    fixedGeometry: boolean;
     inheritTmuxEnvironment: boolean;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
@@ -217,10 +219,14 @@ export interface RiggedConfig {
     enabled: boolean;
     transitionsDays: number;
     watchdogDays: number;
+    usageSamplesDays: number;
     watchdogKeepPerJob: number;
     streamDays: number;
     streamMaxItems: number;
     eventsDays: number;
+    closedContentDays: number;
+    closedMetadataDays: number;
+    erasureLedger: string;
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
@@ -302,6 +308,10 @@ const DEFAULTS = {
   ui: {
     enabled: false,
     timezone: "America/Los_Angeles",
+    // The daemon store leaves its own resolver value unset for this key and the web
+    // client falls back to 2 (settings-browser names that fallback), so the CLI reports
+    // the same effective default rather than inventing a third answer.
+    terminal: { maxLiveTerminals: 2 },
     preview: {
       refreshIntervalSeconds: 3,
       maxPins: 4,
@@ -370,6 +380,7 @@ const DEFAULTS = {
     statusBar: false,
     tmuxServer: "inherit",
     historyLimit: 10000,
+    fixedGeometry: false,
     inheritTmuxEnvironment: false,
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
@@ -411,10 +422,15 @@ const DEFAULTS = {
     enabled: true,
     transitionsDays: 30,
     watchdogDays: 14,
+    // Usage samples age out after this many days; the daemon's own default.
+    usageSamplesDays: 14,
     watchdogKeepPerJob: 50,
     streamDays: 30,
     streamMaxItems: 20000,
     eventsDays: 0,
+    closedContentDays: 0,
+    closedMetadataDays: 0,
+    erasureLedger: "",
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -491,6 +507,9 @@ export const VALID_KEYS = [
   "ui.preview.default_lines",
   "ui.timezone",
   "ui.enabled",
+  // The legacy web client's cap on simultaneously-live terminals. The daemon store
+  // resolves it (SETTINGS_VALID_KEYS), so `rig config` must accept it too.
+  "ui.terminal.max_live_terminals",
   "recovery.auto_drive_provider_prompts",
   "recovery.provider_auth_env_allowlist",
   // V1 Phase 4 SC-29 exception — allowlist-only additions.
@@ -533,6 +552,7 @@ export const VALID_KEYS = [
   "terminal.tmux_server",
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
+  "terminal.fixed_geometry",
   "terminal.inherit_tmux_environment",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
@@ -559,12 +579,20 @@ export const VALID_KEYS = [
   "retention.enabled",
   "retention.transitions_days",
   "retention.watchdog_days",
+  // How long the daemon keeps usage samples; lockstep with the daemon twin.
+  "retention.usage_samples_days",
   "retention.watchdog_keep_per_job",
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
   // The history-only event types of `events` older than N days, 0 (default) keeps them; lockstep with the daemon twin.
   "retention.events_days",
+  // Closed queue work: content erased N days after it closed, then the row (only its id kept); 0 (default) keeps them;
+  // lockstep with the daemon twin.
+  "retention.closed_content_days",
+  "retention.closed_metadata_days",
+  // Queue erasure's ledger file (JSON lines of erased ids and actions); empty keeps none; lockstep with the daemon twin.
+  "retention.erasure_ledger",
   "stream.intake",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
@@ -628,6 +656,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
   "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
+  "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
@@ -664,6 +693,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.fixed_geometry": { primary: "OPENRIG_TERMINAL_FIXED_GEOMETRY" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
@@ -683,10 +713,14 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
+  "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
   "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
+  "retention.closed_content_days": { primary: "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS" },
+  "retention.closed_metadata_days": { primary: "OPENRIG_RETENTION_CLOSED_METADATA_DAYS" },
+  "retention.erasure_ledger": { primary: "OPENRIG_RETENTION_ERASURE_LEDGER" },
   "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
@@ -739,6 +773,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
   "ui.enabled": ["ui", "enabled"],
+  "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
@@ -770,6 +805,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.tmux_server": ["terminal", "tmuxServer"],
   "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.fixed_geometry": ["terminal", "fixedGeometry"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
@@ -788,10 +824,14 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
+  "retention.usage_samples_days": ["retention", "usageSamplesDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
   "retention.events_days": ["retention", "eventsDays"],
+  "retention.closed_content_days": ["retention", "closedContentDays"],
+  "retention.closed_metadata_days": ["retention", "closedMetadataDays"],
+  "retention.erasure_ledger": ["retention", "erasureLedger"],
   "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
@@ -1065,6 +1105,7 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       new Intl.DateTimeFormat("en-US", { timeZone: value });
     } catch { throw new Error("Invalid ui.timezone: use an IANA timezone such as America/Los_Angeles or Europe/London"); }
   },
+  "ui.terminal.max_live_terminals": positiveIntegerConstraint("ui.terminal.max_live_terminals"),
   "health.context_pressure.warning_percent": percentageConstraint("health.context_pressure.warning_percent"),
   "health.context_pressure.critical_percent": percentageConstraint("health.context_pressure.critical_percent"),
   "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
@@ -1151,6 +1192,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.watchdog_days: must be an integer >= 1, got "${raw}"`);
     }
   },
+  // Same bound and message as the daemon twin's KEY_CONSTRAINTS entry.
+  "retention.usage_samples_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.usage_samples_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.watchdog_keep_per_job": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
       throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
@@ -1176,6 +1223,24 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "retention.events_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
       throw new Error(`Invalid value for retention.events_days: must be an integer >= 0 (0 keeps the events), got "${raw}"`);
+    }
+  },
+  // 0 (the default) keeps closed work; a positive day count turns its erasure on (queue-erasure).
+  "retention.closed_content_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.closed_content_days: must be an integer >= 0 (0 keeps the content), got "${raw}"`);
+    }
+  },
+  "retention.closed_metadata_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.closed_metadata_days: must be an integer >= 0 (0 keeps the rows), got "${raw}"`);
+    }
+  },
+  // Empty (the default) keeps no erasure ledger; otherwise an absolute file path, kept outside the backed-up data.
+  "retention.erasure_ledger": (raw) => {
+    const value = (raw ?? "").trim();
+    if (value !== "" && !value.startsWith("/")) {
+      throw new Error(`Invalid value for retention.erasure_ledger: must be empty or an absolute file path, got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {
@@ -1356,6 +1421,7 @@ export class ConfigStore {
       ui: {
         enabled: v("ui.enabled") as boolean,
         timezone: v("ui.timezone") as string,
+        terminal: { maxLiveTerminals: v("ui.terminal.max_live_terminals") as number },
         preview: {
           refreshIntervalSeconds: v("ui.preview.refresh_interval_seconds") as number,
           maxPins: v("ui.preview.max_pins") as number,
@@ -1415,6 +1481,7 @@ export class ConfigStore {
         statusBar: v("terminal.status_bar") as boolean,
         tmuxServer: v("terminal.tmux_server") as "inherit" | "isolated",
         historyLimit: v("terminal.history_limit") as number,
+        fixedGeometry: v("terminal.fixed_geometry") as boolean,
         inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },
       output: {
@@ -1445,10 +1512,14 @@ export class ConfigStore {
         enabled: v("retention.enabled") as boolean,
         transitionsDays: v("retention.transitions_days") as number,
         watchdogDays: v("retention.watchdog_days") as number,
+        usageSamplesDays: v("retention.usage_samples_days") as number,
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
         streamDays: v("retention.stream_days") as number,
         streamMaxItems: v("retention.stream_max_items") as number,
         eventsDays: v("retention.events_days") as number,
+        closedContentDays: v("retention.closed_content_days") as number,
+        closedMetadataDays: v("retention.closed_metadata_days") as number,
+        erasureLedger: v("retention.erasure_ledger") as string,
         batchSize: v("retention.batch_size") as number,
       },
       queue: {

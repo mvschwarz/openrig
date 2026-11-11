@@ -39,14 +39,19 @@ This chapter covers **which agent runs in a seat and how OpenRig talks to it**. 
 sandbox, another machine) is the [execution platform chapter](execution-platform-contract.md). The two are separate on purpose:
 the same harness can run in many places, and one place can host many harnesses.
 
-## 1. Plain preset or runner preset?
+## 1. Plain preset, runner preset, or OpenRig-hosted protocol runner?
 
-| | Plain community preset | Runner preset (`runner: true`) |
-|---|---|---|
-| **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) |
-| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input |
-| **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt |
-| **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably |
+| | Plain community preset | Runner preset (`runner: true`) | OpenRig-hosted protocol runner (`protocol: pi-rpc`) |
+|---|---|---|---|
+| **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) | OpenRig's own Pi runner, which starts your binary (`command`) in Pi's RPC mode |
+| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
+| **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt; a message sent mid-turn waits | Pi's input: a submitted block is a prompt, a message sent while busy steers the current turn, `/followup` queues after it and `/abort` cancels it |
+| **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably | Your harness is a Pi fork, or speaks Pi's CLI and JSONL RPC protocol |
+
+**For the third shape, you promise your binary's Pi-RPC compatibility at a version you name in `limits`.** OpenRig doesn't
+test each fork. It can't be combined with `runner`, `launch_result`, `names_conversation`, `startup_assisted` or
+`first_input`. The flags it must accept are in
+[Pi-compatible RPC harnesses](community-harness-presets.md#pi-compatible-rpc-harnesses-protocol-pi-rpc).
 
 **If your harness works well as a terminal app, a plain preset is enough. Use a runner only when you can report state
 honestly.** A runner that guesses is worse than a quiet screen read as unknown.
@@ -236,8 +241,15 @@ permission or input handling in existing built-in runtimes or require every poss
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
   and record when you sent it.
-  - A person cancels by typing `/abort` in the seat's pane. A `/abort` sent with `rig send` arrives inside a From/To
-    envelope, so it's an ordinary prompt.
+  - **Sending it:** a person types `/abort` in the seat's pane. From another seat or a script,
+    `rig send <seat> "/abort" --raw` pastes exactly `/abort`, with no From/To envelope, and presses Enter, so a runner
+    that follows section 5 gets the control. 0.7.8's native runs typed it in the pane; a raw send hasn't been run
+    natively. An ordinary `rig send` wraps its text in a From/To envelope, so there `/abort` is an ordinary prompt.
+  - **Not while the seat needs input:** a raw send is still refused while the seat reads needs input
+    (`target_needs_input`), for example while the runner holds a permission request for a person (section 7). Type
+    `/abort` in the pane then.
+  - **A sent `/abort` is a request.** A typed control can't name the turn it was meant for: the runner cancels whatever
+    turn is running when it reads it. Whether a turn was cancelled is the runner's `Stop` / `cancelled` below.
 - **Report "cancelled" only when the agent says so:** for ACP, when `session/prompt` returns `stopReason: "cancelled"`.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
@@ -293,8 +305,30 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
 | routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
 | routes or hands it to an agent seat | that seat gets no options. The request waits until that row is closed, by the seat or a person. Closed as done without a choice (including a drop), or as failed, is no answer, so it's permitted. Closed as denied (the Feed's deny, `--closure-reason denied`, or the state `denied`) is a no. A row set to the state `canceled` cancels the request, and a further handoff is followed; a person it reaches gets the same options. Or the request waits until the agent's turn ends |
-| closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| closes it with no answer at all (a drop) | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| answers in other words that nobody decides on | after 0.7.11, **the request waits**: the words are kept, never the default permit, until an explicit decision (`rig seat decide-permission`) or the turn's end |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
+
+**After 0.7.11, a person's answer goes to an agent that decides, or waits:**
+- **Who decides:** this host's receiving agent (`agents.operator_session`, else the kernel operator
+  `operator-agent@kernel`), unless it's the runner that asked (the request's first row, however it was handed on) or
+  a seat this host doesn't have; then the kernel operator, unless it's the runner that asked.
+- **What happens to the answer:** a click, a plain yes or no, other words, or Steering's Approve or Deny on the request
+  (a yes or a no) is kept on the row it was given on. The request is handed to that agent with the person's whole
+  answer, the question and the options, and the person is told once who decides and in what recorded state.
+- **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
+  --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - It accepts only an option the agent offered.
+  - It records an agent's decision: who decided, why, and the person's words.
+  - A request that's no longer pending comes back as it is, and nothing is written.
+- **A kept answer counts only through an explicit decision.** If the row is closed without one (an agent's or a
+  person's ordinary close), the answer stays kept and the request waits; `rig seat decide-permission` still settles it.
+  A refusing close (denied) is still a no.
+- **With no agent that can decide,** any answer is kept, the request waits, and the person is told once that the tool
+  hasn't run and how to decide directly (`rig seat decide-permission`) or set up a receiving agent. A handoff that fails
+  leaves the request waiting the same way.
+- **No timeout refuses a request.** If the turn ends first, nothing is sent.
+- **The default permit stays** for a request nobody can be asked about (above), and one closed with no answer at all.
 
 - **An answer reaches only the live request it was asked for,** once. A request from an earlier occupant reads
   `stale`, and one withdrawn at the turn's end reads `withdrawn`. Neither can take a later answer.
@@ -340,7 +374,9 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
      `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
      `stale`.
    - **From 0.7.9, `said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they
-     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome.
+     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome. After 0.7.11, words are never
+     answered with the default permit (they keep the request waiting), so `said` no longer arrives. A runner that handles
+     it keeps working.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that

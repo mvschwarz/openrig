@@ -185,20 +185,41 @@ describe("fleet/system health TUI", () => {
     expect(healthSummaryLine(snap, { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true }, 70).text).toContain("PARTIAL");
   });
 
-  it("marks a partial source evaluation and never presents omitted families as healthy", () => {
+  it("shows an evaluation cap as coverage, not as degraded health, and never presents omitted families as healthy", () => {
+    // D#52 edge 7: a busy, healthy team sees the passive source's limit on every read; that is a bound, not a fault.
     const coverage = [{ source: "passive-ceremony", unit: "handoff families", limit: 200, total: 634, evaluated: 200, omitted: 434, partial: true,
       order: "most queue transitions in the observation window, then lineage ID" }];
+    const scope = { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true } as const;
     for (const records of [[], [record({ id: "ceremony", seatId: "node-guard", summary: "Ceremony source." })]]) {
       const snap = healthSnapshot();
       snap.health = { availability: "loaded", evaluatedAt: "2026-09-05T12:00:00.000Z", total: records.length, truncated: false, records, coverage };
       const view = open(snap, "rig openrig-build");
       view.dispatch(parseCommand("tab health"));
       const text = renderScreen(view.get(), snap, { cols: 220, rows: 60, colorMode: "none" }).lines.join("\n");
-      const summary = healthSummaryLine(snap, { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true }, 220).text;
-      expect(summary).toMatch(/^HEALTH.*· PARTIAL/);
-      if (records.length) expect(text).toContain("PARTIAL · passive-ceremony evaluated 200 of 634 handoff families; 434 omitted were not evaluated and are not healthy");
-      else { expect(text).toContain("not a healthy verdict"); expect(text).toContain("PARTIAL"); }
+      const summary = healthSummaryLine(snap, scope, 220);
+      expect(summary.text).not.toContain("PARTIAL");
+      expect(summary.segs!.find((s) => s.text.includes("COVERAGE 200/634"))).toMatchObject({ token: "info" });
+      expect(text).not.toContain("PARTIAL");
+      const line = healthListLines(snap, scope, 220).find((l) => l.text.startsWith("COVERAGE · "))!;
+      expect(line.text).toBe("COVERAGE · passive-ceremony evaluated 200 of 634 handoff families (limit 200; most queue transitions in the observation window, then lineage ID); the other 434 weren't evaluated, so they're unknown, not healthy");
+      expect(line.segs!.every((s) => s.token === "info")).toBe(true);
+      if (!records.length) expect(text).toContain("not a healthy verdict");
     }
+  });
+
+  it("keeps a failed source as PARTIAL beside a capped one: degraded health stays a warning", () => {
+    const snap = healthSnapshot();
+    snap.health = { availability: "loaded", evaluatedAt: "2026-09-05T12:00:00.000Z", total: 0, truncated: false, records: [], coverage: [
+      { source: "passive-ceremony", unit: "handoff families", limit: 200, total: 224, evaluated: 200, omitted: 24, partial: true, order: "busiest first" },
+      { source: "other-reader", status: "unavailable", partial: true, reason: "window_unreadable" },
+    ] };
+    const scope = { kind: "instance", local: true } as const;
+    const summary = healthSummaryLine(snap, scope, 160);
+    expect(summary.segs!.find((s) => s.text === " · PARTIAL")).toMatchObject({ token: "warn" });
+    expect(summary.segs!.find((s) => s.text.includes("COVERAGE 200/224"))).toMatchObject({ token: "info" });
+    const lines = healthListLines(snap, scope, 160);
+    expect(lines.find((l) => l.text.startsWith("UNAVAILABLE · other-reader"))!.segs![0]).toMatchObject({ token: "warn" });
+    expect(lines.find((l) => l.text.startsWith("COVERAGE · passive-ceremony"))!.segs![0]).toMatchObject({ token: "info" });
   });
 
   it.each([[80, 24], [140, 42]])("keeps the complete empty-health explanation readable at %ix%i", (cols, rows) => {

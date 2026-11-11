@@ -1,0 +1,132 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "uncertain-no-reply",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"pane.split\",\"args\":{\"direction\":\"right\",\"pane\":\"pd82fe4e7183946941400159fd6f11245\",\"argv\":[\"sleep\",\"3600\"]}}\n"
+  },
+  "reply": {
+    "transport_error": "no reply within 2000 ms",
+    "late_line": "{\"pane\":\"p7fa971b8ab8a1367861ab6b7db028291\",\"terminal\":\"t9\"}\n",
+    "late_json": {
+      "pane": "p7fa971b8ab8a1367861ab6b7db028291",
+      "terminal": "t9"
+    }
+  },
+  "elapsed_ms": 2002,
+  "notes": "The window was stopped (SIGSTOP) before the request was read, so the client's 2 s wait ran out with no reply: the outcome is unknown at that moment. The window was then resumed on the same connection: `late_line` is what it sent afterwards, and `effect` is the reconciliation read. An adapter must treat a missing reply as unknown and reconcile from `ls` and labels, never assume failure.",
+  "context": {
+    "view_tab_terminals_before": [
+      "t3",
+      "t8"
+    ]
+  },
+  "effect": {
+    "status": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb-capture-view",
+      "focused_pane": "p7fa971b8ab8a1367861ab6b7db028291",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    },
+    "ls": {
+      "spaces": [
+        {
+          "id": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+          "name": "person-space",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": true,
+          "tabs": [
+            {
+              "id": "tb70e7f8353f6c88eabaec3285f582089c",
+              "name": "1",
+              "active": false,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t1",
+                  "pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            },
+            {
+              "id": "tb-capture-view",
+              "name": "2",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t3",
+                  "pane": "pd82fe4e7183946941400159fd6f11245",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                },
+                {
+                  "terminal": "t9",
+                  "pane": "p7fa971b8ab8a1367861ab6b7db028291",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                },
+                {
+                  "terminal": "t8",
+                  "pane": "pf96e7d48c359a1155a0f7399a31caa96",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "sp-capture-rig",
+          "name": "work",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": false,
+          "tabs": [
+            {
+              "id": "tb-capture-status",
+              "name": "1",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t2",
+                  "pane": "p15ba792b677c4588803c57f6b64d1bf8",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "recent": []
+    }
+  }
+}

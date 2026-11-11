@@ -8,10 +8,11 @@ import type { WatchdogJobsRepository } from "../watchdog-jobs-repository.js";
 import { HumanModeService, registryAvailability, type ModeApplication } from "../gateway/human-operating-modes.js";
 import { loadHumanRegistry } from "../gateway/human-registry.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
+import { describeDefaultReceiver, KERNEL_OPERATOR_SESSION, resolveDefaultReceiver, type DefaultReceiver } from "../default-receiver.js";
 
 export const MODE_SCHEDULED_END_POLICY = "mode-scheduled-end";
 /** The kernel's operator agent (pod operator, member agent), whose role guidance covers giving the account. */
-export const KERNEL_OPERATOR_SESSION = "operator-agent@kernel";
+export { KERNEL_OPERATOR_SESSION };
 
 const applicationSpec = (applicationId: string) => `applicationId: "${applicationId}"`;
 
@@ -37,6 +38,8 @@ export interface ModeScheduledEndInput {
   home: string;
   jobId: string;
   now?: Date;
+  /** Who receives requests no one else owns here; the host's default receiving agent unless a caller supplies it. */
+  receiver?: (db: Database.Database) => DefaultReceiver;
 }
 
 /** The notice's stable id: one per application, so a retry finds what an earlier run already sent. */
@@ -98,20 +101,27 @@ const SCHEDULER = "daemon@kernel";
  *  is decided yet. */
 type Recipient = { ok: true; to: string; kind: "operator" | "applied-by" | "person"; why: string | null } | { ok: false; known: boolean; why: string };
 
-/** Who's told, through the queue's own destination check: the kernel operator, which gives the account; where it isn't on
- *  this host, the seat that applied the mode, if the queue would accept it (a named operator outside a seat isn't a
- *  destination); otherwise the person, whose account it is. */
+/** Who's told, through the queue's own destination check: the host's receiving agent (the chosen one, else the kernel
+ *  operator), which gives the account; where there's none, the seat that applied the mode, if the queue would accept it
+ *  (a named operator outside a seat isn't a destination); otherwise the person, whose account it is. */
 function recipientFor(input: ModeScheduledEndInput, ended: ModeApplication): Recipient {
   const unknown = (why: string): Recipient => ({ ok: false, known: false, why });
   // A check that throws hasn't said no.
   const accepts = (to: string): boolean | Error => { try { return input.queueRepo.acceptsDestination(to); } catch (error) { return error as Error; } };
-  const operatorHere = !!input.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION);
-  if (operatorHere) {
-    const ok = accepts(KERNEL_OPERATOR_SESSION);
-    if (ok instanceof Error) return unknown(`checking ${KERNEL_OPERATOR_SESSION} failed: ${ok.message}`);
-    if (ok) return { ok: true, to: KERNEL_OPERATOR_SESSION, kind: "operator", why: null };
+  const receiver = (input.receiver ?? resolveDefaultReceiver)(input.db);
+  // Not knowing whether there's a receiving agent isn't knowing there's none: the notice stays owed for the next pass.
+  if (!receiver.session && receiver.state === "unknown") return unknown(describeDefaultReceiver(receiver));
+  if (receiver.session) {
+    const ok = accepts(receiver.session);
+    if (ok instanceof Error) return unknown(`checking ${receiver.session} failed: ${ok.message}`);
+    // A receiver used instead of an unusable choice is delivered to with the reason, never silently.
+    if (ok) return { ok: true, to: receiver.session, kind: "operator", why: receiver.note ?? null };
   }
-  const noOperator = `${KERNEL_OPERATOR_SESSION} isn't on this host`;
+  // An unusable setting is named as such, never as unset.
+  const note = receiver.note ? `${receiver.note}; ` : "";
+  const noOperator = receiver.session ? `${note}${receiver.session}, the receiving agent, isn't an address the queue accepts`
+    : receiver.state === "unknown" ? `${note}OpenRig couldn't tell whether this host has a receiving agent`
+      : `this host has no receiving agent (${receiver.note ?? "no agents.operator_session"}, and ${KERNEL_OPERATOR_SESSION} isn't on this host)`;
   const applier = accepts(ended.startedBy);
   if (applier instanceof Error) return unknown(`checking ${ended.startedBy} failed: ${applier.message}`);
   if (applier) return { ok: true, to: ended.startedBy, kind: "applied-by", why: noOperator };

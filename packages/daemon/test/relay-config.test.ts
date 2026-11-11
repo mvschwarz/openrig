@@ -299,4 +299,77 @@ describe("relay-config: loadRelayProfiles(home)", () => {
       connectorRef: "relay-c",
     });
   });
+
+  it("evaluates OPENRIG_RELAY_MODE=pull as ready without OPENRIG_RELAY_URL or OPENRIG_RELAY_OUTBOUND_TOKEN and validates mode/token errors", () => {
+    const pullValidFile = join(home, "pull-valid.env");
+    const pullNoTokenFile = join(home, "pull-no-token.env");
+    const badModeFile = join(home, "bad-mode.env");
+    const pullDupA = join(home, "pull-dup-a.env");
+    const pushDupB = join(home, "push-dup-b.env");
+
+    writeFileSync(
+      pullValidFile,
+      "OPENRIG_RELAY_MODE=pull\nOPENRIG_RELAY_INBOUND_TOKEN=pull-inbound-tok-1\n",
+      { mode: 0o600 },
+    );
+    writeFileSync(pullNoTokenFile, "OPENRIG_RELAY_MODE=pull\n", { mode: 0o600 });
+    writeFileSync(
+      badModeFile,
+      "OPENRIG_RELAY_MODE=hybrid\nOPENRIG_RELAY_INBOUND_TOKEN=bad-mode-tok\n",
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      pullDupA,
+      "OPENRIG_RELAY_MODE=pull\nOPENRIG_RELAY_INBOUND_TOKEN=shared-pull-push-tok\n",
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      pushDupB,
+      "OPENRIG_RELAY_URL=http://127.0.0.1:8787/out\nOPENRIG_RELAY_OUTBOUND_TOKEN=out-b\nOPENRIG_RELAY_INBOUND_TOKEN=shared-pull-push-tok\n",
+      { mode: 0o600 },
+    );
+
+    const hPull = relayHuman("pull-user", "relay-pull", `file:${pullValidFile}`) as unknown as HumanFragment;
+    const hNoTok = relayHuman("notok-user", "relay-pull-notok", `file:${pullNoTokenFile}`) as unknown as HumanFragment;
+    const hBadMode = relayHuman("badmode-user", "relay-bad-mode", `file:${badModeFile}`) as unknown as HumanFragment;
+
+    const loaded = loadRelayProfiles(home, { entities: [hPull, hNoTok, hBadMode] });
+
+    const pPull = loaded.get("relay-pull")!;
+    expect(pPull.ready).toBe(true);
+    expect(pPull.state).toBe("ready");
+    expect(pPull.mode).toBe("pull");
+    expect(pPull.endpointUrl).toBeNull();
+    expect(pPull.warnings).toEqual([]);
+    expect(pPull.reason).toBe("relay profile verified (pull outbox mode and inbound token configured)");
+    expect(pPull.credentials).toEqual({
+      url: null,
+      outboundToken: null,
+      inboundToken: "pull-inbound-tok-1",
+    });
+    expect(authenticateRelayInboundToken(loaded, "pull-inbound-tok-1")).toMatchObject({
+      ok: true,
+      connectorRef: "relay-pull",
+    });
+
+    const pNoTok = loaded.get("relay-pull-notok")!;
+    expect(pNoTok.ready).toBe(false);
+    expect(pNoTok.mode).toBe("pull");
+    expect(pNoTok.reason).toMatch(/missing OPENRIG_RELAY_INBOUND_TOKEN/);
+    expect(pNoTok.credentials).toBeNull();
+
+    const pBadMode = loaded.get("relay-bad-mode")!;
+    expect(pBadMode.ready).toBe(false);
+    expect(pBadMode.reason).toMatch(/invalid OPENRIG_RELAY_MODE \(must be 'push' or 'pull'\)/);
+    expect(pBadMode.credentials).toBeNull();
+
+    // Cross-profile inbound token collision between pull and push profiles is rejected
+    const hDupPull = relayHuman("u-dup-1", "relay-dup-pull", `file:${pullDupA}`) as unknown as HumanFragment;
+    const hDupPush = relayHuman("u-dup-2", "relay-dup-push", `file:${pushDupB}`) as unknown as HumanFragment;
+    const dupLoaded = loadRelayProfiles(home, { entities: [hDupPull, hDupPush] });
+    expect(dupLoaded.get("relay-dup-pull")!.ready).toBe(false);
+    expect(dupLoaded.get("relay-dup-pull")!.reason).toMatch(/ambiguous.*OPENRIG_RELAY_INBOUND_TOKEN/i);
+    expect(dupLoaded.get("relay-dup-push")!.ready).toBe(false);
+    expect(dupLoaded.get("relay-dup-push")!.reason).toMatch(/ambiguous.*OPENRIG_RELAY_INBOUND_TOKEN/i);
+  });
 });

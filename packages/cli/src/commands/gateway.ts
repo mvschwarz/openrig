@@ -281,7 +281,7 @@ Examples:
     .description("List the registered people, with delivery readiness and quiet hours (rig gateway participants adds organizations, groups, policy and shared channels)")
     .option("--json", "Complete record(s) as JSON")
     .action(async (opts: { json?: boolean }) => {
-      const { listHumans } = await import("@openrig/daemon/gateway-human-registry");
+      const { listHumans, NO_HUMAN_CONFIGURED } = await import("@openrig/daemon/gateway-human-registry");
       const res = listHumans();
       if (!res.ok) { console.error(`refused: ${res.error}`); process.exitCode = 1; return; }
       const humans = await Promise.all(res.humans.map(async (record) => {
@@ -290,7 +290,7 @@ Examples:
           quiet: quiet.ok ? quiet.quiet : { unknown: `quiet hours could not be read from the daemon: ${quiet.reason}` } };
       }));
       if (opts.json) { console.log(JSON.stringify({ ok: true, humans })); return; }
-      if (res.humans.length === 0) { console.log("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …"); return; }
+      if (res.humans.length === 0) { console.log(NO_HUMAN_CONFIGURED); return; }
       for (const h of humans) {
         const inbound = h.bindings.inboundResolvable || !h.bindings.primary ? "" : "  [outbound-only]";
         const primary = h.bindings.primary ? `primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef}` : "no connector: Feed and Steering only";

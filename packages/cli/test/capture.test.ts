@@ -185,7 +185,7 @@ describe("Capture CLI", () => {
       const { out, err } = await run(["read@my-rig", "--readable"]);
       expect(requests.at(-1)!.readable).toEqual({ width: 120, height: 40 });
       expect(out).toEqual(["line1\nline2\n"]);
-      expect(err).toEqual(["[rig capture: read@my-rig: read at 120x40; its window was then given back its size and its own window-size]"]);
+      expect(err).toEqual(["[rig capture: read@my-rig: read at 120x40; its size was put back and its window-size override was unset]"]);
     });
 
     it("says so when a web terminal took the window over meanwhile, instead of claiming a give-back", async () => {
@@ -195,7 +195,7 @@ describe("Capture CLI", () => {
 
     it("says when the size couldn't be put back, without claiming it was", async () => {
       const { err } = await run(["sizeback@my-rig", "--readable"]);
-      expect(err).toEqual(["[rig capture: sizeback@my-rig: read at 120x40; its own window-size was given back, but putting its size back failed: busy]"]);
+      expect(err).toEqual(["[rig capture: sizeback@my-rig: read at 120x40; its window-size override was unset, but putting its size back failed: busy]"]);
     });
 
     it("a readable request waits out the daemon's readable budget; other captures keep the usual wait", async () => {

@@ -17,9 +17,11 @@ import net from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -149,26 +151,9 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     }
   });
 
-  it("GET /api/hosts dials where ssh resolves an ssh host (alias and port), and reads unknown behind a ProxyJump", async () => {
-    const server = net.createServer((sock) => sock.destroy());
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const bin = mkdtempSync(join(tmpdir(), "hosts-ssh-bin-"));
-    const savedPath = process.env["PATH"];
-    try {
-      const { port } = server.address() as net.AddressInfo;
-      // A stand-in `ssh -G`: the alias resolves to this listener; the other host sits behind a jump.
-      writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncase "$*" in\n  *devbox*) printf 'hostname 127.0.0.1\\nport ${port}\\n' ;;\n  *) printf 'hostname jumpy\\nport 22\\nproxyjump bastion\\n' ;;\nesac\n`, { mode: 0o755 });
-      process.env["PATH"] = `${bin}:${savedPath}`;
-      writeFileSync(join(home, "hosts.yaml"), "hosts:\n  - id: devbox\n    transport: ssh\n    target: devbox\n  - id: jumpy\n    transport: ssh\n    target: jumpy\n");
-      const res = await app.request("/api/hosts", { headers: auth });
-      const body = (await res.json()) as { hosts: Array<{ id: string; status: string }> };
-      expect(body.hosts.map((h) => [h.id, h.status])).toEqual([["devbox", "reachable"], ["jumpy", "unknown"]]);
-    } finally {
-      process.env["PATH"] = savedPath;
-      rmSync(bin, { recursive: true, force: true });
-      await new Promise((resolve) => server.close(resolve));
-    }
-  });
+  // hosts-list-ssh-probe-inert.test.ts pins that passive SSH rows start no
+  // process and open no socket. Keep excluding a loopback characterization that
+  // marks a directly resolved SSH host as reachable.
 
   it("writes a valid entry through the writer twin and the CLI-visible registry file", async () => {
     const res = await app.request("/api/hosts/add", {
@@ -307,17 +292,38 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
   });
 
   it("POST /api/hosts/remove deletes only the registry entry, returns previous entry", async () => {
-    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
-    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-b", transport: "http", url: "http://vm-b" }) });
+    const probeServer = net.createServer((socket) => socket.destroy());
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        probeServer.once("error", reject);
+        probeServer.listen(0, "127.0.0.1", () => {
+          const address = probeServer.address();
+          if (!address || typeof address === "string") {
+            reject(new Error("loopback probe fixture did not expose an address"));
+            return;
+          }
+          resolve(address.port);
+        });
+      });
 
-    const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
-    expect(res.status).toBe(200);
-    const body = await res.json() as { entry: { id: string } };
-    expect(body.entry).toMatchObject({ id: "vm-a", transport: "ssh" });
+      await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+      await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-b", transport: "http", url: `http://127.0.0.1:${port}` }) });
 
-    const loaded = await app.request("/api/hosts", { headers: auth });
-    const body2 = await loaded.json() as { hosts: Array<{ id: string }> };
-    expect(body2.hosts.map(h => h.id)).toEqual(["vm-b"]);
+      const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { entry: { id: string } };
+      expect(body.entry).toMatchObject({ id: "vm-a", transport: "ssh" });
+
+      const loaded = await app.request("/api/hosts", { headers: auth });
+      const body2 = await loaded.json() as { hosts: Array<{ id: string }> };
+      expect(body2.hosts.map(h => h.id)).toEqual(["vm-b"]);
+    } finally {
+      if (probeServer.listening) {
+        await new Promise<void>((resolve, reject) => {
+          probeServer.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    }
   });
 
   it("POST /api/hosts/remove refuses an unknown id", async () => {
@@ -414,7 +420,8 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    // The full schema: the approval item carries its question (human_questions) and records the person's answer.
+    migrate(db, ALL_MIGRATIONS);
     // The REAL gate composition (startup.ts shape): human seats pass
     // before parse — pairing's approval item rides it.
     repo = new QueueRepository(db, new EventBus(db), {
@@ -458,6 +465,35 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(repo.list({ limit: 100 })[0]?.destinationSession).toBe("blair@external");
   });
 
+  it("a target with nobody registered (never, or no longer) says so from the requester's side; several with no default keep today's text", async () => {
+    const neverHome = mkdtempSync(join(tmpdir(), "pair-never-registered-"));
+    try {
+      expect(loadHumanRegistry(neverHome)).toMatchObject({ ok: false, noHumans: true });
+      for (const registry of [() => loadHumanRegistry(neverHome), () => ({ ok: true as const, entities: [] })]) {
+        const res = await buildApp(repo, BEARER, registry).request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: "pair_human_required", addresses: [],
+          message: "No person is registered on the target host, so nobody there can be asked to approve pairing. On the target, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created." });
+      }
+      expect(repo.list({ limit: 100 })).toHaveLength(0);
+    } finally { rmSync(neverHome, { recursive: true, force: true }); }
+    const several = await buildApp(repo, BEARER, () => ({ ok: true, entities: [human, { ...human, entityId: "blair", address: "blair@external" }] }))
+      .request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+    expect(((await several.json()) as { message: string }).message).toContain("Pair approval needs one registered human, or a default when several exist.");
+  });
+
+  it("the reply names who was asked and who reads their answer, or why nobody does yet", async () => {
+    const res = await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) });
+    expect(await res.json()).toMatchObject({ person: "alex@external", owner: null,
+      noReader: "no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel)" });
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@rig");
+    try {
+      const owned = await (await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) })).json() as Record<string, unknown>;
+      expect(owned).toMatchObject({ person: "alex@external", owner: "lead@rig" });
+      expect(owned.noReader).toBeUndefined();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("issuance mints the ONE human approval moment: a human-routed qitem with code + summary + evidence_ref", async () => {
     const create = vi.spyOn(repo, "create");
     const { code, approvalQitemId } = await issue();
@@ -469,6 +505,11 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
+    // This host has no receiving agent, so the request says so: the person's answer is kept for one, and the direct
+    // controls are the TUI's pairing settings and rig host approve|deny on this host.
+    expect(item.sourceSession).toBe("host-pair@kernel");
+    expect(item.body).toContain("No agent reads answers here yet: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel). Your answer, a click or your words, is kept, and goes to the receiving agent once one is set; nothing is granted or denied meanwhile.");
+    expect(item.body).toContain(`To decide now on this host: open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
@@ -517,13 +558,14 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     }
   });
 
-  it("approve (close done) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {
+  it("approve (an agent seat's close naming Approve) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {
     const { pairId, approvalQitemId } = await issue();
 
     const pending = await app.request(`/api/hosts/pair-request/${pairId}`);
     expect(((await pending.json()) as { status: string }).status).toBe("pending");
 
-    await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "done", closureReason: "no-follow-on" });
+    // A close with no choice named doesn't approve (host-pair-explicit-approval.test.ts); this one names it.
+    await repo.update({ qitemId: approvalQitemId, actorSession: "dev-agent@fixture-rig", state: "done", closureReason: "no-follow-on", resolution: "approve" });
 
     const approved = await app.request(`/api/hosts/pair-request/${pairId}`);
     const body = await approved.json() as { status: string; token: string };
@@ -532,6 +574,23 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
 
     const second = await app.request(`/api/hosts/pair-request/${pairId}`);
     expect(second.status).toBe(404);
+  });
+
+  // Steering's Deny and Drop close the item done, with closure denied or canceled (mission-control-write-contract.ts
+  // verbToClosure); a done with any reason but no-follow-on isn't an approval. Each denies and hands nothing over.
+  it.each([
+    ["Steering's Deny", { closureReason: "denied", closureTarget: "operator denied" }],
+    ["Steering's Drop", { closureReason: "canceled", closureTarget: "not now" }],
+    ["another closure", { closureReason: "escalation", closureTarget: "ops@team" }],
+  ] as const)("%s (done, not no-follow-on) → denied, with no token, and the pairing dies", async (_label, closure) => {
+    const { pairId, approvalQitemId } = await issue();
+    await repo.update({ qitemId: approvalQitemId, actorSession: "alex@external", state: "done", ...closure });
+    expect(repo.getById(approvalQitemId)).toMatchObject({ state: "done", closureReason: closure.closureReason });
+    const res = await app.request(`/api/hosts/pair-request/${pairId}`);
+    const body = await res.json() as { status: string; token?: string };
+    expect(body).toEqual({ status: "denied" });
+    expect(JSON.stringify(body)).not.toContain(BEARER);
+    expect((await app.request(`/api/hosts/pair-request/${pairId}`)).status).toBe(404);
   });
 
   it("deny → status denied, and the pairing dies (nothing to hand over)", async () => {

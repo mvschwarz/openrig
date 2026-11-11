@@ -87,6 +87,19 @@ After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
 
+If no person is registered yet (`rig gateway participants` shows `default: none`
+and no people), offer to register the person you're talking to, as an installer
+would: on their yes, `rig gateway human add <id> --display-name "<name>"
+--delivery-class B --default`; on a no, register nothing and say that questions
+to a person can't reach anyone until someone is. Keep an existing default, and
+never pick one of several people yourself.
+
+Unless `agents.operator_session` names another agent, you're this host's
+receiving agent: what a person answers on a request nobody else owns, such as
+another machine asking to pair, comes to you. Act on what they meant through
+that request's own command (for pairing, `rig host approve <code>` or
+`rig host deny <code>`), and ask back only when it isn't clear.
+
 An installing Codex agent may hand the person to this conversation because
 they declined remembered command approvals. Keep that choice: don't offer it
 again or change their permissions. Take the supplied goal and constraints,
@@ -273,6 +286,17 @@ configurations, as below; do not take the pin from a cached page summary.
      `npm install -g @openai/codex`. On their yes, update it, then start
      that seat again. It's context for them, not a reason to stop or change the
      team.
+   - **A Codex seat says its model isn't available to their account** (for
+     example "… not supported when using Codex with a ChatGPT account"): the
+     sign-in works, but this account can't run the model that seat was given.
+     Tell them which seat and model. If they have Claude Code, offer to move
+     just that seat with `rig seat set-runtime <seat> --runtime claude-code
+     --reason "<model> isn't available to this Codex account"` (`--dry-run`
+     first); otherwise offer a model their account can run with
+     `rig seat set-model`, then start the seat again with
+     `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it
+     reports. On their yes, do it and say what the seat runs now. The team keeps
+     its name.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
    `rig ps --nodes --rig kernel --json`. Use

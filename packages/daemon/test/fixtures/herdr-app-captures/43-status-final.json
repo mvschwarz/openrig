@@ -1,0 +1,32 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "status-final",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"status\":true}\n"
+  },
+  "reply": {
+    "line": "{\"zoom\":1.0,\"font_size\":14.0,\"ui_font_size\":13.0,\"space\":\"sp524ffbf49bcbe210ae2be30d9d1a8a76\",\"tab\":\"tb-capture-view\",\"focused_pane\":\"p7fa971b8ab8a1367861ab6b7db028291\",\"layout\":\"main\",\"agent\":null,\"floats\":{},\"overlays\":[\"frame-welcome\"],\"errors\":[]}\n",
+    "json": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb-capture-view",
+      "focused_pane": "p7fa971b8ab8a1367861ab6b7db028291",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    }
+  },
+  "elapsed_ms": 0,
+  "notes": "The window answers again after the stop/continue above."
+}

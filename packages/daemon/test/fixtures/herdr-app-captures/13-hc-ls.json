@@ -1,0 +1,69 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "hc-ls",
+  "channel": "hc-cli",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "argv": [
+      "hc",
+      "ls",
+      "--json"
+    ],
+    "via": "scripts/sandbox hc (HC_SESSION=herdr-app-<sandbox>)"
+  },
+  "reply": {
+    "exit": 0,
+    "stdout": "{\"hidden_finished\":0,\"terminals\":[{\"address\":\"t1\",\"agent\":\"sh\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0,\"where\":\"person-space / 1\"},{\"address\":\"t2\",\"agent\":\"sleep\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0,\"where\":\"work / 1\"},{\"address\":\"t3\",\"agent\":\"sleep\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0,\"where\":\"person-space / 2\"},{\"address\":\"t4\",\"agent\":\"sleep\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0,\"where\":\"person-space / 2\"},{\"address\":\"t5\",\"agent\":\"sleep\",\"cwd\":\"<sandbox>/work\",\"state\":\"live\",\"turn\":0,\"where\":\"person-space / 2\"}]}\n",
+    "stderr": "",
+    "json": {
+      "hidden_finished": 0,
+      "terminals": [
+        {
+          "address": "t1",
+          "agent": "sh",
+          "cwd": "<sandbox>/work",
+          "state": "live",
+          "turn": 0,
+          "where": "person-space / 1"
+        },
+        {
+          "address": "t2",
+          "agent": "sleep",
+          "cwd": "<sandbox>/work",
+          "state": "live",
+          "turn": 0,
+          "where": "work / 1"
+        },
+        {
+          "address": "t3",
+          "agent": "sleep",
+          "cwd": "<sandbox>/work",
+          "state": "live",
+          "turn": 0,
+          "where": "person-space / 2"
+        },
+        {
+          "address": "t4",
+          "agent": "sleep",
+          "cwd": "<sandbox>/work",
+          "state": "live",
+          "turn": 0,
+          "where": "person-space / 2"
+        },
+        {
+          "address": "t5",
+          "agent": "sleep",
+          "cwd": "<sandbox>/work",
+          "state": "live",
+          "turn": 0,
+          "where": "person-space / 2"
+        }
+      ]
+    }
+  },
+  "elapsed_ms": 31,
+  "notes": "Every live terminal in the sandbox core, with labels."
+}

@@ -143,6 +143,11 @@ export function proofCommand(): Command {
 The selected daemon owns show/judge. Scope addresses are mission/slices/slice#item.
 The project owner selects proofPolicy: { judges: [exact-seat-address] } in the
 owning slice.yaml, mission.yaml or project.yaml (nearest wins; no default gate roles).
+By default an item's latest judgment from any listed judge decides it. Add
+everyJudge: true to require every listed judge's own current accept: one judge's
+accept then can't hide another's reject, withdraw, missing judgment or stale
+evidence. Turning it on is a policy change, so earlier judgments must be recorded
+again. rig proof show lists each judge's own latest judgment either way.
 The contract is the authored ## Proof contract. A sole item needs no # selector.
 
 Example (existing evidence, no copied hashes or operation key):

@@ -1,0 +1,223 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-08, issue #2762, family B). Seat-authored note prose is replaced; daemon-generated notes are verbatim.",
+  "family": "B",
+  "lineageId": "fc-267211da6d8b-1794119249",
+  "now": "2026-11-08T10:27:18.193Z",
+  "observationWindowSeconds": 21600,
+  "findingTransitionIds": [
+    102789,
+    102791,
+    102861,
+    103066,
+    103077,
+    103382,
+    103413,
+    103657,
+    103702,
+    104080,
+    104082,
+    104102,
+    104120,
+    104121,
+    104122,
+    104123,
+    105068,
+    105091,
+    105862,
+    105864
+  ],
+  "members": [
+    {
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "handedOffFrom": null,
+      "sourceSession": "coordenacao-orquestrador-tech@fabrica",
+      "destinationSession": "coordenacao-coord-2@fabrica",
+      "tags": [
+        "coordenar",
+        "mission:family-b"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 102789,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T06:27:29.970Z",
+      "state": "pending",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "created",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 102791,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T06:28:23.544Z",
+      "state": "in-progress",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 102861,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T06:33:14.987Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 103066,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T06:48:56.164Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: coordenacao-coord-2@fabrica|e67d6cce86f6e65f#96d28cdc-c522-4461-a4a0-a3aa3e36ea5b; generation e91ed588-7e02-4e88-9c43-7ed7dd3ed239; retention-state WyIwMU02SzhSM1BZOUZUMU1CVlE5NlFFMThHNSIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations fc-267211da6d8b-1794119249,fc-c2faca195a0b-1794120012,fc-e5b12832dd7c-1794119883",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 103077,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T06:50:56.211Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivered: coordenacao-coord-2@fabrica|e67d6cce86f6e65f#96d28cdc-c522-4461-a4a0-a3aa3e36ea5b",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 103382,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:09:00.520Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: coordenacao-coord-2@fabrica|3bf0bfe339c0655a#bd05bb0e-2621-42ba-8e34-8d158528aa98; generation e91ed588-7e02-4e88-9c43-7ed7dd3ed239; retention-state WyIwMU02SzhSM1BZOUZUMU1CVlE5NlFFMThHNSIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations fc-267211da6d8b-1794119249,fc-cb3a20fc529c-1794120731",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 103413,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:11:00.935Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivered: coordenacao-coord-2@fabrica|3bf0bfe339c0655a#bd05bb0e-2621-42ba-8e34-8d158528aa98",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 103657,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:29:05.414Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: coordenacao-coord-2@fabrica|9788ecad901785a7#8fba1da3-0ccd-45ec-bbb9-57c378b592ea; generation e91ed588-7e02-4e88-9c43-7ed7dd3ed239; retention-state WyIwMU02SzhSM1BZOUZUMU1CVlE5NlFFMThHNSIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations fc-267211da6d8b-1794119249,fc-855fa752a297-1794122202",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 103702,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:31:05.908Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivered: coordenacao-coord-2@fabrica|9788ecad901785a7#8fba1da3-0ccd-45ec-bbb9-57c378b592ea",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104080,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:55:12.001Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: coordenacao-coord-2@fabrica|9c2dc4a902e6f557#939dbc5e-35e8-43d3-9eb1-f548cd221b4e; generation e91ed588-7e02-4e88-9c43-7ed7dd3ed239; retention-state WyIwMU02SzhSM1BZOUZUMU1CVlE5NlFFMThHNSIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations fc-267211da6d8b-1794119249",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104082,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:55:20.138Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 104102,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:57:12.486Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivered: coordenacao-coord-2@fabrica|9c2dc4a902e6f557#939dbc5e-35e8-43d3-9eb1-f548cd221b4e",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104120,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:59:13.426Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: coordenacao-coord-2@fabrica|9c2dc4a902e6f557#939dbc5e-35e8-43d3-9eb1-f548cd221b4e (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104121,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:59:13.438Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: coordenacao-coord-2@fabrica|9788ecad901785a7#8fba1da3-0ccd-45ec-bbb9-57c378b592ea (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104122,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:59:13.449Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: coordenacao-coord-2@fabrica|3bf0bfe339c0655a#bd05bb0e-2621-42ba-8e34-8d158528aa98 (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 104123,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T07:59:13.460Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: coordenacao-coord-2@fabrica|e67d6cce86f6e65f#96d28cdc-c522-4461-a4a0-a3aa3e36ea5b (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 105068,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T09:25:21.041Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M6X2F6P8DF6YZ61N8AX5TFSC; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 105091,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T09:26:18.372Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 105862,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T10:26:19.423Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M6X7NS03RP55N94TAGCT322S; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 105864,
+      "qitemId": "fc-267211da6d8b-1794119249",
+      "ts": "2026-11-08T10:26:31.864Z",
+      "state": "blocked",
+      "actorSession": "coordenacao-coord-2@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

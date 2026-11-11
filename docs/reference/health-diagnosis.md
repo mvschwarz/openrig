@@ -91,7 +91,11 @@ and `severity=info`. CLI/TUI call this **needs diagnosis**, not a confirmed
 warning. Enabled diagnosis policy admits one bounded packet even though the
 product denominator is unknown. Ordinary unavailable/stale detector records
 remain ineligible. Diagnosis and human-notification traffic are excluded from
-the numerator and cannot recursively generate another investigation.
+the numerator and cannot recursively generate another investigation. So is the
+daemon's own bookkeeping: transitions by system actors (`*@system` and the
+bare `system` of claim handover) and daemon notes recorded under any actor
+(`auto-unparked:`, `blocker custody moved `, `park wake `, `parked-owner `).
+The reported `transitionIds` are the counted transitions.
 
 The agent reads the actual evidence, including beyond the supplied references,
 and resolves the semantic outcome granularity and consequence boundary. Use the

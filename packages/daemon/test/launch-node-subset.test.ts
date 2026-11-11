@@ -1,6 +1,8 @@
 // OPR.0.3.4.11 — launchNodeSubset tests: managed partial restore for held seats.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -816,6 +818,35 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
         expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeExecutable: fs.realpathSync(executable) }), expect.anything());
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
     });
+
+    it.skipIf(!["darwin", "linux"].includes(process.platform))("provider takeover captures launch before stopping and passes it transiently to the adapter", async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-capture-"));
+      const executable = path.join(root, "claude"), script = path.join(root, "owned-child.cjs");
+      fs.writeFileSync(executable, '#!/bin/sh\nprintf "  --settings <file>  Settings\\n  --model <model>  Model\\n  --resume <id>  Resume\\n"\n', { mode: 0o755 });
+      fs.writeFileSync(script, 'console.log("ready");setInterval(()=>{},1000)');
+      const child = spawn(process.execPath, [script, "--settings", "/custom rules.json", "--model", "opus"], {
+        env: { PATH: process.env.PATH!, HOME: root, CLAUDE_CONFIG_DIR: "/custom config", CUSTOM_SETTING: "transient-only" }, stdio: ["ignore", "pipe", "ignore"],
+      });
+      try {
+        await once(child.stdout!, "data");
+        const { rigId, nodeIds } = seedPodAwareRig();
+        seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+        liveDriver(rigId, nodeIds[0]!);
+        (tmux as any).differingSessionEnv = vi.fn(async () => ["CUSTOM_SETTING"]);
+        tmux.getPanePid.mockResolvedValue(child.pid! as never);
+        // Pane/lineage is simulated; argv/environment are read from this real owned child.
+        processes = [{ pid: child.pid!, ppid: process.pid, pgid: child.pid!, tpgid: child.pid!, command: `${executable} --session-id original`, executableName: "claude", startedAt: "Fri Oct 9 07:00:00 2026" }];
+        const adapter = readyAdapter("claude-code");
+        (tmux as any).signalPaneProcess.mockImplementation(async () => { processes = []; return { ok: true }; });
+        const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepClaudeLaunch: true });
+        expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeLaunch: expect.objectContaining({
+          args: ["--settings", "/custom rules.json", "--model", "opus"], configDir: "/custom config",
+        }) }), expect.anything());
+        expect(result.warnings?.join(" ")).toContain("Kept mapped running Claude options");
+        expect(JSON.stringify(result)).not.toContain("transient-only");
+        expect(JSON.stringify(db.prepare("SELECT * FROM snapshots").all())).not.toContain("transient-only");
+      } finally { child.kill("SIGTERM"); await once(child, "close"); fs.rmSync(root, { recursive: true, force: true }); }
+    }, 15_000);
 
     it("keeps a seat's Claude MCP opt-out beside the retained executable on the continuation", async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-executable-"));
