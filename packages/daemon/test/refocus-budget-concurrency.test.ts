@@ -237,16 +237,40 @@ describe("refocus: overlapping events for one occupant", () => {
     const release = join(root!, "trace-release");
     const first = hook(f, "UserPromptSubmit", "s1", {
       OPENRIG_REFOCUS_BUDGET_MS: "10000", STUB_TRACE_READY: ready, STUB_TRACE_RELEASE: release,
-    });
+    }, 60_000, "prompt-A");
     try {
       await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 5000 });
-      const second = await hook(f, "UserPromptSubmit", "s1");
+      const revision = stateOf(f, "s1").pendingRevision;
+      const second = await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" }, 60_000, "prompt-A");
       expect(context(second)).toBe("");
       expect(second.stderr).toContain("another hook is delivering");
+      expect(stateOf(f, "s1").pendingRevision).toBe(revision);
     } finally {
       writeFileSync(release, "");
       expect(context(await first)).toContain("REFOCUS");
     }
+    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
+  }, 20_000);
+
+  it("retains a distinct identified on-demand prompt while an earlier prompt is rendering", async () => {
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const ready = join(root!, "trace-ready");
+    const release = join(root!, "trace-release");
+    const first = hook(f, "UserPromptSubmit", "s1", {
+      OPENRIG_REFOCUS_BUDGET_MS: "10000", STUB_TRACE_READY: ready, STUB_TRACE_RELEASE: release,
+    }, 60_000, "prompt-A");
+    try {
+      await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 5000 });
+      const second = await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" }, 60_000, "prompt-B");
+      expect(context(second)).toBe("");
+    } finally {
+      writeFileSync(release, "");
+      expect(context(await first)).toContain("REFOCUS");
+    }
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: expect.any(String) });
+    expect(context(await hook(f, "UserPromptSubmit", "s1", {}, 60_000, "prompt-C"))).toContain("REFOCUS");
+    expect(context(await hook(f, "UserPromptSubmit", "s1", {}, 60_000, "prompt-D"))).toBe("");
   }, 20_000);
 
   it("delivers once per identified prompt even if the second handler starts after completion", async () => {

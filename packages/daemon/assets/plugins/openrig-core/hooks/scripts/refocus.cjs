@@ -451,7 +451,7 @@ function runsForThisSeatsProject(env = process.env) {
   const promptId = firstString(input.prompt_id);
   const onDemand = enabled(process.env.OPENRIG_REFOCUS_NOW, false);
   let state, size = 0, grown, claimed;
-  const claim = { id: crypto.randomUUID(), pid: process.pid, at: Date.now() };
+  const claim = { id: crypto.randomUUID(), pid: process.pid, at: Date.now(), promptId };
   try {
     state = start.read();
     try { size = fs.statSync(transcriptPath).size; } catch {}
@@ -550,6 +550,15 @@ function runsForThisSeatsProject(env = process.env) {
     }
 
     if (start.exclusive && liveDelivery(state.deliveryClaim)) {
+      if (onDemand && promptId && state.deliveryClaim.promptId && promptId !== state.deliveryClaim.promptId) {
+        const pending = {
+          pendingOn: state.pendingOn || event,
+          pendingAt: state.pendingAt || new Date().toISOString(),
+          pendingRevision: crypto.randomUUID(),
+        };
+        Object.assign(state, pending);
+        if (!start.write(state)) start.writeDeferred("other", pending);
+      }
       process.stderr.write("refocus: another hook is delivering. Any later pending work stays queued\n");
       return;
     }
