@@ -265,7 +265,7 @@ describe("retained authority negative controls", () => {
     const sliceRevision = readSliceReadiness(f.alpha).revision;
     const events: Array<{ type: string; revision: string }> = [];
     let invalidated = 0;
-    const watch = watchProofSources(f.missions, () => { invalidated++; }, {
+    const watch = await watchProofSources(f.missions, () => { invalidated++; }, {
       emit: (event: { type: string; revision: string }) => events.push(event),
     } as unknown as EventBus);
     try {
@@ -296,8 +296,11 @@ describe("retained authority negative controls", () => {
   it("pushes changed source truth, keeps sibling basis, and ignores unchanged source bytes", async () => {
     const f = fixture(); f.judge(); const sibling = readSliceReadiness(f.beta).revision;
     const events: Array<{ type: string; revision: string }> = []; let invalidated = 0;
-    const watch = watchProofSources(f.missions, () => { invalidated++; }, { emit: (e: { type: string; revision: string }) => events.push(e) } as unknown as EventBus);
+    const watch = await watchProofSources(f.missions, () => { invalidated++; }, { emit: (e: { type: string; revision: string }) => events.push(e) } as unknown as EventBus);
     try {
+      // Creation events may interrupt asynchronous setup; count changes only after the initial basis settles.
+      await expect.poll(() => watch.observation().state, { timeout: 5000 }).toBe("watching");
+      events.length = 0; invalidated = 0;
       const file = join(f.alpha, "proof/evidence.md"); fs.writeFileSync(file, fs.readFileSync(file));
       await new Promise(r => setTimeout(r, 100)); expect(events).toEqual([]);
       fs.writeFileSync(file, "Measured outcome changed.\n");
@@ -450,7 +453,7 @@ it("notifies scope followers on a node-header change even when proof readiness i
   const f = fixture(), file = join(f.alpha, "SPEC.md");
   const original = fs.readFileSync(file, "utf8"), before = readMissionReadiness(f.mission).revision;
   let scopeChanges = 0;
-  const watch = watchProofSources(f.missions, () => {}, { emit: () => {} } as unknown as EventBus, () => { scopeChanges++; });
+  const watch = await watchProofSources(f.missions, () => {}, { emit: () => {} } as unknown as EventBus, () => { scopeChanges++; });
   try {
     const updated = original.replace("id: 01-alpha", "id: renamed-alias");
     fs.writeFileSync(file, updated);
