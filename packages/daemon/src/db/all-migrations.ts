@@ -4,6 +4,7 @@ import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
+import { coreAppAccessSchema } from "./migrations/168_core_app_access.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -355,4 +356,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeProcessLimitsSchema,
   seatHookBridgeSchema,
   sessionLaunchedCwdSchema,
+  coreAppAccessSchema,
 ];
