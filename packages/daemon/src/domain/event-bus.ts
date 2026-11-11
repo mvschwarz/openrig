@@ -111,6 +111,26 @@ export class EventBus {
   }
 
   /**
+   * Run a nested transactional writer (a savepoint inside the active envelope) whose failure the caller handles. If it
+   * throws, its savepoint has rolled back the event rows it persisted, so their tokens leave the envelope too, and the
+   * caller's transaction can still commit. Outside an envelope it just runs.
+   */
+  discardOnThrow<T>(writer: () => T): T {
+    const envelope = this.activeEnvelope;
+    const persisted = envelope ? new Set(envelope.persisted) : null;
+    const registered = envelope ? new Set(envelope.registered) : null;
+    try {
+      return writer();
+    } catch (err) {
+      if (envelope && persisted && registered) {
+        for (const token of [...envelope.persisted]) if (!persisted.has(token)) envelope.persisted.delete(token);
+        for (const token of [...envelope.registered]) if (!registered.has(token)) envelope.registered.delete(token);
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Run one caller-owned synchronous transaction under the W2b notification
    * envelope. Every token persisted through EventBus during the callback must
    * be registered before it returns. The exact object-identity sets are

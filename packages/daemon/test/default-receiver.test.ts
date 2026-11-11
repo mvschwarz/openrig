@@ -183,5 +183,10 @@ describe("who decides a runner's answered permission request", () => {
     // A chosen seat this host doesn't have can't decide: the kernel operator, when here, else nobody.
     expect(permissionDeciderFor(db([]), "runner@team", () => "ghost@team")).toBeNull();
     expect(permissionDeciderFor(both, "runner@team", () => "ghost@team")).toMatchObject({ session: KERNEL_OPERATOR_SESSION, note: "ghost@team, the receiving agent, isn't on this host" });
+    // A setting that's set but ignored keeps its note when the kernel operator decides: it never reads as unset.
+    const ignored = { session: null, problem: 'agents.operator_session is "alex@external", which isn\'t an agent\'s session, so it\'s ignored' };
+    const kernelDecides = permissionDeciderFor(both, "runner@team", () => ignored)!;
+    expect(kernelDecides).toMatchObject({ session: KERNEL_OPERATOR_SESSION, note: ignored.problem });
+    expect(describeDefaultReceiver(kernelDecides)).not.toContain("unset");
   });
 });

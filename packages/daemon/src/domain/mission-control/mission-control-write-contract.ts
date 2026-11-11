@@ -818,6 +818,9 @@ export class MissionControlWriteContract {
       }
       throw err;
     }
+    // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
+    const final = after as QueueItem | null;
+    const runnerNotice = !answer.message && final && runnerPermissionOrigin(final) ? runnerAnswerNotice(final) : undefined;
     return {
       actionId: actionEntry!.actionId,
       verb: actionVerb,
@@ -827,7 +830,7 @@ export class MissionControlWriteContract {
       notifyAttempted: false,
       notifyResult: null,
       auditedAt: evaluatedAt,
-      answer,
+      answer: runnerNotice ? { ...answer, message: runnerNotice } : answer,
     };
   }
 
@@ -958,6 +961,18 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
         "answer verb should have been routed to answerAsk",
       );
   }
+}
+
+/** What became of a person's answer on a runner's permission request: handed to the receiving agent, or kept (the
+ *  person's own receipt says why). Undefined for a request the answer closed (no agent wired here). */
+function runnerAnswerNotice(ask: QueueItem): string | undefined {
+  if (ask.state === "handed-off" && ask.handedOffTo) {
+    return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run.`;
+  }
+  if (ask.state === "pending" || ask.state === "in-progress" || ask.state === "blocked") {
+    return `Your answer is kept on ${ask.qitemId}, and the request is still waiting: the tool hasn't run, and nothing was permitted or refused. A note to you says why it wasn't passed to a receiving agent. To decide directly: rig seat decide-permission ${ask.qitemId} --option <id>.`;
+  }
+  return undefined;
 }
 
 function snapshotQitem(q: QueueItem): Record<string, unknown> {

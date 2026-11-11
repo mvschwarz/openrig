@@ -4257,7 +4257,9 @@ export class QueueRepository {
       : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).trim()}"`
       : "answered without a choice or words";
     const person = input.actorSession;
-    try { this.handoffNow({
+    // A handoff that fails after persisting its events rolls them back with its savepoint: discardOnThrow takes their
+    // tokens out of the caller's notify envelope too, so the kept answer below still commits.
+    try { this.eventBus.discardOnThrow(() => this.handoffNow({
       qitemId: item.qitemId, fromSession: person, toSession: decider,
       summary: `Decide: ${item.summary ?? "a runner's permission request"} (${person} answered)`,
       transitionNote: `runner-permission-answer-passed: ${person}'s answer goes to ${decider}, the receiving agent, to decide while the runner waits`,
@@ -4273,7 +4275,7 @@ export class QueueRepository {
         "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming this request, then decide.",
         "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
       ].join("\n"),
-    }); } catch (error) {
+    })); } catch (error) {
       // Kept, and committed with the answer's own write (a throw here would roll it back): the request stays open, and
       // the person is told it couldn't be passed on. Never a default permit.
       console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; it's kept and the request stays open`, error);
@@ -4305,7 +4307,11 @@ export class QueueRepository {
       if (item.state === "done" || item.state === "failed") {
         this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
         this.transitionLog.append({ qitemId: item.qitemId, state: item.state, actorSession: input.actorSession, transitionNote: input.transitionNote });
-        return { persistedEvents: [] as PersistedEvent[] };
+        // The row's state doesn't change, but its decision does: a runner waiting on this request reads it now, and
+        // Steering refreshes.
+        return { persistedEvents: [this.eventBus.persistWithinTransaction({ type: "queue.updated", qitemId: item.qitemId,
+          fromState: item.state, toState: item.state, closureReason: null, closureTarget: null,
+          actorSession: input.actorSession, summary: item.summary ?? null })] };
       }
       if (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked") return null;
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);

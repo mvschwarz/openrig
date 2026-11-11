@@ -366,7 +366,7 @@ export class RunnerPermissions {
     const words = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
     const recorded = this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
       transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${words}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}` });
-    if (!recorded) return { ok: false, code: "not_recorded", message: `The decision couldn't be recorded on ${live.qitemId} (its row is ${live.state}). Nothing was decided; the request is still waiting.` };
+    if (!recorded) return { ok: false, code: "not_recorded", message: `The decision couldn't be recorded on ${live.qitemId} (its row is ${live.state}). Nothing was decided. Read the request again.` };
     return this.read(null, askId);
   }
 
