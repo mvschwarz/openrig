@@ -4094,9 +4094,11 @@ export class SessionTransport {
       hookActivity.reason !== "permission_request_pending" &&
       hookActivity.reason !== "permission_prompt_cleared"
     ) {
-      // Fresh hook (within the 15s send window): authoritative for any state.
+      // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
+      // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
+      // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
-        if (hookActivity.state === "running" && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle") && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4109,7 +4111,9 @@ export class SessionTransport {
             captureObserver: privateInput ? undefined : this.captureObserver,
             binding,
           });
-          if (paneVeto.state === "needs_input") return paneVeto;
+          // After an idle hook only a dialog refuses: a draft or other input stays the delivery guard's.
+          if (paneVeto.state === "needs_input" && (hookActivity.state === "running"
+            || paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
         }
         return hookActivity;
       }
