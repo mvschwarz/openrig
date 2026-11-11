@@ -980,6 +980,20 @@ describe("RigTeardownOrchestrator", () => {
     expect(result).toMatchObject({ sessionsKilled: 1, errors: [], deleted: del, leftRunning: ["desktop@test-rig"] });
   });
 
+  it("stops a seat whose stored kind is neither tmux nor external CLI, as it does today: only an external CLI seat is left running", async () => {
+    const { rigId, nodeId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    db.prepare("UPDATE bindings SET attachment_type = 'herdr' WHERE node_id = ?").run(nodeId);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async (name: string) => ({ state: name === "r01-dev" ? "present" : "absent" }));
+
+    const result = await buildTeardown(tmux).teardown(rigId, { delete: false });
+
+    expect(tmux.killSession).toHaveBeenCalledWith("r01-dev");
+    expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+    expect(result.leftRunning).toBeUndefined();
+  });
+
   it("names the community-harness seats whose pane it stopped, since the harness's own processes may outlive it", async () => {
     const { rigId } = seedRigWithNode({ runtime: "claude-code", cwd: "/tmp" });
     const hermes = rigRepo.addNode(rigId, "hermes", { runtime: "synth-harness" });

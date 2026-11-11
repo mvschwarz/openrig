@@ -54,6 +54,7 @@ import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/communi
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -1427,7 +1428,7 @@ export class SeatLifecycleService {
     const claimed = rows.find(row => row.origin === "claimed");
     if (claimed) {
       const seats = this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null;
-      const externalCli = this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType === "external_cli";
+      const externalCli = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType)) === "external";
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
@@ -2292,7 +2293,7 @@ export class SeatLifecycleService {
   /** The claimed-session routes for this seat's rig (see claimedSessionRoutes). */
   private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
     return claimedSessionRoutes(seat.rigName, sessionName, this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null,
-      this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType === "external_cli");
+      seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
   }
 
   private describe(resolved: ResolvedSeat): SeatDescriptor {

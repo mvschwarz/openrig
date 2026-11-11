@@ -23,3 +23,11 @@ export function resolveSeatKind(stored: string | null | undefined): ResolvedSeat
 export function seatInboundTransport(seat: ResolvedSeatKind): "tmux" | "none" {
   return seat.kind === "external_cli" ? "none" : "tmux";
 }
+
+/** Who runs a seat's process, which decides whether OpenRig's lifecycle (restore, fresh launch, teardown) acts on it. An
+ *  external CLI seat joined with `rig attach` runs in someone else's program: OpenRig neither launches nor stops it, and
+ *  leaves it attached. An unknown stored kind keeps the path it takes today, OpenRig's own; as for the inbound transport,
+ *  whether it should is a question for its owner. */
+export function seatProcessOwner(seat: ResolvedSeatKind): "openrig" | "external" {
+  return seat.kind === "external_cli" ? "external" : "openrig";
+}
