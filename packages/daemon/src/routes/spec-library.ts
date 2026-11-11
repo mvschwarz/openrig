@@ -76,7 +76,7 @@ export function specLibraryRoutes(): Hono {
         // their separate two-file byte check above because they have no persisted row of their own.
         const sourceHashes = verifiedSourceHashes;
         for (const entry of [...workflowEntries]) {
-          if (entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
+          if (entry.id.startsWith("workflow-source:") || entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
           try {
             let sourceHash = sourceHashes.get(entry.sourcePath);
             if (sourceHash === undefined) {
