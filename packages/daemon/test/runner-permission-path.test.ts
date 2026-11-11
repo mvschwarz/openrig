@@ -962,4 +962,21 @@ describe("an answered request: #2934's follow-ups", () => {
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
   });
+
+  it("a handoff that throws after its own write was released rolls back whole, so the kept answer is the only outcome", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    // The handoff's own transaction has released its savepoint; the throw comes after it, inside the caller's transaction.
+    const spy = vi.spyOn(f.queueRepo as unknown as { deliverWakeIntentAfterCommit: () => void }, "deliverWakeIntentAfterCommit")
+      .mockImplementationOnce(() => { throw new Error("failed after the handoff was written"); });
+    try {
+      expect(await f.answer(askId, { decision: "only the test file" })).toMatchObject({ status: 200 });
+    } finally { spy.mockRestore(); }
+    // Nothing of the handoff remains: the request wasn't handed on, and no row went to the receiving agent.
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE handed_off_from = ?").get(askId)).toEqual({ n: 0 });
+    expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
+  });
 });
