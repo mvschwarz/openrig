@@ -767,7 +767,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     const name = host?.trim();
     if (!name || name === "local") return { client, headers: {}, remote: false };
     if (access && !access.owner) {
-      const message = "A granted connection reaches only the daemon serving it; host isn't available here.";
+      const message = "Naming a host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant; a granted connection reaches only the daemon serving it.";
       return errorResult(message, "host_not_available", message);
     }
     const registry = hostRegistryLoader();
@@ -927,7 +927,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_ps")) server.registerTool(
     "rig_ps",
     {
-      description: "List rigs and their status. host reads a registered remote host instead of this daemon.",
+      description: "List rigs and their status. host reads a registered remote host instead of this daemon; it needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
       }),
@@ -1200,7 +1200,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_send")) server.registerTool(
     "rig_send",
     {
-      description: "Send a message to an agent's terminal using reliable two-step send",
+      description: "Send a message to an agent's terminal using reliable two-step send. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         session: z.string().describe("Target session name (e.g. dev-impl@my-rig)"),
         text: z.string().describe("Message text to send"),
@@ -1241,7 +1241,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_capture")) server.registerTool(
     "rig_capture",
     {
-      description: "Capture terminal output from an agent session",
+      description: "Capture terminal output from an agent session. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         session: z.string().optional().describe("Session name (omit for multi-target with rig/pod)"),
         rig: z.string().optional().describe("Capture all sessions in a rig"),
@@ -1388,7 +1388,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_create")) server.registerTool(
     "rig_queue_create",
     {
-      description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
+      description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         destination: access?.external
           ? z.string().optional().describe("Destination seat: member@rig, or its name alone (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
@@ -1490,7 +1490,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_show")) server.registerTool(
     "rig_queue_show",
     {
-      description: "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord.",
+      description: "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
@@ -1527,7 +1527,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_list")) server.registerTool(
     "rig_queue_list",
     {
-      description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
+      description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         owned: z.boolean().optional().describe("Only items assigned to this seat: its whole inbox (overrides destination)"),
         mine: z.boolean().optional().describe("Items this seat sent or owns"),
@@ -1617,7 +1617,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_update")) server.registerTool(
     "rig_queue_update",
     {
-      description: "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened.",
+      description: "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         qitemId: z.string().describe("The queue item to update"),
         state: z.string().optional().describe("New state (e.g. in-progress, blocked, done)"),
@@ -2268,7 +2268,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_handoff")) server.registerTool(
     "rig_queue_handoff",
     {
-      description: "Pass a queue item this seat holds on to the next seat in one step: the item closes as handed off and a new item opens for that seat, carrying the work's lineage in chainOfRecord, so whoever follows the work reaches the new item from rig_queue_show. Without body the new item keeps the task's text. If the call times out, check rig_queue_show on this qitemId before retrying: when it reads handed off, its successor is the new item, so don't hand it off again.",
+      description: "Pass a queue item this seat holds on to the next seat in one step: the item closes as handed off and a new item opens for that seat, carrying the work's lineage in chainOfRecord, so whoever follows the work reaches the new item from rig_queue_show. Without body the new item keeps the task's text. If the call times out, check rig_queue_show on this qitemId before retrying: when it reads handed off, its successor is the new item, so don't hand it off again. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         qitemId: z.string().describe("The queue item to pass on"),
         to: z.string().describe("The next seat (e.g. qa@my-rig)"),
