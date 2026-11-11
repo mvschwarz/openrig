@@ -474,7 +474,7 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     // This host has no kernel operator, so the request is agent-free: Approve and Deny decide, typed words are kept and the
     // person is asked again, and a terminal on this host can decide with rig host approve|deny.
     expect(item.sourceSession).toBe("host-pair@kernel");
-    expect(item.body).toContain("Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (it has no operator-agent@kernel).");
+    expect(item.body).toContain("Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel).");
     expect(item.body).toContain(`To decide in a terminal on this host with its operator bearer token: rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
   });
 

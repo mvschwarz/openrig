@@ -134,6 +134,8 @@ export const SETTINGS_VALID_KEYS = [
   // dispatch ACK §4: allowlist-only edit; no migrations / new
   // endpoints / event types.
   "agents.advisor_session",
+  // The default receiving agent: reads what a person answers when nothing else reads it (resolveDefaultReceiver), and the
+  // agent a dead seat's recovery reaches. Unset means the kernel operator, when this host has that seat.
   "agents.operator_session",
   // Explicit operator override; unset means discover the registered human.
   "workspace.operator_seat_name",
