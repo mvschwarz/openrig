@@ -79,8 +79,9 @@ Other layouts and other herdr-app windows don't show Rig views. Each window (app
 - Entering a view again (a click in the strip, or herdr-app restarting with it shown) returns the keyboard to the cell
   you were last in there, else the first live cell.
 - **Your tabs** gives the keyboard back to your own pane.
-- OpenRig's own rewrites (another view opening or closing, a cell ending) never move the keyboard, whether you are in
-  a view or in your tabs.
+- Apart from an open, OpenRig's own rewrites (another view closing, a cell ending) leave the keyboard where it is,
+  whether you are in a view or in your tabs, with one exception: when the cell you were last in ends while its view is
+  shown, the keyboard goes to that view's first live cell, if one is left.
 - Once the view is shown, an interactive cell for a local seat attaches its tile to the seat with plain tmux, as a
   writable tile does ([terminal sessions](terminal-sessions.md#replacing-a-seats-session)). Until then it only shows
   the seat, and anything typed in it is dropped. A cell for a seat on another host is its ssh attachment from the
