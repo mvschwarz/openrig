@@ -79,7 +79,7 @@ function shellWord(value: string): string {
 }
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
-function tmuxOnDaemonServer(): string {
+export function tmuxOnDaemonServer(): string {
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
   return `tmux${server ? ` ${server}` : ""}`;
 }

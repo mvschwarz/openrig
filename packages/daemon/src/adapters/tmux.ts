@@ -8,6 +8,7 @@ import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
+import { tmuxOnDaemonServer } from "./tmux-server.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -1358,7 +1359,9 @@ export class TmuxAdapter {
     const why = marker === null ? "doesn't carry this seat's OpenRig marker (OPENRIG_NODE_ID)" : `carries another seat's OpenRig marker (OPENRIG_NODE_ID=${marker})`;
     return { ok: false, code: "seat_target_unproven", message: `'${name}' was left running: its tmux session ${sessionId} ${why}, so it can't be shown `
       + "to be this seat's terminal, and nothing was detached or killed. A session OpenRig didn't create, such as an adopted one, has no marker. "
-      + `If it is this seat's, stop it in tmux yourself and run the command again.` };
+      // On the daemon's own tmux server: a person's plain `tmux` can reach another server, and a namesake there.
+      + `If it is this seat's, look first with \`${tmuxOnDaemonServer()} attach -t ${shellQuote(`=${name}`)}\`, then stop it with `
+      + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` and run the command again.` };
   }
 
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */

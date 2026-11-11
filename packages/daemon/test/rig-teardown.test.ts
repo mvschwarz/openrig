@@ -28,6 +28,7 @@ import { replaceFile } from "../src/adapters/replace-file.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -1422,12 +1423,17 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
 
   it("a session with the seat's name but no marker (adopted, bound or older) is left running, not stopped", async () => {
     const h = await harness();
+    // The daemon is on its own server here, so the manual path must name it: a plain `tmux` reaches another server.
+    setDaemonTmuxServer(["-L", "own"]);
     try {
       await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
       const session = await h.bind();
-      expectLeftRunning(h, session.id, await h.teardown(), /doesn't carry this seat's OpenRig marker \(OPENRIG_NODE_ID\)/);
+      const result = await h.teardown();
+      expectLeftRunning(h, session.id, result, /doesn't carry this seat's OpenRig marker \(OPENRIG_NODE_ID\)/);
+      expect(result.errors[0]).toContain(`If it is this seat's, look first with \`tmux -L own attach -t '=${NAME}'\`, `
+        + `then stop it with \`tmux -L own kill-session -t '=${NAME}'\` and run the command again.`);
       expect(await h.alive(NAME)).toBe(true);
-    } finally { await h.close(); }
+    } finally { setDaemonTmuxServer([]); await h.close(); }
   });
 
   it("a session marked with another seat's node is left running", async () => {
