@@ -159,5 +159,10 @@ describe("the settings view", () => {
     expect(JSON.stringify(view)).not.toContain("synthetic-example-value");
     expect(view.entries.find((entry) => entry.key === "slack.inboundDestination")?.application)
       .toBe(`Not chosen: this host has no receiving agent (Agents & runtime), so when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`);
+    // A receiver that couldn't be read, or none resolved for this view, is unknown, not absent.
+    const unknown = `Not chosen: OpenRig couldn't tell whether this host has a receiving agent (Agents & runtime). If it still can't when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`;
+    for (const receiver of [{ session: null, source: "none" as const, state: "unknown" as const }, null]) {
+      expect(settingsBrowser(store, null, home, receiver).entries.find((entry) => entry.key === "slack.inboundDestination")?.application).toBe(unknown);
+    }
   });
 });

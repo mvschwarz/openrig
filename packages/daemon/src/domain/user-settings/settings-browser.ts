@@ -178,7 +178,10 @@ export function settingsBrowser(store: SettingsStore, gateway: Record<string, un
       cfg ? read.fields.includes(key) ? "file" : "default" : "unavailable", kind, undefined,
       unchosen ? receiver?.session
         ? "Not chosen: when the connector starts, unrouted messages go to the default receiving agent (Agents & runtime)."
-        : `Not chosen: this host has no receiving agent (Agents & runtime), so when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`
+        // A receiver that couldn't be read (or wasn't resolved here) is unknown, not absent.
+        : receiver && receiver.state !== "unknown"
+          ? `Not chosen: this host has no receiving agent (Agents & runtime), so when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`
+          : `Not chosen: OpenRig couldn't tell whether this host has a receiving agent (Agents & runtime). If it still can't when the connector starts, unrouted messages go to ${LEGACY_INBOUND_DESTINATION} for compatibility, as before.`
         : undefined);
   }
   // #192: the channel map as one read-only line, "match: channel" per entry.
