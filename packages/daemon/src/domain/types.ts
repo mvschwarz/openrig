@@ -123,6 +123,11 @@ export interface Session {
 
 // -- Event types --
 
+/** What a delivery-evidence record says was admitted: the outbox rows that exist, none, or unknown when they couldn't be read. */
+export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
+/** A send's own screen check as it reported it, or nulls when none ran. */
+export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -182,6 +187,16 @@ export type RigEvent =
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
+  /** What one send's own result says was admitted, written and seen on screen, for the seat and
+   *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
+   *  result shows reached the input; `terminalObserved` is today's screen check, verbatim; `inputBoundary` is unknown
+   *  until a harness hook is correlated. Never acceptance, a claim or completion. It names no node, so a node's own event
+   *  reads never see it: the session and occupant generation name the seat. */
+  | { type: "transport.delivery_evidence"; sessionName: string; seatKind: "tmux" | "external_cli" | "unknown";
+      pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
+      admitted: DeliveryEvidenceAdmitted;
+      written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
+      terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result" }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
