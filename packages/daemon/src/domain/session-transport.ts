@@ -287,6 +287,7 @@ const CLAUDE_STATUS_WARNINGS = [
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
   // "Restart to update" on its own row (Claude 2.1.319, #2605).
   /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
@@ -479,14 +480,18 @@ function closesFramedPromptAbove(lines: string[], open: number, indent: number, 
 const codexFooter = (line: string): boolean => isComposerFooter(line)
   || /(?:\b\d+% context left\b|\bContext \[)/.test(line);
 
-/** Preserve faint styling so autocomplete ghosts can be separated from authored
- * text. Color channel values must never be interpreted as style codes. */
+/** Preserve the styling used for autocomplete ghosts and the drawn cursor.
+ * Color channel values must never be interpreted as style codes. */
 function styledTextLines(screen: string) {
-  let faint = false;
+  let faint = false, inverse = false;
   return screen.replace(/\r\n/g, "\n").split("\n").map(raw => {
     let text = "", offset = 0;
-    const faintCells: boolean[] = [];
-    const append = (value: string) => { text += value; faintCells.push(...Array<boolean>(value.length).fill(faint)); };
+    const faintCells: boolean[] = [], inverseCells: boolean[] = [];
+    const append = (value: string) => {
+      text += value;
+      faintCells.push(...Array<boolean>(value.length).fill(faint));
+      inverseCells.push(...Array<boolean>(value.length).fill(inverse));
+    };
     for (const match of raw.matchAll(/\x1b\[([0-9;:]*)m/g)) {
       append(raw.slice(offset, match.index));
       const codes = match[1]!.split(";");
@@ -497,15 +502,18 @@ function styledTextLines(screen: string) {
           const skip = codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? (codes[i + 2] === "" ? 5 : 4) : 0;
           // Color channels are not style codes. Ambiguous compound sequences
           // provide no faint-style proof, rather than interpreting an RGB 2 as dim.
-          if (!skip || i + skip !== codes.length - 1) { faint = false; break; }
+          if (!skip || i + skip !== codes.length - 1) { faint = inverse = false; break; }
           i += skip;
-        } else if (code === "" || code === "0" || code === "22") faint = false;
+        } else if (code === "" || code === "0") faint = inverse = false;
+        else if (code === "22") faint = false;
         else if (code === "2") faint = true;
+        else if (code === "7") inverse = true;
+        else if (code === "27") inverse = false;
       }
       offset = match.index! + match[0].length;
     }
     append(raw.slice(offset));
-    return { text, faintCells };
+    return { text, faintCells, inverseCells };
   });
 }
 
@@ -600,7 +608,11 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       else if (cursorOffset >= 0 && !rows[cursorRow]!.slice(cursorOffset).trim()) visible[cursorRow] = rows[cursorRow]!.slice(0, cursorOffset);
     }
     const atStart = y === start && x === prefix;
-    const empty = atStart && rows.length === 1 && rows[0] === "";
+    // Claude can draw an inverse-video blank in the cursor cell (#2925). Only
+    // that single cell at the start is padding; ordinary/preceding spaces stay input.
+    const inverseCells = styled[start]!.inverseCells;
+    const cursorBlank = prompt.glyph === "❯" && rows[0] === " " && inverseCells[prefix] && !inverseCells[prefix - 1];
+    const empty = atStart && rows.length === 1 && (rows[0] === "" || cursorBlank);
     const last = visible.length - 1;
     const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
     const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;

@@ -367,20 +367,33 @@ registered person can approve (none, or several with no default; name one with
 `--human`) (`packages/daemon/src/routes/hosts.ts:379-398`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
-approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+approval says how long and until when, in UTC. A target that reports who was asked (`person`) and who reads their answer (`owner`), or why
+nobody does yet (`noReader`), has `rig host pair` name them; an older target's reply keeps the general text. With
+nobody registered on the target, its refusal (409 `pair_human_required`) says to register a person there:
+`rig gateway human add <entityId> --display-name <name> --delivery-class B --default`. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
 On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
 Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
-- **When the target has a kernel operator (`operator-agent@kernel`),** it asks. The person's answer, a click or their
-  words, comes back to it as a reply, and it decides with `rig host approve <code>` or `rig host deny <code>`. It asks
-  the person back when the answer isn't clear. The person is told once that their answer was received. If the operator
-  isn't running, the request and that receipt say so, and they name the terminal route. The request stays pending, never
-  granted or denied, until the operator decides or the request expires. If the operator doesn't pick up the answer, the
-  person is told at expiry that it didn't.
-- **When the target has no kernel operator** (or the queue can't send rows to it, or OpenRig couldn't read which; the
-  request says which), Approve and Deny decide at once. A reply in words, or with none (a file), is kept on the
-  request, and the person is asked again with a new request.
+- **When the target has a receiving agent** (the one chosen in `agents.operator_session`, else its kernel operator
+  `operator-agent@kernel`), it asks. The person's answer, a click or their words, comes back to it as a reply, and it
+  decides with `rig host approve <code>` or `rig host deny <code>`. It asks the person back when the answer isn't clear.
+  The person is told once that their answer was received. If the agent isn't running, the request and that receipt say
+  so, and they name the direct controls (below). The request stays pending, never granted or denied, until a decision or
+  expiry. If the agent doesn't pick up the answer, the person is told at expiry that it didn't.
+- **When the target has no receiving agent** (or the queue can't send rows to it, or OpenRig couldn't read which; the
+  request says which, and names a chosen agent it couldn't use), the person's answer, a click or their words, is kept on
+  the request and decides nothing. (A Steering Deny or Drop, which closes the request, still refuses it.) The person
+  gets one receipt naming the direct controls. If a receiving agent is set
+  before the request expires, it gets their answer once and decides. (On 0.7.11, Approve and Deny decided at once here,
+  and words were asked again.)
+- **The direct controls:** the target's TUI pairing settings (`rig tui`, then Settings, Instance & work, Pairing
+  requests; the Feed's request opens it there), or `rig host approve|deny` below. The TUI lists the open requests from
+  `GET /api/hosts/pair-requests` (code, requester, expiry, status, who reads the answer, and the person's kept answer,
+  so an Approve over a kept Deny is made knowingly; no credential), reads the
+  request again before Approve or Deny, and decides through `POST /api/hosts/pair-decision` with its operator bearer
+  token. A decision it can't confirm (a timeout, a lost connection or a server error) reads "outcome unknown" and is
+  read again, never sent twice.
 - **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
 
 On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
@@ -388,11 +401,11 @@ approval row id), run on the target from an agent seat or a plain terminal, deci
 token: an agent seat carries `OPENRIG_AUTH_BEARER_TOKEN`, and a person sets it or passes `--bearer <token>`. Without
 it the daemon answers 401, and nothing is decided. It decides once, and refuses an
 unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or already-decided (409
-`pair_request_decided`) request, including one its row already decided before the requester's next check (a click on
-a target with no kernel operator, or a refusing close). It records who decided: the seat, or `human@host` from a plain terminal. The person
+`pair_request_decided`) request, including one its row already decided before the requester's next check (an agent
+seat's close naming Approve, or a refusing close). A close never approves over the person's recorded Deny. It records who decided: the seat, or `human@host` from a plain terminal. The person
 gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
 --resolution approve` on an unanswered request still approves, and any other close that carries no answer and isn't
-the person's own reply, or `--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator, run
+the person's own reply, or `--state denied`, refuses. To refuse a pairing, use Deny on the target's pairing settings or on Steering, run
 `rig host deny`, or let it expire (nothing is persisted). At its deadline a request's ask closes as expired, even when the requester stopped waiting, so a late click there isn't
 accepted. The decisions live in the daemon's memory, as the requests do, so a daemon restart drops an open request.
 

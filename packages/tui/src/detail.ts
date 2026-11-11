@@ -26,12 +26,18 @@ export interface ContentLine {
 
 /** Wrap prose and full references without losing a link's target. Graph/table rows
  * retain their own layout; callers opt in only for detail pages. */
+/** Text from outside shown in the terminal: tabs as spaces, and every other control character as a visible \xNN, so it
+ *  can't move the cursor, clear the screen or start an escape sequence. */
+export function escapeControlChars(text: string): string {
+  return text.replace(/\t/g, "    ").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
 export function wrapDetailLines(lines: ContentLine[], width: number): ContentLine[] {
   const room = Math.max(8, width);
   // A ContentLine is one logical terminal row. YAML block scalars and current
   // source files may contain CR/LF; never emit those inside a physical row.
   const logical = lines.flatMap((line) => line.text.split(/\r\n|\r|\n/).map((text, i) => ({
-    ...line, text: text.replace(/\t/g, "    ").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`),
+    ...line, text: escapeControlChars(text),
     ...(i ? { action: undefined, zones: undefined, segs: undefined } : {}),
   })));
   return logical.flatMap((line) => {

@@ -68,6 +68,29 @@ describe("cursor-bound composer input", () => {
     }
   });
 
+  it("reads Claude's context hint below a named composer without skipping arbitrary rows", () => {
+    const frame = (body: string, styled = false, hint = "~66k uncached · /clear to start fresh"): ComposerSnapshot => ({
+      screen: [...Array<string>(22).fill(""),
+        "──────────────────────────────────────── dev-docs@moonjoy-workshop ─",
+        `❯\u00a0${body || (styled ? "\x1b[7m \x1b[0m" : "")}`,
+        "─".repeat(68),
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        hint.padStart(66), "", "", "",
+      ].join("\n"),
+      cursor: { x: 2, y: 23, width: 68, height: 30 }, inMode: false,
+    });
+    for (const styled of [false, true]) {
+      for (const body of ["", "person's draft"]) {
+        const snapshot = frame(body, styled);
+        expect(inspectComposerInput(snapshot, "claude-code")).toMatchObject({ state: body ? "text" : "empty" });
+        if (!body) expect(annotateInputBox(snapshot.screen, snapshot.cursor, "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
+      }
+    }
+    for (const hint of ["~66k uncached · /clear to start fresh now", "66k uncached · /clear to start fresh", "~66k uncached · /clear to approve", "unexpected hint"]) {
+      expect(inspectComposerInput(frame("", true, hint), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    }
+  });
+
   it("keeps nested prompt examples inside the current draft, including when its head is clipped", () => {
     const body = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
     const snapshot = claude(body, { x: 4, y: 8 });
@@ -160,6 +183,15 @@ describe("cursor-bound composer input", () => {
       expect(inspectComposerInput(value).state).toBe("text");
     }
     expect(inspectComposerInput(claude("\x1b[2;38;5;245mAsk Codex to do anything\x1b[0m", { x: 2, y: 2 })).state).toBe("empty");
+  });
+
+  it("recognizes only a single inverse-video Claude cursor blank at the prompt start", () => {
+    const cursor = { x: 2, y: 2 };
+    expect(inspectComposerInput(claude("\x1b[7m \x1b[0m", cursor))).toMatchObject({ state: "empty", rows: [""], cursorAtEnd: true });
+    for (const body of [" ", "\x1b[38;5;7m \x1b[0m", "\x1b[7m\x1b[27m ", "\x1b[7m \x1b[0mdraft"]) {
+      expect(inspectComposerInput(claude(body, cursor)).state).toBe("text");
+    }
+    expect(inspectComposerInput(claude("\x1b[7m \x1b[0m", { x: 3, y: 2 }))).toMatchObject({ state: "text", rows: [" "] });
   });
 
   it("requires the complete owned text and preserves significant spaces", () => {

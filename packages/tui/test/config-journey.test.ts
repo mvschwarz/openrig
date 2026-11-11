@@ -86,7 +86,7 @@ describe("CONFIG in the normal TUI journey", () => {
     expect(snap.config!.entries.filter((e) => e.group === "general").map((e) => e.key)).toEqual(expect.arrayContaining([...SETTINGS_VALID_KEYS]));
     while (["config", "system"].includes(view.get().section)) escape();
     expect(view.get()).toMatchObject({ section: work.section, selection: work.selection, filter: work.filter, contentOffset: work.contentOffset });
-    expect(new Set(trace)).toEqual(new Set(["GET /api/config?view=browser", "GET /healthz", "GET /api/gateway/connections"]));
+    expect(new Set(trace)).toEqual(new Set(["GET /api/config?view=browser", "GET /healthz", "GET /api/gateway/connections", "GET /api/hosts/pair-requests"]));
     expect(sources.map((p) => readFileSync(p, "utf8"))).toEqual(before);
     expect(external).not.toHaveBeenCalled();
     expect(JSON.stringify(snap)).not.toContain(secret);

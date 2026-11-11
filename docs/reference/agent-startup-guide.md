@@ -428,22 +428,24 @@ running seat only through the action in the last column.
 
 ### New guidance for a running seat
 
-These reach a running seat without a restart, in the order they reach the agent:
+There are three ways for a seat to pick up new guidance:
 
-1. **Tell it.** `rig send <seat> "Read <file>: <why>"`, or `rig walk <seat> --through <files>` for several. It's in the
-   conversation at the seat's next turn. The seat's reply is the only evidence that it read the file.
+1. **Tell it.** `rig send <seat> "Read <file>: <why>"`, or `rig walk <seat> --through <files>` for several. The seat's
+   interruption settings can hold a message; `rig send` may report `retained, not delivered`.
 2. **The refocus hook**, where the seat runs OpenRig's `openrig-core` hooks (**Refocus** in `rig seat status` shows whether
    the hook has recorded it). The hook's content comes from `OPENRIG_REFOCUS_CONTENT_REF` (a `rig context get` address),
-   else `OPENRIG_REFOCUS_CONTENT_FILE`, else `refocus/REFOCUS.md` under `OPENRIG_HOME`, else the shipped default. It
-   reaches the agent at the next prompt after a compaction, and for Claude also once the conversation has grown past the
-   hook's size threshold.
+   else `OPENRIG_REFOCUS_CONTENT_FILE`, else `refocus/REFOCUS.md` under `OPENRIG_HOME`, else the shipped default. After
+   compaction the hook waits for an eligible prompt. For managed Claude compaction it skips the acknowledgement boundary,
+   and other prompts can arrive first and be skipped while restore is pending. Claude can also refocus after the
+   conversation grows past the hook's size threshold.
 3. **Its guidance file, loaded again:** for Claude at its next compaction, `/clear` or start, for Codex at its next start.
    **Guidance** in `rig seat status` shows which of OpenRig's blocks were written after the session's recorded startup finish.
 
-A pointer or a message names a file; the seat still reads it itself, under its own permission settings. A seat whose
-harness asks before reading a file outside its project (its own `LEARNED.md` under the topology root, a plugin's skill)
-waits at that prompt until someone answers it, even though a hook could deliver an excerpt of the same file. Finding a
-file, a hook picking up, and the agent reading and using it are separate facts.
+A file pointer leaves the read to the seat, under its own permission settings. `rig walk` reads the named files in the
+calling process and sends their contents. A seat whose harness asks before reading a file outside its project (its own
+`LEARNED.md` under the topology root, a plugin's skill) waits at that prompt until someone answers it, even though a hook
+could deliver an excerpt of the same file. Finding a file, a hook picking it up, and the agent reading and using it are
+separate facts.
 
 Per harness: Claude Code's and Codex's permission choices are in the setup reference
 ([Claude Code](getting-started.md#claude-code-a-different-launch-flag),

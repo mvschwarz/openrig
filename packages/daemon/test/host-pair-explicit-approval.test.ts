@@ -103,151 +103,117 @@ async function fixture({ kernel = true, operator, ownershipUnreadable = false }:
   const slackThreadReply = (text: string) => router.route({ type: "message", user: "UPAIR", channel: "CPAIR", thread_ts: "1.1", ts: "3.3", text });
   /** Rows created in reply to the request: an answer to it is kept on the request itself, so there are none. */
   const replyRows = () => repo.list({ limit: 1000 }).filter((item) => item.replyTo === ask || item.destinationSession === "host-pair@kernel");
-  return { repo, contract, ask, issued, poll, answer, decide, toPerson, slackButton, slackThreadReply, replyRows };
+  /** The pairing settings' read: the requests on this host, as text, so a leaked token would show. */
+  const requests = async () => { const res = await app.request("/api/hosts/pair-requests"); return { http: res.status, text: await res.text() }; };
+  return { repo, contract, ask, issued, poll, answer, decide, toPerson, slackButton, slackThreadReply, replyRows, requests };
 }
 
-describe("host pairing with no kernel operator running: Approve and Deny decide, typed words are asked again", () => {
-  it("the request carries one question, Approve or Deny, and tells the person typed words are kept and asked again", async () => {
+// With no receiving agent (no agents.operator_session, no kernel operator), a person's click or words are kept for the
+// receiving agent once one is set, never a decision by themselves; the direct controls are the TUI's pairing settings and
+// rig host approve|deny on this host.
+const NO_READER = `no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${OPERATOR})`;
+const direct = (code: string) => `open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>)`;
+const kept = (code: string, said: string) => `Received ${said} on pairing request ${code} from requester@far-host. No agent reads answers on this host yet (${NO_READER}), so it's kept for the receiving agent once one is set, and nothing is granted or denied meanwhile. To decide now: ${direct(code)}.`;
+
+describe("host pairing with no receiving agent: answers are kept for one, and the person decides directly", () => {
+  it("the request carries one question, says no agent reads answers yet, and names the direct controls", async () => {
     const f = await fixture();
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe("host-pair@kernel");
     expect(item.humanQuestions).toEqual([{ id: "pair", question: `Pair requester@far-host (code ${f.issued.code}) with this host?`, options: [
       { id: "approve", label: "Approve: hand this host's bearer token to the requester" }, { id: "deny", label: "Deny" }] }]);
-    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${OPERATOR}).`);
-    expect(item.body).toContain(`rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}`);
+    expect(item.body).toContain(`No agent reads answers here yet: ${NO_READER}. Your answer, a click or your words, is kept, and goes to the receiving agent once one is set; nothing is granted or denied meanwhile.`);
+    expect(item.body).toContain(`To decide now on this host: ${direct(f.issued.code)}.`);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-  });
-
-  // Steering's and the TUI's "reply <text>": the person's words close the request and are kept under its question.
-  // Nothing on this host reads them, so they never deny: the person is asked again, and their choice there decides.
-  it.each(["no", "yes", "who is this?"])("a typed reply %j (Steering or the TUI) never denies: words kept, the person is asked again, and Approve there pairs", async (words) => {
-    const f = await fixture();
-    expect((await f.answer({ decision: words })).status).toBe(200);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on",
-      humanAnswers: { pair: { kind: "typed-reply", text: words } } });
-    const [again, ...more] = f.toPerson();
-    expect(more).toEqual([]);
-    expect(again).toMatchObject({ state: "pending", sourceSession: "host-pair@kernel", humanQuestions: f.repo.getById(f.ask)!.humanQuestions });
-    expect(again!.body).toContain(`You wrote "${words}" in reply to this request. Your words are kept, and they didn't deny anything`);
-    // Polling again asks nothing more.
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-    expect(f.toPerson()).toHaveLength(1);
-    expect((await f.answer({ questionId: "pair", optionId: "approve" }, again!.qitemId)).status).toBe(200);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-    expect((await f.poll()).http).toBe(404);
-  });
-
-  it.each(["yes", "no"])("a typed Slack thread reply %j never denies: words kept, the person is asked again", async (words) => {
-    const f = await fixture();
-    await f.slackThreadReply(words);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: words } } });
-    expect(f.toPerson()).toEqual([expect.objectContaining({ state: "pending", sourceSession: "host-pair@kernel" })]);
-  });
-
-  it("a plain terminal on this host decides with rig host approve, recorded as a direct human action, and the person is told", async () => {
-    const f = await fixture();
-    await f.answer({ decision: "yes please" });
-    await f.poll();
-    const again = f.toPerson()[0]!;
-    expect(await f.decide(f.issued.code, "approve")).toEqual({ status: 200,
-      body: { ok: true, decision: "approve", code: f.issued.code, requester: "requester@far-host", by: "human@host" } });
-    // The open re-ask is closed with the result, and one update tells the person.
-    expect(f.repo.getById(again.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "pairing approved by human@host" });
-    expect(f.toPerson().filter((item) => item.humanIntent === "update")).toEqual([expect.objectContaining({
-      body: `Pairing request ${f.issued.code} from requester@far-host: approved by human@host. This host's token is handed over when the requesting machine next checks, if it's still waiting.` })]);
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
   });
 
   it.each([
-    ["Steering's question card", { questionId: "pair", optionId: "approve" }],
-    ["the TUI's Approve act (primary user)", { questionId: "pair", optionId: "approve", authority: "primary-user" }],
-  ] as const)("%s: Approve hands the token over once, then the pairing dies", async (_label, input) => {
-    const f = await fixture();
-    expect((await f.answer(input)).status).toBe(200);
-    expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: "approve" } });
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-    expect((await f.poll()).http).toBe(404);
-  });
-
-  it("Slack's Approve button hands the token over once", async () => {
-    const f = await fixture();
-    await f.slackButton("approve");
-    expect(f.repo.getById(f.ask)?.humanAnswers).toEqual({ pair: "approve" });
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-    expect((await f.poll()).http).toBe(404);
-  });
-
-  it.each([
-    ["Steering's Deny choice", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "deny" })],
-    ["Slack's Deny button", (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("deny")],
-  ] as const)("%s denies, with no token", async (_label, act) => {
+    ["a typed reply \"no\" (Steering or the TUI)", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "no" }), "\"no\""],
+    ["a typed reply \"yes\" (Steering or the TUI)", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "yes" }), "\"yes\""],
+    ["a typed Slack thread reply", (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("who is this?"), "\"who is this?\""],
+    ["Steering's Approve choice", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve" }), "your Approve choice"],
+    ["the TUI's Approve act (primary user)", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve", authority: "primary-user" }), "your Approve choice"],
+    ["Slack's Approve button", (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("approve"), "your Approve choice"],
+    ["Steering's Deny choice", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "deny" }), "your Deny choice"],
+    ["Slack's Deny button", (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("deny"), "your Deny choice"],
+  ] as const)("%s is kept on the request and decides nothing: one receipt names the direct controls, and no token", async (_label, act, said) => {
     const f = await fixture();
     await act(f);
-    expect(f.repo.getById(f.ask)?.humanAnswers).toEqual({ pair: "deny" });
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+    expect(f.repo.getById(f.ask)?.humanAnswers?.pair).toBeDefined();
+    expect(f.replyRows()).toEqual([]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update", sourceSession: "host-pair@kernel",
+      summary: `Pairing ${f.issued.code} from requester@far-host: answer kept`, body: kept(f.issued.code, said) })]);
+    // Polling again sends nothing more.
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    expect(f.toPerson()).toHaveLength(1);
   });
 
-  // An answer is kept on the request, like a runner's permission request's: no reply row goes to host-pair@kernel, so it
-  // works the same on a daemon without a kernel rig, and nothing is left for a seat that doesn't exist.
-  it.each([true, false])("kernel rig registered: %s. An Approve choice (Steering, the TUI, Slack) closes the request in place and approves once", async (kernel) => {
-    for (const [actor, act] of [
-      [PERSON, (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve" })],
-      // The terminal names no responder: the TUI's act is recorded unattributed.
-      ["human@host", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve", authority: "primary-user" })],
-      [PERSON, (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("approve")],
-    ] as const) {
-      const f = await fixture({ kernel });
-      const result = await act(f);
-      // Steering and the TUI answer over HTTP; Slack's router returns its own disposition.
-      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
-      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", closureReason: "no-follow-on", humanAnswers: { pair: "approve" } });
-      expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(actor);
-      expect(f.replyRows()).toEqual([]);
-      expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-      expect((await f.poll()).http).toBe(404);
-    }
-  });
-
-  it.each([true, false])("kernel rig registered: %s. A Deny choice (Steering, Slack) closes the request in place and denies once", async (kernel) => {
+  it.each([true, false])("kernel rig registered: %s. Answers close the request in place, with no reply rows, and decide nothing", async (kernel) => {
     for (const act of [
-      (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "deny" }),
+      (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ questionId: "pair", optionId: "approve" }),
       (f: Awaited<ReturnType<typeof fixture>>) => f.slackButton("deny"),
-    ]) {
-      const f = await fixture({ kernel });
-      const result = await act(f);
-      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
-      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: "deny" } });
-      expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(PERSON);
-      expect(f.replyRows()).toEqual([]);
-      expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
-      expect((await f.poll()).http).toBe(404);
-    }
-  });
-
-  it.each([true, false])("kernel rig registered: %s. A typed reply (Steering, Slack) closes the request in place, words kept, never denied", async (kernel) => {
-    for (const act of [
       (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "yes" }),
-      (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("yes"),
     ]) {
       const f = await fixture({ kernel });
-      const result = await act(f);
-      // Steering and the TUI answer over HTTP; Slack's router returns its own disposition.
-      if (typeof (result as { status?: unknown }).status === "number") expect((result as { status: number }).status).toBe(200);
-      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done", humanAnswers: { pair: { kind: "typed-reply", text: "yes" } } });
+      await act(f);
+      expect(f.repo.getById(f.ask)).toMatchObject({ state: "done" });
       expect(f.repo.closingTransition(f.ask, "done")?.actorSession).toBe(PERSON);
       expect(f.replyRows()).toEqual([]);
       expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     }
   });
 
-  it("a click that decides is told to the person as the outcome, apart from their click", async () => {
+  it("a plain terminal on this host decides with rig host approve, recorded as a direct human action, and the person is told", async () => {
+    const f = await fixture();
+    await f.answer({ decision: "yes please" });
+    await f.poll();
+    expect(await f.decide(f.issued.code, "approve")).toEqual({ status: 200,
+      body: { ok: true, decision: "approve", code: f.issued.code, requester: "requester@far-host", by: "human@host" } });
+    expect(f.toPerson().filter((item) => item.summary === `Pairing ${f.issued.code} from requester@far-host: approved`)).toEqual([expect.objectContaining({
+      body: `Pairing request ${f.issued.code} from requester@far-host: approved by human@host. This host's token is handed over when the requesting machine next checks, if it's still waiting.` })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    expect((await f.poll()).http).toBe(404);
+  });
+
+  it("a receiving agent set after the person answered gets their answer once, and the person is told it reads it", async () => {
     const f = await fixture();
     await f.slackButton("approve");
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-    expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update", summary: `Pairing ${f.issued.code} from requester@far-host: approved`,
-      body: `Pairing request ${f.issued.code} from requester@far-host: approved by ${PERSON}. This host's token was handed to the requesting machine.` })]);
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@fixture-rig");
+    try {
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+      await f.poll();
+      const toAgent = f.repo.list({ limit: 1000 }).filter((item) => item.destinationSession === "lead@fixture-rig");
+      expect(toAgent).toEqual([expect.objectContaining({ sourceSession: "host-pair@kernel",
+        summary: `Pairing ${f.issued.code} from requester@far-host: ${PERSON} answered before you were its receiving agent` })]);
+      expect(toAgent[0]!.body).toContain(`${PERSON} answered pairing request ${f.issued.code} from requester@far-host with their Approve choice`);
+      expect(toAgent[0]!.body).toContain(`rig host approve ${f.issued.code}`);
+      // It decides with the explicit operation, as any receiving agent does.
+      expect((await f.decide(f.issued.code, "approve", "lead@fixture-rig")).status).toBe(200);
+      expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("the pairing settings list the request with who reads it, show a decision's status, and never carry the token", async () => {
+    const f = await fixture();
+    const before = await f.requests();
+    expect(before.http).toBe(200);
+    expect(JSON.parse(before.text)).toEqual({ requests: [expect.objectContaining({ code: f.issued.code, requester: "requester@far-host",
+      status: "pending", person: PERSON, owner: null, noReader: NO_READER, approvalQitemId: f.ask })] });
+    expect((await f.decide(f.issued.code, "approve")).status).toBe(200);
+    const after = await f.requests();
+    expect(JSON.parse(after.text).requests).toEqual([expect.objectContaining({ code: f.issued.code, status: "approved" })]);
+    expect(before.text.includes(BEARER) || after.text.includes(BEARER)).toBe(false);
+  });
+
+  it("the pairing settings show a decision the request's own row records (an agent's close), before the requester collects it", async () => {
+    const f = await fixture();
+    await f.repo.update({ qitemId: f.ask, actorSession: AGENT, state: "done", closureReason: "no-follow-on", resolution: "approve" });
+    expect(JSON.parse((await f.requests()).text).requests).toEqual([expect.objectContaining({ code: f.issued.code, status: "approved" })]);
+    const g = await fixture();
+    await g.repo.update({ qitemId: g.ask, actorSession: AGENT, state: "done", closureReason: "no-follow-on", resolution: "deny" });
+    expect(JSON.parse((await g.requests()).text).requests).toEqual([expect.objectContaining({ code: g.issued.code, status: "denied" })]);
   });
 
   it("an agent seat approves only by naming the choice: rig queue update --state done --closure-reason no-follow-on --resolution approve", async () => {
@@ -270,25 +236,20 @@ describe("host pairing with no kernel operator running: Approve and Deny decide,
     expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
   });
 
-  it("an explicit Deny wins over a later agent close that names Approve", async () => {
+  it("a person's own Deny is never overridden: a later agent close naming Approve hands nothing over", async () => {
     const f = await fixture();
     // A recorded Deny whose return hasn't closed the request yet (its close failed), then an agent's approving close.
     f.repo.recordHumanAnswer({ qitemId: f.ask, actorSession: PERSON, questionId: "pair", optionId: "deny" });
-    expect(f.repo.getById(f.ask)?.state).toBe("pending");
     await f.repo.update({ qitemId: f.ask, actorSession: AGENT, state: "done", closureReason: "no-follow-on", resolution: "approve" });
-    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
   });
 
-  it("a recorded Approve whose return didn't close the request still approves once; a later Steering Deny before the poll denies", async () => {
-    const approvedOpen = await fixture();
-    approvedOpen.repo.recordHumanAnswer({ qitemId: approvedOpen.ask, actorSession: PERSON, questionId: "pair", optionId: "approve" });
-    expect(approvedOpen.repo.getById(approvedOpen.ask)?.state).toBe("pending");
-    expect(await approvedOpen.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
-
-    const deniedAfter = await fixture();
-    deniedAfter.repo.recordHumanAnswer({ qitemId: deniedAfter.ask, actorSession: PERSON, questionId: "pair", optionId: "approve" });
-    await deniedAfter.contract.act({ verb: "deny", qitemId: deniedAfter.ask, actorSession: PERSON });
-    expect(await deniedAfter.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
+  it("a recorded Approve that didn't close the request decides nothing; a later Steering Deny verb denies", async () => {
+    const f = await fixture();
+    f.repo.recordHumanAnswer({ qitemId: f.ask, actorSession: PERSON, questionId: "pair", optionId: "approve" });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
+    await f.contract.act({ verb: "deny", qitemId: f.ask, actorSession: PERSON });
+    expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
   });
 });
 
@@ -321,14 +282,14 @@ describe("host pairing with the kernel operator running: the person's answer goe
     const f = await fixture({ operator: "exited" });
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe(OPERATOR);
-    expect(item.body).toContain(`${OPERATOR} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host with its operator bearer token: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
+    expect(item.body).toContain(`${OPERATOR} isn't running right now, so your answer waits until it starts; nothing is granted or denied meanwhile. To decide sooner on this host: open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
     await f.slackButton("approve");
     expect(f.repo.list({ limit: 1000 }).filter((row) => row.replyTo === f.ask)).toEqual([expect.objectContaining({ destinationSession: OPERATOR, state: "pending" })]);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
     const [receipt, ...more] = f.toPerson();
     expect(more).toEqual([]);
     expect(receipt!.body).toContain(`Received your Approve choice on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} isn't running, so it may not have read it yet. Nothing is granted or denied until it acts, or the request expires at `);
-    expect(receipt!.body).toContain(`To decide now, in a terminal on this host with its operator bearer token: rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
+    expect(receipt!.body).toContain(`To decide now on this host: open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${f.issued.code}, or rig host deny ${f.issued.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
     // The person's terminal route works without a seat.
     expect((await f.decide(f.issued.code, "approve")).body).toMatchObject({ ok: true, by: "human@host" });
     expect(await f.poll()).toEqual({ http: 200, body: { status: "approved", token: BEARER }, leaksToken: true });
@@ -391,10 +352,11 @@ describe("host pairing with the kernel operator running: the person's answer goe
 });
 
 describe("host pairing: one decision per request, and no reply is denied on a technicality", () => {
-  it("a Deny click the requester hasn't polled yet stands: rig host approve is refused, and the poll denies", async () => {
+  it("a kept Deny click decides nothing by itself; the direct decision after it is the one decision, and a second is refused", async () => {
     const f = await fixture();
     await f.slackButton("deny");
-    expect(await f.decide(f.issued.code, "approve")).toMatchObject({ status: 409, body: { error: "pair_request_decided", decision: "deny", by: PERSON } });
+    expect((await f.decide(f.issued.code, "deny")).status).toBe(200);
+    expect(await f.decide(f.issued.code, "approve")).toMatchObject({ status: 409, body: { error: "pair_request_decided", decision: "deny", by: "human@host" } });
     expect(await f.poll()).toEqual({ http: 200, body: { status: "denied" }, leaksToken: false });
   });
 
@@ -415,12 +377,11 @@ describe("host pairing: one decision per request, and no reply is denied on a te
     expect(f.toPerson()).toEqual([expect.objectContaining({ body: expect.stringContaining(`Received your reply on pairing request ${f.issued.code}`) })]);
   });
 
-  it("an attachment-only Slack reply on an agent-free host is never denied: the person is asked again", async () => {
+  it("an attachment-only Slack reply with no receiving agent is never denied: it's kept, and the person gets one receipt", async () => {
     const f = await fixture();
     await f.slackThreadReply("");
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
-    expect(f.toPerson()).toEqual([expect.objectContaining({ state: "pending", sourceSession: "host-pair@kernel",
-      body: expect.stringContaining("Your reply to this request had no words to keep here, and it didn't deny anything") })]);
+    expect(f.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update", sourceSession: "host-pair@kernel", body: kept(f.issued.code, "your reply") })]);
   });
 
   // The queue keeps no words for the literal text "[file reply]" (the text a Slack file reply carries), so these closes
@@ -428,12 +389,12 @@ describe("host pairing: one decision per request, and no reply is denied on a te
   it.each([
     ["Steering", (f: Awaited<ReturnType<typeof fixture>>) => f.answer({ decision: "[file reply]" })],
     ["Slack", (f: Awaited<ReturnType<typeof fixture>>) => f.slackThreadReply("[file reply]")],
-  ] as const)("the literal text [file reply] typed in %s is never denied: asked again with no operator, a receipt with one", async (_label, act) => {
+  ] as const)("the literal text [file reply] typed in %s is never denied: kept with a receipt, with or without a receiving agent", async (_label, act) => {
     const free = await fixture();
     await act(free);
     expect(free.repo.getById(free.ask)?.humanAnswers?.pair).toBeUndefined();
     expect(await free.poll()).toEqual({ http: 200, body: { status: "pending", code: free.issued.code }, leaksToken: false });
-    expect(free.toPerson()).toEqual([expect.objectContaining({ state: "pending", body: expect.stringContaining("Your reply to this request had no words to keep here") })]);
+    expect(free.toPerson()).toEqual([expect.objectContaining({ humanIntent: "update", body: kept(free.issued.code, "your reply") })]);
 
     const owned = await fixture({ operator: "running" });
     await act(owned);
@@ -462,7 +423,8 @@ describe("host pairing: one decision per request, and no reply is denied on a te
 describe("host pairing: exact expiry, and an agent-free request says why nobody reads answers", () => {
   it("the outcome update can't hold the token: a hanging update doesn't delay the approved response", async () => {
     const f = await fixture();
-    await f.slackButton("approve");
+    // An agent's close naming Approve: the poll decides it, and tells the person without awaiting the update.
+    await f.repo.update({ qitemId: f.ask, actorSession: AGENT, state: "done", closureReason: "no-follow-on", resolution: "approve" });
     const create = f.repo.create.bind(f.repo);
     const hang = vi.spyOn(f.repo, "create").mockImplementation(((input: Parameters<typeof f.repo.create>[0]) =>
       input.humanIntent === "update" ? new Promise(() => {}) : create(input)) as typeof f.repo.create);
@@ -485,7 +447,7 @@ describe("host pairing: exact expiry, and an agent-free request says why nobody 
     const f = await fixture({ kernel: false, operator: "running" });
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe("host-pair@kernel");
-    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: ${OPERATOR} can't receive answers on this host.`);
+    expect(item.body).toContain(`No agent reads answers here yet: ${OPERATOR} can't receive answers on this host. Your answer, a click or your words, is kept`);
   });
 
   it("a receiving agent chosen in agents.operator_session owns the request, with no kernel operator here", async () => {
@@ -504,19 +466,24 @@ describe("host pairing: exact expiry, and an agent-free request says why nobody 
       const f = await fixture();
       const item = f.repo.getById(f.ask)!;
       expect(item.sourceSession).toBe("host-pair@kernel");
-      expect(item.body).toContain(`you're asked again: no agent reads answers on this host (agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored, and it has no ${OPERATOR}).`);
+      expect(item.body).toContain(`No agent reads answers here yet: no agent reads answers on this host (agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored, and it has no ${OPERATOR}). Your answer`);
       expect(item.body).not.toContain("no receiving agent is set");
     } finally { vi.unstubAllEnvs(); }
   });
 
-  it("when OpenRig can't read who owns the request, it's agent-free and says it couldn't tell", async () => {
+  it("when OpenRig can't read who owns the request, it says it couldn't tell; once it can, the receiving agent takes the kept answer", async () => {
     const f = await fixture({ operator: "running", ownershipUnreadable: true });
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe("host-pair@kernel");
-    expect(item.body).toContain("Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: OpenRig couldn't tell whether an agent reads answers on this host.");
+    expect(item.body).toContain("No agent reads answers here yet: OpenRig couldn't tell whether an agent reads answers on this host. Your answer, a click or your words, is kept");
     await f.answer({ decision: "yes" });
+    // The ownership read works again at the poll: the running kernel operator is the receiving agent now, and gets the
+    // person's kept answer once; the person is told it reads it.
     await f.poll();
-    expect(f.toPerson()[0]!.body).toContain("and they didn't deny anything: OpenRig couldn't tell whether an agent reads answers on this host, so please decide");
+    await f.poll();
+    expect(f.repo.list({ limit: 1000 }).filter((row) => row.destinationSession === OPERATOR && row.sourceSession === "host-pair@kernel"))
+      .toEqual([expect.objectContaining({ summary: `Pairing ${f.issued.code} from requester@far-host: ${PERSON} answered before you were its receiving agent` })]);
+    expect(f.toPerson()).toEqual([expect.objectContaining({ body: expect.stringContaining(`Received "yes" on pairing request ${f.issued.code} from requester@far-host. ${OPERATOR} reads it and acts on it.`) })]);
   });
 });
 
@@ -538,5 +505,39 @@ describe("host pairing: expiry when the requester stopped waiting", () => {
         expect(await f.poll()).toEqual({ http: 200, body: { status: "expired" }, leaksToken: false });
       } finally { now.mockRestore(); }
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("host pairing, round 1: the kept answer where it's decided, and one whole forward", () => {
+  it("the pairing list carries the person's kept answer: a Deny click, or their words, with who", async () => {
+    const f = await fixture();
+    expect((await f.answer({ questionId: "pair", optionId: "deny" })).status).toBe(200);
+    expect(JSON.parse((await f.requests()).text).requests).toEqual([expect.objectContaining({ status: "pending", answer: { by: PERSON, choice: "deny" } })]);
+    const g = await fixture();
+    expect((await g.answer({ decision: "only after lunch" })).status).toBe(200);
+    expect(JSON.parse((await g.requests()).text).requests).toEqual([expect.objectContaining({ status: "pending", answer: { by: PERSON, words: "only after lunch" } })]);
+  });
+
+  it("a late receiving agent gets the person's whole words and the approval row, once, even when the forward's create throws after it committed", async () => {
+    const f = await fixture({ operator: "running", ownershipUnreadable: true });
+    const words = `please pair it, ${"the build host needs it for the release ".repeat(8)}and tell me when it's done`;
+    expect(words.length).toBeGreaterThan(200);
+    await f.answer({ decision: words });
+    const realCreate = f.repo.create.bind(f.repo);
+    let attempts = 0; // forward creates tried: the first commits and then throws
+    const spy = vi.spyOn(f.repo, "create").mockImplementation(async (input) => {
+      const made = await realCreate(input);
+      if (input.qitemId?.startsWith("qitem-pair-forward-") && attempts++ === 0) throw new Error("read back failed after commit");
+      return made;
+    });
+    try {
+      await f.poll();
+      await f.poll();
+    } finally { spy.mockRestore(); }
+    expect(attempts).toBe(1); // the next poll found the committed forward and didn't send it again
+    const forwards = f.repo.list({ limit: 1000 }).filter((row) => row.destinationSession === OPERATOR && row.sourceSession === "host-pair@kernel");
+    expect(forwards).toHaveLength(1);
+    expect(forwards[0]!.body).toContain(`with these words: "${words}"`);
+    expect(forwards[0]!.body).toContain(`rig queue show ${f.ask} --full`);
   });
 });

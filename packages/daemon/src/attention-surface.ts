@@ -22,6 +22,9 @@ export interface AttentionItem {
   /** The row's questions and the answers recorded so far, as the queue row holds them. */
   humanQuestions?: HumanQuestion[];
   humanAnswers?: HumanAnswers;
+  /** The settings page where the person decides this request directly, without an agent (a pairing request's Approve and
+   *  Deny): a TUI settings category, and the request it opens on there. */
+  settingsLink?: { category: string; focus: string; label: string };
 }
 export interface AttentionDetail {
   item: AttentionItem;
