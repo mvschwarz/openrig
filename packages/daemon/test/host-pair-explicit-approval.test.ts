@@ -498,6 +498,17 @@ describe("host pairing: exact expiry, and an agent-free request says why nobody 
     } finally { vi.unstubAllEnvs(); }
   });
 
+  it("with no kernel operator here, an unusable agents.operator_session is named in the request, never as unset", async () => {
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "alex@external");
+    try {
+      const f = await fixture();
+      const item = f.repo.getById(f.ask)!;
+      expect(item.sourceSession).toBe("host-pair@kernel");
+      expect(item.body).toContain(`you're asked again: no agent reads answers on this host (agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored, and it has no ${OPERATOR}).`);
+      expect(item.body).not.toContain("no receiving agent is set");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("when OpenRig can't read who owns the request, it's agent-free and says it couldn't tell", async () => {
     const f = await fixture({ operator: "running", ownershipUnreadable: true });
     const item = f.repo.getById(f.ask)!;

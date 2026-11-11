@@ -117,9 +117,11 @@ function recipientFor(input: ModeScheduledEndInput, ended: ModeApplication): Rec
     // A receiver used instead of an unusable choice is delivered to with the reason, never silently.
     if (ok) return { ok: true, to: receiver.session, kind: "operator", why: receiver.note ?? null };
   }
-  const noOperator = receiver.session ? `${receiver.session}, the receiving agent, isn't an address the queue accepts`
-    : receiver.state === "unknown" ? "OpenRig couldn't tell whether this host has a receiving agent"
-      : `this host has no receiving agent (no agents.operator_session, and ${KERNEL_OPERATOR_SESSION} isn't on this host)`;
+  // An unusable setting is named as such, never as unset.
+  const note = receiver.note ? `${receiver.note}; ` : "";
+  const noOperator = receiver.session ? `${note}${receiver.session}, the receiving agent, isn't an address the queue accepts`
+    : receiver.state === "unknown" ? `${note}OpenRig couldn't tell whether this host has a receiving agent`
+      : `this host has no receiving agent (${receiver.note ?? "no agents.operator_session"}, and ${KERNEL_OPERATOR_SESSION} isn't on this host)`;
   const applier = accepts(ended.startedBy);
   if (applier instanceof Error) return unknown(`checking ${ended.startedBy} failed: ${applier.message}`);
   if (applier) return { ok: true, to: ended.startedBy, kind: "applied-by", why: noOperator };

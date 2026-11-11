@@ -143,6 +143,8 @@ interface IssuedPair {
   freeReason?: "none" | "unroutable" | "unknown";
   /** The receiving agent the queue couldn't take rows to (`unroutable`). */
   freeSession?: string;
+  /** Why the chosen agent wasn't used on an agent-free request (an unusable agents.operator_session), told with the reason. */
+  freeNote?: string;
   /** Why the owner is a receiver used instead of the chosen one (an unusable agents.operator_session). */
   ownerNote?: string;
 }
@@ -188,20 +190,24 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
    *  operator), when the queue takes rows to it; else nobody, and the request is agent-free, with the reason. A stopped
    *  receiver still owns it: the person's answer waits in its queue, and the person is told it isn't running. A receiver
    *  the queue can't take rows to can't own it: the person's answer would be refused on its way there. */
-  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason" | "freeSession" | "ownerNote"> {
+  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason" | "freeSession" | "ownerNote" | "freeNote"> {
     const repo = getRepo(c);
     try {
       const receiver = resolveDefaultReceiver(repo.db);
-      if (!receiver.session) return { owner: null, freeReason: receiver.state === "unknown" ? "unknown" : "none" };
+      const freeNote = receiver.note ? { freeNote: receiver.note } : {};
+      if (!receiver.session) return { owner: null, freeReason: receiver.state === "unknown" ? "unknown" : "none", ...freeNote };
       return repo.acceptsDestination(receiver.session) ? { owner: receiver.session, ...(receiver.note ? { ownerNote: receiver.note } : {}) }
-        : { owner: null, freeReason: "unroutable", freeSession: receiver.session };
+        : { owner: null, freeReason: "unroutable", freeSession: receiver.session, ...freeNote };
     } catch { return { owner: null, freeReason: "unknown" }; }
   }
 
-  /** Why nobody reads answers on an agent-free request, as the person is told it. */
+  /** Why nobody reads answers on an agent-free request, as the person is told it. An unusable setting is named as such,
+   *  never as unset. */
   function noReader(rec: IssuedPair): string {
-    return rec.freeReason === "unroutable" ? `${rec.freeSession ?? "the receiving agent"} can't receive answers on this host`
-      : rec.freeReason === "unknown" ? "OpenRig couldn't tell whether an agent reads answers on this host"
+    const note = rec.freeNote ? `${rec.freeNote}; ` : "";
+    return rec.freeReason === "unroutable" ? `${note}${rec.freeSession ?? "the receiving agent"} can't receive answers on this host`
+      : rec.freeReason === "unknown" ? `${note}OpenRig couldn't tell whether an agent reads answers on this host`
+      : rec.freeNote ? `no agent reads answers on this host (${rec.freeNote}, and it has no ${KERNEL_OPERATOR_SESSION})`
       : `no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${KERNEL_OPERATOR_SESSION})`;
   }
 

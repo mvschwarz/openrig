@@ -119,6 +119,19 @@ describe("a mode's scheduled end", () => {
     expect(f.toOperator()[0]!.body).toContain(`Sent to ${KERNEL_OPERATOR_SESSION} because agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored.`);
   });
 
+  it("with no kernel operator here, an unusable setting is named in the reason, never as unset", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // orch@rig is a routable seat
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "alex@external");
+    try {
+      expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
+    } finally { vi.unstubAllEnvs(); }
+    const body = f.toOperator()[0]!.body;
+    expect(body).toContain(`Sent to orch@rig because this host has no receiving agent (agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored, and ${KERNEL_OPERATOR_SESSION} isn't on this host).`);
+    expect(body).not.toContain("no agents.operator_session");
+  });
+
   it("applied by a named operator outside any seat, with no kernel operator here, the person is told, as an update", async () => {
     const f = fixture();
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
