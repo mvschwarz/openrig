@@ -1,9 +1,9 @@
 # What changed in OpenRig 0.7.12
 
 This note is for an agent on an install that was just upgraded to 0.7.12.
-OpenRig 0.7.12 sends a person's answers, typed, clicked or qualified, to an
-agent that reads them with the question and decides, with a default receiving
-agent that always exists. Setup offers to register the person. `rig down` stops
+OpenRig 0.7.12 routes a person's typed, clicked or qualified answers with the
+question to the configured receiving agent or the kernel operator to decide.
+Answers wait when no receiver is available. Setup offers to register the person. `rig down` stops
 only terminals it can show belong to the seat. It adds five database
 migrations. If you upgraded from 0.7.10 or earlier, also read "What changed in
 OpenRig 0.7.11" below, and so on back. For the full capability map, read
@@ -38,16 +38,18 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 ## Answers from a person reach an agent
 
-- A default receiving agent always exists for answers nothing else reads, such
-  as a host pairing request or a mode's scheduled end. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
+- Answers nothing else reads, such as a host pairing request or a mode's
+  scheduled end, use the configured receiving agent or the kernel operator.
+  Answers wait when no receiver is available. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
 - Pairing answers go to the receiving agent, and a person can decide directly in
   the TUI's pairing settings. ([#2931](https://github.com/mvschwarz/openrig/pull/2931), [#2935](https://github.com/mvschwarz/openrig/pull/2935))
 - A runner's permission answer goes to the receiving agent, which decides while
   the runner waits, so a qualified answer ("only if it's the test file") is
   read before anything acts. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
-- **What to do:** when a person answers by typing, clicking or qualifying,
-  expect an agent to receive the words with the question. Don't design or
-  advise a fixed button action, or a path where no agent receives the answer.
+- **What to do:** design for an agent to read the person's answer with its
+  question and decide. If no receiver is available, say the answer is waiting;
+  don't describe it as read or decided. Pairing settings in the TUI also offer
+  the direct decision described above.
 
 ## Other changes to act on
 

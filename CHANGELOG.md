@@ -31,9 +31,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 ### Answering your team
 
-- A default receiving agent always exists for answers nothing else reads, such
-  as a host pairing request or a mode's scheduled end, and one setting decides
-  which agent it is. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
+- Answers nothing else reads, such as a host pairing request or a mode's
+  scheduled end, use the configured receiving agent or the kernel operator.
+  Answers wait when no receiver is available. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
 - Pairing answers go to the receiving agent, and you can decide directly in the
   TUI's pairing settings. A pairing request says who it went to and who reads
   the answer. ([#2931](https://github.com/mvschwarz/openrig/pull/2931), [#2935](https://github.com/mvschwarz/openrig/pull/2935))
@@ -128,8 +128,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 ### Behaviour that changed
 
 - **Your answer goes to an agent.** Through 0.7.11 some answers acted on the
-  request directly, and some had no receiver when no operator was set. Now a
-  default receiving agent always exists and gets the answer with its question.
+  request directly, and some had no receiver when no operator was set. Now these
+  answers use the configured receiving agent or the kernel operator, with the
+  question included. Answers wait when no receiver is available.
   ([#2923](https://github.com/mvschwarz/openrig/pull/2923), [#2931](https://github.com/mvschwarz/openrig/pull/2931), [#2934](https://github.com/mvschwarz/openrig/pull/2934))
 - **`rig down`** leaves terminals it can't show belong to the seat; see Before
   you upgrade. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))

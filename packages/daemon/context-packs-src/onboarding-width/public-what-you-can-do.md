@@ -1262,12 +1262,12 @@ reaching them is ordinary work rather than an escalation.
   person can settle an ask that was asked of someone else, recorded as themselves beside the person
   asked. The first committed answer wins; a later one gets 409 `qitem_already_terminal` and records
   nothing. A park addressed to a registered person can be resolved.
-- **A person's answer goes to an agent.** A default receiving agent always exists for answers nothing
-  else reads (a host pairing request, a mode's scheduled end), pairing answers and a runner's
-  permission answers go to it with the question, and it decides; a qualified answer ("only if it's
-  the test file") is read before anything acts. Design for that agent, never for a fixed button
-  action or for no receiver. A pairing request says who it went to and who reads the answer, and a
-  person can decide directly in the TUI's pairing settings. A relay connector that can't accept
+- **A person's answer goes to an agent.** Answers nothing else reads (a host pairing request, a
+  mode's scheduled end) use the configured receiving agent or the kernel operator. Pairing and
+  runner permission answers go to the receiving agent with the question for it to decide;
+  qualified words ("only if it's the test file") need that judgment. Answers wait when no receiver
+  is available: don't describe them as read or decided. A pairing request names its receiver, and
+  a person can decide directly in the TUI's pairing settings. A relay connector that can't accept
   incoming connections can pull instead (`OPENRIG_RELAY_MODE=pull` in the relay secrets file); push
   stays the default, and a person's connector binding can be unset.
 - **`rig gateway channel add <id> --display-name <name> --binding
