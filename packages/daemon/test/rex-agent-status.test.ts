@@ -1,39 +1,30 @@
 import { describe, it, expect } from "vitest";
 import {
-  REX_STATUS_MARKER,
   RexAgentStatusRelay,
   rexAgentStatus,
   rexStatusReport,
-  type ResolveSeatActivity,
+  type SeatActivity,
 } from "../src/domain/terminal/rex-agent-status.js";
 import type { AgentActivity, AgentActivityState } from "../src/domain/types.js";
 
 const activity = (state: AgentActivityState, reason = "hook"): AgentActivity =>
   ({ state, reason, evidenceSource: "hook", sampledAt: "2026-11-11T00:00:00.000Z", evidence: null }) as AgentActivity;
 
-const wrapped = (fields: string) => `\x1bPtmux;\x1b\x1b]7501;${fields}\x1b\x1b\\\x1b\\`;
+const osc = (fields: string) => `\x1b]7501;${fields}\x1b\\`;
+const REX = "rex 0.0.1793890641-gaf0c20";
 
-function fakePanes(opts: { marked?: string[]; refuse?: string[] } = {}) {
-  const options = new Map<string, string>();
-  for (const seat of opts.marked ?? []) options.set(`${seat} ${REX_STATUS_MARKER}`, "on");
+function fakeTmux(clients: Record<string, Array<{ tty: string; termtype: string }>>) {
   const writes: Array<{ tty: string; text: string }> = [];
-  const panes = {
-    async getPaneLocalOption(target: string, option: string) { return options.get(`${target} ${option}`) ?? null; },
-    async restorePaneOption(target: string, option: string, value: string | null) {
-      if (opts.refuse?.includes(target)) return { ok: false };
-      if (value === null) options.delete(`${target} ${option}`);
-      else options.set(`${target} ${option}`, value);
-      return { ok: true };
-    },
-    async getPaneTty(target: string) { return `/dev/tty-${target}`; },
+  let listings = 0;
+  const tmux = {
+    async listSessionClientTerminals(session: string) { listings++; return clients[session] ?? []; },
   };
   const writeTty = async (tty: string, text: string) => { writes.push({ tty, text }); };
-  return { panes, options, writes, writeTty };
+  return { tmux, writes, writeTty, listings: () => listings };
 }
 
-function relayWith(f: ReturnType<typeof fakePanes>, seats: Record<string, { activity: AgentActivity | null; runtime: string | null }>) {
-  const resolve: ResolveSeatActivity = (seat) => seats[seat] ?? { activity: null, runtime: null };
-  return new RexAgentStatusRelay({ panes: f.panes, resolve, writeTty: f.writeTty });
+function relayWith(f: ReturnType<typeof fakeTmux>, seats: Record<string, SeatActivity>) {
+  return new RexAgentStatusRelay({ clients: f.tmux, resolve: (seat) => seats[seat] ?? { activity: null, runtime: null }, writeTty: f.writeTty });
 }
 
 describe("rex agent status: mapping", () => {
@@ -46,59 +37,71 @@ describe("rex agent status: mapping", () => {
     expect(rexAgentStatus(null)).toEqual({ state: "clear" });
   });
 
-  it("wraps the report for tmux passthrough, naming the runtime as the app", () => {
-    expect(rexStatusReport({ state: "idle" }, "claude-code")).toBe(wrapped("state=idle:app=claude-code"));
-    expect(rexStatusReport({ state: "blocked", kind: "permission" }, "codex")).toBe(wrapped("state=blocked:app=codex:kind=permission"));
-    expect(rexStatusReport({ state: "clear" }, null)).toBe(wrapped("state=clear"));
+  it("names the runtime as the app", () => {
+    expect(rexStatusReport({ state: "idle" }, "claude-code")).toBe(osc("state=idle:app=claude-code"));
+    expect(rexStatusReport({ state: "blocked", kind: "permission" }, "codex")).toBe(osc("state=blocked:app=codex:kind=permission"));
+    expect(rexStatusReport({ state: "clear" }, null)).toBe(osc("state=clear"));
     expect(rexStatusReport({ state: "working" }, null)).toBeNull();
   });
 });
 
 describe("rex agent status: relay", () => {
-  it("marks each opened seat's pane, turns on passthrough, and writes its current state", async () => {
-    const f = fakePanes();
-    const relay = relayWith(f, { "op@kernel": { activity: activity("idle"), runtime: "claude-code" } });
-    await relay.tilesOpened(["op@kernel"]);
-    expect(f.options.get("op@kernel allow-passthrough")).toBe("on");
-    expect(f.options.get(`op@kernel ${REX_STATUS_MARKER}`)).toBe("on");
-    expect(f.writes).toEqual([{ tty: "/dev/tty-op@kernel", text: wrapped("state=idle:app=claude-code") }]);
+  it("writes an opened seat's current state to its Rex clients only", async () => {
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }, { tty: "/dev/ttys2", termtype: "iTerm2 3.6" }, { tty: "/dev/ttys3", termtype: "" }] });
+    await relayWith(f, { "op@kernel": { activity: activity("idle"), runtime: "claude-code" } }).tilesOpened(["op@kernel"]);
+    expect(f.writes).toEqual([{ tty: "/dev/ttys1", text: osc("state=idle:app=claude-code") }]);
   });
 
   it("writes nothing for a newly opened seat whose state is unknown", async () => {
-    const f = fakePanes();
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
     await relayWith(f, { "op@kernel": { activity: activity("unknown"), runtime: "claude-code" } }).tilesOpened(["op@kernel"]);
     expect(f.writes).toEqual([]);
   });
 
-  it("skips a seat whose pane refuses passthrough", async () => {
-    const f = fakePanes({ refuse: ["op@kernel"] });
-    await relayWith(f, { "op@kernel": { activity: activity("idle"), runtime: "claude-code" } }).tilesOpened(["op@kernel"]);
-    expect(f.writes).toEqual([]);
+  it("writes each change once, uses the caller's reading, and clears when the state becomes unknown", async () => {
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
+    const relay = relayWith(f, {});
+    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
+    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
+    await relay.activityChanged("op@kernel", { activity: activity("unknown"), runtime: "claude-code" });
+    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
   });
 
-  it("writes a change only for a marked seat, once per change, and clears when the state becomes unknown", async () => {
-    const f = fakePanes({ marked: ["op@kernel"] });
-    const seats = {
-      "op@kernel": { activity: activity("running"), runtime: "claude-code" },
-      "other@kernel": { activity: activity("running"), runtime: "claude-code" },
-    };
+  it("looks for Rex clients on a seat without one only once, until a Rex view opens it", async () => {
+    const clients: Record<string, Array<{ tty: string; termtype: string }>> = { "dev@r": [] };
+    const f = fakeTmux(clients);
+    const seats = { "dev@r": { activity: activity("running"), runtime: "codex" } };
     const relay = relayWith(f, seats);
+    await relay.activityChanged("dev@r");
+    seats["dev@r"].activity = activity("idle");
+    await relay.activityChanged("dev@r");
+    expect(f.listings()).toBe(1);
+    clients["dev@r"] = [{ tty: "/dev/ttys9", termtype: REX }];
+    await relay.tilesOpened(["dev@r"]);
+    expect(f.writes).toEqual([{ tty: "/dev/ttys9", text: osc("state=idle:app=codex") }]);
+  });
+
+  it("retries a report no Rex client took on the next activity reading", async () => {
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
+    let attempts = 0;
+    const relay = new RexAgentStatusRelay({
+      clients: f.tmux,
+      resolve: () => ({ activity: activity("running"), runtime: "claude-code" }),
+      writeTty: async (tty, text) => { if (attempts++ === 0) throw new Error("EAGAIN"); f.writes.push({ tty, text }); },
+    });
     await relay.activityChanged("op@kernel");
+    expect(f.writes).toEqual([]);
     await relay.activityChanged("op@kernel");
-    await relay.activityChanged("other@kernel");
-    seats["op@kernel"].activity = activity("unknown");
-    await relay.activityChanged("op@kernel");
-    expect(f.writes.map((w) => w.text)).toEqual([wrapped("state=working:app=claude-code"), wrapped("state=clear")]);
+    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code")]);
   });
 
   it("leaves the tile on the latest state after two quick changes", async () => {
-    const f = fakePanes({ marked: ["op@kernel"] });
-    const seat = { activity: activity("running"), runtime: "codex" };
-    const relay = relayWith(f, { "op@kernel": seat });
-    const first = relay.activityChanged("op@kernel");
-    seat.activity = activity("idle");
-    const second = relay.activityChanged("op@kernel");
-    await Promise.all([first, second]);
-    expect(f.writes.map((w) => w.text).at(-1)).toBe(wrapped("state=idle:app=codex"));
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }] });
+    const relay = relayWith(f, {});
+    await Promise.all([
+      relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "codex" }),
+      relay.activityChanged("op@kernel", { activity: activity("idle"), runtime: "codex" }),
+    ]);
+    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=codex"), osc("state=idle:app=codex")]);
   });
 });

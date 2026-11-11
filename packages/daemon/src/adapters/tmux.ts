@@ -1622,18 +1622,6 @@ export class TmuxAdapter {
     }
   }
 
-  /** The pane's terminal device, such as /dev/ttys004. Returns null if unavailable. */
-  async getPaneTty(paneId: string): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
-    try {
-      const output = (await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_tty}"],
-        `tmux display-message -p -t ${shellQuote(target)} "#{pane_tty}"`)).trim();
-      return output.startsWith("/dev/") ? output : null;
-    } catch {
-      return null;
-    }
-  }
-
   /** KI-14: the server's `default-shell` option — what a createSession pane runs when no command is
    *  given. Used to make a respawn EXPLICIT about the blank shell instead of inheriting whatever
    *  command the pane was created with. Returns null if unavailable (caller falls back). */
@@ -2179,6 +2167,24 @@ export class TmuxAdapter {
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
+    }
+  }
+
+  /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
+   *  "" when it reported none). Empty when the session has no clients or tmux can't be read. */
+  async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }>> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
+    try {
+      const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+        `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+      return output.split("\n").flatMap((line) => {
+        const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+        const tty = line.slice(0, Math.max(separator, 0));
+        return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
+      });
+    } catch {
+      return [];
     }
   }
 

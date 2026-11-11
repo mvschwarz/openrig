@@ -396,11 +396,12 @@ Discovery (`server.version` and `server.status`) has a 1 s budget, and
 timeout, a killed client, an unreadable reply) is `unknown`, not failed: the
 adapter never closes a session on it and reports `rex_outcome_unknown`.
 After the check, the local seats whose tiles opened go to `RexAgentStatusRelay`
-(`rex-agent-status.ts`), which turns on the pane's `allow-passthrough`, sets the
-`@openrig-rex-status` marker, and writes an OSC 7501 report in tmux's passthrough
-envelope to the pane's tty. Later activity changes (the same hook-or-pane
-resolution that recovers prompt wakes in `startup.ts`) are written only to marked
-panes, once per change; an unknown activity is written as `state=clear`.
+(`rex-agent-status.ts`), which writes an OSC 7501 report to the tty of each tmux
+client attached to the seat whose `client_termtype` (its XTVERSION reply) names
+Rex. Later activity changes (the same hook-or-pane resolution that recovers
+prompt wakes in `startup.ts`) are written once per change; an unknown activity is
+written as `state=clear`. A seat found without a Rex client is not looked at
+again until a Rex view opens it.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 

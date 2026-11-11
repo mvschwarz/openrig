@@ -134,7 +134,6 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.cancelPaneMode("%1");
   await a.signalPaneProcess("%1", "TERM");
   await a.getPanePid(SESSION);
-  await a.getPaneTty(SESSION);
   await a.getDefaultShell();
   await a.getPaneCommand(SESSION);
   await a.getSessionEnv(SESSION, "OPENRIG_NODE_ID");
@@ -158,6 +157,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.readAllPaneProcesses();
   await a.readPaneLastActivity(SESSION);
   await a.listClients();
+  await a.listSessionClientTerminals(SESSION);
   await a.switchClient("/dev/ttys001", SESSION);
   // A runtime switch's exchange: two session-id reads, then the guarded if-shell swap (nested quoting); and its env writes.
   await a.swapRuntimeSwitchPanes({ nodeId: "n1", stagingSession: "staging'q a", canonicalSession: SESSION, canonicalPane: "%1", stagedPane: "%1" });

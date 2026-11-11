@@ -5,26 +5,22 @@ import type { AgentActivity } from "../types.js";
 /**
  * Rex shows a block's agent and its state from OSC 7501 reports, but a Rex tile runs only `tmux attach`, and the agent
  * inside the seat's pane writes to OpenRig's tmux server, so Rex never sees its own reports. This relays the activity
- * OpenRig already resolves for a seat to the tiles that show it: each seat opened in a Rex tile gets tmux passthrough
- * and a marker on its pane, and its state is written to the pane's tty in tmux's passthrough envelope, which tmux hands
- * to every client attached to the pane. Terminals other than Rex ignore OSC 7501.
+ * OpenRig already resolves for a seat straight to the tmux clients attached to the seat's session that identify as
+ * Rex (their XTVERSION reply), leaving tmux options and other terminals alone.
  */
-
-/** The pane option that marks a seat as shown in a Rex tile; it outlives a daemon restart, as the tile does. */
-export const REX_STATUS_MARKER = "@openrig-rex-status";
 
 /** What a Rex tile is told about a seat: a state, or `clear` when OpenRig doesn't know it. */
 export type RexAgentStatus = { state: "working" | "idle" | "blocked"; kind?: "permission" } | { state: "clear" };
 
-/** The panes the relay reads and marks: the daemon's tmux adapter. */
-export interface RexStatusPanes {
-  getPaneLocalOption(target: string, option: string): Promise<string | null | undefined>;
-  restorePaneOption(target: string, option: string, value: string | null): Promise<{ ok: boolean }>;
-  getPaneTty(target: string): Promise<string | null>;
+/** The daemon's tmux adapter, as far as the relay uses it. */
+export interface RexStatusClients {
+  listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }>>;
 }
 
-/** A seat's current activity and runtime, resolved the way `rig ps --nodes` resolves them; null when unknown. */
-export type ResolveSeatActivity = (sessionName: string) => { activity: AgentActivity | null; runtime: string | null };
+export interface SeatActivity { activity: AgentActivity | null; runtime: string | null }
+
+/** A seat's current activity and runtime, resolved the way `rig ps --nodes` resolves them. */
+export type ResolveSeatActivity = (sessionName: string) => SeatActivity;
 
 export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
   switch (activity?.state) {
@@ -38,7 +34,6 @@ export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
 /** The runtime as Rex names the app; a runtime it doesn't know is passed as OpenRig names it. */
 const rexApp = (runtime: string): string => runtime.replace(/[^A-Za-z0-9_.+-]/g, "-").slice(0, 32);
 
-/** The OSC 7501 report, wrapped for tmux passthrough (each ESC inside doubled). */
 export function rexStatusReport(status: RexAgentStatus, runtime: string | null): string | null {
   let fields: string;
   if (status.state === "clear") fields = "state=clear";
@@ -46,63 +41,72 @@ export function rexStatusReport(status: RexAgentStatus, runtime: string | null):
     if (!runtime) return null;
     fields = [`state=${status.state}`, `app=${rexApp(runtime)}`, ...(status.kind ? [`kind=${status.kind}`] : [])].join(":");
   }
-  return `\x1bPtmux;\x1b\x1b]7501;${fields}\x1b\x1b\\\x1b\\`;
+  return `\x1b]7501;${fields}\x1b\\`;
 }
 
+const isRex = (termtype: string): boolean => /^rex\b/i.test(termtype);
+
 async function writeTty(tty: string, text: string): Promise<void> {
-  // O_NOCTTY: the daemon never takes a seat's terminal as its own.
-  const handle = await open(tty, constants.O_WRONLY | constants.O_NOCTTY);
+  // O_NOCTTY: never take the client's terminal as the daemon's own. O_NONBLOCK: a stalled terminal drops the report
+  // instead of holding the seat's later reports behind it.
+  const handle = await open(tty, constants.O_WRONLY | constants.O_NOCTTY | constants.O_NONBLOCK);
   try { await handle.write(text); } finally { await handle.close(); }
 }
 
 export class RexAgentStatusRelay {
-  private readonly panes: RexStatusPanes;
+  private readonly clients: RexStatusClients;
   private readonly resolve: ResolveSeatActivity;
   private readonly write: (tty: string, text: string) => Promise<void>;
-  /** The last report per seat, so a seat is read and written only when what Rex should show changes. */
+  /** The last report delivered per seat, so a seat is written only when what Rex should show changes. */
   private readonly last = new Map<string, string>();
+  /** Whether a seat had a Rex client when last looked at. A seat not yet looked at (after a daemon restart) is
+   *  looked at once; one without a Rex client costs nothing more until a Rex view opens it. */
+  private readonly shown = new Map<string, boolean>();
   /** One report at a time per seat, so two quick changes reach the tile in order. */
   private readonly pending = new Map<string, Promise<void>>();
 
-  constructor(deps: { panes: RexStatusPanes; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void> }) {
-    this.panes = deps.panes;
+  constructor(deps: { clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void> }) {
+    this.clients = deps.clients;
     this.resolve = deps.resolve;
     this.write = deps.writeTty ?? writeTty;
   }
 
-  /** Mark the seats a Rex view just opened and show each one's current state. A seat that can't be marked is skipped. */
+  /** A Rex view just opened these seats' tiles: show each one's current state. */
   async tilesOpened(seats: string[]): Promise<void> {
-    await Promise.all(seats.map(async (seat) => {
-      const passthrough = await this.panes.restorePaneOption(seat, "allow-passthrough", "on");
-      if (!passthrough.ok || !(await this.panes.restorePaneOption(seat, REX_STATUS_MARKER, "on")).ok) return;
+    await Promise.all(seats.map((seat) => {
+      this.shown.set(seat, true);
       this.last.delete(seat);
-      await this.report(seat, true);
+      return this.report(seat, true);
     }));
   }
 
-  /** The seat's activity may have changed. */
-  async activityChanged(seat: string): Promise<void> {
-    await this.report(seat, false);
+  /** The seat's activity may have changed; `current` is its activity when the caller already resolved it. */
+  activityChanged(seat: string, current?: SeatActivity): Promise<void> {
+    if (this.shown.get(seat) === false) return Promise.resolve();
+    return this.report(seat, false, current);
   }
 
-  private report(seat: string, opening: boolean): Promise<void> {
-    const next = (this.pending.get(seat) ?? Promise.resolve()).then(() => this.reportNow(seat, opening)).catch(() => {});
+  private report(seat: string, opening: boolean, current?: SeatActivity): Promise<void> {
+    const next = (this.pending.get(seat) ?? Promise.resolve()).then(() => this.reportNow(seat, opening, current)).catch(() => {});
     this.pending.set(seat, next);
     void next.then(() => { if (this.pending.get(seat) === next) this.pending.delete(seat); });
     return next;
   }
 
-  private async reportNow(seat: string, opening: boolean): Promise<void> {
-    const { activity, runtime } = this.resolve(seat);
+  private async reportNow(seat: string, opening: boolean, current?: SeatActivity): Promise<void> {
+    const { activity, runtime } = current ?? this.resolve(seat);
     const status = rexAgentStatus(activity);
     // A tile that just opened has nothing to clear.
     if (opening && status.state === "clear") return;
     const report = rexStatusReport(status, runtime);
     if (!report || this.last.get(seat) === report) return;
-    this.last.set(seat, report);
-    if (!opening && await this.panes.getPaneLocalOption(seat, REX_STATUS_MARKER) !== "on") return;
-    const tty = await this.panes.getPaneTty(seat);
-    if (!tty) return;
-    await this.write(tty, report).catch(() => this.last.delete(seat));
+    const ttys = (await this.clients.listSessionClientTerminals(seat)).filter((c) => isRex(c.termtype)).map((c) => c.tty);
+    this.shown.set(seat, ttys.length > 0);
+    if (ttys.length === 0) {
+      this.last.delete(seat);
+      return;
+    }
+    const written = await Promise.all(ttys.map((tty) => this.write(tty, report).then(() => true, () => false)));
+    if (written.some(Boolean)) this.last.set(seat, report);
   }
 }

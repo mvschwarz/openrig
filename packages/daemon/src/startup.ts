@@ -624,7 +624,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // The same reading lets a seat a full restore stopped at a prompt be reconciled once it resumes (#2622); set once
   // the attention reconciler exists, so a reading before then waits for the next change.
   let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
-  let rexSeatActivity: ((sessionName: string) => void) | undefined;
+  let rexSeatActivity: ((sessionName: string, current: import("./domain/terminal/rex-agent-status.js").SeatActivity) => void) | undefined;
   const currentSeatActivity = (sessionName: string) => {
     const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime ?? null;
     const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
@@ -633,7 +633,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     return { activity: resolved?.activity ?? null, runtime, structural };
   };
   const retryPromptWakes = (sessionName: string) => {
-    const { activity, structural } = currentSeatActivity(sessionName);
+    const { activity, runtime, structural } = currentSeatActivity(sessionName);
     const state = activity?.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
@@ -641,7 +641,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
       .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
-    rexSeatActivity?.(sessionName);
+    rexSeatActivity?.(sessionName, { activity, runtime });
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
@@ -2161,8 +2161,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const { RexAdapter } = await import("./domain/terminal/rex-adapter.js");
     const { createRexCliTransport } = await import("./domain/terminal/rex-transport.js");
     const { RexAgentStatusRelay } = await import("./domain/terminal/rex-agent-status.js");
-    const rexStatusRelay = new RexAgentStatusRelay({ panes: tmuxAdapter, resolve: currentSeatActivity });
-    rexSeatActivity = (sessionName) => { void rexStatusRelay.activityChanged(sessionName); };
+    const rexStatusRelay = new RexAgentStatusRelay({ clients: tmuxAdapter, resolve: currentSeatActivity });
+    rexSeatActivity = (sessionName, current) => { void rexStatusRelay.activityChanged(sessionName, current); };
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
     const { createScopedTaskResolver } = await import("./domain/terminal/scope-task-terminal-view.js");
