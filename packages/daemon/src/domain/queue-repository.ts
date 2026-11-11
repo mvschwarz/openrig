@@ -1794,11 +1794,12 @@ export class QueueRepository {
   /** Recover current notifications once per pass. A snapshot horizon and seek cursor
    * prevent new arrivals or persistent failures from making this pass unbounded. `stopRequested` is checked before
    * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start.
-   * A notification already tried for a seat that still has no session or transport would only fail again, so it isn't
-   * claimed, alone or in a group: it stays as it is, its row stays owed, and the pass reports it as waiting. The
-   * receiver is read at each claim, so a seat that starts during the pass gets its later notifications. */
+   * A notification already tried for a seat that still has no session or transport, or that is a bound terminal seat,
+   * would only fail again, so it isn't claimed, alone or in a group: it stays as it is, its row stays owed, and the
+   * pass reports it as waiting. The receiver is read at each claim, so a seat that starts during the pass gets its
+   * later notifications. */
   async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number;
-    /** Present only when a notification waits for a seat with no session or transport. */
+    /** Present only when a notification waits for a seat with no receiver (no session or transport, or a terminal). */
     waiting?: { notifications: number; seats: string[] } }> {
     const tally: { delivered: number; indeterminate: number; failed: number; retained: number;
       waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
@@ -1852,16 +1853,20 @@ export class QueueRepository {
     return result();
   }
 
-  /** Positive evidence only that a wake can't land now: no transport can hold the address, or the newest session
-   * under the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A
-   * canonical address resolves to its current physical session first. Anything unknown may have a receiver. */
+  /** Positive evidence only that a wake can't land now: no transport can hold the address, the address is a bound
+   * terminal seat (a shell or a TUI: performWakeSend types nothing there, so a retry can only fail the same way and
+   * move the row's last nudge time, which the stuck sweep reads as new evidence; #2939), or the newest session under
+   * the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A canonical
+   * address resolves to its current physical session first. Anything unknown may have a receiver. */
   private wakeHasNoReceiver(destinationSession: string): boolean {
     try {
       const destClass = this.classifyDestinationOf(destinationSession).class;
       if (destClass === "unroutable") return true;
       if (destClass !== "pane-bound") return false;
+      const physical = physicalSessionName(this.db, destinationSession);
+      if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physical)) return true;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
-        .get(physicalSessionName(this.db, destinationSession)) as { status: string } | undefined;
+        .get(physical) as { status: string } | undefined;
       return newest?.status === "exited" || newest?.status === "detached";
     } catch {
       return false;

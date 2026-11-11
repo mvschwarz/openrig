@@ -44,7 +44,7 @@ in the case named:
 | `routeTimings` | With `eventLoop`. |
 | `slowOperations` | When the slow-operation recorder runs. |
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
-| `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. |
+| `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
 
 ## Bearer tokens
 

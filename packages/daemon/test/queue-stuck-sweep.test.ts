@@ -1394,7 +1394,10 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     // Issue step 3: the source is excluded from candidates, and the resolution pass used
     // to read that exclusion as "condition resolved" and close the finding as done /
     // no-follow-on. Suppression must leave the finding open; delivery evidence closes it.
-    await runSweep();
+    const suppressed = await runSweep();
+    // #2939: the pass reports no action on it, but the finding is still open, and healthz says so
+    expect(suppressed.result.findings).toEqual([]);
+    expect(suppressed.status.snapshot()).toMatchObject({ findingsRouted: 0, findingsOpen: 1 });
     const after = await findingsFor(row.qitemId);
     expect(after).toHaveLength(1);
     expect(repo.getById(after[0]!.qitemId)?.state).toBe("pending");
