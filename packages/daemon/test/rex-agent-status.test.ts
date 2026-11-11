@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  REX_CLIENT_RECHECK_MS,
   RexAgentStatusRelay,
   rexAgentStatus,
   rexStatusReport,
@@ -13,11 +14,11 @@ const activity = (state: AgentActivityState, reason = "hook"): AgentActivity =>
 const osc = (fields: string) => `\x1b]7501;${fields}\x1b\\`;
 const REX = "rex 0.0.1793890641-gaf0c20";
 
-function fakeTmux(clients: Record<string, Array<{ tty: string; termtype: string }>>) {
+function fakeTmux(clients: Record<string, Array<{ tty: string; termtype: string }> | null>) {
   const writes: Array<{ tty: string; text: string }> = [];
   let listings = 0;
   const tmux = {
-    async listSessionClientTerminals(session: string) { listings++; return clients[session] ?? []; },
+    async listSessionClientTerminals(session: string) { listings++; return session in clients ? clients[session] : []; },
   };
   const writeTty = async (tty: string, text: string) => { writes.push({ tty, text }); };
   return { tmux, writes, writeTty, listings: () => listings };
@@ -67,18 +68,49 @@ describe("rex agent status: relay", () => {
     expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
   });
 
-  it("looks for Rex clients on a seat without one only once, until a Rex view opens it", async () => {
-    const clients: Record<string, Array<{ tty: string; termtype: string }>> = { "dev@r": [] };
+  it("looks for Rex clients on a seat without one again only after a Rex view opens it or the recheck time passes", async () => {
+    const clients: Record<string, Array<{ tty: string; termtype: string }> | null> = { "dev@r": [] };
     const f = fakeTmux(clients);
+    let now = 0;
     const seats = { "dev@r": { activity: activity("running"), runtime: "codex" } };
-    const relay = relayWith(f, seats);
+    const relay = new RexAgentStatusRelay({ clients: f.tmux, resolve: (seat) => seats[seat as "dev@r"], writeTty: f.writeTty, now: () => now });
     await relay.activityChanged("dev@r");
     seats["dev@r"].activity = activity("idle");
     await relay.activityChanged("dev@r");
     expect(f.listings()).toBe(1);
     clients["dev@r"] = [{ tty: "/dev/ttys9", termtype: REX }];
-    await relay.tilesOpened(["dev@r"]);
+    now = REX_CLIENT_RECHECK_MS;
+    await relay.activityChanged("dev@r");
     expect(f.writes).toEqual([{ tty: "/dev/ttys9", text: osc("state=idle:app=codex") }]);
+    clients["dev@r"] = [];
+    seats["dev@r"].activity = activity("running");
+    await relay.activityChanged("dev@r");
+    clients["dev@r"] = [{ tty: "/dev/ttys9", termtype: REX }];
+    await relay.tilesOpened(["dev@r"]);
+    expect(f.writes.at(-1)).toEqual({ tty: "/dev/ttys9", text: osc("state=working:app=codex") });
+  });
+
+  it("keeps updating an open tile after tmux couldn't be read once", async () => {
+    const clients: Record<string, Array<{ tty: string; termtype: string }> | null> = { "op@kernel": null };
+    const f = fakeTmux(clients);
+    const relay = relayWith(f, {});
+    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
+    clients["op@kernel"] = [{ tty: "/dev/ttys1", termtype: REX }];
+    await relay.activityChanged("op@kernel", { activity: activity("running"), runtime: "claude-code" });
+    expect(f.writes.map((w) => w.text)).toEqual([osc("state=working:app=claude-code")]);
+  });
+
+  it("writes again to every Rex client when one of them missed the last report", async () => {
+    const f = fakeTmux({ "op@kernel": [{ tty: "/dev/ttys1", termtype: REX }, { tty: "/dev/ttys2", termtype: REX }] });
+    let failNext = true;
+    const relay = new RexAgentStatusRelay({
+      clients: f.tmux,
+      resolve: () => ({ activity: activity("running"), runtime: "claude-code" }),
+      writeTty: async (tty, text) => { if (tty === "/dev/ttys2" && failNext) { failNext = false; throw new Error("EAGAIN"); } f.writes.push({ tty, text }); },
+    });
+    await relay.activityChanged("op@kernel");
+    await relay.activityChanged("op@kernel");
+    expect(f.writes.map((w) => w.tty)).toEqual(["/dev/ttys1", "/dev/ttys1", "/dev/ttys2"]);
   });
 
   it("retries a report no Rex client took on the next activity reading", async () => {

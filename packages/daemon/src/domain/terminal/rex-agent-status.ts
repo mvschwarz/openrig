@@ -14,7 +14,7 @@ export type RexAgentStatus = { state: "working" | "idle" | "blocked"; kind?: "pe
 
 /** The daemon's tmux adapter, as far as the relay uses it. */
 export interface RexStatusClients {
-  listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }>>;
+  listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null>;
 }
 
 export interface SeatActivity { activity: AgentActivity | null; runtime: string | null }
@@ -46,6 +46,10 @@ export function rexStatusReport(status: RexAgentStatus, runtime: string | null):
 
 const isRex = (termtype: string): boolean => /^rex\b/i.test(termtype);
 
+/** How long a seat found without a Rex client is left alone, so a Rex client attached by hand, or by Rex after an app
+ *  restart, is still found. */
+export const REX_CLIENT_RECHECK_MS = 5 * 60_000;
+
 async function writeTty(tty: string, text: string): Promise<void> {
   // O_NOCTTY: never take the client's terminal as the daemon's own. O_NONBLOCK: a stalled terminal drops the report
   // instead of holding the seat's later reports behind it.
@@ -59,14 +63,18 @@ export class RexAgentStatusRelay {
   private readonly write: (tty: string, text: string) => Promise<void>;
   /** The last report delivered per seat, so a seat is written only when what Rex should show changes. */
   private readonly last = new Map<string, string>();
-  /** Whether a seat had a Rex client when last looked at. A seat not yet looked at (after a daemon restart) is
-   *  looked at once; one without a Rex client costs nothing more until a Rex view opens it. */
-  private readonly shown = new Map<string, boolean>();
+  /** When a seat was last found without a Rex client. Such a seat isn't looked at again until a Rex view opens it or
+   *  REX_CLIENT_RECHECK_MS passes. */
+  private readonly unshownAt = new Map<string, number>();
+  private readonly now: () => number;
   /** One report at a time per seat, so two quick changes reach the tile in order. */
   private readonly pending = new Map<string, Promise<void>>();
 
-  constructor(deps: { clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void> }) {
+  constructor(deps: {
+    clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void>; now?: () => number;
+  }) {
     this.clients = deps.clients;
+    this.now = deps.now ?? Date.now;
     this.resolve = deps.resolve;
     this.write = deps.writeTty ?? writeTty;
   }
@@ -74,7 +82,7 @@ export class RexAgentStatusRelay {
   /** A Rex view just opened these seats' tiles: show each one's current state. */
   async tilesOpened(seats: string[]): Promise<void> {
     await Promise.all(seats.map((seat) => {
-      this.shown.set(seat, true);
+      this.unshownAt.delete(seat);
       this.last.delete(seat);
       return this.report(seat, true);
     }));
@@ -82,7 +90,8 @@ export class RexAgentStatusRelay {
 
   /** The seat's activity may have changed; `current` is its activity when the caller already resolved it. */
   activityChanged(seat: string, current?: SeatActivity): Promise<void> {
-    if (this.shown.get(seat) === false) return Promise.resolve();
+    const unshown = this.unshownAt.get(seat);
+    if (unshown !== undefined && this.now() - unshown < REX_CLIENT_RECHECK_MS) return Promise.resolve();
     return this.report(seat, false, current);
   }
 
@@ -100,13 +109,18 @@ export class RexAgentStatusRelay {
     if (opening && status.state === "clear") return;
     const report = rexStatusReport(status, runtime);
     if (!report || this.last.get(seat) === report) return;
-    const ttys = (await this.clients.listSessionClientTerminals(seat)).filter((c) => isRex(c.termtype)).map((c) => c.tty);
-    this.shown.set(seat, ttys.length > 0);
+    const clients = await this.clients.listSessionClientTerminals(seat);
+    // tmux couldn't be read: try again on the next reading, without deciding the seat has no Rex client.
+    if (clients === null) return;
+    const ttys = clients.filter((c) => isRex(c.termtype)).map((c) => c.tty);
     if (ttys.length === 0) {
+      this.unshownAt.set(seat, this.now());
       this.last.delete(seat);
       return;
     }
+    this.unshownAt.delete(seat);
+    // Recorded only when every Rex client took it, so a client that missed it gets it on the next reading.
     const written = await Promise.all(ttys.map((tty) => this.write(tty, report).then(() => true, () => false)));
-    if (written.some(Boolean)) this.last.set(seat, report);
+    if (written.every(Boolean)) this.last.set(seat, report);
   }
 }

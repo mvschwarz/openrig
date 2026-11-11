@@ -401,7 +401,8 @@ client attached to the seat whose `client_termtype` (its XTVERSION reply) names
 Rex. Later activity changes (the same hook-or-pane resolution that recovers
 prompt wakes in `startup.ts`) are written once per change; an unknown activity is
 written as `state=clear`. A seat found without a Rex client is not looked at
-again until a Rex view opens it.
+again until a Rex view opens it or five minutes pass; a failed `list-clients`
+leaves that verdict unchanged.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 
