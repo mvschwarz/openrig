@@ -284,14 +284,16 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
     };
   }
 
-  it("writes current-PID session metadata from OPENRIG_SESSION_NAME + --resume so shutdown captures without fallback probe", async () => {
+  it("writes current-PID session metadata from explicit --name + --resume so shutdown captures without fallback probe", async () => {
     const conversation = randomUUID();
+    const seatName = "r00-provider-switch-fixture-work_worker";
     const h = await launchProviderSwitchFixtureSeat({
       storedToken: conversation,
       provenance: "operator",
-      args: ["--resume", conversation, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
+      seatName,
+      args: ["--resume", conversation, "--name", seatName, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
       extraEnv: {
-        OPENRIG_SESSION_NAME: "r00-provider-switch-fixture-work_worker",
+        OPENRIG_SESSION_NAME: seatName,
         ANTHROPIC_API_KEY: "synthetic-api",
       },
     });
@@ -314,7 +316,7 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
 
     const recordExists = fs.existsSync(h.pidSessionFile);
     expect
-      .soft(recordExists, "expected synthetic fixture to write <CLAUDE_CONFIG_DIR>/sessions/<pid>.json for OPENRIG_SESSION_NAME + --resume")
+      .soft(recordExists, "expected synthetic fixture to write <CLAUDE_CONFIG_DIR>/sessions/<pid>.json for explicit --name + --resume")
       .toBe(true);
     if (recordExists) {
       const stat = fs.statSync(h.pidSessionFile);
@@ -387,14 +389,62 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
     expect.soft(snap.data.sessions.find((s) => s.id === h.session.id)?.resumeToken).toBe(activeConversation);
   });
 
+  it("does not emit current-PID session metadata when only OPENRIG_SESSION_NAME is set without explicit --name", async () => {
+    const initialConversation = randomUUID();
+    const resumedConversation = randomUUID();
+    const seatName = "r00-provider-switch-fixture-work_worker";
+    const h = await launchProviderSwitchFixtureSeat({
+      storedToken: initialConversation,
+      provenance: "scrape",
+      seatName,
+      args: ["--resume", resumedConversation, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
+      extraEnv: {
+        OPENRIG_SESSION_NAME: seatName,
+        ANTHROPIC_API_KEY: "synthetic-api",
+      },
+    });
+
+    expect(h.readLaunches()).toEqual([
+      {
+        pid: h.childPid,
+        conversation: resumedConversation,
+        model: "fixture-model",
+        permission: "acceptEdits",
+        auth: "api",
+        remembered: false,
+      },
+    ]);
+
+    const result = await h.teardown.teardown(h.rig.id);
+    expect(result.errors).toEqual([]);
+    expect(result.sessionsKilled).toBe(1);
+    expect(h.listClaudeProcesses).toHaveBeenCalled();
+
+    expect
+      .soft(fs.existsSync(h.pidSessionFile), "expected synthetic fixture not to emit <CLAUDE_CONFIG_DIR>/sessions/<pid>.json without explicit --name")
+      .toBe(false);
+    expect
+      .soft(h.probeClaudeResume, "expected launch without explicit --name to fall through to fallback probeClaudeResume")
+      .toHaveBeenCalledTimes(1);
+    expect.soft(h.probeClaudeResume).toHaveBeenCalledWith(h.seatName, initialConversation, h.workDir, h.selectedConfigDir);
+
+    const updated = registry.getSessionsForRig(h.rig.id)[0]!;
+    expect.soft(updated.resumeToken).toBe(initialConversation);
+    expect.soft(updated.resumeLastProbeStatus).toBe("inconclusive");
+    const snap = snapshotRepo.getSnapshot(result.snapshotId!)!;
+    expect.soft(snap.data.sessions.find((s) => s.id === h.session.id)?.resumeToken).toBe(initialConversation);
+  });
+
   it("control: captures valid current-PID session record in selected account_home without invoking fallback probe", async () => {
     const conversation = randomUUID();
+    const seatName = "r00-provider-switch-fixture-work_worker";
     const h = await launchProviderSwitchFixtureSeat({
       storedToken: conversation,
       provenance: "operator",
-      args: ["--resume", conversation, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
+      seatName,
+      args: ["--resume", conversation, "--name", seatName, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
       extraEnv: {
-        OPENRIG_SESSION_NAME: "r00-provider-switch-fixture-work_worker",
+        OPENRIG_SESSION_NAME: seatName,
         ANTHROPIC_API_KEY: "synthetic-api",
       },
     });
@@ -455,12 +505,14 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
 
   it("control: rejects status-only sessions/<pid>.json lacking sessionId and falls through to probeClaudeResume", async () => {
     const initialConversation = randomUUID();
+    const seatName = "r00-provider-switch-fixture-work_worker";
     const h = await launchProviderSwitchFixtureSeat({
       storedToken: initialConversation,
       provenance: "scrape",
-      args: ["--resume", initialConversation, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
+      seatName,
+      args: ["--resume", initialConversation, "--name", seatName, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
       extraEnv: {
-        OPENRIG_SESSION_NAME: "r00-provider-switch-fixture-work_worker",
+        OPENRIG_SESSION_NAME: seatName,
         ANTHROPIC_API_KEY: "synthetic-api",
       },
     });
@@ -492,12 +544,14 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
     async (kind) => {
       const initialConversation = randomUUID();
       const candidateConversation = randomUUID();
+      const seatName = "r00-provider-switch-fixture-work_worker";
       const h = await launchProviderSwitchFixtureSeat({
         storedToken: initialConversation,
         provenance: "scrape",
-        args: ["--resume", initialConversation, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
+        seatName,
+        args: ["--resume", initialConversation, "--name", seatName, "--model", "fixture-model", "--permission-mode", "acceptEdits"],
         extraEnv: {
-          OPENRIG_SESSION_NAME: "r00-provider-switch-fixture-work_worker",
+          OPENRIG_SESSION_NAME: seatName,
           ANTHROPIC_API_KEY: "synthetic-api",
         },
       });
