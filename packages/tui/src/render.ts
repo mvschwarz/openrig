@@ -30,7 +30,7 @@ import { buildLedgerExplorer } from "./crash-cart/ledger-explorer.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
-import { hostLabel } from "./topology/host-label.js";
+import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
@@ -788,7 +788,7 @@ function instanceContentLines(
     ...lines,
     healthSummaryLine(snap, scope, contentWidth),
     ...wrapDetailLines([
-      { text: `host ${host.name} · ${host.reachable ? "reachable" : "not reachable"}` },
+      { text: `host ${host.name} · ${hostReachabilityLabel(host)}` },
       { text: `Its seats aren't read in this view: rig ps --host ${host.name} --nodes -A` },
     ], contentWidth),
     { text: "" },
