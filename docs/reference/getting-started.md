@@ -866,6 +866,9 @@ What it costs:
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
+A terminal OpenRig didn't start, such as a seat joined with `rig attach --self`,
+is left running: `rig down` names it with the commands to stop it by hand, and
+exits 2.
 Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop;
 `rig down` also prints the rig's recorded agent sessions and their activity
 before stopping them.
