@@ -4,6 +4,8 @@ import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
 import { parseCommand } from "../src/grammar.js";
+import { createStyle } from "../src/theme.js";
+import { stylizeLines } from "../src/stylize.js";
 import type { FleetSnapshot, RecentTransitionSnap } from "../src/types.js";
 
 // #2049: a registered remote host stays in the topology tree on every tab and through drill-in, with no feed
@@ -205,6 +207,47 @@ describe("a registered remote host in the topology tree (#2049)", () => {
     const fake: Fake = { calls: [], hosts: [VPS], aggregateHosts: [{ hostId: "mm2", status: "ok" }, { hostId: "vps", status: "unreachable" }] };
     const { snap } = await page(fake, "tab pulse");
     expect(snap.hosts.map((host) => [host.name, host.reachable])).toEqual([["mac", true], ["mm2", true], ["vps", false]]);
+  });
+
+  it("keeps unknown reachability distinct from unreachable in status, detail, and color", async () => {
+    const fake: Fake = {
+      calls: [],
+      hosts: [
+        { id: "ssh-unknown", transport: "ssh", selected: false, status: "unknown" },
+        { id: "ssh-down", transport: "ssh", selected: false, status: "unreachable" },
+        VPS,
+      ],
+      aggregateHosts: [
+        { hostId: "aggregate-unknown", status: "unknown" },
+        { hostId: "aggregate-down", status: "unreachable" },
+        { hostId: "vps", status: "ok" },
+      ],
+    };
+    const overview = await page(fake, "tab pulse");
+    const statuses = Object.fromEntries(overview.snap.hosts.map((host) => [host.name, host.reachable]));
+    expect(statuses).toEqual({
+      mac: true,
+      "ssh-unknown": null,
+      "ssh-down": false,
+      vps: true,
+      "aggregate-unknown": null,
+      "aggregate-down": false,
+    });
+    expect(overview.text).toContain("ssh-unknown (unknown)");
+    expect(overview.text).not.toContain("ssh-unknown (unreachable)");
+    expect(overview.text).toContain("aggregate-unknown (unknown)");
+    expect(overview.text).toContain("ssh-down (unreachable)");
+    expect(overview.text).toContain("aggregate-down (unreachable)");
+
+    const detail = await page(fake, "host ssh-unknown");
+    expect(detail.text).toContain("host ssh-unknown · unknown");
+    const styled = stylizeLines(
+      renderScreen(detail.view.get(), detail.snap, { cols: 160, rows: 50, colorMode: "truecolor" }),
+      createStyle("truecolor"),
+    ).join("\n");
+    const style = createStyle("truecolor");
+    expect(styled).toContain(style.paint("dim", "(unknown)"));
+    expect(styled).toContain(style.paint("error", "(unreachable)"));
   });
 
   it("does not list this host twice when the registry names it", async () => {
