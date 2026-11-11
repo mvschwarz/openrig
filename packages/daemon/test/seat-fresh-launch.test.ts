@@ -24,6 +24,7 @@ import { deriveOriented } from "../src/domain/startup-proof.js";
 import { deriveRehydrateSessionIdByNode } from "../src/domain/active-occupant.js";
 import { readFreshOccupantRelations } from "../src/domain/fresh-occupant-relation.js";
 import type { NativeProcessLister, NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import type { ProcessTableRow } from "../src/domain/process-table.js";
 
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
@@ -59,6 +60,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
   let listProcesses: NativeProcessLister;
+  let readProcesses: () => Promise<ProcessTableRow[]>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -131,6 +133,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
+    readProcesses = async () => [];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,
@@ -139,6 +142,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       listProcesses: () => listProcesses(),
+      readProcesses: () => readProcesses(),
       nodeLauncher,
       startupOrchestrator,
       runtimeAdapters,
@@ -838,7 +842,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
 
     // `rig unclaim` releases an adopted session (its row detached, its binding cleared) and leaves its process running;
-    // the person then ends it and closes its terminal. When that was the server's last session, tmux exits with it.
+    // the person then ends it and its tmux session. When that was the server's last session, tmux exits with it.
     const releaseAdopted = (seat: ReturnType<typeof seedSeat>) => {
       sessionRegistry.markDetached(seat.session!.id);
       sessionRegistry.clearBinding(seat.node.id);
@@ -874,6 +878,63 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(tmux.createSession).not.toHaveBeenCalled();
       expect(killed).toEqual([]);
       expect(alive.has(seat.sessionName)).toBe(true);
+    });
+
+    // Unclaim doesn't end the process, and tmux can lose its socket while its server keeps running: the probe then
+    // can't reach the server, and a server started at that path is a new, empty one. So the model keeps the two apart:
+    // `alive` and `server.up` are what the socket answers, and the process table is what still runs.
+    const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const lstart = (d: Date) => `${DAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} `
+      + `${[d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":")} ${d.getFullYear()}`;
+    const processRow = (pid: number, ppid: number, startedAt: Date, command: string): ProcessTableRow =>
+      ({ pid, ppid, pgid: pid, tpgid: -1, executableName: command.split(" ")[0]!, startedAt: lstart(startedAt), command });
+    const observed = new Date(Date.now() - 60_000);
+    const releasedWithLostSocket = () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      releaseAdopted(seat);
+      new SeatIdentityStore(db).upsert({
+        nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%old", observedPid: 5151, observedPanePid: 5150, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: seat.sessionName, observedAt: observed.toISOString(),
+      });
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+      return { seat, server };
+    };
+
+    it("keeps refusing a released seat's fresh launch while its recorded process still runs behind a lost socket", async () => {
+      const { seat } = releasedWithLostSocket();
+      const before = new Date(observed.getTime() - 10 * 60_000);
+      readProcesses = async () => [processRow(5150, 900, before, "zsh"), processRow(900, 1, before, "tmux new-session")];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("last ran as process 5150, which is still running") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it.each([
+      { name: "its recorded process has ended", rows: async () => [] as ProcessTableRow[] },
+      { name: "its pid now belongs to a later process",
+        rows: async () => [processRow(5150, 1, new Date(observed.getTime() + 30_000), "vim")] },
+      { name: "the process table can't be read", rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
+    ])("reopens the server for a released seat when $name", async ({ rows }) => {
+      const { seat, server } = releasedWithLostSocket();
+      readProcesses = rows;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
     });
 
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
