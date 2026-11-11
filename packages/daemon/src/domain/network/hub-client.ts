@@ -75,8 +75,8 @@ const item = (value: unknown): HubItem => {
 };
 
 /** Connect to a hub as one participant. The bearer goes only in this transport's Authorization header. The SDK's
- *  same-origin policy, set explicitly, follows a redirect only within the hub's origin (or its https form on the same
- *  host), so the bearer never goes to another origin; any other redirect fails with its target named. */
+ *  same-origin policy, set explicitly, follows a redirect only within the hub's origin, or to its https form on the same
+ *  host with default ports, so the bearer follows only those; any other redirect fails with its target named. */
 export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
   const transport = new StreamableHTTPClientTransport(new URL(hubUrl), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },

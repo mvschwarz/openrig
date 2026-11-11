@@ -226,13 +226,20 @@ function finalItem(repo: QueueRepository, start: QueueItem): QueueItem | null {
   return current.state === "handed-off" ? null : current;
 }
 
-/** What the hub hears as the result: the resolution, else the closer's own note on the close itself. Other notes on the
- *  item can be OpenRig's or another seat's, and name local seats, so they're never sent. */
-function closingWords(db: Database.Database, item: QueueItem): string {
+/** What the hub hears as the result: the resolution, else the closer's own note on the close itself. The close is read
+ *  with `closingTransition`, since later notes on a closed item repeat its state. Other notes on the item can be
+ *  OpenRig's or another seat's, and name local seats, so they're never sent. */
+function closingWords(repo: QueueRepository, item: QueueItem): string {
   if (item.resolution) return item.resolution;
-  const close = db.prepare("SELECT transition_note, actor_session FROM queue_transitions WHERE qitem_id = ? AND state = ? ORDER BY transition_id DESC LIMIT 1")
-    .get(item.qitemId, item.state) as { transition_note: string | null; actor_session: string | null } | undefined;
-  return close?.transition_note && close.actor_session === item.destinationSession ? close.transition_note : "Closed without a stated result.";
+  const close = repo.closingTransition(item.qitemId, item.state);
+  return close?.transitionNote && close.actorSession === item.destinationSession ? close.transitionNote : "Closed without a stated result.";
+}
+
+/** The hub items a binding's result never reached because someone else closed them first, for status. */
+export function networkClosedElsewhere(db: Database.Database, bindingId: string): Array<{ hubItem: string; localItem: string; note: string | null }> {
+  return (db.prepare("SELECT hub_qitem_id, local_qitem_id, last_error FROM network_receipts WHERE binding_id = ? AND outcome = 'closed_on_hub' ORDER BY settled_at, local_qitem_id")
+    .all(bindingId) as Array<{ hub_qitem_id: string; local_qitem_id: string; last_error: string | null }>)
+    .map((row) => ({ hubItem: row.hub_qitem_id, localItem: row.local_qitem_id, note: row.last_error }));
 }
 
 async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, now: () => Date, result: NetworkPassResult): Promise<void> {
@@ -275,20 +282,29 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
         : end.state === "denied" || end.closureReason === "denied" ? "denied" : "no-follow-on";
       const state = end.state === "failed" ? "failed" as const : "done" as const;
       const closureReason = state === "failed" ? null : reason;
-      const words = closingWords(deps.db, end);
-      try {
-        await hub.close(receipt.hub_qitem_id, { state, closureReason, resolution: words });
-      } catch (error) {
-        if (!(error instanceof HubError) || error.kind !== "refused") throw error;
-        const shown = await hub.show(receipt.hub_qitem_id);
-        if (!FINAL.has(shown.state)) throw error;
-        // Closed already: by our own close whose answer was lost, or by someone else first. Only our own outcome
-        // counts as sent; otherwise the local result stays here, and the receipt says the hub closed it elsewhere.
-        if (shown.state !== state || shown.resolution !== words || (shown.closureReason ?? null) !== closureReason) {
-          mark("settled_at", receipt, "closed_on_hub", `The hub item was closed elsewhere (${shown.state}${shown.closureReason ? `, ${shown.closureReason}` : ""}) before this result reached it. The result stays on ${local.qitemId}.`);
-          deps.log?.(`network ${binding.id}: hub item ${receipt.hub_qitem_id} was closed elsewhere; its local result stays on ${local.qitemId}`);
+      const words = closingWords(deps.queueRepo, end);
+      // A final check before the close: a hub item already closed, by our own close whose answer was lost or by someone
+      // else, gets no write, so another actor's failure or cancel never becomes our done.
+      let shown = await hub.show(receipt.hub_qitem_id);
+      if (!FINAL.has(shown.state)) {
+        try {
+          await hub.close(receipt.hub_qitem_id, { state, closureReason, resolution: words });
+        } catch (error) {
+          // Refused: closed by someone else between the check and the close. The readback says how.
+          if (!(error instanceof HubError) || error.kind !== "refused") throw error;
+        }
+        shown = await hub.show(receipt.hub_qitem_id);
+        if (!FINAL.has(shown.state)) {
+          deps.db.prepare("UPDATE network_receipts SET last_error = ? WHERE local_qitem_id = ?").run("The hub accepted the close but the item still reads open; trying again.", receipt.local_qitem_id);
           continue;
         }
+      }
+      // It counts as our result only when the hub item shows our state, closure reason and resolution. Otherwise the
+      // local result stays here, and status shows the hub item as closed elsewhere.
+      if (shown.state !== state || shown.resolution !== words || (shown.closureReason ?? null) !== closureReason) {
+        mark("settled_at", receipt, "closed_on_hub", `The hub item was closed elsewhere (${shown.state}${shown.closureReason ? `, ${shown.closureReason}` : ""}) before this result reached it. The result stays on ${local.qitemId}.`);
+        deps.log?.(`network ${binding.id}: hub item ${receipt.hub_qitem_id} was closed elsewhere; its local result stays on ${local.qitemId}`);
+        continue;
       }
       mark("settled_at", receipt, end.state);
       result.resultsSent++;

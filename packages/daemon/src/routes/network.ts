@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { NetworkBindingError, NetworkBindingStore } from "../domain/network/network-bindings.js";
+import { networkClosedElsewhere } from "../domain/network/network-connector.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 
@@ -22,7 +23,10 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
   // The connector's own view (next pass, backoff, last pass) when it runs in this daemon; null otherwise.
   router.get("/bindings", (c) => {
     const connector = c.get("networkConnector" as never) as { snapshot(): unknown } | undefined;
-    return c.json({ bindings: store(c).list(), connector: connector?.snapshot() ?? null });
+    const db = (c.get("rigRepo" as never) as RigRepository).db;
+    // Hub items someone else closed before a binding's result reached them: a conflict the person sees.
+    const bindings = store(c).list().map((b) => ({ ...b, closedElsewhere: networkClosedElsewhere(db, b.id) }));
+    return c.json({ bindings, connector: connector?.snapshot() ?? null });
   });
 
   router.post("/bindings", async (c) => {

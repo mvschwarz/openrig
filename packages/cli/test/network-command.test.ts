@@ -99,6 +99,18 @@ it("a plain-http hub needs --allow-http: refused with the remedy, then connected
   expect(json).not.toContain("tok-abc");
 });
 
+it("status shows a hub item closed elsewhere under its binding, in text and JSON", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  await cli({ "/tok": "tok-abc" }).parseAsync(["node", "rig", "network", "connect", "dev-impl@lab", "--hub", "https://hub.example/mcp", "--as", "alex@team", "--token-file", "/tok"]);
+  const bindingId = String(out.mock.calls.at(-1)?.[0]).match(/netb-[0-9a-f]{20}/)![0];
+  db.prepare(`INSERT INTO network_receipts (local_qitem_id, binding_id, hub_qitem_id, created_at, settled_at, outcome, last_error)
+    VALUES ('qitem-net-0001', ?, 'hub-9', '2026-11-11T19:00:00Z', '2026-11-11T19:01:00Z', 'closed_on_hub', 'closed elsewhere (done, canceled)')`).run(bindingId);
+  await cli().parseAsync(["node", "rig", "network", "status"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).toContain("\n  hub item hub-9 was closed elsewhere before its result arrived; the result stays on qitem-net-0001");
+  await cli().parseAsync(["node", "rig", "network", "status", "--json"]);
+  expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).bindings[0].closedElsewhere).toEqual([{ hubItem: "hub-9", localItem: "qitem-net-0001", note: "closed elsewhere (done, canceled)" }]);
+});
+
 it("sends the operator bearer on its writes, so a daemon with one configured takes them", async () => {
   app = routesWith("op-secret");
   const out = vi.spyOn(console, "log").mockImplementation(() => {});

@@ -13,7 +13,9 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { NetworkBindingStore, networkCredentialFile } from "../src/domain/network/network-bindings.js";
+import { Hono } from "hono";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
+import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
 const PARTICIPANT = "alex@team";
@@ -32,6 +34,8 @@ class FakeHub {
   readonly stallShow = new Set<string>();
   /** Runs while a show is waiting on the hub, before it answers. */
   duringShow: ((id: string) => void) | null = null;
+  /** Someone else closes these items just as ours arrives: the hub keeps theirs and answers ours as done. */
+  readonly raceClose = new Map<string, Partial<HubItem>>();
   closes = 0;
 
   add(qitemId: string, body = "Summarize the release notes", destination = PARTICIPANT): void {
@@ -72,6 +76,8 @@ class FakeHub {
         this.closes++;
         const item = get(id);
         if (["done", "canceled", "denied", "failed"].includes(item.state)) throw new HubError("refused", `qitem ${id} is already closed`);
+        const theirs = this.raceClose.get(id);
+        if (theirs) { Object.assign(item, theirs); return; }
         Object.assign(item, { state: input.state, closureReason: input.closureReason, resolution: input.resolution });
         if (this.loseCloseAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
       },
@@ -406,13 +412,49 @@ describe("network connector", () => {
     const [local] = runs("hub-c1");
     Object.assign(hub.items.get("hub-c1")!, { state: "done", closureReason: "canceled", resolution: "Not needed any more." });
     await repo.update({ qitemId: local!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Here it is." });
+    const closes = hub.closes;
     expect(await pass(b.id)).toMatchObject({ resultsSent: 0 });
+    // Checked before the close, so nothing is written over theirs.
+    expect(hub.closes).toBe(closes);
     expect(hub.items.get("hub-c1")).toMatchObject({ state: "done", closureReason: "canceled", resolution: "Not needed any more." });
     expect(db.prepare("SELECT outcome, settled_at IS NOT NULL AS settled, last_error FROM network_receipts WHERE hub_qitem_id = 'hub-c1'").get()).toEqual({
       outcome: "closed_on_hub", settled: 1,
       last_error: `The hub item was closed elsewhere (done, canceled) before this result reached it. The result stays on ${local!.qitemId}.`,
     });
     expect(repo.getById(local!.qitemId)!.resolution).toBe("Here it is.");
+  });
+
+  it("a hub item already failed elsewhere gets no write and isn't our result, and a close that loses a race is read back as closed elsewhere", async () => {
+    const b = bind();
+    hub.add("hub-f1");
+    hub.add("hub-f2");
+    await pass(b.id);
+    const [f1] = runs("hub-f1");
+    const [f2] = runs("hub-f2");
+    Object.assign(hub.items.get("hub-f1")!, { state: "failed", closureReason: null, resolution: "Their failure." });
+    hub.raceClose.set("hub-f2", { state: "done", closureReason: "no-follow-on", resolution: "Someone else's answer." });
+    for (const item of [f1!, f2!]) {
+      await repo.update({ qitemId: item.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Ours." });
+    }
+    const closes = hub.closes;
+    expect(await pass(b.id)).toMatchObject({ resultsSent: 0 });
+    expect(hub.closes).toBe(closes + 1);
+    expect(hub.items.get("hub-f1")).toMatchObject({ state: "failed", resolution: "Their failure." });
+    expect(hub.items.get("hub-f2")).toMatchObject({ state: "done", resolution: "Someone else's answer." });
+    const outcomes = db.prepare("SELECT hub_qitem_id, outcome FROM network_receipts WHERE hub_qitem_id IN ('hub-f1', 'hub-f2') ORDER BY hub_qitem_id").all();
+    expect(outcomes).toEqual([{ hub_qitem_id: "hub-f1", outcome: "closed_on_hub" }, { hub_qitem_id: "hub-f2", outcome: "closed_on_hub" }]);
+
+    // The person sees both conflicts on the binding.
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("rigRepo" as never, new RigRepository(db) as never); await next(); });
+    app.route("/api/network", networkRoutes({ home }));
+    // A later pass's ordinary contact doesn't clear it, and it's read from the receipts, so a restart keeps it.
+    expect((await pass(b.id)).error).toBeUndefined();
+    const listed = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ id: string; closedElsewhere: unknown[] }> };
+    expect(listed.bindings.find((x) => x.id === b.id)!.closedElsewhere).toEqual([
+      { hubItem: "hub-f1", localItem: f1!.qitemId, note: `The hub item was closed elsewhere (failed) before this result reached it. The result stays on ${f1!.qitemId}.` },
+      { hubItem: "hub-f2", localItem: f2!.qitemId, note: `The hub item was closed elsewhere (done, no-follow-on) before this result reached it. The result stays on ${f2!.qitemId}.` },
+    ].sort((x, y) => x.localItem.localeCompare(y.localItem)));
   });
 
   it("a close without a resolution sends only the closer's own closing note, never another note on the item", async () => {
@@ -426,6 +468,11 @@ describe("network connector", () => {
       .run(w1!.qitemId, new Date().toISOString(), "Stuck sweep: dev-impl@lab idle 17 min, recovery qitem-recovery-x.");
     await repo.update({ qitemId: w1!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on" });
     await repo.update({ qitemId: w2!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", transitionNote: "Done; the notes are in the item." });
+    // Notes after a close repeat its state: the closer's own later note isn't the result, and a later OpenRig note
+    // doesn't hide the closer's note on the close.
+    await repo.update({ qitemId: w1!.qitemId, actorSession: "dev-impl@lab", transitionNote: "Also: I left a scratch file in /tmp." });
+    db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES (?, ?, 'done', ?, 'daemon@kernel')")
+      .run(w2!.qitemId, new Date().toISOString(), "Delivery receipt: wake confirmed for dev-impl@lab.");
     await pass(b.id);
     expect(hub.items.get("hub-w1")!.resolution).toBe("Closed without a stated result.");
     expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");

@@ -13,6 +13,8 @@ export interface NetworkDeps {
 interface Binding {
   id: string; localSession: string; hubUrl: string; hubSeat: string; state: string; stateReason: string | null;
   lastContactAt: string | null; lastError: string | null; unencrypted?: boolean;
+  /** Hub items someone else closed before this binding's result reached them. */
+  closedElsewhere?: Array<{ hubItem: string; localItem: string }>;
 }
 
 /** The participant's token, read from the file the account gave the person. A file others can read is used, with a note. */
@@ -27,7 +29,8 @@ function line(b: Binding): string {
   const contact = b.lastContactAt ? `last contact ${b.lastContactAt}` : "no contact yet";
   const state = b.state === "active" ? contact : `${b.state}${b.stateReason ? ` (${b.stateReason})` : ""}`;
   const plain = b.unencrypted ? "  UNENCRYPTED (http, allowed for this binding)" : "";
-  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${b.hubUrl}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}`;
+  const conflicts = (b.closedElsewhere ?? []).map((c) => `\n  hub item ${c.hubItem} was closed elsewhere before its result arrived; the result stays on ${c.localItem}`).join("");
+  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${b.hubUrl}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}${conflicts}`;
 }
 
 /** `rig network`: connect a selected local seat to a participant of a remote hub (an account's network rig, or

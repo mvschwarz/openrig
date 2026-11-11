@@ -55,8 +55,10 @@ rig queue update <local item> --state done --closure-reason no-follow-on --resol
   took.
 - If the local record of an item is gone, or it was handed on without one successor here, the hub item says its outcome
   is unknown, and it is never run again.
-- If someone else closed the hub item first (its requester canceled it, say), the local result stays here, and the
-  connector doesn't count it as delivered.
+- If someone else closed the hub item first (its requester canceled it, say), the local result stays here, the connector
+  doesn't count it as delivered, and `rig network status` (and its `--json`) shows it under the binding as closed
+  elsewhere. The connector checks the hub item just before closing it, so it never writes over a close that's already
+  there, and reads it back after.
 - The derived id makes the queue item unique, not the work's outside effects. Anything your agent did outside OpenRig
   before a crash is neither undone nor deduplicated.
 
@@ -95,6 +97,9 @@ each time it starts.
 
 - The connector polls, so new work normally waits up to one interval before it reaches the seat, and longer when the
   hub fails or a backlog builds.
+- If someone else closes a hub item in the moment between the connector's check and its close, the hub may keep
+  either close; the readback then reports it as closed elsewhere. Closing only if still open in one step needs the hub
+  to offer a conditional close.
 - After a disconnect or a revocation, work already taken keeps running here, but its pickup and result no longer reach
   the hub item, which stays at its last reported stage.
 - **Plain http needs your choice.** `rig network connect` refuses an `http:` hub URL until you add `--allow-http`, because

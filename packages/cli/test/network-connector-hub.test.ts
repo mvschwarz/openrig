@@ -123,6 +123,20 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(hubRepo.getById(failing.qitemId)).toMatchObject({ state: "failed", resolution: "The build broke." });
   expect(hubRepo.getById(dropped.qitemId)).toMatchObject({ state: "done", closureReason: "canceled", resolution: "Not needed." });
 
+  // Two items the requester fails on the hub while they're queued here. Our failed and done results then aren't ours to
+  // deliver: the hub items keep their failure, and the receipts say closed elsewhere.
+  const theirs = [
+    await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "One", body: "First.", nudge: false } as never),
+    await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Two", body: "Second.", nudge: false } as never),
+  ];
+  expect(await pass()).toMatchObject({ taken: 2 });
+  for (const item of theirs) await hubRepo.update({ qitemId: item.qitemId, actorSession: "lead@team", state: "failed", resolution: "Dropped by the requester." } as never);
+  await localRepo.update({ qitemId: byHub(theirs[0]!.qitemId).qitemId, actorSession: "dev-impl@lab", state: "failed", transitionNote: "Could not finish." });
+  await localRepo.update({ qitemId: byHub(theirs[1]!.qitemId).qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Finished it." });
+  expect(await pass()).toMatchObject({ resultsSent: 0 });
+  for (const item of theirs) expect(hubRepo.getById(item.qitemId)).toMatchObject({ state: "failed", resolution: "Dropped by the requester." });
+  expect(localDb.prepare("SELECT DISTINCT outcome FROM network_receipts WHERE hub_qitem_id IN (?, ?)").all(theirs[0]!.qitemId, theirs[1]!.qitemId)).toEqual([{ outcome: "closed_on_hub" }]);
+
   await revokeGrant(tokenFile, "alex");
   expect(await pass()).toMatchObject({ error: "revoked" });
   expect(bindings.get(binding.id)!.state).toBe("revoked");
