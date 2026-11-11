@@ -1617,8 +1617,9 @@ export async function attachAgentActivity(
      *
      *     needs_input > running > MOTION > idle / unknown
      *
-     * A current, target-bound complete idle frame is the narrow exception to motion below.
-     * A generic footer or old idle capture is not that evidence; D2 remains unchanged.
+     * A current, target-bound complete idle frame is the narrow idle exception to motion below.
+     * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
+     * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
      * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
      * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
      * safety argument, and it is what each half of the defect needs:

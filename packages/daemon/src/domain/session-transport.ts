@@ -1791,8 +1791,9 @@ const SEAT_IDLE_SHAPES: {
     },
   },
   codex: {
-    // The hint row under the status line of an empty box (product-path-idle.J, idle).
-    hints: [/^\? for shortcuts$/, /^\? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/],
+    // Empty-box hints: 0.160 product-path-idle.J/idle, and the captured 0.167 completed frame.
+    hints: [/^\? for shortcuts$/, /^\? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/,
+      /^← for agents · \? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/],
     // The last non-blank row above the empty box: the completion row Codex adds when a turn completes
     // (after-enter-15s.J; its grammar is CODEX_COMPLETION_ROW above), or the greeting under the session header
     // before any turn (idle, product-path-idle.J, cleared-without-enter.J). A running or streaming turn draws rows
