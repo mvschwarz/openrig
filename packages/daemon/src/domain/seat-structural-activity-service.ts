@@ -14,6 +14,11 @@ export interface StructuralObservation {
   reason: string;
   evidence: string | null;
   observedAt: string;
+  /** A lower bound taken before the capture's read, when known: a reader may use the frame only for the occupant
+   *  present by then. */
+  captureStartedAt?: string;
+  /** The pane and its process this capture read, when the batched capture reported them (#2515). */
+  pane?: { id: string; pid: number };
   /** A complete idle frame read for this capture's target, not a generic footer or hook. */
   idleFrame?: { sessionName: string; runtime: "claude-code" | "codex"; captureStartedAt: string };
   /** A Codex working observation is usable only for the occupant present when capture began. */
@@ -103,12 +108,14 @@ export class SeatStructuralActivityService {
   async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, communityHarness?: string | null, prefetchedStartedAt?: Date): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
+    let pane: StructuralObservation["pane"];
     // Completion can lag the bytes: use a lower bound taken before the actual read.
     const captureStartedAt = prefetched?.has(sessionName) ? prefetchedStartedAt : this.now();
     if (prefetched?.has(sessionName)) {
       const capture = prefetched.get(sessionName)!;
       content = capture.text;
       observedAt = capture.capturedAt; // the capture's own time, never the end of the sweep (#309 review)
+      pane = capture.pane;
     } else {
       try {
         content = await this.tmuxAdapter.capturePaneContent(sessionName, this.captureLines);
@@ -141,6 +148,8 @@ export class SeatStructuralActivityService {
       reason: c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
+      ...(captureStartedAt ? { captureStartedAt: captureStartedAt.toISOString() } : {}),
+      ...(pane ? { pane } : {}),
       ...(captureStartedAt && seconds !== null ? { codexWorkingClock: { seconds, captureStartedAt: captureStartedAt.toISOString() } } : {}),
       ...(workingFrame ? { codexWorkingFrame: workingFrame } : {}),
       ...(captureStartedAt && c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")
