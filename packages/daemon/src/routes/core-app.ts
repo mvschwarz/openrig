@@ -1,10 +1,12 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import type { CoreAppJob } from "../domain/core-app-job.js";
+import type { CoreAppCredential } from "../domain/core-app-access.js";
 import { isIP } from "node:net";
 import { CoreAppAccess, CoreAppError, appObject } from "../domain/core-app-access.js";
 import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
 
 /** Local-instance facade. The server's Host/Origin boundary still precedes this group. */
-export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: string | null }): Hono {
+export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: string | null; job?: CoreAppJob }): Hono {
   const app = new Hono();
   app.onError((error, c) => {
     if (error instanceof CoreAppError) return c.json({ error: error.code, ...error.details }, error.status);
@@ -42,8 +44,20 @@ export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: st
     return c.json({ revoked: true });
   });
   app.get("/v1/capabilities", c => c.json({ contract: "openrig.core-app", version: 1, jobs: [],
-    app: { id: opts.access!.authenticate(c.req.header("Authorization")).appId },
+    app: { id: credential(c).appId, actors: credential(c).actors },
     refresh: { snapshot: true, pollAfterMs: 5000 } }));
+  const job = () => { if (!opts.job) throw new CoreAppError("app_job_unavailable", 503); return opts.job; };
+  const actor = (c: Context) => job().actor(credential(c), c.req.query("actor"));
+  app.get("/v1/needs-me", c => c.json(job().needsMe(credential(c), actor(c))));
+  app.get("/v1/requests/:requestId", c => c.json(job().snapshot(() => job().request(credential(c), c.req.param("requestId"), actor(c)))));
+  app.get("/v1/answers/:answerId", c => c.json(job().readAnswer(credential(c), c.req.param("answerId"), actor(c))));
+  app.post("/v1/answers/:answerId", async c => {
+    let body: unknown; try { body = await c.req.json(); } catch { throw new CoreAppError("invalid_body", 400); }
+    return c.json(await job().submit(credential(c), c.req.param("answerId"), body));
+  });
+  app.all("/v1/*", c => c.json({ error: "not_found" }, 404));
   app.all("/*", c => c.json({ error: "unsupported_contract_version", supportedVersions: [1] }, 404));
   return app;
 }
+
+function credential(c: Context): CoreAppCredential { return c.get("coreAppCredential" as never) as CoreAppCredential; }

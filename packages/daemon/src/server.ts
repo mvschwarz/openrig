@@ -1,5 +1,7 @@
 import { hookBridgeRoutes } from "./routes/hook-bridge.js";
 import type { RunnerChannel } from "./domain/runner-channel.js";
+import { CoreAppJob } from "./domain/core-app-job.js";
+import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { coreAppRoutes } from "./routes/core-app.js";
 import { CoreAppAccess } from "./domain/core-app-access.js";
 import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
@@ -890,7 +892,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
-  app.route("/api/apps", coreAppRoutes({ access: deps.queueRepo ? new CoreAppAccess(deps.queueRepo.db, deps.queueRepo) : undefined, operatorToken: deps.missionControlBearerToken }));
+  const coreAppAccess = deps.queueRepo ? new CoreAppAccess(deps.queueRepo.db, deps.queueRepo) : undefined;
+  app.route("/api/apps", coreAppRoutes({ access: coreAppAccess, operatorToken: deps.missionControlBearerToken,
+    job: coreAppAccess && deps.queueRepo && deps.missionControlWriteContract
+      ? new CoreAppJob(coreAppAccess, deps.queueRepo, deps.eventBus, deps.missionControlWriteContract, new MissionControlActionLog(deps.queueRepo.db)) : undefined }));
   app.route(
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),

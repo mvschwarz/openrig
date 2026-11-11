@@ -68,3 +68,8 @@ export function appObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new CoreAppError("invalid_body", 400);
   return input as Record<string, unknown>;
 }
+
+export interface CoreAppSubmission {
+  app_id: string; answer_id: string; request_id: string; binding_hash: string;
+  binding_json: string | null; checkpoint_json: string | null; receipt_json: string | null; erased_at: string | null;
+}

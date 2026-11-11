@@ -39,6 +39,8 @@
 //                closure_target+handed_off_to=<destination>;
 //                creates new qitem at destination (4-step canonical)
 
+import { ulid } from "ulid";
+import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
@@ -105,6 +107,13 @@ export interface MissionControlActionInput {
   /** #2446, opt-in: the `decisionRevision` the caller read. A settling act then runs only on that decision; omitted, the
    *  act and its result are exactly as before. An `operationId` in `auditNotes` lets a retry be answered from the record. */
   expectedRevision?: string;
+  /** In-process app submission composition. Never accepted from legacy route input. Hooks run synchronously inside
+   * the owning mutation transaction; final receipt is also retained in the immutable audit record. */
+  appSubmission?: {
+    checkpoint: (item: QueueItem) => void;
+    verify: () => void;
+    finalize: (result: MissionControlActionResult) => Record<string, unknown>;
+  };
   /**
    * For handoff: opt-in best-effort wake. Default true (PL-004 Phase A R1
    * pattern: durable + waking by default; operators opt out for cold queues).
@@ -173,7 +182,7 @@ export class MissionControlWriteContract {
     const item = this.queueRepo.getById(input.qitemId);
     const current = item ? this.queueRepo.decisionRevision(item) : null;
     if (item && current !== input.expectedRevision) {
-      const last = this.actionLog.listForQitem(input.qitemId, 1)[0];
+      const last = operation ? this.actionLog.findOperation(input.qitemId, operation) : null;
       // The caller's own committed operation retried after an uncertain result: answered from its record, nothing written.
       if (operation && last?.auditNotes?.operation === operation) {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
@@ -659,8 +668,25 @@ export class MissionControlWriteContract {
     let reply: string;
     let wrote = false; // whether this call changed the ask before the return below awaits
     if (chose) {
-      const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
-        questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+      // A partial app choice has no asynchronous return seam: choice + immutable receipt + audit + events commit
+      // under the same envelope. An injected audit failure rolls back the choice too.
+      if (input.appSubmission && unansweredQuestions(questions, { ...(ask.humanAnswers ?? {}), [input.questionId ?? ""]: input.optionId ?? "" }).length > 0) {
+        return this.eventBus.withNotifyEnvelope(register => {
+          const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+            questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+          if (recorded.status !== "recorded") throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`);
+          const [just] = formatHumanAnswers(recorded.questions.filter(q => q.id === input.questionId), recorded.answers);
+          return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
+            outcome: "recorded", unanswered: unansweredQuestions(recorded.questions, recorded.answers).map(q => q.question),
+          }, null, undefined, register);
+        });
+      }
+      const recorded = this.db.transaction(() => {
+        const result = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+          questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+        if (result.status === "recorded") input.appSubmission?.checkpoint(this.queueRepo.getById(input.qitemId)!);
+        return result;
+      })();
       if (recorded.status !== "recorded") {
         throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
           { qitemId: input.qitemId, reason: recorded.reason });
@@ -713,6 +739,7 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    input.appSubmission?.verify();
     // Two people answering at once: one answer returns, and the other is told whose it was.
     if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
     // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
@@ -771,6 +798,7 @@ export class MissionControlWriteContract {
       allowAlreadyDone: boolean;
       onUnclosed: () => MissionControlWriteContractError;
     },
+    outerRegister?: NotifyRegister,
   ): MissionControlActionResult {
     const evaluatedAt = this.now().toISOString();
     // A runner's permission ask approved or denied from the Feed or Steering goes through the answer path, and the
@@ -779,8 +807,9 @@ export class MissionControlWriteContract {
     const auditReason = actionVerb !== "answer" && input.reason ? input.reason : reason;
     let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
+    let appResult: MissionControlActionResult | null = null;
     try {
-      this.eventBus.withNotifyEnvelope((register) => {
+      const persist = (register: NotifyRegister) => {
         if (closePending) {
           const closed = this.queueRepo.resolveDirectHumanReply({
             qitemId: input.qitemId,
@@ -793,7 +822,15 @@ export class MissionControlWriteContract {
           }
         }
         after = this.queueRepo.getById(input.qitemId);
+        const actionId = ulid();
+        appResult = {
+          actionId, verb: actionVerb, qitemId: input.qitemId, closedQitem: after, createdQitemId,
+          notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer,
+          ...(input.expectedRevision && after ? { decisionRevision: this.queueRepo.decisionRevision(after) } : {}),
+        };
+        const appReceipt = input.appSubmission?.finalize(appResult);
         actionEntry = this.actionLog.record({
+          actionId,
           actionVerb,
           qitemId: input.qitemId,
           actorSession: input.actorSession,
@@ -801,7 +838,7 @@ export class MissionControlWriteContract {
           beforeState: before,
           afterState: after ? snapshotQitem(after) : null,
           reason: auditReason,
-          auditNotes: input.auditNotes ?? null,
+          auditNotes: appReceipt ? { ...input.auditNotes, appReceipt } : input.auditNotes ?? null,
           identityProvenance: input.identityProvenance ?? null,
         });
         register(
@@ -813,7 +850,8 @@ export class MissionControlWriteContract {
             actorSession: input.actorSession,
           }),
         );
-      });
+      };
+      if (outerRegister) persist(outerRegister); else this.eventBus.withNotifyEnvelope(persist);
     } catch (err) {
       if (err instanceof MissionControlActionLogError) {
         throw new MissionControlWriteContractError(err.code, err.message, err.details);
@@ -896,7 +934,7 @@ interface ClosureMapping {
 
 /** One logical operation (#2446): the caller's operationId with the verb, who sent it and what it carries, so a retry
  *  matches only itself, never another verb or payload sent under the same ID. */
-function operationFingerprint(input: MissionControlActionInput): string {
+export function operationFingerprint(input: MissionControlActionInput): string {
   const sent = [input.auditNotes?.operationId, input.verb, input.actorSession, input.authority ?? null, input.questionId ?? null,
     input.optionId ?? null, input.decision ?? null, input.reason ?? null, input.destinationSession ?? null, input.body ?? null, input.annotation ?? null];
   return createHash("sha256").update(JSON.stringify(sent)).digest("hex").slice(0, 24);
