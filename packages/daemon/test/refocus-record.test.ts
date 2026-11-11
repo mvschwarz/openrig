@@ -70,7 +70,7 @@ describe("seat status reads what OpenRig's own refocus hook recorded", () => {
     });
   });
 
-  it("an earlier record that can't be read makes the history unknown, never 'no record' or an older time", () => {
+  it.skipIf(process.getuid?.() === 0)("an earlier record that can't be read makes the history unknown, never 'no record' or an older time (root bypasses mode 000)", () => {
     withHome((home) => {
       // Alone: an unreadable earlier record, and the seat now has another conversation (or no resume token).
       prompt(home, "earlier");
@@ -90,7 +90,7 @@ describe("seat status reads what OpenRig's own refocus hook recorded", () => {
     });
   });
 
-  it("a state folder that can't be read reads unknown, not 'no record'", () => {
+  it.skipIf(process.getuid?.() === 0)("a state folder that can't be read reads unknown, not 'no record' (root bypasses mode 000)", () => {
     withHome((home) => {
       prompt(home, conversation);
       const dir = join(home, "refocus");
