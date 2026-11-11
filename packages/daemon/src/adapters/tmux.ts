@@ -277,7 +277,9 @@ function parentSessionEnvWarning(target: string, err: unknown): string {
 /** Shell-quote a string using single quotes (POSIX-safe). */
 /** One pane's text from a batched capture, with the time its chunk was read (#309 review). `text` is null for a
  *  session that is gone or an empty capture. */
-export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true }
+export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true;
+  /** The pane and its process that this capture read, from the same tmux call (#2515). */
+  pane?: { id: string; pid: number } }
 
 /** The most sessions one batched capture chains (#308). Not a byte bound: a chunk whose output overflows exec's buffer
  *  fails and is split in half. */
@@ -1781,12 +1783,14 @@ export class TmuxAdapter {
     const captureChunk = async (chunk: string[]): Promise<void> => {
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
+      // The marker line also names the pane and its process that the capture after it reads, in the same call.
+      const header = (k: number) => `${mark(k)} #{pane_id} #{pane_pid}`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", `=${t}:`, header(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
-        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
+        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(header(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
       ).join(" \\; ");
       let output: string;
       let capturedAt: Date;
@@ -1830,14 +1834,18 @@ export class TmuxAdapter {
         return; // a single session that failed: read per target by the caller
       }
       const segments: Array<string[] | null> = chunk.map(() => null);
+      const panes: Array<PaneCapture["pane"]> = chunk.map(() => undefined);
+      const marker = new RegExp(`^__openrig_capture_${nonce}_(\\d+)__(?: (.*))?$`);
       let cur = -1;
       const outLines = output.split("\n");
       if (outLines.length && outLines[outLines.length - 1] === "") outLines.pop(); // the final newline, not a line
       for (const line of outLines) {
-        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? /_(\d+)__$/.exec(line) : null;
-        if (m && line === mark(Number(m[1]))) {
+        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? marker.exec(line) : null;
+        if (m && Number(m[1]) < chunk.length) {
           cur = Number(m[1]);
           segments[cur] = [];
+          const identity = /^(%\d+) (\d+)$/.exec(m[2] ?? "");
+          panes[cur] = identity ? { id: identity[1]!, pid: Number(identity[2]) } : undefined;
         } else if (cur >= 0) {
           segments[cur]!.push(line);
         }
@@ -1847,7 +1855,7 @@ export class TmuxAdapter {
         if (seg == null) return; // its marker never printed: read per target
         // capture-pane prints its lines newline-terminated, as the per-target read returns them
         const text = seg.length ? seg.join("\n") + "\n" : "";
-        out.set(t, { text: text === "" ? null : text, capturedAt });
+        out.set(t, { text: text === "" ? null : text, capturedAt, ...(panes[k] ? { pane: panes[k] } : {}) });
       });
     };
     const unique = [...new Set(targets)];

@@ -230,7 +230,7 @@ export class SeatActivityService {
         const proofAt = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.proofAt) : NaN;
         const previousStarted = frame?.codexWorkingFrame?.previousCaptureStartedAt;
         codexFrameWorking = frame !== null && frame?.state !== "attention" && Number.isFinite(capturedAt)
-          && Number.isFinite(frameStarted) && frameStarted >= seat.inventorySinceMs
+          && Number.isFinite(frameStarted) && this.codexFrameQualifies(seat, frame!.codexWorkingFrame!.captureStartedAt, frame!.pane, "if-known")
           && (previousStarted === undefined || Date.parse(previousStarted) >= seat.inventorySinceMs)
           && Number.isFinite(proofAt) && proofAt <= capturedAt && proofAt <= observedAt.getTime()
           && observedAt.getTime() - proofAt < DEFAULT_STRUCTURAL_STALE_MS && frameStarted <= proofAt;
@@ -251,11 +251,15 @@ export class SeatActivityService {
       // showing (1) or the composer is complete and empty (0). Any other frame (a draft, work, an unrecognised screen)
       // withdraws this source, so the prompt reads unknown again. A tracked tool approval keeps its own path.
       if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
-        const prompt = codexPromptObservation(frame, paneId, seat.inventorySinceMs);
+        const prompt = frame && this.codexFrameQualifies(seat, frame.captureStartedAt, frame.pane, "required")
+          ? codexPromptObservation(frame, paneId) : null;
         if (prompt) {
+          seat.structuralPrompt = { freshMs: Date.parse(frame!.checkedAt ?? frame!.observedAt),
+            startedMs: Date.parse(frame!.captureStartedAt!), pane: frame!.pane! };
           this.reportEvidence({ seatNodeId, sessionName: paneId, rung: "needs-input-chrome", sourceId: CODEX_STRUCTURAL_PROMPT_SOURCE,
             seq, observedAt: prompt.observedAt, needsInput: prompt.needsInput });
         } else if (seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE)) {
+          seat.structuralPrompt = undefined;
           this.arbitrate(seat);
         }
       }
@@ -509,6 +513,7 @@ export class SeatActivityService {
     this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
     seat.inventory = inventory;
     seat.inventorySinceMs = this.now().getTime();
+    seat.codexPane = undefined;
     seat.trust.clear();
     for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
     seat.promotion.clear();
@@ -889,8 +894,32 @@ export class SeatActivityService {
    *  instantly. Chosen against our 1Hz/3s cadence: the 3s silence window already
    *  absorbs sub-3s lulls; the 2-tick arbitration debounce absorbs the
    *  window-boundary flap. */
+  /** #2500's boundary for a Codex structural frame, shared by the working frame and the prompt evidence: captured after
+   *  this seat's current inventory began, and, when the capture names its pane, by the same pane and process as the first
+   *  such frame since. A respawn, or a reused pane id under the same name, is a different process. "required" refuses a
+   *  frame that doesn't name its pane. */
+  private codexFrameQualifies(seat: SeatLadderState, startedAt: string | undefined, pane: StructuralObservation["pane"],
+    identity: "required" | "if-known"): boolean {
+    const started = startedAt ? Date.parse(startedAt) : NaN;
+    if (!Number.isFinite(started) || started < seat.inventorySinceMs) return false;
+    if (!pane) return identity !== "required";
+    if (!seat.codexPane) {
+      seat.codexPane = pane;
+      return true;
+    }
+    return seat.codexPane.id === pane.id && seat.codexPane.pid === pane.pid;
+  }
+
   private arbitrate(seat: SeatLadderState): void {
     this.checkContradiction(seat);
+    // #2515: the copied Codex prompt evidence holds only while its frame would: fresh, from this inventory, and from the
+    // pinned pane and process. Read here, so a getter, a failed window read or a new inventory sees it expire too.
+    const prompt = seat.structuralPrompt;
+    if (prompt && (this.now().getTime() - prompt.freshMs >= DEFAULT_STRUCTURAL_STALE_MS || prompt.startedMs < seat.inventorySinceMs
+        || seat.codexPane?.id !== prompt.pane.id || seat.codexPane?.pid !== prompt.pane.pid)) {
+      seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+      seat.structuralPrompt = undefined;
+    }
     const candidate = this.rawCandidate(seat);
     let nextActivity: ActivityValue = candidate?.activity ?? "unknown";
     let decidedBy: EvidenceRungId | null = candidate?.rung ?? null;
@@ -1014,13 +1043,10 @@ interface NeedsInputShape {
 
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
 
-/** What a Codex seat's latest structural frame says about a prompt, for the occupant present when it was captured:
- *  a choice or permission prompt on screen (1), or a complete empty composer (0), observed at the capture's start.
- *  Null for anything else, or a frame captured before this seat's current inventory. */
-function codexPromptObservation(frame: StructuralObservation | null, sessionName: string, inventorySinceMs: number):
+/** What a qualified Codex structural frame says about a prompt: a choice or permission prompt on screen (1), or a
+ *  complete empty composer (0), observed at the capture's start. Null for anything else. */
+function codexPromptObservation(frame: StructuralObservation, sessionName: string):
   { observedAt: string; needsInput: NeedsInputShape } | null {
-  const started = frame?.captureStartedAt ? Date.parse(frame.captureStartedAt) : NaN;
-  if (!frame || !Number.isFinite(started) || started < inventorySinceMs) return null;
   if (frame.state === "attention" && (frame.reason === "selection_prompt" || frame.reason === "permission_prompt")) {
     return { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } };
   }
@@ -1047,6 +1073,10 @@ interface SeatLadderState {
   retired: boolean;
   inventory: AdapterRungInventory | null;
   inventorySinceMs: number;
+  /** The pane and process of the first Codex structural frame accepted since the inventory began (#2515). */
+  codexPane?: { id: string; pid: number };
+  /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
+  structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;

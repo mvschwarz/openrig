@@ -314,7 +314,13 @@ it("the production scheduler keeps a current Claude prompt alert when an older S
 const codexScreen = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 it("a Codex wake refused at a native choice the person then answers: no escalation, and the next wake is sent once", async () => {
   const f = fixture("codex", undefined, codexScreen("./fixtures/codex-trust-0.156.1.txt"), true);
-  const observe = async () => { await f.structural!.pollSeat(f.name, null, "codex"); await f.oracle().pollAllRunningTmuxSeats(f.db); };
+  // The sweep's batched capture: the screen with the pane and process tmux reported for it.
+  const screen = { value: codexScreen("./fixtures/codex-trust-0.156.1.txt") };
+  const observe = async () => {
+    await f.structural!.pollSeat(f.name, new Map([[f.name, { text: screen.value, capturedAt: f.clock.value, pane: { id: "%5", pid: 4100 } }]]),
+      "codex", null, f.clock.value);
+    await f.oracle().pollAllRunningTmuxSeats(f.db);
+  };
   await observe();
   expect(f.oracle().getSeatState(f.node.id)?.needsInput).toMatchObject({ count: 1, reason: "selection_prompt" });
   const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
@@ -347,6 +353,7 @@ it("a Codex wake refused at a native choice the person then answers: no escalati
   expect(f.readPromptState(f.name, refused!.ts)).toBe("blocked"); // still open: nothing is typed into it
   // The person answers the choice; no hook follows.
   f.show(codexScreen("./fixtures/input-box/codex-0.160.0/idle.txt"));
+  screen.value = codexScreen("./fixtures/input-box/codex-0.160.0/idle.txt");
   f.clock.value = new Date(Date.now() + 2_000);
   await observe();
   expect(f.readPromptState(f.name, refused!.ts)).toBe("clear");
