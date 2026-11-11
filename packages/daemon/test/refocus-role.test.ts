@@ -35,8 +35,9 @@ function run(runtime: string, event: string, overrides: NodeJS.ProcessEnv = {}, 
 }
 const context = (r: ReturnType<typeof run>) => { expect(r.status, r.stderr || String(r.error)).toBe(0); return JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string; };
 const calls = () => existsSync(env.CALLS!) ? readFileSync(env.CALLS!, "utf8").trim().split("\n") : [];
+const refocusStatePath = () => join(env.OPENRIG_HOME!, "refocus", `${env.OPENRIG_SESSION_NAME}__test-occupant.json`);
 
-it.each([12_000, 28_000])("Codex refocus output budgets %i standing-content bytes and records any omitted tail", (bytes) => {
+it.each([6_000, 12_000, 28_000])("Codex refocus output budgets %i standing-content bytes and records any omitted tail", (bytes) => {
   const content = join(root, "standing.md");
   writeFileSync(content, `STANDING START\n${"🙂".repeat(bytes / 4)}\nSTANDING END`);
   run("codex", "PostCompact");
@@ -44,13 +45,12 @@ it.each([12_000, 28_000])("Codex refocus output budgets %i standing-content byte
   const manifest = JSON.parse(readFileSync(resolve(hook, "../../codex.json"), "utf8"));
   const handler = manifest.hooks.UserPromptSubmit.flatMap((group: any) => group.hooks)
     .find((entry: any) => entry.command.includes("refocus.cjs"));
-  expect(handler.additionalContextLimit).toBe(5_000);
-  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(handler.additionalContextLimit * 4);
-  const state = JSON.parse(readFileSync(join(env.OPENRIG_HOME!, "refocus/a@test__test-occupant.json"), "utf8"));
+  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(2_500 * 4);
+  expect(handler.additionalContextLimit).toBeUndefined();
+  const state = JSON.parse(readFileSync(refocusStatePath(), "utf8"));
   expect(state.firedAt).toEqual(expect.any(String));
   expect(state.contextOutput.outputBytes).toBe(Buffer.byteLength(text));
-  if (bytes === 12_000) {
-    expect(Buffer.byteLength(text)).toBeGreaterThan(2_500 * 4);
+  if (bytes === 6_000) {
     expect(text).toContain("STANDING END");
     expect(state.contextOutput).toMatchObject({ status: "full", omittedBytes: 0 });
   } else {
@@ -65,7 +65,7 @@ it.each([12_000, 28_000])("Codex refocus output budgets %i standing-content byte
     expect(text.startsWith(Buffer.from(full).subarray(0, state.contextOutput.prefixBytes).toString("utf8"))).toBe(true);
     writeFileSync(content, `NEXT STANDING CONTENT\n${"x".repeat(25_000)}`);
     context(run("codex", "UserPromptSubmit", { OPENRIG_REFOCUS_CONTENT_FILE: content, OPENRIG_REFOCUS_NOW: "1" }));
-    const next = JSON.parse(readFileSync(join(env.OPENRIG_HOME!, "refocus/a@test__test-occupant.json"), "utf8"));
+    const next = JSON.parse(readFileSync(refocusStatePath(), "utf8"));
     expect(next.contextOutput.fullPath).not.toBe(state.contextOutput.fullPath);
     expect(readFileSync(state.contextOutput.fullPath, "utf8")).toBe(full);
   }
@@ -76,7 +76,7 @@ it("Codex refocus output still fires and records shortening when the full-text f
   const content = join(root, "standing.md");
   writeFileSync(content, "x".repeat(25_000));
   run("codex", "PostCompact");
-  const stateFile = join(env.OPENRIG_HOME!, "refocus/a@test__test-occupant.json");
+  const stateFile = refocusStatePath();
   const preload = join(root, "fail-context-save.cjs");
   writeFileSync(preload, `const fs = require("node:fs"), write = fs.writeFileSync;
 fs.writeFileSync = (file, ...args) => {

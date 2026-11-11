@@ -633,8 +633,8 @@ function runsForThisSeatsProject(env = process.env) {
   let additionalContext = payload;
   let contextOutput;
   if (runtime() === "codex") {
-    // Matches UserPromptSubmit's additionalContextLimit in codex.json. Codex 0.167.1 counts ceil(UTF-8 bytes / 4).
-    const limitTokens = 5_000;
+    // Keep the handler declaration unchanged; Codex's default is 2,500 tokens, ceil(UTF-8 bytes / 4).
+    const limitTokens = 2_500;
     const bytes = Buffer.from(payload);
     contextOutput = { status: "full", limitTokens, originalBytes: bytes.length, outputBytes: bytes.length, omittedBytes: 0 };
     if (bytes.length > limitTokens * 4) {

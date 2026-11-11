@@ -26,8 +26,7 @@
           {
             "type": "command",
             "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
-            "timeout": 60,
-            "additionalContextLimit": 5000
+            "timeout": 60
           }
         ]
       }
