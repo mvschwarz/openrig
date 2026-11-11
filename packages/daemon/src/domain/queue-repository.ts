@@ -2192,8 +2192,9 @@ export class QueueRepository {
 
   /** Every answer returned to this ask, oldest first, under getHumanAnswer's rule for whoever answered: an ask to a person
    *  (never an update), a row back to the asker linked by reply_to, from someone who may answer it (never a shared
-   *  channel). An answer row carries the human-answer tag; the unnamed primary user's own is one. An older Slack reply
-   *  from before that tag counts only when the ask has no tagged answer, and only each person's first. Each gives who, when,
+   *  channel). An answer row carries the human-answer tag; the unnamed primary user's own is one. An untagged Slack reply
+   *  (from before that tag) counts only when it came before the ask's first tagged answer and no later than the ask's
+   *  close, and only each person's first: after an answer or a close, a reply on the thread is correspondence. Each gives who, when,
    *  their words without the footer, the park it answered (null for the ask itself or an older Slack reply), and the
    *  identity recorded when the answer row was created. An ask answered in place (a runner's permission request, a host
    *  pairing request) has no answer row: its answer is on the ask. */
@@ -2201,18 +2202,20 @@ export class QueueRepository {
     recordedIdentity: { provenance: string | null; principal: string | null } | null }> {
     const ask = this.getById(askId);
     if (!this.hasReplyToColumn || !ask || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return [];
-    const candidates = (this.db.prepare(`SELECT qitem_id, source_session,
+    const candidates = (this.db.prepare(`SELECT qitem_id, source_session, ts_created,
         EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer') AS tagged
       FROM queue_items
       WHERE reply_to = ? AND destination_session = ?
         AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
           OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
-      ORDER BY ts_created, rowid`).all(askId, ask.sourceSession) as Array<{ qitem_id: string; source_session: string; tagged: number }>)
+      ORDER BY ts_created, rowid`).all(askId, ask.sourceSession) as Array<{ qitem_id: string; source_session: string; ts_created: string; tagged: number }>)
       .filter((row) => !this.isSharedChannel(row.source_session)
         && (this.answersAsk(ask, row.source_session) || (row.tagged === 1 && row.source_session === UNATTRIBUTED_ACTOR)));
-    const tagged = candidates.filter((row) => row.tagged === 1);
+    const firstTagged = candidates.find((row) => row.tagged === 1)?.ts_created;
+    const closed = this.closingTransition(askId, ask.state)?.ts;
     const legacyFirst = new Set<string>();
-    const rows = tagged.length > 0 ? tagged : candidates.filter((row) => !legacyFirst.has(row.source_session) && legacyFirst.add(row.source_session));
+    const rows = candidates.filter((row) => row.tagged === 1 || ((!firstTagged || row.ts_created < firstTagged)
+      && (!closed || row.ts_created <= closed) && !legacyFirst.has(row.source_session) && !!legacyFirst.add(row.source_session)));
     if (rows.length === 0) return [];
     // An answer to a park's question has the ID made from that park's episode, so the episode is read back from the ID.
     const episodes = new Map(this.transitionLog.listForQitem(askId)

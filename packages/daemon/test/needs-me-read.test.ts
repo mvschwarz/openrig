@@ -90,8 +90,7 @@ describe("needs-me.read: answers on the ask, by link", () => {
 
   it("counts only real answers: not correspondence, another reply after the answer, a reply to an update, or a row to someone else", async () => {
     const f = fixture();
-    const legacy = (qitemId: string, replyTo: string, source: string, destination: string) => {
-      const at = new Date().toISOString();
+    const legacy = (qitemId: string, replyTo: string, source: string, destination: string, at = new Date().toISOString()) => {
       f.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,reply_to,tags) VALUES(?,?,?,?,?,?,?,?,?,?)")
         .run(qitemId, at, at, source, destination, "pending", "routine", `Words in ${qitemId}`, replyTo, "[]");
     };
@@ -112,6 +111,29 @@ describe("needs-me.read: answers on the ask, by link", () => {
     const update = (await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "FYI", humanIntent: "update", nudge: false })).qitemId;
     legacy("qitem-slack-inbound-on-update", update, PERSON, ASKER);
     expect((await f.read(update)).answers).toEqual([]);
+    // Closed with no answer row (answered in place), then a reply on its thread: correspondence, not its answer.
+    const inPlace = await f.ask();
+    f.repo.update({ qitemId: inPlace, actorSession: PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "decided in place" });
+    legacy("qitem-slack-inbound-after-close", inPlace, PERSON, ASKER, new Date(Date.now() + 60_000).toISOString());
+    expect((await f.read(inPlace)).answers).toEqual([]);
+  });
+
+  it("keeps a real older Slack answer that came before a re-park's tagged answer, and lists both", async () => {
+    const f = fixture(); const id = await f.ask();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    f.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,reply_to,tags) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run("qitem-slack-inbound-before-tag", at, at, PERSON, ASKER, "pending", "routine", "Yes, ship it", id, "[]");
+    // That answer closed the ask; later it was deliberately reopened onto its person, and answered again under the tag.
+    f.repo.update({ qitemId: id, actorSession: ASKER, state: "done", closureReason: "no-follow-on", transitionNote: "answered in Slack" });
+    f.repo.update({ qitemId: id, actorSession: ASKER, state: "blocked", blockedOn: PERSON, reopen: true, summary: "One more call",
+      evidenceRef: "/fixture/decision", transitionNote: "reopened for a follow-up decision" });
+    const episode = f.repo.currentHumanRequiredEpisode(id)!.key;
+    const parked = await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: ASKER, body: "Also tell the team",
+      tags: ["human-answer"], inboundReplyTo: id, episodeKey: episode, nudge: false });
+    expect((await f.read(id)).answers).toMatchObject([
+      { qitemId: "qitem-slack-inbound-before-tag", text: "Yes, ship it", episode: null },
+      { qitemId: parked.qitemId, text: "Also tell the team", episode },
+    ]);
   });
 
   it("finds an ask's replies through the reply_to index, not a scan of the queue", async () => {
