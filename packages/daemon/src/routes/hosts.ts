@@ -406,7 +406,10 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     const humans = body.human ? registry.entities.filter((human) => human.address === body.human) : fallback ? [fallback] : [];
     if (humans.length !== 1) return c.json({
       error: "pair_human_required", addresses: registry.entities.map((human) => human.address),
-      message: "Pair approval needs one registered human, or a default when several exist. Inspect rig gateway participants --json; select --human <entityId>@external, or choose a default with rig gateway default <id>. No approval row was created.",
+      // Nobody registered here: the fix is on this host, where the request is answered.
+      message: registry.entities.length === 0
+        ? "No person is registered on this host, so nobody here can be asked to approve pairing. On this host, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created."
+        : "Pair approval needs one registered human, or a default when several exist. Inspect rig gateway participants --json; select --human <entityId>@external, or choose a default with rig gateway default <id>. No approval row was created.",
     }, 409);
 
     // Prune stale issued pairs past the grace window (keep recently expired entries
@@ -439,7 +442,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       return c.json({ error: "pair_approval_item_failed", message }, 500);
     }
 
-    return c.json({ pairId, code, approvalQitemId: qitemId });
+    // Who was asked, and who reads their answer here (or why nobody does yet), for the requester to show.
+    return c.json({ pairId, code, approvalQitemId: qitemId, person: rec.person, owner: rec.owner,
+      ...(rec.owner ? (rec.ownerNote ? { ownerNote: rec.ownerNote } : {}) : { noReader: noReader(rec) }) });
   });
 
   router.get("/pair-request/:pairId", async (c) => {

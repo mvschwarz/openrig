@@ -862,7 +862,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       // retry loop forever. Values that work today keep their wait. The target
       // keeps the request open as long as this side waits, and its approval says so.
       const timeoutMs = resolvePairTimeoutMs(opts.timeout);
-      let issued: { pairId?: string; code?: string; approvalQitemId?: string; error?: string; message?: string };
+      let issued: { pairId?: string; code?: string; approvalQitemId?: string; error?: string; message?: string;
+        person?: string; owner?: string | null; ownerNote?: string; noReader?: string };
       try {
         const res = await httpPost(`${targetBase}/api/hosts/pair-request`, {
           requester: `${userInfo().username}@${osHostname()}`,
@@ -884,7 +885,13 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       if (!opts.json) {
         console.log(`Pairing code: ${issued.code}`);
         console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
-        console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
+        // A target that says who was asked and who reads the answer: name them. An older target keeps the general text.
+        if (issued.person) {
+          console.log(`The request went to ${issued.person} on the target.`);
+          console.log(issued.owner
+            ? `${issued.owner} reads their answer and decides${issued.ownerNote ? ` (${issued.ownerNote}, so ${issued.owner} reads it instead)` : ""}.`
+            : `No agent reads answers there yet: ${issued.noReader ?? "the target didn't say why"}. The request names how to decide directly on the target.`);
+        } else console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
         console.log(`On a 0.7.11 or later target, anyone at its terminal with its operator bearer token can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}), with OPENRIG_AUTH_BEARER_TOKEN set or --bearer <token>.`);
       }
 

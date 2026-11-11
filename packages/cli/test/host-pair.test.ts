@@ -100,6 +100,19 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     expect(yaml).not.toContain("issued-bearer");
   }, 15_000);
 
+  it("a target that says who was asked and who reads the answer is named; one where no agent reads says why", async () => {
+    const approved = [{ status: 200, body: { status: "approved", token: "issued-bearer" } }];
+    const owned = fakeDeps({ post: { status: 200, body: { pairId: "p-1", code: "424242", approvalQitemId: "qitem-1", person: "alex@external", owner: "lead@rig" } }, poll: approved });
+    const a = await capture(() => run(owned, ["pair", "vps-a:7433", "--id", "vps-a", "--timeout", "10"]));
+    expect(a.out.join("\n")).toContain("The request went to alex@external on the target.\nlead@rig reads their answer and decides.");
+    expect(a.out.join("\n")).not.toContain("On the target, its person answers the pairing request");
+    fs.rmSync(path.join(dir, "hosts.yaml"), { force: true }); fs.rmSync(path.join(dir, "secrets"), { recursive: true, force: true });
+    const free = fakeDeps({ post: { status: 200, body: { pairId: "p-2", code: "515151", approvalQitemId: "qitem-2", person: "alex@external", owner: null,
+      noReader: "no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel)" } }, poll: approved });
+    const b = await capture(() => run(free, ["pair", "vps-b:7433", "--id", "vps-b", "--timeout", "10"]));
+    expect(b.out.join("\n")).toContain("No agent reads answers there yet: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel). The request names how to decide directly on the target.");
+  }, 15_000);
+
   it("--timeout reaches the target, which keeps the request open that long", async () => {
     const deps = fakeDeps({ poll: [{ status: 200, body: { status: "denied" } }] });
     await capture(() => run(deps, ["pair", "http://vps-a:7433", "--timeout", "3600"]));

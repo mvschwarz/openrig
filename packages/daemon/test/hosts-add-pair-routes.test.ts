@@ -460,6 +460,26 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(repo.list({ limit: 100 })[0]?.destinationSession).toBe("blair@external");
   });
 
+  it("an empty registry's refusal says to register a person on this host; several with no default keep today's text", async () => {
+    const empty = await buildApp(repo, BEARER, () => ({ ok: true, entities: [] })).request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+    expect(((await empty.json()) as { message: string }).message).toBe("No person is registered on this host, so nobody here can be asked to approve pairing. On this host, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created.");
+    const several = await buildApp(repo, BEARER, () => ({ ok: true, entities: [human, { ...human, entityId: "blair", address: "blair@external" }] }))
+      .request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+    expect(((await several.json()) as { message: string }).message).toContain("Pair approval needs one registered human, or a default when several exist.");
+  });
+
+  it("the reply names who was asked and who reads their answer, or why nobody does yet", async () => {
+    const res = await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) });
+    expect(await res.json()).toMatchObject({ person: "alex@external", owner: null,
+      noReader: "no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel)" });
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@rig");
+    try {
+      const owned = await (await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) })).json() as Record<string, unknown>;
+      expect(owned).toMatchObject({ person: "alex@external", owner: "lead@rig" });
+      expect(owned.noReader).toBeUndefined();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("issuance mints the ONE human approval moment: a human-routed qitem with code + summary + evidence_ref", async () => {
     const create = vi.spyOn(repo, "create");
     const { code, approvalQitemId } = await issue();
