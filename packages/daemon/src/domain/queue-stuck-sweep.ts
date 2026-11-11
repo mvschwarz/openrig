@@ -58,6 +58,12 @@ const NO_WAKE_ROUTE_RULES = [
   "the operator agent (agents.operator_session)",
 ] as const;
 
+/** How a failed wake's finding at a seat with no declared route names the rule that chose its recipient, in the order tried. */
+const FAILED_WAKE_ROUTE_RULES = [
+  "the row's creator",
+  "the operator agent (agents.operator_session)",
+] as const;
+
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
 // prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
 // LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
@@ -1274,8 +1280,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       c.why += `. This finding goes to ${recipient.seat}, ${NO_WAKE_ROUTE_RULES[recipient.chosen]}`;
       c.route = recipient.seat;
     };
-    /** The two re-routes, in order, for one candidate. */
-    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); };
     for (const c of candidates) {
       if (dueToYield()) await yieldLoop();
       routeAroundMissing(c);
@@ -1319,6 +1323,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       agentSeats.set(session, agent);
       return agent;
     };
+    // A wake that failed at a live agent seat with no delegation parent or escalates_to made its finding that same seat's,
+    // so the finding's own wake went to the seat that had just failed to take one, onto whatever was in its input box.
+    // The row's creator can act on it (resend, reroute or ask), as the waiting and parked-owner findings already route;
+    // for a seat that sent itself the work, the operator agent can. A declared route that failed keeps its fallback, and a
+    // finding the two re-routes above moved keeps its recipient. A wake that found no route never reached the seat, so a
+    // seat launched since keeps its own finding, whose wake is the one it missed.
+    const routeAroundFailedWake = (c: Candidate): void => {
+      if (c.kind !== "undelivered-wake" || !startsWithCI(c.row.lastNudgeResult, "failed:") || c.noWake
+        || c.route !== c.row.destinationSession
+        || routeNotes.has(c.row.qitemId) || agentSeatNode(c.route) === null) return;
+      const choices = [c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat)
+        && deps.queueRepo.acceptsDestination(seat));
+      if (chosen < 0) {
+        c.why += `; ${c.route} declares no delegation parent or escalates_to, and its creator and the operator agent (agents.operator_session) are each unset, missing, this seat or not an address this queue takes, so this finding stays addressed to it`;
+        return;
+      }
+      c.why += `; ${c.route} declares no delegation parent or escalates_to, so this finding goes to ${choices[chosen]}, ${FAILED_WAKE_ROUTE_RULES[chosen]}`;
+      c.route = choices[chosen]!;
+    };
+    /** The three re-routes, in order, for one candidate. The third reads no earlier pass: a failed wake's finding is
+     *  routed only here, on the row as it is right before the finding is created. */
+    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); routeAroundFailedWake(c); };
     const selfRoutedUnclaimed = (c: Candidate): boolean => c.kind === "unclaimed-obligation"
       && c.route === c.row.destinationSession && !routeNotes.has(c.row.qitemId) && agentSeatNode(c.route) !== null;
     // A hosted member that polls for its work (no wake trigger) can't hear a finding, so each unclaimed row went to a
