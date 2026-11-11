@@ -278,7 +278,10 @@ with an old Claude header or input frame above it and Claude already running. A 
 input frame also keeps the check pending. If the current screen or process cannot be read, or the process identity is unconfirmed, the handover keeps
 waiting within the readiness window and fails if that window expires. Old screen text or the `claude` process label
 alone cannot complete this check. A healthy agent can therefore remain unconfirmed while those observations are
-unavailable; inspect its pane before deciding how to recover.
+unavailable; inspect its pane before deciding how to recover. When the launch was already sent, the failure's
+guidance names that pane and the result carries `replacementStarted` and `successorPane`: the previous agent was
+already ended, the new one may be working there without being registered as the seat's occupant, and another
+handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
