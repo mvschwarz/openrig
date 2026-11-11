@@ -18,6 +18,7 @@ import { hookPrecedes } from "./agent-activity-store.js";
 import type { SeatStructuralActivityService, StructuralObservation } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation (a slower cadence from
@@ -405,7 +406,7 @@ export class SeatActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
+        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime, b.tmux_pane as tmux_pane,
           COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness,
           ${sessionCommunityRunnerSelect(db)} as community_runner
         FROM nodes n
@@ -414,7 +415,7 @@ export class SeatActivityService {
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; tmux_pane: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -434,6 +435,7 @@ export class SeatActivityService {
       // auto-declared from their runtime's inventory (claude authoritative standing,
       // codex hooks-at-trial, generic sampling floor) — production-complete without
       // touching the launch machinery.
+      const identities = new SeatIdentityStore(db);
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
         const inventory = runtimeRungInventory(r.runtime, r.community_harness, recordedRunner(r.community_runner));
@@ -443,6 +445,14 @@ export class SeatActivityService {
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
           this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
+        }
+        if (r.runtime === "codex") {
+          // The occupant as OpenRig records it: the binding's pane, and the pane process the identity reconciler last
+          // verified as this session's Codex in that pane. It follows OpenRig's own in-place restart.
+          const verdict = identities.getForNode(r.node_id);
+          const verified = verdict?.verdict === "verified" && verdict.sessionName === r.session_name
+            && !!r.tmux_pane && verdict.evidence.registeredPane === r.tmux_pane;
+          this.recordCodexOccupant(r.node_id, { paneId: r.tmux_pane, pid: verified ? verdict!.evidence.observedPanePid ?? null : null });
         }
       }
 
@@ -513,11 +523,20 @@ export class SeatActivityService {
     this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
     seat.inventory = inventory;
     seat.inventorySinceMs = this.now().getTime();
-    seat.codexPane = undefined;
+    // #2515: a new inventory is a new occupant boundary, so the copied prompt evidence from before it goes too.
+    seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+    seat.structuralPrompt = undefined;
     seat.trust.clear();
     for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
     seat.promotion.clear();
     this.arbitrate(seat);
+  }
+
+  /** A Codex seat's occupant as OpenRig records it (#2515): its binding's pane and its verified pane process, or null
+   *  where unknown. The sweep refreshes it every tick; the next arbitration applies it. */
+  recordCodexOccupant(seatNodeId: string, occupant: { paneId: string | null; pid: number | null }): void {
+    const seat = this.ladder.get(seatNodeId);
+    if (seat) seat.occupant = occupant;
   }
 
   /** Adapters push rung evidence (hooks, self-report, chrome, sampling). Per-source
@@ -895,28 +914,32 @@ export class SeatActivityService {
    *  absorbs sub-3s lulls; the 2-tick arbitration debounce absorbs the
    *  window-boundary flap. */
   /** #2500's boundary for a Codex structural frame, shared by the working frame and the prompt evidence: captured after
-   *  this seat's current inventory began, and, when the capture names its pane, by the same pane and process as the first
-   *  such frame since. A respawn, or a reused pane id under the same name, is a different process. "required" refuses a
-   *  frame that doesn't name its pane. */
+   *  this seat's current inventory began, and, when the capture names its pane, from the occupant's own pane and process
+   *  (`recordCodexOccupant`). A respawn, a reused pane id or another pane under the same name differs from them.
+   *  "required" refuses a frame that doesn't name its pane, or a seat whose process OpenRig hasn't verified. */
   private codexFrameQualifies(seat: SeatLadderState, startedAt: string | undefined, pane: StructuralObservation["pane"],
     identity: "required" | "if-known"): boolean {
     const started = startedAt ? Date.parse(startedAt) : NaN;
     if (!Number.isFinite(started) || started < seat.inventorySinceMs) return false;
     if (!pane) return identity !== "required";
-    if (!seat.codexPane) {
-      seat.codexPane = pane;
-      return true;
-    }
-    return seat.codexPane.id === pane.id && seat.codexPane.pid === pane.pid;
+    return this.fromCodexOccupant(seat, pane, identity);
+  }
+
+  private fromCodexOccupant(seat: SeatLadderState, pane: { id: string; pid: number }, identity: "required" | "if-known"): boolean {
+    const occupant = seat.occupant;
+    if (occupant?.paneId && occupant.paneId !== pane.id) return false;
+    if (occupant?.pid != null) return occupant.pid === pane.pid;
+    return identity !== "required";
   }
 
   private arbitrate(seat: SeatLadderState): void {
     this.checkContradiction(seat);
     // #2515: the copied Codex prompt evidence holds only while its frame would: fresh, from this inventory, and from the
-    // pinned pane and process. Read here, so a getter, a failed window read or a new inventory sees it expire too.
+    // occupant's pane and process. Read here, so a getter, a failed window read, a new inventory or a new occupant sees
+    // it expire too.
     const prompt = seat.structuralPrompt;
     if (prompt && (this.now().getTime() - prompt.freshMs >= DEFAULT_STRUCTURAL_STALE_MS || prompt.startedMs < seat.inventorySinceMs
-        || seat.codexPane?.id !== prompt.pane.id || seat.codexPane?.pid !== prompt.pane.pid)) {
+        || !this.fromCodexOccupant(seat, prompt.pane, "required"))) {
       seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
       seat.structuralPrompt = undefined;
     }
@@ -1073,8 +1096,8 @@ interface SeatLadderState {
   retired: boolean;
   inventory: AdapterRungInventory | null;
   inventorySinceMs: number;
-  /** The pane and process of the first Codex structural frame accepted since the inventory began (#2515). */
-  codexPane?: { id: string; pid: number };
+  /** The Codex occupant's pane and process as OpenRig records them, refreshed by the sweep (#2515). */
+  occupant?: { paneId: string | null; pid: number | null };
   /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
   structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;

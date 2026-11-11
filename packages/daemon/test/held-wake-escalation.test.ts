@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
@@ -314,6 +315,11 @@ it("the production scheduler keeps a current Claude prompt alert when an older S
 const codexScreen = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 it("a Codex wake refused at a native choice the person then answers: no escalation, and the next wake is sent once", async () => {
   const f = fixture("codex", undefined, codexScreen("./fixtures/codex-trust-0.156.1.txt"), true);
+  // The occupant as OpenRig records it: the binding's pane, and the pane process the identity reconciler verified.
+  new SessionRegistry(f.db).updateBinding(f.node.id, { tmuxPane: "%5" });
+  new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "verified", evidenceSource: null, reason: null,
+    evidence: { registeredPane: "%5", observedPanePid: 4100, observedPid: 4101, observedCommand: "codex", matchedLayer: 1 },
+    sessionName: f.name, observedAt: f.clock.value.toISOString() });
   // The sweep's batched capture: the screen with the pane and process tmux reported for it.
   const screen = { value: codexScreen("./fixtures/codex-trust-0.156.1.txt") };
   const observe = async () => {

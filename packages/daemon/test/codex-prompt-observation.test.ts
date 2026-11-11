@@ -12,7 +12,13 @@ const TRUST = read("./fixtures/codex-trust-0.156.1.txt");
 const UPDATE = read("./fixtures/codex-update-0.160.0.txt");
 const IDLE = read("./fixtures/input-box/codex-0.160.0/idle.txt");
 const DRAFT = read("./fixtures/input-box/codex-0.160.0/staged-short.J.txt");
+// #2500's recorded working frame, as codex-working-queue-oracle.test.ts builds it.
+const RECORDED_WORKING = read("./fixtures/input-box/codex-0.160.0/after-enter-0.4s.J.txt");
+const WORKING = RECORDED_WORKING.slice(RECORDED_WORKING.indexOf("• Working"))
+  .replace(/^• Working.*$/m, "◦ Working已(1h 56m 32s • esc to interrupt · 3 background terminals running")
+  .replace(/^  GPT-.*$/m, "  GPT-6.1 Terra high · D:\\workspace");
 type Pane = { id: string; pid: number } | undefined;
+type Occupant = { paneId: string | null; pid: number | null };
 
 function fixture(first: string) {
   let time = Date.parse("2026-11-11T06:00:00.000Z"), screen = first, pane: Pane = { id: "%5", pid: 4100 };
@@ -22,6 +28,10 @@ function fixture(first: string) {
   const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => windowRead },
     defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
   oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  /** The occupant as OpenRig records it (the binding's pane, the process the identity reconciler verified); the sweep
+   *  refreshes it every tick. */
+  const occupant = (next: Occupant) => oracle.recordCodexOccupant?.(node, next);
+  occupant({ paneId: "%5", pid: 4100 });
   /** The sweep's batched capture: the text with the pane and process tmux reported for it in the same call. */
   const capture = async () => structural.pollSeat(session, new Map([[session, { text: screen, capturedAt: new Date(time), ...(pane ? { pane } : {}) }]]),
     "codex", null, new Date(time));
@@ -32,7 +42,7 @@ function fixture(first: string) {
     await oracle.pollSeat(session);
   };
   return { oracle, node, session, structural, tick, capture, at: () => new Date(time).toISOString(),
-    show: (next: string) => { screen = next; }, pane: (next: Pane) => { pane = next; }, advance: (ms: number) => { time += ms; },
+    show: (next: string) => { screen = next; }, pane: (next: Pane) => { pane = next; }, occupant, advance: (ms: number) => { time += ms; },
     failWindowRead: () => { windowRead = null; },
     state: () => oracle.getSeatState(node)!,
     redeclare: () => oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY),
@@ -139,15 +149,16 @@ describe("the frame must come from the occupant's own pane and process (#2952 R1
     ["another pane under the same session name", { id: "%9", pid: 4100 }],
   ])("%s is refused: the prompt reads unknown, never clear", async (_name, other) => {
     const f = fixture(TRUST);
-    await f.tick(); // pins %5 / 4100 for this inventory
+    await f.tick(); // the occupant is %5 / 4100
     const refusedAt = f.at();
     f.show(IDLE);
     f.pane(other);
     await f.tick();
     expect(f.state().needsInputEvidence).toBeNull();
     expect(f.verdict(refusedAt)).toBe("unknown");
-    // A newly declared inventory (a managed swap) accepts the new pane.
-    f.redeclare();
+    // Once OpenRig records that pane and process as the occupant (a managed swap's binding, or the reconciler verifying
+    // the process), its frames count.
+    f.occupant({ paneId: other.id, pid: other.pid });
     await f.tick();
     expect(f.verdict(refusedAt)).toBe("clear");
   });
@@ -157,5 +168,50 @@ describe("the frame must come from the occupant's own pane and process (#2952 R1
     f.pane(undefined);
     await f.tick();
     expect(f.state().needsInputEvidence).toBeNull();
+  });
+});
+
+describe("the identity is the occupant's as OpenRig records it, not the first frame's (#2952 round 2)", () => {
+  it("a replacement before the seat's first frame is refused, so it can't clear an earlier refusal (R2-F1)", async () => {
+    const f = fixture(IDLE);
+    const refusedAt = f.at();
+    f.pane({ id: "%5", pid: 4200 }); // replaced behind the same name before any frame was read
+    await f.tick();
+    expect(f.state().needsInputEvidence).toBeNull();
+    expect(f.verdict(refusedAt)).toBe("unknown");
+  });
+
+  it("a process OpenRig hasn't verified gives no prompt evidence", async () => {
+    const f = fixture(IDLE);
+    f.occupant({ paneId: "%5", pid: null });
+    const refusedAt = f.at();
+    await f.tick();
+    expect(f.state().needsInputEvidence).toBeNull();
+    expect(f.verdict(refusedAt)).toBe("unknown");
+  });
+
+  it("OpenRig's in-place restart (same pane, new process): once the reconciler verifies the process, the prompt clear works", async () => {
+    const f = fixture(TRUST);
+    await f.tick();
+    const refusedAt = f.at();
+    f.pane({ id: "%5", pid: 4300 });
+    f.show(IDLE);
+    await f.tick();
+    // Until the identity reconciler verifies the new process, its frames aren't the occupant's.
+    expect(f.verdict(refusedAt)).toBe("unknown");
+    f.occupant({ paneId: "%5", pid: 4300 });
+    await f.tick();
+    expect(f.verdict(refusedAt)).toBe("clear");
+  });
+
+  it("OpenRig's in-place restart keeps #2500's working frame once the reconciler verifies the process", async () => {
+    const f = fixture(WORKING);
+    await f.tick();
+    expect(f.state()).toMatchObject({ activity: "working", decidedBy: "window-sampling" });
+    f.pane({ id: "%5", pid: 4300 });
+    f.occupant({ paneId: "%5", pid: 4300 });
+    await f.tick();
+    await f.tick();
+    expect(f.state()).toMatchObject({ activity: "working", decidedBy: "window-sampling" });
   });
 });
