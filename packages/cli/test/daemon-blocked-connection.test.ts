@@ -289,6 +289,12 @@ describe("sandboxed liveness: EPERM on kill(pid, 0) is not a dead daemon", () =>
     expect(signalProbe(1, throwing("ESRCH"))).toBe("missing");
   });
 
+  it("an error other than ESRCH is never evidence that the process is gone", () => {
+    const throwing = (code: string | undefined) => () => { throw Object.assign(new Error(String(code)), { code }); };
+    expect(signalProbe(1, throwing("EINVAL"))).toBe("not-permitted");
+    expect(signalProbe(1, throwing(undefined))).toBe("not-permitted");
+  });
+
   it("unknown liveness plus a blocked probe is unverified with EPERM, never stale, and the guard says blocked", async () => {
     const status = await getDaemonStatus(withState({
       isProcessAlive: () => false,

@@ -38,14 +38,16 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 
 export type SignalOutcome = "sent" | "missing" | "not-permitted";
 
-/** kill(pid, 0) as an outcome. POSIX: only ESRCH means no such process; EPERM means the process
- *  EXISTS but this shell may not signal it (another user's process, or a sandbox such as Codex's). */
+/** kill(pid, 0) as an outcome. POSIX: kill(pid, 0) fails only with ESRCH (no such process) or EPERM
+ *  (the process EXISTS but this shell may not signal it: another user's process, or a sandbox such as
+ *  Codex's). Only ESRCH is "missing"; any other error is not evidence of death, so it reads as
+ *  "not-permitted" (uninspectable), never as a dead process. */
 export function signalProbe(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill): SignalOutcome {
   try {
     kill(pid, 0);
     return "sent";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM" ? "not-permitted" : "missing";
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "not-permitted";
   }
 }
 
