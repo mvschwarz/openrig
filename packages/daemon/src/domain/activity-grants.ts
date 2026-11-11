@@ -152,6 +152,14 @@ export class ActivityGrantStore {
     })();
   }
 
+  /** Pending issuance IDs for a Core-reserved operation, captured before its recovery awaits.
+   * This selects cleanup work; generation alone never authenticates a report or activates a grant. */
+  pendingForGeneration(nodeId: string, generation: string): ActivityGrant[] {
+    if (!hasActivityGrantsTable(this.db) || !this.hasRunColumns()) return [];
+    return (this.db.prepare(`SELECT * FROM activity_grants WHERE node_id = ? AND generation = ?
+      AND run_id IS NOT NULL AND activated_at IS NULL AND revoked_at IS NULL`).all(nodeId, generation) as Row[]).map(toGrant);
+  }
+
   /** A status observation for an old row cannot revoke the replacement's run. */
   revokeForSession(sessionId: string, reason: string): void {
     if (!hasActivityGrantsTable(this.db) || !this.hasRunColumns()) return;

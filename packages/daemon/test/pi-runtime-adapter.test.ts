@@ -1145,7 +1145,7 @@ describe("run grant at the actual Pi dispatch", () => {
     const runnerGrants = vi.fn(async (_binding, runtime, runId, runner) => {
       expect([runtime, runId, runner]).toEqual(["pi", "attempt-bound", 0]);
       calls.push("issued");
-      return { wrap: (command: string) => `private-wrapper ${command}`, dispatched: () => { calls.push("dispatched"); }, finish };
+      return { grantId: "test-grant", generation: "generation", wrap: (command: string) => `private-wrapper ${command}`, dispatched: () => { calls.push("dispatched"); }, finish };
     });
     const sendShellCommand = vi.fn(async (_target: string, command: string) => {
       expect(command).toContain("private-wrapper");
@@ -1169,4 +1169,34 @@ it("keeps the run grant and its private transfer keys out of native Pi/tools", (
   expect(child.OPENRIG_NODE_ID).toBe("seat");
   expect(JSON.stringify(child)).not.toContain("oag_private");
   expect(child).not.toHaveProperty("OPENRIG_RUN_ID");
+});
+
+describe("direct Pi resume run authority", () => {
+  it("refuses without dispatch when Core cannot resolve the restored binding", async () => {
+    const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const adapter = new PiResumeAdapter(mockTmux({ sendShellCommand }), memFs({ [SESSION_FILE]: "history" }),
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: async () => { throw new Error("no Core binding"); } });
+    expect(await adapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work")).toMatchObject({ ok: false, code: "resume_failed" });
+    expect(sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("uses its actual new attempt and finishes exact authority, ready=%s", async ready => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const dispatched = vi.fn(), finish = vi.fn(async (_ok: boolean) => {});
+    const runnerGrant = vi.fn(async (_session: string, _runId: string, _cwd: string) => ({ grantId: "resume-grant", generation: "generation",
+      wrap: (command: string) => `private-resume ${command}`, dispatched, finish }));
+    const sendShellCommand = vi.fn(async () => {
+      if (ready) fs.files[statePath] = readyState(SESSION_FILE, "resume-attempt");
+      return { ok: true as const };
+    });
+    const adapter = new PiResumeAdapter(mockTmux({ sendShellCommand }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      { runnerGrant, newLaunchId: () => "resume-attempt", maxWaitMs: 1, pollMs: 1, sleep: async () => {} });
+    const result = await adapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(ready);
+    expect(runnerGrant).toHaveBeenCalledWith(SESSION, "resume-attempt", "/work");
+    expect(sendShellCommand.mock.calls[0]?.[1]).toContain("private-resume");
+    expect(dispatched).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(ready);
+  });
 });

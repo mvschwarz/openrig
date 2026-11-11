@@ -166,7 +166,7 @@ describe("community run authority", () => {
     const dispatched = vi.fn(), finish = vi.fn(async (_ok: boolean) => {});
     const runnerGrants: RunnerGrantIssuer = async (_binding, runtime, attempt, runner) => {
       expect([runtime, runner]).toEqual(["synth", 1]); runId = attempt;
-      return { wrap: command => command, dispatched, finish };
+      return { grantId: "test-grant", generation: "generation", wrap: command => command, dispatched, finish };
     };
     const f = seat(ready ? (attempt) => { expect(attempt).toBe(runId); return good(attempt); } : undefined,
       `${PRESET}runner: true\n`, runnerGrants);
@@ -178,7 +178,7 @@ describe("community run authority", () => {
 
   it("allocates and revokes an attempt when the launch-result folder is unavailable", async () => {
     const finish = vi.fn(async (_ok: boolean) => {});
-    const issue = vi.fn(async (_binding, _runtime, _runId, _runner) => ({ wrap: (command: string) => command, dispatched: () => {}, finish }));
+    const issue = vi.fn(async (_binding, _runtime, _runId, _runner) => ({ grantId: "test-grant", generation: "generation", wrap: (command: string) => command, dispatched: () => {}, finish }));
     const f = seat(undefined, `${PRESET}runner: true\n`, issue);
     rmSync(f.root, { recursive: true });
     writeFileSync(f.root, "blocked");

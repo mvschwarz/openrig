@@ -1,3 +1,4 @@
+import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
@@ -172,6 +173,12 @@ export class SeatIdentityReconciler {
 
   private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
+    // Capture exact issuance before any observation awaits. A delayed verdict cannot revoke a successor.
+    const grants = hasActivityGrantsTable(this.db) ? new ActivityGrantStore(this.db) : null;
+    const observedGrants = new Map(seats.map(seat => {
+      const grant = grants?.activeForNode(seat.node_id);
+      return [seat.node_id, grant?.runId && grant.binding?.pane === seat.tmux_pane ? grant.grantId : null];
+    }));
     // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
     this.store.pruneExcept([...seats.map((s) => s.node_id), ...this.releasedSeats()]);
     if (seats.length === 0) return;
@@ -272,6 +279,11 @@ export class SeatIdentityReconciler {
         const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
+        const grantId = observedGrants.get(seat.node_id);
+        if (grantId && (verdict.verdict === "pane_missing"
+          || (verdict.verdict === "mismatch" && verdict.reason === "process_identity_mismatch"))) {
+          grants!.revoke({ grantId }, "runner_exit_observed");
+        }
       } catch {
         if (generation !== this.generation) return;
         // A single seat's tmux failure must not crash the loop; record it as

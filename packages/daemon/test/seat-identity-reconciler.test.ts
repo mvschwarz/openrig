@@ -1,3 +1,5 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 // OPR.0.4.3.19 — SeatIdentityReconciler unit tests.
 //
 // The reconciler owns the liveness identity verdict (the THIRD axis, orthogonal
@@ -609,5 +611,45 @@ describe("SeatIdentityReconciler — bounded polling", () => {
       await rec.reconcileAll();
       expect(store.getForNode("n1")?.verdict).toBe("verified");
     } finally { rec.stop(); db.close(); }
+  });
+});
+
+describe("definitive Core exit ends exact run authority", () => {
+  it.each([true, false])("preserves authority on transient or unconfirmed observations, transient=%s", async transient => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "synth", pane: "%1" });
+      db.prepare("UPDATE sessions SET agent_app = 'synth', agent_runner = 1 WHERE node_id = 'n1'").run();
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
+        binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+      expect(grants.activate(grant.grantId)).toBe(true);
+      const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": "node" }, throwListSessions: transient });
+      await new SeatIdentityReconciler({ db, tmux, now: NOW }).reconcileAll();
+      expect(grants.get(grant.grantId)?.revokedAt).toBeNull();
+      expect(new SeatIdentityStore(db).getForNode("n1")?.verdict).toBe(transient ? "tmux_unavailable" : "unconfirmed");
+    } finally { db.close(); }
+  });
+
+  it.each([false, true])("revokes the sampled run without touching a replacement during the await, replacement=%s", async replace => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const issue = (runId: string) => grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: {
+        runId, sessionId: "sess-n1", binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+      const first = issue("first"); grants.activate(first.grantId);
+      let successor: ReturnType<typeof issue> | undefined;
+      const tmux = makeTmux({ sessions: ["another@rig"] });
+      tmux.listSessions = vi.fn(async () => {
+        if (replace) { successor = issue("successor"); grants.activate(successor.grantId); }
+        return [{ name: "another@rig" }] as never;
+      });
+      await new SeatIdentityReconciler({ db, tmux, now: NOW }).reconcileAll();
+      expect(grants.standing(first.grantId)).toBe("revoked");
+      if (successor) expect(grants.standing(successor.grantId)).toBe("current");
+    } finally { db.close(); }
   });
 });

@@ -393,7 +393,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       const fallback = cmd;
       // Every Pi-protocol runtime (Pi and its pi-rpc forks) takes the seat launch environment; OMP unchanged.
       let command = this.runtime !== "omp" && this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, accountHome })
+        ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
         : fallback;
       if (authority) command = authority.wrap(command);
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
@@ -437,7 +437,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       // is real, but until then there is no history to resume after a reboot.
       if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
       authorizedLaunchSucceeded = true;
-      return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch };
+      return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch,
+        ...(authority ? { activityGrantId: authority.grantId } : {}) };
     } finally { await authority?.finish(authorizedLaunchSucceeded); }
   }
 

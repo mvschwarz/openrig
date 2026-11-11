@@ -6,6 +6,8 @@ import { ActivityGrantStore } from "./activity-grants.js";
 import { SessionRegistry } from "./session-registry.js";
 
 export interface RunnerGrantLaunch {
+  readonly grantId: string;
+  readonly generation: string;
   wrap(command: string): string;
   dispatched(): void;
   finish(ok: boolean): Promise<void>;
@@ -41,6 +43,8 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
       throw new Error("Runner credential distribution failed; no runner started.");
     }
     return {
+      grantId: grant.grantId,
+      generation: grant.generation,
       wrap(command) {
         const target = shellQuote(`=${session}`);
         // No eval: token text is treated only as data. Disable tracing before reading the private value.
@@ -48,7 +52,7 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
           + `case "$_openrig_grant" in ${key}=oag_*) ;; *) exit 1;; esac; `
           + `OPENRIG_ACTIVITY_HOOK_TOKEN=\${_openrig_grant#*=}; export OPENRIG_ACTIVITY_HOOK_TOKEN; unset _openrig_grant; `
           + `tmux set-environment -t ${target} -u ${key} 2>/dev/null || exit 1; `
-          + `OPENRIG_RUN_ID=${shellQuote(runId)}; export OPENRIG_RUN_ID; exec ${command}`;
+          + `OPENRIG_RUN_ID=${shellQuote(runId)}; OPENRIG_OCCUPANT_GENERATION=${shellQuote(grant.generation)}; export OPENRIG_RUN_ID OPENRIG_OCCUPANT_GENERATION; exec ${command}`;
         return `/bin/sh -c ${shellQuote(script)}`;
       },
       dispatched() {

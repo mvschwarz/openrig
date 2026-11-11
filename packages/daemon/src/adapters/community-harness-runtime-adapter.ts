@@ -199,7 +199,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       let command: string;
       try {
         command = this.deps.seatLaunchEnvironment
-          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix,
+          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(authority ? { generation: authority.generation } : {}),
             ...(binding.launchWrapper?.length ? { failClosed: true, ...(!preset.runner ? { launchWrapper: binding.launchWrapper } : {}) } : {}) })
           : launcherPrefix + preset.command;
       } catch (error) {
@@ -230,7 +230,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
             error: `Community harness "${this.runtime}": asked to resume conversation ${resumeRef}, its launcher reports conversation ${read.nativeRef} instead. The seat keeps conversation ${resumeRef}, and OpenRig doesn't switch it to ${read.nativeRef}. Nothing was restarted.` };
         }
       }
-      if (read.ok) { launchSucceeded = true; return { ok: true, resumeToken: read.nativeRef, resumeType: `community:${this.runtime}`, resumeProvenance: "launcher" }; }
+      if (read.ok) { launchSucceeded = true; return { ok: true, resumeToken: read.nativeRef, resumeType: `community:${this.runtime}`, resumeProvenance: "launcher",
+        ...(authority ? { activityGrantId: authority.grantId } : {}) }; }
       const unavailable = `community harness "${this.runtime}": its launch identity is unavailable: ${read.reason}`;
       return preset.runner ? { ok: false, recovery: "attention_required", error: unavailable } : { ok: true, warnings: [unavailable] };
 

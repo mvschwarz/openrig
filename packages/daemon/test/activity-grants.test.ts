@@ -224,13 +224,13 @@ describe("actual run grants", () => {
     const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101,
       setSessionEnv: async (_session, name, value) => { key = name; token = value; }, unsetSessionEnv: async () => {} });
     const launch = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never, "synth", "opaque-run", 1);
-    const program = `const t=process.env.OPENRIG_ACTIVITY_HOOK_TOKEN; process.stdout.write(JSON.stringify({bound:t===process.env.TEST_PRIVATE,run:process.env.OPENRIG_RUN_ID,argvLeak:process.argv.some(a=>a.includes(t))}));`;
+    const program = `const t=process.env.OPENRIG_ACTIVITY_HOOK_TOKEN; process.stdout.write(JSON.stringify({bound:t===process.env.TEST_PRIVATE,run:process.env.OPENRIG_RUN_ID,generation:process.env.OPENRIG_OCCUPANT_GENERATION,argvLeak:process.argv.some(a=>a.includes(t))}));`;
     const command = launch.wrap(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`);
     expect(command).not.toContain(token);
     const result = spawnSync("/bin/sh", ["-xc", command], { encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`,
-      OPENRIG_ACTIVITY_HOOK_TOKEN: "legacy-install", TEST_KEY: key, TEST_PRIVATE: token, TEST_REMOVED: marker } });
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "legacy-install", OPENRIG_OCCUPANT_GENERATION: "stale-shell", TEST_KEY: key, TEST_PRIVATE: token, TEST_REMOVED: marker } });
     expect(result.status, result.error?.message ?? result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ bound: true, run: "opaque-run", argvLeak: false });
+    expect(JSON.parse(result.stdout)).toEqual({ bound: true, run: "opaque-run", generation: f.generation, argvLeak: false });
     expect(result.stderr).not.toContain(token);
     expect(existsSync(marker)).toBe(true);
     await launch.finish(false);

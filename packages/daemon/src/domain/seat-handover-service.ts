@@ -656,7 +656,7 @@ export class SeatHandoverService {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
         // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
         // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -741,7 +741,7 @@ export class SeatHandoverService {
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
         // binding unchanged, seat re-wakeable — never a false complete.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -779,7 +779,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: coreCopyNotes,
-      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
     });
   }
 
