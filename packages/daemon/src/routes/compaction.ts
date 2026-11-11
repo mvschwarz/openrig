@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import type { ClaudeCompactionEnforcer, ManualCompactionOutcome } from "../domain/claude-compaction-enforcer.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { SessionTransport } from "../domain/session-transport.js";
+import type { PiCompactionService } from "../domain/pi-compaction-service.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
 /**
@@ -30,7 +31,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     const usageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
     const db = c.get("db" as never) as Database.Database | undefined;
 
-    if (!enforcer || !transport || !usageStore || !db) {
+    if (!transport || !db) {
       return c.json({
         ok: false,
         reason: "compaction_unavailable",
@@ -61,6 +62,18 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
         error: `Session '${sessionName}' not found. Check session names with: rig ps --nodes`,
       }, 404);
     }
+
+    if (row.runtime === "pi") {
+      const service = c.get("piCompactionService" as never) as PiCompactionService | undefined;
+      if (!service) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
+      const outcome = await service.trigger({ nodeId: row.node_id, sessionName, runtime: row.runtime });
+      if (outcome.triggered) return c.json({ ok: true, session: sessionName, runtime: "pi", stage: outcome.stage });
+      const status = outcome.reason === "unsupported" || outcome.reason === "runtime_filter" ? 422
+        : outcome.reason === "session_missing" ? 404
+        : outcome.reason === "send_failed" || outcome.reason === "submit_failed" ? 502 : 409;
+      return c.json({ ok: false, session: sessionName, runtime: "pi", reason: outcome.reason }, status);
+    }
+    if (!enforcer || !usageStore) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
 
     // Read the KNOWN context-usage projection BEFORE triggering. When usage is
     // absent / stale / unknown we pass null (never invent a value); the enforcer
@@ -114,11 +127,15 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
   router.post("/cancel", async (c) => {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
     const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
-    if (!enforcer || !transport) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
+    if (!transport) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
     const body = await c.req.json<{ session?: string }>().catch(() => ({} as { session?: string }));
     if (!body.session) return c.json({ ok: false, error: "Missing required field: session" }, 400);
-    const resolved = await transport.resolveSessions({ session: body.session });
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const seat = db ? resolveSeatNode(db, body.session) : undefined;
+    const resolved = await transport.resolveSessions({ session: seat?.sessionName ?? body.session });
     if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, resolved.code === "ambiguous" ? 409 : 404);
+    if (seat?.node.runtime === "pi") return c.json({ ok: false, session: body.session, runtime: "pi", reason: "runtime_filter" }, 422);
+    if (!enforcer) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
     const preparation = enforcer.cancelPreparation(body.session);
     return c.json({ ok: true, session: body.session, preparation,
       ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
@@ -128,16 +145,20 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
 
   router.get("/state", (c) => {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
-    if (!enforcer) {
-      return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
-    }
     const session = c.req.query("session");
     if (!session) {
       return c.json({ ok: false, error: "Missing required query param: session" }, 400);
     }
     // After a restart, the first look at a seat picks up its record, as the context monitor's first poll would.
     const db = c.get("db" as never) as Database.Database | undefined;
-    const seat = db ? latestSeatNode(db, session) : undefined;
+    const resolved = db ? resolveSeatNode(db, session) : undefined;
+    const seat = resolved?.node;
+    if (resolved?.node.runtime === "pi") {
+      const service = c.get("piCompactionService" as never) as PiCompactionService | undefined;
+      if (!service) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
+      return c.json({ ok: true, session, runtime: "pi", state: service.getState(resolved.sessionName) });
+    }
+    if (!enforcer) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
     if (seat) enforcer.recoverSeat({ sessionName: session, cwd: seat.cwd, runtime: seat.runtime });
     const preparation = enforcer.getPreparationState(session);
     const stranded = enforcer.getStrandedCompaction(session);
@@ -164,6 +185,14 @@ function latestSeatNode(db: Database.Database, sessionName: string): { node_id: 
     ORDER BY s.id DESC
     LIMIT 1
   `).get(sessionName) as { node_id: string; runtime: string | null; cwd: string | null } | undefined;
+}
+
+function resolveSeatNode(db: Database.Database, session: string) {
+  const direct = latestSeatNode(db, session);
+  if (direct) return { node: direct, sessionName: session };
+  const sessionName = physicalSessionName(db, session);
+  const node = sessionName !== session ? latestSeatNode(db, sessionName) : undefined;
+  return node ? { node, sessionName } : undefined;
 }
 
 function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompactionOutcome, { triggered: false }>): string {

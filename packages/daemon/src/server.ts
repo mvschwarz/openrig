@@ -361,6 +361,7 @@ export interface AppDeps {
    * auto share one back-half state machine — no second restore path).
    */
   compactionEnforcer?: ClaudeCompactionEnforcer;
+  piCompactionService?: import("./domain/pi-compaction-service.js").PiCompactionService;
   /**
    * GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator, constructed once in startup and
    * injected so SeatHandoverService.commit()'s re-key call actually FIRES (dev-driver's fold added
@@ -673,6 +674,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("healthCheckpoints" as never, deps.healthCheckpoints);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);
+    c.set("piCompactionService" as never, deps.piCompactionService);
     c.set("occupantInvalidator" as never, deps.occupantInvalidator);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);

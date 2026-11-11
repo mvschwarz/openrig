@@ -51,6 +51,34 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 // ── Runner-state sidecar ─────────────────────────────────────────────────────
 
 export interface PiRunnerState {
+  inputInspection?: {
+    readonly protocol: 1;
+    readonly probeId: string;
+    readonly state: "empty" | "matched" | "busy" | "unknown";
+    readonly updatedAt: string;
+  };
+  liveState?: {
+    readonly probeId: string;
+    readonly isStreaming: boolean;
+    readonly isCompacting: boolean;
+    readonly updatedAt: string;
+  };
+  compaction?: {
+    readonly requestId?: string;
+    readonly reason?: string;
+    readonly startedAt?: string;
+    readonly endedAt?: string;
+    readonly result?: { readonly summary?: string; readonly firstKeptEntryId?: string; readonly tokensBefore?: number; readonly estimatedTokensAfter?: number } | null;
+    readonly aborted?: boolean;
+    readonly willRetry?: boolean;
+    readonly errorMessage?: string;
+  };
+  contextUsage?: {
+    readonly tokens: number | null;
+    readonly contextWindow: number;
+    readonly percent: number | null;
+    readonly updatedAt: string;
+  };
   ready: boolean;
   /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar

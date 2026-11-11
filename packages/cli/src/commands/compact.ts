@@ -14,29 +14,33 @@ export interface CompactDeps {
 }
 
 /**
- * OPR.0.4.3.14 — `rig compact <session>`: manually run the guided compaction
- * lifecycle (prep → /compact → restore → audit) for one Claude seat, on demand,
- * independent of the auto threshold. Distinct from the read-only `rig
- * compact-plan` triage command.
+ * OPR.0.4.3.14 — `rig compact <session>`: manually trigger compaction for one
+ * Claude or Pi seat on demand, independent of the auto threshold. Distinct from
+ * the read-only, Claude-only `rig compact-plan` triage command.
  */
 export function compactCommand(depsOverride?: CompactDeps): Command {
   const cmd = new Command("compact")
-    .description("Manually run the guided compaction sequence (prep → /compact → restore → audit) for one Claude seat")
-    .argument("<session>", "Target Claude session name (e.g. dev-impl@my-rig)")
+    .description("Manually trigger one seat's compaction: the Claude guided lifecycle or Pi's native compact RPC")
+    .argument("<session>", "Target Claude or Pi session name (e.g. dev-impl@my-rig)")
     .option("--json", "JSON output for agents")
-    .option("--skip-map", "Skip the restore-map prerequisite once; keep target, idle and permission checks")
-    .option("--cancel", "Disarm managed preparation or pending restore/audit; cannot undo a submitted /compact")
-    .option("--state", "Show the current preparation, expected map and deadline without triggering")
+    .option("--skip-map", "Claude: skip the restore-map prerequisite once; ignored for Pi")
+    .option("--cancel", "Claude only: disarm managed preparation or pending restore/audit; cannot undo a submitted /compact")
+    .option("--state", "Show the current state without triggering (Claude preparation/map/deadline; Pi runner-sidecar state)")
     .addHelpText("after", `
 Examples:
-  rig compact dev-impl@my-rig          Manually compact one Claude seat now
+  rig compact dev-impl@my-rig          Trigger one seat's compaction now
   rig compact dev-impl@my-rig --json   JSON output for agents
+  rig compact dev-impl@my-rig --state  Show the current compaction state
 
-Runs the SAME guided lifecycle the auto-compaction policy runs (pre-compact
-prep → a short /compact (the full trust note travels in the map) → restore-from-marker → read-depth audit)
+Triggers compaction on demand for ONE Claude or Pi seat, independent of the
+automatic threshold. It is NOT the read-only 'rig compact-plan' triage
+(Claude-only: its threshold planning assumes the Claude compaction policy).
+Runtime behavior differs:
+
+Claude seats run the SAME guided lifecycle the auto-compaction policy runs
+(pre-compact prep → a short /compact (the full trust note travels in the map) → restore-from-marker → read-depth audit)
 on demand, for ONE Claude seat, without waiting for the context threshold. It is
-NOT a bare /compact and NOT the read-only 'rig compact-plan' triage. Non-Claude
-seats are rejected. Managed /compact waits for the exact attempt/occupant restore
+NOT a bare /compact. Managed /compact waits for the exact attempt/occupant restore
 map named by preparation, published atomically with its completion marker. This
 checks completion identity, not map quality. Manual preparation and idle wait share
 180 seconds; expiry disarms that attempt. --state shows the map/deadline/reason,
@@ -70,7 +74,24 @@ map reports preparation_incomplete. Manual requests still
 share one 180-second budget and stop as before; while an attempt is held, a manual
 request reads already_in_progress until --cancel.
 Stopped attempts may retry automatically after the cooldown; cancellation does not.
-Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.`);
+Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.
+Pi seats send the reserved /openrig-compact input, which the runner turns into Pi's
+native compact RPC (not prompt text). A successful trigger is reported as
+"submitted, unconfirmed" because OpenRig does not wait for Pi to finish; read
+completion and its request identity from the Pi runner sidecar with
+rig compact <session> --state (activity is advisory, the sidecar is authoritative).
+OpenRig sends no restore or audit prompts for Pi, and Pi's context usage may stay
+unknown until the next assistant response. Both control inputs require an empty
+editor before paste and an exact staged-token match before Enter. Refusal examples (not exhaustive):
+draft_input_busy, draft_input_unknown, draft_input_changed, live_state_unavailable,
+mid_work, already_in_progress, send_failed and submit_failed.
+--skip-map is ignored for Pi; --cancel is rejected for Pi with runtime_filter.
+
+Runtimes other than Claude and Pi are rejected as runtime_filter. On a Pi build without
+native compact RPC, the first trigger may return submitted_unconfirmed before the RPC
+error is recorded; --state then reports unsupported and subsequent triggers refuse with unsupported.
+An older runner without editor inspection fails closed with draft_input_unknown.
+`);
 
   const getDepsF = (): CompactDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
@@ -105,16 +126,32 @@ Cancellation disarms future input; it cannot undo a command already submitted. R
 
     if (res.status >= 400) {
       const error = res.data["error"] as string | undefined;
-      console.error(error ?? `Manual compaction failed (HTTP ${res.status})`);
+      const reason = res.data["reason"] as string | undefined;
+      const runtime = res.data["runtime"] as string | undefined;
+      if (error) console.error(error);
+      else if (reason) console.error(`Manual compaction for ${session} was not started (${runtime ? `runtime: ${runtime}, ` : ""}reason: ${reason}, HTTP ${res.status}).`);
+      else console.error(`Manual compaction failed (HTTP ${res.status})`);
       process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
 
     if (opts.state || opts.cancel) {
+      if (opts.state && res.data["runtime"] === "pi") {
+        const state = res.data["state"] as { status?: string; completionKey?: string | null } | undefined;
+        console.log(`Pi compaction state for ${session}: ${state?.status ?? "unknown"}${state?.completionKey ? ` (completion: ${state.completionKey})` : ""}`);
+        console.log("Read from the Pi runner sidecar (authoritative); activity is advisory. No restore or audit prompts are owed for Pi, and context usage may stay unknown until the next assistant response.");
+        return;
+      }
       console.log(JSON.stringify(res.data, null, 2)); return;
     }
     const stage = res.data["stage"] as string | undefined;
     const compact = res.data["compact"] as string | undefined;
+    if (res.data["runtime"] === "pi") {
+      console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""} (runtime: pi)`);
+      if (opts.skipMap) console.log("--skip-map is ignored for Pi; no restore-map lifecycle is used.");
+      console.log(`Pi runs its native compact RPC. Completion is read from the Pi runner sidecar: rig compact ${session} --state. OpenRig sends no restore or audit prompts for Pi; context usage may stay unknown until the next assistant response.`);
+      return;
+    }
     console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""}`);
     console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold, and a daemon restart picks them up where they stopped (rig compact --state shows one too old to resume).");
   });
