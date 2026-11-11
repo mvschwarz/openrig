@@ -380,14 +380,17 @@ Steering, or in Slack: with Approve or Deny, or in their own words. Typed words 
   expiry. If the agent doesn't pick up the answer, the person is told at expiry that it didn't.
 - **When the target has no receiving agent** (or the queue can't send rows to it, or OpenRig couldn't read which; the
   request says which, and names a chosen agent it couldn't use), the person's answer, a click or their words, is kept on
-  the request and decides nothing. The person gets one receipt naming the direct controls. If a receiving agent is set
+  the request and decides nothing. (A Steering Deny or Drop, which closes the request, still refuses it.) The person
+  gets one receipt naming the direct controls. If a receiving agent is set
   before the request expires, it gets their answer once and decides. (On 0.7.11, Approve and Deny decided at once here,
   and words were asked again.)
 - **The direct controls:** the target's TUI pairing settings (`rig tui`, then Settings, Instance & work, Pairing
   requests; the Feed's request opens it there), or `rig host approve|deny` below. The TUI lists the open requests from
-  `GET /api/hosts/pair-requests` (code, requester, expiry, status and who reads the answer; no credential), reads the
+  `GET /api/hosts/pair-requests` (code, requester, expiry, status, who reads the answer, and the person's kept answer,
+  so an Approve over a kept Deny is made knowingly; no credential), reads the
   request again before Approve or Deny, and decides through `POST /api/hosts/pair-decision` with its operator bearer
-  token. A decision it can't confirm reads "outcome unknown" and is read again, never sent twice.
+  token. A decision it can't confirm (a timeout, a lost connection or a server error) reads "outcome unknown" and is
+  read again, never sent twice.
 - **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
 
 On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
@@ -399,7 +402,7 @@ unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or al
 seat's close naming Approve, or a refusing close). A close never approves over the person's recorded Deny. It records who decided: the seat, or `human@host` from a plain terminal. The person
 gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
 --resolution approve` on an unanswered request still approves, and any other close that carries no answer and isn't
-the person's own reply, or `--state denied`, refuses. To refuse a pairing, use Deny on the target's pairing settings, run
+the person's own reply, or `--state denied`, refuses. To refuse a pairing, use Deny on the target's pairing settings or on Steering, run
 `rig host deny`, or let it expire (nothing is persisted). At its deadline a request's ask closes as expired, even when the requester stopped waiting, so a late click there isn't
 accepted. The decisions live in the daemon's memory, as the requests do, so a daemon restart drops an open request.
 

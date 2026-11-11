@@ -114,3 +114,27 @@ describe("deciding a pairing request from the settings page", () => {
     for (const f of [landed, notYet, blind]) expect(f.pairDecision).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("pairing settings, round 1", () => {
+  it("shows the person's kept answer above Approve and Deny, so an Approve over a kept Deny is made knowingly", () => {
+    const lines = pairingLines({ requests: [request({ answer: { by: "alex@external", choice: "deny" } })], readAt: "2026-11-11T01:01:00Z" }, "pair-ask", 140);
+    const text = lines.map((l) => l.text).join("\n");
+    expect(text).toContain("alex@external answered Deny (kept). Approve overrides it.");
+    expect(lines.filter((l) => l.action?.type === "act")).toHaveLength(2);
+    const words = pairingLines({ requests: [request({ answer: { by: "alex@external", words: "only after lunch" } })], readAt: "2026-11-11T01:01:00Z" }, null, 140);
+    expect(words.map((l) => l.text).join("\n")).toContain('alex@external wrote "only after lunch" (kept).');
+  });
+
+  it("a server error from the decision reads \"outcome unknown\" and reads again, never sending twice; the plain refusals stay plain", async () => {
+    const decideOnce = vi.fn(async () => ({ status: 500, body: { error: "internal_error" } }));
+    let i = 0;
+    const lists = [[request()], [request({ status: "approved" })]];
+    const client: PairDecisionClient = { pairRequests: async () => ({ requests: lists[Math.min(i++, 1)]! }), pairDecision: decideOnce };
+    expect(await decidePairRequest(client, approveAct)).toBe("Pairing request 482913 from requester@far-host: the Approve wasn't confirmed (HTTP 500 internal_error), so its outcome is unknown. Read again: approved.");
+    expect(decideOnce).toHaveBeenCalledTimes(1);
+    for (const status of [400, 404, 409]) {
+      const plain: PairDecisionClient = { pairRequests: async () => ({ requests: [request()] }), pairDecision: async () => ({ status, body: { message: `refused ${status}` } }) };
+      expect(await decidePairRequest(plain, approveAct)).toBe(`Pairing request 482913 from requester@far-host: not decided here. refused ${status}`);
+    }
+  });
+});

@@ -465,6 +465,18 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       if (rec.decision) return rec.decision.approve;
       try { return rowDecision(c, rec, rec.qitemId ? getRepo(c).getById(rec.qitemId) : null); } catch { return undefined; }
     };
+    // The person's answer kept on the request (their choice, or the start of their words, and who), shown where a direct
+    // decision is made, so an Approve over a kept Deny is made knowingly. Unreadable: not shown.
+    const keptOf = (rec: IssuedPair): { by: string; choice?: string; words?: string } | null => {
+      try {
+        const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
+        const kept = item?.humanAnswers?.[PAIR_QUESTION_ID];
+        if (kept == null && !closedByReply(c, item)) return null;
+        const by = (item && item.state !== "pending" ? getRepo(c).closingTransition(item.qitemId, item.state)?.actorSession : null) ?? rec.person;
+        return typeof kept === "string" ? { by, choice: kept === PAIR_APPROVE ? "approve" : kept }
+          : kept != null && typeof kept === "object" ? { by, words: kept.text.replace(/\s+/g, " ").trim().slice(0, 200) } : { by, words: "" };
+      } catch { return null; }
+    };
     const requests = [...issued.values()].filter((rec) => now <= rec.expiresAt).map((rec) => ({
       code: rec.code,
       requester: rec.requester,
@@ -474,6 +486,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       person: rec.person,
       owner: rec.owner ?? null,
       ...(rec.owner ? {} : { noReader: noReader(rec) }),
+      ...((kept) => kept ? { answer: kept } : {})(keptOf(rec)),
       approvalQitemId: rec.qitemId || null,
     }));
     return c.json({ requests });
@@ -516,13 +529,22 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       }
       if (rec.owner && rec.lateOwner && answered && !rec.forwarded) {
         rec.forwarded = true;
+        // One forward per request, by an id the request names: a create that failed after it committed isn't sent again.
+        const forwardId = `qitem-pair-forward-${(rec.qitemId || pairId).replace(/^qitem-/, "")}`;
+        // The person's whole answer for the agent to act on (receipts keep a short preview), and where it's recorded.
+        const whole = typeof answer === "string" ? `their ${answer === PAIR_APPROVE ? "Approve" : answer === "deny" ? "Deny" : answer} choice`
+          : answer != null && typeof answer === "object" ? `these words: "${answer.text.trim()}"` : "a reply with no words in it (such as a file)";
         try {
-          await getRepo(c).create({ sourceSession: PAIR_SOURCE_SESSION, destinationSession: rec.owner,
+          await getRepo(c).create({ qitemId: forwardId, sourceSession: PAIR_SOURCE_SESSION, destinationSession: rec.owner,
             summary: `Pairing ${rec.code} from ${rec.requester}: ${rec.person} answered before you were its receiving agent`,
-            body: [`${rec.person} answered pairing request ${rec.code} from ${rec.requester} with ${said.replace(/^your /, "their ")}, while no agent read answers on this host. You're its receiving agent now.`,
+            body: [`${rec.person} answered pairing request ${rec.code} from ${rec.requester} with ${whole}, while no agent read answers on this host. You're its receiving agent now.`,
+              ...(rec.qitemId ? [`Their answer is recorded on the request's approval row: rig queue show ${rec.qitemId} --full (its question, the options and everything they sent).`] : []),
               `Act on what they meant: a clear yes or an Approve click, rig host approve ${rec.code}; a clear no or a Deny click, rig host deny ${rec.code}. If it isn't clear, ask them back, naming pairing code ${rec.code}.`,
               `The request expires at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC.`].join("\n") });
-        } catch { rec.forwarded = false; } // the next poll passes it on
+        } catch {
+          // Only a forward that isn't there is passed on at the next poll.
+          try { rec.forwarded = !!getRepo(c).getById(forwardId); } catch { rec.forwarded = false; }
+        }
       }
       // No agent reads answers here: tell the person once that their answer is kept, and how to decide directly.
       if (!rec.owner && answered && !rec.receipted) {

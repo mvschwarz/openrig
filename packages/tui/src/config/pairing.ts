@@ -12,6 +12,8 @@ export interface PairRequest {
   /** The agent that reads the person's answer; null when none does here (`noReader` says why). */
   owner: string | null;
   noReader?: string;
+  /** The person's answer kept on the request, which decided nothing by itself: their choice, or the start of their words. */
+  answer?: { by: string; choice?: string; words?: string };
   /** The request's approval row, which names it for a decision. */
   approvalQitemId: string | null;
 }
@@ -38,6 +40,13 @@ export function pairingLines(read: PairRequestsRead | null | undefined, focus: s
     const mark = r === focused ? "> " : "  ";
     text.push({ text: `${mark}${r.code} · ${r.requester} · expires ${hhmm(r.expiresAt)} UTC · ${r.status}` });
     text.push({ text: `    ${r.owner ? `${r.owner} reads ${r.person}'s answer and decides` : `No agent reads answers here: ${r.noReader ?? "reason unreported"}`}` });
+    if (r.answer) {
+      const a = r.answer;
+      text.push({ text: a.choice === "deny" ? `    ${a.by} answered Deny (kept). Approve overrides it.`
+        : a.choice === "approve" ? `    ${a.by} answered Approve (kept). Deny overrides it.`
+        : a.choice ? `    ${a.by} chose ${a.choice} (kept).`
+        : a.words ? `    ${a.by} wrote "${a.words}" (kept).` : `    ${a.by} replied with no words (kept).` });
+    }
     if (r.status === "pending" && r.approvalQitemId) {
       const act = (decision: "approve" | "deny"): Action => ({ type: "act", act: "pair-decision", request: r.approvalQitemId!, decision, code: r.code, requester: r.requester });
       text.push(listItem(`Approve ${r.code}: hand this host's bearer token to ${r.requester}`, act("approve"), 4),
@@ -68,15 +77,24 @@ export async function decidePairRequest(client: PairDecisionClient, act: PairDec
   if (!before) return `${what} isn't open here anymore (expired, collected or decided, or the daemon restarted). Nothing was sent.`;
   if (before.status === "unknown") return `${what}: its decision couldn't be read, so nothing was sent. Refresh and try again.`;
   if (before.status !== "pending") return `${what} was already ${before.status}; that stands. Nothing was sent.`;
-  let result: Awaited<ReturnType<PairDecisionClient["pairDecision"]>>;
-  try { result = await client.pairDecision(act.request, act.decision); } catch (error) {
-    const head = `${what}: the ${act.decision === "approve" ? "Approve" : "Deny"} wasn't confirmed (${(error as Error).message}), so its outcome is unknown.`;
+  // Not confirmed either way: the decision may have been recorded. Read it again and say what that shows; never resend.
+  const unknown = async (why: string): Promise<string> => {
+    const head = `${what}: the ${act.decision === "approve" ? "Approve" : "Deny"} wasn't confirmed (${why}), so its outcome is unknown.`;
     try {
       const after = await find();
       return `${head} Read again: ${!after ? "it's no longer open here." : after.status === "pending" ? "still pending, with no decision recorded. Check again before deciding again." : `${after.status}.`}`;
     } catch (again) {
       return `${head} Reading it again failed too (${(again as Error).message}): refresh before deciding again.`;
     }
+  };
+  let result: Awaited<ReturnType<PairDecisionClient["pairDecision"]>>;
+  try { result = await client.pairDecision(act.request, act.decision); } catch (error) {
+    return unknown((error as Error).message);
+  }
+  // The daemon's plain refusals decide nothing: no bearer (401), a bad request (400), gone (404), decided or expired (409).
+  // Any other failure, such as a server error, can follow a recorded decision, so its outcome is unknown.
+  if (result.status !== 401 && ![400, 404, 409].includes(result.status) && (result.status < 200 || result.status >= 300)) {
+    return unknown(`HTTP ${result.status}${typeof result.body?.error === "string" ? ` ${result.body.error}` : ""}`);
   }
   if (result.status === 401) return `${what}: this daemon refused the decision without its operator bearer token, so nothing was decided. Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, or run rig host ${act.decision} ${act.code} here.`;
   if (result.status < 200 || result.status >= 300) {

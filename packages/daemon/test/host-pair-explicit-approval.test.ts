@@ -507,3 +507,37 @@ describe("host pairing: expiry when the requester stopped waiting", () => {
     } finally { vi.useRealTimers(); }
   });
 });
+
+describe("host pairing, round 1: the kept answer where it's decided, and one whole forward", () => {
+  it("the pairing list carries the person's kept answer: a Deny click, or their words, with who", async () => {
+    const f = await fixture();
+    expect((await f.answer({ questionId: "pair", optionId: "deny" })).status).toBe(200);
+    expect(JSON.parse((await f.requests()).text).requests).toEqual([expect.objectContaining({ status: "pending", answer: { by: PERSON, choice: "deny" } })]);
+    const g = await fixture();
+    expect((await g.answer({ decision: "only after lunch" })).status).toBe(200);
+    expect(JSON.parse((await g.requests()).text).requests).toEqual([expect.objectContaining({ status: "pending", answer: { by: PERSON, words: "only after lunch" } })]);
+  });
+
+  it("a late receiving agent gets the person's whole words and the approval row, once, even when the forward's create throws after it committed", async () => {
+    const f = await fixture({ operator: "running", ownershipUnreadable: true });
+    const words = `please pair it, ${"the build host needs it for the release ".repeat(8)}and tell me when it's done`;
+    expect(words.length).toBeGreaterThan(200);
+    await f.answer({ decision: words });
+    const realCreate = f.repo.create.bind(f.repo);
+    let attempts = 0; // forward creates tried: the first commits and then throws
+    const spy = vi.spyOn(f.repo, "create").mockImplementation(async (input) => {
+      const made = await realCreate(input);
+      if (input.qitemId?.startsWith("qitem-pair-forward-") && attempts++ === 0) throw new Error("read back failed after commit");
+      return made;
+    });
+    try {
+      await f.poll();
+      await f.poll();
+    } finally { spy.mockRestore(); }
+    expect(attempts).toBe(1); // the next poll found the committed forward and didn't send it again
+    const forwards = f.repo.list({ limit: 1000 }).filter((row) => row.destinationSession === OPERATOR && row.sourceSession === "host-pair@kernel");
+    expect(forwards).toHaveLength(1);
+    expect(forwards[0]!.body).toContain(`with these words: "${words}"`);
+    expect(forwards[0]!.body).toContain(`rig queue show ${f.ask} --full`);
+  });
+});
