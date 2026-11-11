@@ -64,6 +64,28 @@ const VALID_YAML = (id: string) => `workflow:
     allowed_exits:
       - done
 `;
+const SAME_TICK_YAML = (version: "1" | "2", revision: "one" | "two") => `workflow:
+  id: same-tick-flow
+  version: '${version}'
+  objective: Objective ${revision}
+  target:
+    rig: capture-fixture
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@capture-fixture
+  steps:
+    - id: produce
+      actor_role: producer
+      objective: Step ${revision}.
+      allowed_exits:
+        - done
+  invariants:
+    allowed_exits:
+      - done
+`;
 const BROKEN_YAML = "workflow:\n  id: capture-repair\n  version: [unterminated\n";
 const CAPTURE_TIME = new Date("2035-01-02T03:04:05.100Z");
 const LATER_TIME = new Date("2035-01-02T03:04:06.100Z");
@@ -324,6 +346,93 @@ describe("workflow spec persisted capture and Library reads", () => {
       restartedCachedAt: P3_REFRESH_TIME.toISOString(),
       restartedHash: captureHash(contents),
       restartedStatus: "valid",
+    });
+  });
+
+  it.each([
+    ["immediately", 0],
+    ["at the first lookup five seconds later", 5_000],
+  ] as const)("reviews the current Library source after a same-tick rewrite %s", async (_timing, delayMs) => {
+    const file = join(folder, "same-tick.yaml");
+    const versionOne = SAME_TICK_YAML("1", "one");
+    const versionTwo = SAME_TICK_YAML("2", "two");
+    expect(Buffer.byteLength(versionOne, "utf8")).toBe(Buffer.byteLength(versionTwo, "utf8"));
+
+    fs.writeFileSync(file, versionOne);
+    statAt(file, CAPTURE_TIME.getTime());
+    const initialStat = { ...fileProbe.statOverrides.get(file)! };
+    expect(initialStat).toEqual({ mtimeMs: CAPTURE_TIME.getTime(), ctimeMs: CAPTURE_TIME.getTime() });
+    let observedAt = CAPTURE_TIME.getTime();
+    const cache = new WorkflowSpecCache(db, () => new Date(observedAt));
+    const app = makeLibraryApp({ db, cache, folder, root });
+
+    const initialListResponse = await app.request("/api/specs/library?kind=workflow");
+    const initialEntries = await initialListResponse.json() as Array<{
+      id: string; name: string; version: string; sourcePath: string; sourceType: string;
+    }>;
+    const sourceLink = initialEntries.find((entry) => entry.id.startsWith("workflow-source:")
+      && entry.sourcePath === file && entry.sourceType === "user_file");
+    expect(initialListResponse.status).toBe(200);
+    expect(sourceLink).toMatchObject({ name: "same-tick-flow", version: "1", sourcePath: file });
+    expect(sourceLink).toBeDefined();
+
+    const initialRow = db.prepare("SELECT cached_at, source_hash, status FROM workflow_specs WHERE source_path = ? AND name = ? AND version = '1'")
+      .get(file, "same-tick-flow") as { cached_at: string; source_hash: string; status: string };
+    expect(initialRow).toEqual({ cached_at: CAPTURE_TIME.toISOString(), source_hash: captureHash(versionOne), status: "valid" });
+
+    const beforeUnchangedReviewReads = readsOf(file);
+    const initialReviewResponse = await app.request(`/api/specs/library/${encodeURIComponent(sourceLink!.id)}/review`);
+    const initialReview = await initialReviewResponse.json() as {
+      version: string; sourcePath: string; purpose: string; steps: Array<{ objective: string }>;
+    };
+    expect(initialReviewResponse.status).toBe(200);
+    expect(initialReview).toMatchObject({
+      version: "1",
+      sourcePath: file,
+      purpose: "Objective one",
+      steps: [expect.objectContaining({ objective: "Step one." })],
+    });
+    expect(readsOf(file)).toBeGreaterThan(beforeUnchangedReviewReads);
+    const unchangedRow = db.prepare("SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ? AND name = ? AND version = '1'")
+      .get(file, "same-tick-flow") as { cached_at: string; source_hash: string };
+    expect(unchangedRow).toEqual({ cached_at: CAPTURE_TIME.toISOString(), source_hash: captureHash(versionOne) });
+
+    const readsBeforeRewrite = readsOf(file);
+    fs.writeFileSync(file, versionTwo);
+    statAt(file, CAPTURE_TIME.getTime());
+    expect(fileProbe.statOverrides.get(file)).toEqual(initialStat);
+    observedAt = CAPTURE_TIME.getTime() + delayMs;
+    const expectedLookupAt = new Date(observedAt);
+
+    // This source-link review is the first request after the rewrite, including in the T+5s case.
+    const currentReviewResponse = await app.request(`/api/specs/library/${encodeURIComponent(sourceLink!.id)}/review`);
+    const currentReview = await currentReviewResponse.json() as {
+      version: string; sourcePath: string; purpose: string; steps: Array<{ objective: string }>;
+    };
+    expect(currentReviewResponse.status).toBe(200);
+    expect(currentReview).toMatchObject({
+      version: "2",
+      sourcePath: file,
+      purpose: "Objective two",
+      steps: [expect.objectContaining({ objective: "Step two." })],
+    });
+    expect(readsOf(file)).toBeGreaterThan(readsBeforeRewrite);
+    expect(fileProbe.statOverrides.get(file)).toEqual(initialStat);
+
+    const currentRow = db.prepare("SELECT cached_at, source_hash, status FROM workflow_specs WHERE source_path = ? AND name = ? AND version = '2'")
+      .get(file, "same-tick-flow") as { cached_at: string; source_hash: string; status: string };
+    expect(currentRow).toEqual({ cached_at: expectedLookupAt.toISOString(), source_hash: captureHash(versionTwo), status: "valid" });
+
+    const historyResponse = await app.request(`/api/specs/library/${encodeURIComponent("workflow:same-tick-flow:1")}/review`);
+    const historicalReview = await historyResponse.json() as {
+      version: string; sourcePath: string; purpose: string; steps: Array<{ objective: string }>;
+    };
+    expect(historyResponse.status).toBe(200);
+    expect(historicalReview).toMatchObject({
+      version: "1",
+      sourcePath: file,
+      purpose: "Objective one",
+      steps: [expect.objectContaining({ objective: "Step one." })],
     });
   });
 
