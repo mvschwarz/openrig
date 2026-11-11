@@ -57,7 +57,7 @@ import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/
 import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry, type SshHostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { UNATTRIBUTED_ACTOR, type QueueItem, type QueueRepository } from "../domain/queue-repository.js";
-import { KERNEL_OPERATOR_SESSION } from "../domain/policies/mode-scheduled-end.js";
+import { KERNEL_OPERATOR_SESSION, resolveDefaultReceiver } from "../domain/default-receiver.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { PAIR_SOURCE_SESSION } from "../domain/hosts/pairing-ask.js";
 import { existsSync } from "node:fs";
@@ -141,6 +141,8 @@ interface IssuedPair {
   /** Why an agent-free request has no owner: this host has no kernel operator, the queue can't take rows to it, or
    *  OpenRig couldn't read which. */
   freeReason?: "none" | "unroutable" | "unknown";
+  /** The receiving agent the queue couldn't take rows to (`unroutable`). */
+  freeSession?: string;
 }
 
 interface ClientPair {
@@ -180,23 +182,24 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     return c.get("queueRepo" as never) as QueueRepository;
   }
 
-  /** Who reads a person's answer to a pairing request here: the kernel operator, when this host has one (a session, in any
-   *  state) and the queue takes rows to it; else nobody, and the request is agent-free, with the reason. A stopped
-   *  operator still owns it: the person's answer waits in its queue, and the person is told it isn't running. An operator
+  /** Who reads a person's answer to a pairing request here: the host's receiving agent (the chosen one, else the kernel
+   *  operator), when the queue takes rows to it; else nobody, and the request is agent-free, with the reason. A stopped
+   *  receiver still owns it: the person's answer waits in its queue, and the person is told it isn't running. A receiver
    *  the queue can't take rows to can't own it: the person's answer would be refused on its way there. */
-  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason"> {
+  function pairOwner(c: { get: (key: string) => unknown }): Pick<IssuedPair, "owner" | "freeReason" | "freeSession"> {
     const repo = getRepo(c);
     try {
-      if (!repo.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION)) return { owner: null, freeReason: "none" };
-      return repo.acceptsDestination(KERNEL_OPERATOR_SESSION) ? { owner: KERNEL_OPERATOR_SESSION } : { owner: null, freeReason: "unroutable" };
+      const receiver = resolveDefaultReceiver(repo.db);
+      if (!receiver.session) return { owner: null, freeReason: receiver.state === "unknown" ? "unknown" : "none" };
+      return repo.acceptsDestination(receiver.session) ? { owner: receiver.session } : { owner: null, freeReason: "unroutable", freeSession: receiver.session };
     } catch { return { owner: null, freeReason: "unknown" }; }
   }
 
   /** Why nobody reads answers on an agent-free request, as the person is told it. */
   function noReader(rec: IssuedPair): string {
-    return rec.freeReason === "unroutable" ? `${KERNEL_OPERATOR_SESSION} can't receive answers on this host`
+    return rec.freeReason === "unroutable" ? `${rec.freeSession ?? "the receiving agent"} can't receive answers on this host`
       : rec.freeReason === "unknown" ? "OpenRig couldn't tell whether an agent reads answers on this host"
-      : `no agent reads answers on this host (it has no ${KERNEL_OPERATOR_SESSION})`;
+      : `no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${KERNEL_OPERATOR_SESSION})`;
   }
 
   /** Whether the owner's session is running now; null when that can't be read. */

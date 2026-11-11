@@ -58,7 +58,8 @@ async function fixture({ kernel = true, operator, ownershipUnreadable = false }:
   // The ownership read fails while the request is made (the sessions lookup throws).
   const real = db.prepare.bind(db);
   const unreadable = ownershipUnreadable ? vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
-    if (sql.includes("FROM sessions WHERE session_name = ? LIMIT 1")) throw new Error("sessions unreadable");
+    // The receiving agent's seat read, whichever query reads it.
+    if (sql.includes("FROM sessions WHERE session_name = ?")) throw new Error("sessions unreadable");
     return real(sql);
   }) as typeof db.prepare) : null;
   const issued = await (await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -112,7 +113,7 @@ describe("host pairing with no kernel operator running: Approve and Deny decide,
     expect(item.sourceSession).toBe("host-pair@kernel");
     expect(item.humanQuestions).toEqual([{ id: "pair", question: `Pair requester@far-host (code ${f.issued.code}) with this host?`, options: [
       { id: "approve", label: "Approve: hand this host's bearer token to the requester" }, { id: "deny", label: "Deny" }] }]);
-    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (it has no ${OPERATOR}).`);
+    expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${OPERATOR}).`);
     expect(item.body).toContain(`rig host approve ${f.issued.code}, or rig host deny ${f.issued.code}`);
     expect(await f.poll()).toEqual({ http: 200, body: { status: "pending", code: f.issued.code }, leaksToken: false });
   });
@@ -485,6 +486,16 @@ describe("host pairing: exact expiry, and an agent-free request says why nobody 
     const item = f.repo.getById(f.ask)!;
     expect(item.sourceSession).toBe("host-pair@kernel");
     expect(item.body).toContain(`Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: ${OPERATOR} can't receive answers on this host.`);
+  });
+
+  it("a receiving agent chosen in agents.operator_session owns the request, with no kernel operator here", async () => {
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@fixture-rig");
+    try {
+      const f = await fixture({ kernel: false });
+      const item = f.repo.getById(f.ask)!;
+      expect(item.sourceSession).toBe("lead@fixture-rig");
+      expect(item.body).not.toContain("Typed words are kept but don't decide it");
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("when OpenRig can't read who owns the request, it's agent-free and says it couldn't tell", async () => {

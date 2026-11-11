@@ -21,7 +21,8 @@ import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from ".
 import { DispatchBuffer } from "../dispatch-buffer.js";
 import { downloadPrivateFile, isSlackHost, lookupBotApp, postChatMessage } from "./slack-api.js";
 import { botInboxProblems } from "./bot-inbox.js";
-import { loadConfig } from "./config.js";
+import { effectiveInboundDestination, loadConfig } from "./config.js";
+import { resolveDefaultReceiver } from "../../default-receiver.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
@@ -310,7 +311,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
-  const inboundRouting = { fallback: "local", destination: cfg.inboundDestination };
+  // Read once, when the connector starts, like the rest of its configuration.
+  const inbound = effectiveInboundDestination(cfg, (() => { try { return resolveDefaultReceiver(opts.queueRepo.db).session; } catch { return null; } })());
+  const inboundRouting = { fallback: "local", destination: inbound.destination, destinationFrom: inbound.from };
   const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
   const deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"));
   // Retained relays belong to their original host, even after forwarding configuration changes.
@@ -1359,14 +1362,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       queue: ports,
       seen: inboundSeen,
       deadLetter: dead,
-      destination: cfg.inboundDestination,
+      destination: inbound.destination,
       reactions: cfg.reactions === "off" ? "off" : "route",
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({
         map: threadMap,
-        unroutedDestination: cfg.inboundDestination,
+        unroutedDestination: inbound.destination,
         // A person's top-level message in a channel the map routes: its `inbound` seat or its rig's representative.
         resolveChannelDestination: (channel) =>
           resolveInboundChannelDestination(cfg, channel, (rig) => resolveRigRepresentative(opts.queueRepo.db, rig)),

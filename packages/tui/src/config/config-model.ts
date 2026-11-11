@@ -51,6 +51,7 @@ const LABELS: Record<string, string> = {
   "workspace.projects_root": "Project folders", "workspace.specs_root": "Spec folders",
   "workspace.steering_path": "Steering file", "workspace.catalog_path": "Workspace catalog",
   "workspace.operator_seat_name": "Operator seat", "db.path": "Database",
+  "agents.default_receiver": "Default receiving agent", "agents.operator_session": "Receiving agent (chosen)",
   "topology.root": "Topology root", "context.root": "Context root", "skills.root": "Skills root",
   "ui.timezone": "Timezone", "workflow.exception_routing": "Exception routing",
   "queue.wake_retry_interval_seconds": "Retry interval", "queue.wake_retry_cap": "Retry limit",

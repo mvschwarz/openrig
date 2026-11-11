@@ -181,7 +181,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .command("setup")
     .description("Configure the connector (first-class config; secrets stay in the env file, never here)")
     .option("--channel <id>", "Slack channel id the connector app must be a member of")
-    .option("--inbound-destination <session>", "where inbound human messages land (default operator-agent@kernel)")
+    .option("--inbound-destination <session>", "where a person's unrouted message lands: a seat's session, or default-receiver (the default) for the host's default receiving agent (agents.operator_session, else the kernel operator)")
     .option("--minimum-level-that-posts <level>", "minimum OWNER level posted to Slack: RECORD|NOTICE|ALERT")
     .option("--minimum-level-that-interrupts <level>", "minimum OWNER level that mentions/interrupts: RECORD|NOTICE|ALERT")
     .option("--source-label <label>", "label shown in the posted message footer (where the queue lives)")
