@@ -512,6 +512,17 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
+  it("names only the release route for an adopted seat joined with rig attach as an external CLI, since rig down leaves it running", async () => {
+    const seat = seedSeat({ adopted: true });
+    sessionRegistry.updateBinding(seat.node.id, { attachmentType: "external_cli", externalSessionName: seat.sessionName });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fixture" });
+    expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.guidance).toContain("rig unclaim 'dev-impl@fresh-rig'");
+    expect(result.guidance).not.toContain("rig down");
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   it("keeps stop effects unknown when pane identity cannot be observed", async () => {
     const seat = seedSeat();
     vi.mocked(tmux.listPanes).mockRejectedValue(new Error("secret-pane-error"));

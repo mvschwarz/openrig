@@ -1135,6 +1135,23 @@ describe("RestoreOrchestrator", () => {
     ])).toBe("fully_restored");
   });
 
+  it("a full restore launches a seat whose stored kind is neither tmux nor external CLI on OpenRig's own path, as it does today", async () => {
+    const rig = rigRepo.createRig("r99");
+    const worker = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const old = sessionRegistry.registerSession(worker.id, "r99-worker");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateBinding(worker.id, { tmuxSession: "r99-worker" });
+    db.prepare("UPDATE bindings SET attachment_type = 'herdr' WHERE node_id = ?").run(worker.id);
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => false) } as unknown as TmuxAdapter;
+
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["worker"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "worker", status: "fresh-primed" })]);
+  });
+
   it("a missing startup file doesn't hold a seat joined with rig attach as an external CLI, or the restore, since nothing launches it", async () => {
     const rig = rigRepo.createRig("r99");
     const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });

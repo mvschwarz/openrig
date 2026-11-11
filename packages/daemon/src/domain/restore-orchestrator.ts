@@ -103,6 +103,7 @@ import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -445,7 +446,7 @@ export class RestoreOrchestrator {
       for (const blocker of validation.blockers) {
         if (!SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId) continue;
         // A seat joined with `rig attach` as an external CLI isn't launched, so its startup files don't hold it.
-        if (this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType === "external_cli") continue;
+        if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType)) === "external") continue;
         const reason = `${blocker.message} ${blocker.remediation}`;
         heldForStartup.set(blocker.nodeId, heldForStartup.has(blocker.nodeId) ? `${heldForStartup.get(blocker.nodeId)} ${reason}` : reason);
       }
@@ -713,7 +714,7 @@ export class RestoreOrchestrator {
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
-      const external = this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli";
+      const external = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external";
       const sessions = external ? [] : this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -828,7 +829,7 @@ export class RestoreOrchestrator {
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
       // A seat joined with `rig attach` as an external CLI has no tmux session to check, and restore leaves it attached.
-      if (this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external") continue;
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -904,7 +905,7 @@ export class RestoreOrchestrator {
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
       // An external CLI's claim has no tmux session; restore leaves it attached (restoreNodeWithCompensation).
-      if (this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") continue;
       try {
         // Replacement must preserve unknown transport state before any reconciliation write.
         if (selectedIds) {
@@ -1110,7 +1111,7 @@ export class RestoreOrchestrator {
 
     // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
     const external = this.sessionRegistry.getBindingForNode(nodeId);
-    if (external?.attachmentType === "external_cli") {
+    if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId) };
     }
 
