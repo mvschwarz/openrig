@@ -1334,7 +1334,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // A wake that failed at a live agent seat with no delegation parent or escalates_to made its finding that same seat's,
     // so the finding's own wake went to the seat that had just failed to take one, onto whatever was in its input box.
     // The row's creator can act on it (resend, reroute or ask), as the waiting and parked-owner findings already route;
-    // for a seat that sent itself the work, or a row OpenRig's own machinery created, the operator agent can. A declared
+    // for a seat that sent itself the work, a row OpenRig's own machinery created, or a creator that is a bound terminal
+    // seat (nothing there can claim it, as for the no-wake rule), the operator agent can. A declared
     // route that failed keeps its fallback, and a finding the two re-routes above moved keeps its recipient. A wake that
     // found no route never reached the seat, so a seat launched since keeps its own finding, whose wake is the one it missed.
     const routeAroundFailedWake = (c: Candidate): void => {
@@ -1343,9 +1344,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         || routeNotes.has(c.row.qitemId) || agentSeatNode(c.route) === null) return;
       const choices = [c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
       const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !isMachinerySession(seat)
-        && !sessionMissing(seat) && deps.queueRepo.acceptsDestination(seat));
+        && !sessionMissing(seat) && deps.queueRepo.acceptsDestination(seat) && !isBoundTerminalSeat(deps.db, seat));
       if (chosen < 0) {
-        c.why += `; ${c.route} declares no delegation parent or escalates_to, and its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery or not an address this queue takes, so this finding stays addressed to it`;
+        c.why += `; ${c.route} declares no delegation parent or escalates_to, and its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery, a terminal seat or not an address this queue takes, so this finding stays addressed to it`;
         return;
       }
       c.why += `; ${c.route} declares no delegation parent or escalates_to, so this finding goes to ${choices[chosen]}, ${FAILED_WAKE_ROUTE_RULES[chosen]}`;
