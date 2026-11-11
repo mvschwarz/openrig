@@ -1622,6 +1622,18 @@ export class TmuxAdapter {
     }
   }
 
+  /** The pane's terminal device, such as /dev/ttys004. Returns null if unavailable. */
+  async getPaneTty(paneId: string): Promise<string | null> {
+    const target = exactTarget(paneId, "pane");
+    try {
+      const output = (await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_tty}"],
+        `tmux display-message -p -t ${shellQuote(target)} "#{pane_tty}"`)).trim();
+      return output.startsWith("/dev/") ? output : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** KI-14: the server's `default-shell` option — what a createSession pane runs when no command is
    *  given. Used to make a respawn EXPLICIT about the blank shell instead of inheriting whatever
    *  command the pane was created with. Returns null if unavailable (caller falls back). */

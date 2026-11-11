@@ -134,6 +134,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.cancelPaneMode("%1");
   await a.signalPaneProcess("%1", "TERM");
   await a.getPanePid(SESSION);
+  await a.getPaneTty(SESSION);
   await a.getDefaultShell();
   await a.getPaneCommand(SESSION);
   await a.getSessionEnv(SESSION, "OPENRIG_NODE_ID");

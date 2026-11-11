@@ -182,6 +182,15 @@ When no app can be chosen, or the app refuses the switch, the result names the
 session to select by hand. A Rex app accepts the switch only with Remote Control
 turned on in its Settings, under Rex Server.
 
+Each local seat's tile shows the seat's runtime (such as Claude Code or Codex) and
+its activity: working, idle, or blocked (with a permission kind for a permission
+prompt). The tile gets the current activity once it opens and each change after
+that, as `rig ps --nodes` resolves it. When OpenRig doesn't know a seat's activity,
+the tile shows none rather than idle. To reach the tile through tmux, OpenRig turns
+on `allow-passthrough` for that seat's pane only and marks the pane with the
+`@openrig-rex-status` option; both stay set after the tile closes. Other terminals
+attached to the pane ignore these reports.
+
 The daemon finds `rex` in `$REX_BIN_DIR`, then on `PATH`, then inside the Rex
 app on macOS, and uses its own `REX_SERVER` when set. It never starts a Rex
 server. An open view is not reused: opening it again adds a numbered session,
