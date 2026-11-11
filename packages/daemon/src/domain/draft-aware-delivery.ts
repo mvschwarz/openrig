@@ -79,7 +79,7 @@ export class DraftAwareDelivery {
       // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
       await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
       result = await this.deliver(session, text, { ...opts,
-        onInputEffect: phase => { inputWritten = true; opts.onInputEffect?.(phase); },
+        onInputEffect: (phase, written) => { inputWritten = true; opts.onInputEffect?.(phase, written); },
         beforeWrite: () => {
           if (opts.queueWake && !this.wakeApplicable?.(entries)) throw new DeliveryGuardError("draft_wake_superseded", "The queue wake is no longer applicable; no further input was written.");
           opts.beforeWrite?.();

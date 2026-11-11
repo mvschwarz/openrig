@@ -64,6 +64,20 @@ function conversationFields(providerPayload, env) {
   };
 }
 
+// The prompt the harness received at UserPromptSubmit, as a fingerprint and byte length, with Claude's own prompt id
+// when it sends one: enough for the daemon to match it to a message OpenRig wrote, without the prompt leaving this
+// process. Any other event, or a prompt that isn't a string, adds nothing.
+function promptBoundaryFields(hookEvent, providerPayload) {
+  if (hookEvent !== "UserPromptSubmit" || typeof providerPayload.prompt !== "string") return {};
+  const bytes = Buffer.from(providerPayload.prompt, "utf8");
+  const nativePromptId = firstString(providerPayload.prompt_id);
+  return {
+    promptSha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    promptBytes: bytes.length,
+    ...(nativePromptId && /^[A-Za-z0-9_-]{1,128}$/.test(nativePromptId) ? { nativePromptId } : {}),
+  };
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
@@ -127,6 +141,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
       && (providerPayload.agent_id == null || firstString(providerPayload.agent_id))
       ? { hookAgentId: firstString(providerPayload.agent_id) } : {}),
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
+    ...promptBoundaryFields(hookEvent, providerPayload),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
     ...conversationFields(providerPayload, env),

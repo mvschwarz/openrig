@@ -10,7 +10,7 @@ const REPLAY_PAGE = 500;
 
 /** Event types this stream doesn't carry, live or replayed: one-per-send diagnostics the log keeps for their own readers,
  *  which would otherwise fill a viewer's newest-N replay and its cache. */
-const OMITTED_TYPES: readonly string[] = ["transport.delivery_evidence"];
+const OMITTED_TYPES: readonly string[] = ["transport.delivery_evidence", "transport.prompt_observation"];
 
 function getEventBus(c: { get: (key: string) => unknown }): EventBus {
   return c.get("eventBus" as never) as EventBus;

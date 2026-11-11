@@ -733,6 +733,7 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     const status = result.code === "missing_session_identity" ? 400 : 404;
     return { refused: c.json({ ok: false, code: result.code, error: result.error }, status) };
   }
+  recordPromptObservation(c, body, (result.event as { sessionName?: string } | undefined)?.sessionName ?? stringOrNull(body.sessionName));
 
   // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
   // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
@@ -1099,6 +1100,28 @@ activityRoutes.get("/parked", (c) => {
     },
   });
 });
+
+/** A prompt hook's own observation, recorded as it was reported: a fingerprint and byte length of the prompt the harness
+ *  received, its native session and prompt or turn id, and the generation the hook ran as. It's raw evidence only: neither
+ *  harness reports where a prompt came from (a message OpenRig wrote, a person's own text, a background turn), so it's never
+ *  joined to a message here. A missing or malformed fingerprint records nothing; a bad id or time is left out. The hook
+ *  itself is recorded and answered either way. */
+function recordPromptObservation(c: Context, body: Record<string, unknown>, sessionName: string | null): void {
+  if (body.hookEvent !== "UserPromptSubmit") return;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  const promptSha256 = typeof body.promptSha256 === "string" && /^[0-9a-f]{64}$/.test(body.promptSha256) ? body.promptSha256 : null;
+  const promptBytes = typeof body.promptBytes === "number" && Number.isSafeInteger(body.promptBytes) && body.promptBytes >= 0 ? body.promptBytes : null;
+  if (!eventBus || !sessionName || !promptSha256 || promptBytes === null) return;
+  const nativeId = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null;
+  // An instant, not a string to compare: a time that doesn't parse is left out.
+  const at = typeof body.occurredAt === "string" ? Date.parse(body.occurredAt) : Number.NaN;
+  try {
+    eventBus.emit({ type: "transport.prompt_observation", sessionName, occupantGeneration: stringOrNull(body.generation),
+      runtime: stringOrNull(body.runtime), source: "UserPromptSubmit", nativeSessionId: nativeId(body.sessionId),
+      nativePromptId: nativeId(body.nativePromptId), nativeTurnId: nativeId(body.turnId), promptSha256, promptBytes,
+      observedAt: Number.isFinite(at) ? new Date(at).toISOString() : null });
+  } catch { /* Best effort: the hook is recorded either way. */ }
+}
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;

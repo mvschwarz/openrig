@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { createDb } from "../src/db/connection.js";
@@ -2840,7 +2841,8 @@ describe("SessionTransport", () => {
     it("an external CLI seat's refusal records nothing written and no screen check", async () => {
       seedExternalCliRig();
       await createTransport(mockTmux(), { eventBus: new EventBus(db) }).send("orch1-lead@rigged-buildout", "hello");
-      expect(evidence()).toMatchObject([{ seatKind: "external_cli", written: "none", terminalObserved: { outcome: null, verified: null } }]);
+      expect(evidence()).toMatchObject([{ seatKind: "external_cli", written: "none", terminalObserved: { outcome: null, verified: null },
+        wireSha256: null, wireBytes: null, writtenAt: null }]);
     });
 
     it("a write that may have landed reads uncertain and is written once, never resent", async () => {
@@ -2909,6 +2911,29 @@ describe("SessionTransport", () => {
       expect(result).toEqual(plain);
       expect(warn).toHaveBeenCalledTimes(1);
       warn.mockRestore();
+    });
+
+    it("fingerprints the text the paste wrote, never the text itself: a terminal seat's exact text, not the envelope", async () => {
+      seedCanonicalRig("terminal");
+      let typed = "";
+      const tmux = mockTmux({ capturePaneContent: async () => "hello", sendText: async (_target, text) => { typed = text; return { ok: true as const }; } });
+      await createTransport(tmux, { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "env lines\nhello", { exactText: "hello" });
+      const [fact] = evidence();
+      expect(typed).toBe("hello");
+      expect(fact).toMatchObject({ wireSha256: createHash("sha256").update("hello").digest("hex"), wireBytes: 5 });
+      expect(Number.isNaN(Date.parse(fact.writtenAt))).toBe(false);
+      expect(JSON.stringify(fact)).not.toContain("hello");
+    });
+
+    it("fingerprints what was pasted, an urgent send's added line included, not the text the caller passed", async () => {
+      seedCanonicalRig();
+      let typed = "";
+      const tmux = mockTmux({ capturePaneContent: async () => "hello", sendText: async (_target, text) => { typed = text; return { ok: true as const }; } });
+      await createTransport(tmux, { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello", { urgent: { by: "orch@r" } });
+      const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+      expect(typed).not.toBe("hello");
+      expect(evidence()).toMatchObject([{ wireSha256: sha(typed), wireBytes: Buffer.byteLength(typed) }]);
+      expect(evidence()[0].wireSha256).not.toBe(sha("hello"));
     });
 
     it("a terminal seat's exact-text send, which re-enters send, records once", async () => {
