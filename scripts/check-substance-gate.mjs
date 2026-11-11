@@ -156,16 +156,12 @@ function derivePackageArtifacts(packageRoot) {
   if (packed.status !== 0) {
     throw new Error(`npm artifact enumeration failed:\n${packed.stderr || packed.stdout || `exit ${packed.status}`}`);
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(packed.stdout);
-  } catch (error) {
-    throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
-  }
   let entries = [];
   try {
-    entries = packEntries(parsed);
-  } catch {
+    // One parse, in the shared reader: a JSON string (even one holding a serialized list) is not a shape npm prints.
+    entries = packEntries(packed.stdout);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
     // not a shape npm prints: reported below as no files array
   }
   const rawFiles = entries[0]?.files;
