@@ -317,6 +317,14 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     }
   });
 
+  it("A WEBHOOK FAILURE AFTER THE POST KEEPS THE FAILED PATH: its effect is unknown, but it is retried as it always was", async () => {
+    const baton = await mkBaton();
+    setNudgeResult(baton.qitemId, "failed:webhook (hook) answered 500", 10);
+    await tick();
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(1);
+    expect(calls).toEqual([{ qitemId: baton.qitemId, target: "worker@r" }]);
+  });
+
   it("DELIVERY MACHINERY IS NOT PICKUP: a relay-owner-notification-transport-failed note on an unconfirmed or held baton does not count as pickup evidence", async () => {
     const mod = await ladderMod();
     for (const [idx, result] of ["gateway-owned: virtual destination", "retained:typing_guard"].entries()) {

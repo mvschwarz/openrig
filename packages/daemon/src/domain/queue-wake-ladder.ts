@@ -394,6 +394,10 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
     // to retry; its own notice covers it.
     case "not-delivered":
       return outcome.route === "none" ? null : "failed";
+    // A webhook failure after the POST: its effect is unknown, but it keeps the failed path and retry policy it has
+    // always had.
+    case "failed-effect-unknown":
+      return "failed";
     // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
     // unclaimed baton keeps a retry path instead of stranding behind a terminal
     // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the

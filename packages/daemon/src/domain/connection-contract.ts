@@ -30,6 +30,9 @@ export type DeliveryFact =
   | "turn-started"
   /** Proven that nothing reached the member: no input was written, or the route refused before sending. */
   | "not-delivered"
+  /** The route reported a failure after the attempt may already have reached the member (an error answer, a dropped
+   *  connection): failed, with its effect unknown. */
+  | "failed-effect-unknown"
   /** Held on purpose by a guard or a setting; nothing was written. */
   | "held"
   | "unknown";
@@ -70,7 +73,14 @@ export function readWakeOutcome(recorded: string | null | undefined): WakeOutcom
   // A hosted member's trigger answered: the ring was taken, not the work.
   if (recorded.startsWith("wake-accepted:webhook")) return at("accepted", "hosted-trigger");
   if (recorded.startsWith("indeterminate:webhook")) return at("unknown", "hosted-trigger");
-  if (recorded.startsWith("failed:webhook")) return at("not-delivered", "hosted-trigger");
+  // A ring that never left: no URL, no Authorization value, an invalid URL.
+  if (/^failed:webhook \([^)]*\) (isn't set:|not rung:)/.test(recorded)) return at("not-delivered", "hosted-trigger");
+  // Any other webhook failure came after the POST was sent. The trigger's own error answer is its report; a network
+  // error is what OpenRig saw. Either way the member may have the ring.
+  if (/^failed:webhook \([^)]*\) answered /.test(recorded)) {
+    return at("failed-effect-unknown", "hosted-trigger", { reporter: "outside-adapter" });
+  }
+  if (recorded.startsWith("failed:webhook")) return at("failed-effect-unknown", "hosted-trigger");
   // The gateway's own ledger records whether the person was posted to; this attempt's own outcome is unknown.
   if (recorded.startsWith("gateway-owned:")) return at("unknown", "gateway");
   if (recorded.startsWith("unroutable:")) return at("not-delivered", "none");
