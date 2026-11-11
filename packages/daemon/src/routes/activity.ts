@@ -838,7 +838,7 @@ activityRoutes.post("/permission-requests/:askId/decide", async (c) => {
     stream: c.get("streamStore" as never) as StreamStore | undefined });
   const decider = transportSenderSession(c) ?? "someone outside a seat";
   const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "");
-  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : 400);
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : result.code === "not_recorded" ? 409 : 400);
   return c.json(result);
 });
 

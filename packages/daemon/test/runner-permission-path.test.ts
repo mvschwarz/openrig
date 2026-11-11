@@ -905,4 +905,26 @@ describe("an answered request: review-r2's round-1 questions", () => {
     expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: "withdrawn" } });
     expect(f.queueRepo.listTransitions(askId).some((t) => t.transitionNote?.startsWith("runner-permission-decided"))).toBe(false);
   });
+
+  it("a failed handoff's kept words survive a later ordinary close: the request waits, never a default permit", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const spy = vi.spyOn(f.queueRepo as unknown as { handoffNow: () => unknown }, "handoffNow").mockImplementation(() => { throw new Error("staging failed"); });
+    try { await f.answer(askId, { decision: "only the test file" }); } finally { spy.mockRestore(); }
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+    expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("a decision the row can't take says so: nothing is decided, and the request still waits", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { decision: "only the test file" });
+    const spy = vi.spyOn(f.queueRepo, "recordPermissionDecision").mockReturnValue(false);
+    try {
+      expect(await f.decide(askId, "allow")).toMatchObject({ status: 409, body: { ok: false, code: "not_recorded" } });
+    } finally { spy.mockRestore(); }
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+  });
 });

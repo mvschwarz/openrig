@@ -351,7 +351,7 @@ export class RunnerPermissions {
   /** An agent's decision on a request its person answered (`rig seat decide-permission`): one of the options the agent
    *  offered, recorded on the row that holds the request now, with who decided and why. A request that's no longer
    *  pending (decided, withdrawn or stale) returns as it is and nothing is written, so deciding twice changes nothing. */
-  decide(askId: string, optionId: string, decider: string, reason: string): ReadResult | { ok: false; code: "invalid_option"; message: string } {
+  decide(askId: string, optionId: string, decider: string, reason: string): ReadResult | { ok: false; code: "invalid_option" | "not_recorded"; message: string } {
     const now = this.read(null, askId);
     if (!now.ok || now.state !== "pending") return now;
     const asked = this.deps.queueRepo.getById(askId)!;
@@ -364,8 +364,9 @@ export class RunnerPermissions {
     // The person's words as they wrote them, a plain yes or no included (the record says what they said).
     const typed = this.personAnswer(live) as { kind?: unknown; text?: unknown } | string | undefined;
     const words = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
-    this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
+    const recorded = this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
       transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${words}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}` });
+    if (!recorded) return { ok: false, code: "not_recorded", message: `The decision couldn't be recorded on ${live.qitemId} (its row is ${live.state}). Nothing was decided; the request is still waiting.` };
     return this.read(null, askId);
   }
 
