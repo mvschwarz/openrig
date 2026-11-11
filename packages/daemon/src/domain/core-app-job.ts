@@ -1,3 +1,5 @@
+import { runnerPermissionOrigin } from "./runner-permissions.js";
+import { SessionRegistry } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { CoreAppAccess, CoreAppError, appObject, exactKeys, appHash, type CoreAppCredential, type CoreAppSubmission } from "./core-app-access.js";
@@ -28,6 +30,19 @@ export class CoreAppJob {
     const [epoch, raw, extra] = decoded.split(":");
     return epoch === this.epoch && extra === undefined && /^\d+$/.test(raw ?? "") && Number.isSafeInteger(Number(raw)) ? Number(raw) : null;
   }
+  /** Conservative continuity proof: filtered sequence jumps are fine; deleted log rows or a retention sweep reset. */
+  eventReplay(cursor: string | undefined) {
+    return this.access.db.transaction(() => {
+      const head = this.bus.maxSeq(), after = cursor === undefined ? head : this.cursorSequence(cursor);
+      const floor = (this.access.db.prepare("SELECT low_water_seq n FROM events_retention_marks WHERE id = 1").get() as { n: number } | undefined)?.n ?? 0;
+      if (after === null || after > head || after < floor) return null;
+      const count = (this.access.db.prepare("SELECT COUNT(*) n FROM events WHERE seq > ? AND seq <= ?").get(after, head) as { n: number }).n;
+      if (count !== head - after) return null;
+      const rows = this.access.db.prepare(`SELECT seq FROM events WHERE seq > ? AND seq <= ?
+        AND type IN ('queue.created', 'queue.updated', 'mission_control.action_executed') ORDER BY seq LIMIT 501`).all(after, head) as Array<{ seq: number }>;
+      return rows.length > 500 ? null : { head, sequences: rows.map(row => row.seq) };
+    })();
+  }
   snapshot<T>(read: () => T): T & { readAt: string; cursor: string } {
     return this.access.db.transaction(() => ({ ...read(), readAt: new Date().toISOString(), cursor: this.cursor() }))();
   }
@@ -40,10 +55,18 @@ export class CoreAppJob {
     const path = `/api/apps/v1/requests/${encodeURIComponent(requestId)}`, query = `?actor=${encodeURIComponent(actor)}`;
     return { self: path + query, result: `${path}/result${query}` };
   }
+  private unsupported(item: QueueItem): string | null {
+    const reason = appAskUnsupported(this.queue, item);
+    if (reason) return reason;
+    const origin = runnerPermissionOrigin(item);
+    if (origin && new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid !== origin.generation) return "request_stale";
+    return null;
+  }
   request(credential: CoreAppCredential, requestId: string, actor: string) {
     const item = this.queue.getById(requestId);
     if (!item) throw new CoreAppError("request_not_found", 404);
-    const unsupportedReason = appAskUnsupported(this.queue, item);
+    const unsupportedReason = this.unsupported(item);
+    if (unsupportedReason === "unsupported_request_kind" || unsupportedReason === "source_unavailable") return { requestId, answer: null, unsupportedReason, links: this.links(requestId, actor) };
     return { requestId, asker: item.sourceSession, askedPerson: item.destinationSession,
       actor: { address: actor, assurance: "app-attributed", appId: credential.appId }, state: item.state,
       decisionRevision: this.queue.decisionRevision(item), episodeKey: this.episodeKey(requestId),
@@ -53,11 +76,131 @@ export class CoreAppJob {
   }
   needsMe(credential: CoreAppCredential, actor: string) {
     return this.snapshot(() => {
+      try {
       const { current, partial } = humanAskAttention(this.queue);
       const view = feedPerspective(this.queue, actor);
       return { version: 1, sources: [{ source: "queue", state: partial ? "partial" : "available" }],
-        requests: current.filter(item => view.inView(item.destinationSession) && !appAskUnsupported(this.queue, item))
+        requests: current.filter(item => view.inView(item.destinationSession) && !this.unsupported(item))
           .map(item => this.request(credential, item.qitemId, actor)) };
+      } catch { return { version: 1, sources: [{ source: "queue", state: "unavailable", detail: "Queue source unavailable; absence does not establish resolution." }], requests: [] }; }
+    });
+  }
+  private submissions(appId: string, requestId: string): CoreAppSubmission[] {
+    return this.access.db.prepare("SELECT * FROM core_app_submissions WHERE app_id = ? AND request_id = ? ORDER BY rowid").all(appId, requestId) as CoreAppSubmission[];
+  }
+  private workLink(qitemId: string, requestId: string, actor: string): string {
+    return `/api/apps/v1/work/${encodeURIComponent(qitemId)}?requestId=${encodeURIComponent(requestId)}&actor=${encodeURIComponent(actor)}`;
+  }
+  private workRecord(item: QueueItem, requestId: string, actor: string) {
+    return { qitemId: item.qitemId, state: item.state, body: item.body, summary: item.summary, source: item.sourceSession,
+      actor: this.queue.listTransitions(item.qitemId).at(-1)?.actorSession ?? null, replyTo: item.replyTo ?? null,
+      handedOffFrom: item.handedOffFrom, handedOffTo: item.handedOffTo, blockedOn: item.blockedOn,
+      closureReason: item.closureReason, evidenceRef: item.evidenceRef,
+      completion: { status: ["done", "canceled", "denied", "failed", "handed-off"].includes(item.state) ? "closed-as-recorded" : "open",
+        sourceQitemId: item.qitemId, closureReason: item.closureReason, evidenceRef: item.evidenceRef },
+      links: { self: this.workLink(item.qitemId, requestId, actor), request: this.links(requestId, actor).self, result: this.links(requestId, actor).result } };
+  }
+  private graph(appId: string, requestId: string) {
+    const root = this.queue.getById(requestId);
+    const nodes = new Map<string, QueueItem>();
+    const edges: Array<{ from: string; to: string; relation: string; sourceQitemId: string; captured?: true }> = [];
+    let partial = false;
+    if (!root || root.contentErasedAt) return { nodes, edges, partial: true };
+    const pending: Array<{ id: string; hops: number }> = [{ id: requestId, hops: 0 }];
+    const addEdge = (from: string, to: string, relation: string, captured = false) => {
+      if (!edges.some(edge => edge.from === from && edge.to === to && edge.relation === relation)) {
+        edges.push({ from, to, relation, sourceQitemId: to, ...(captured ? { captured: true as const } : {}) });
+      }
+    };
+    for (const row of this.submissions(appId, requestId)) {
+      for (const id of parse<Checkpoint>(row.checkpoint_json)?.workIds ?? []) {
+        addEdge(requestId, id, "blocked-on", true); pending.push({ id, hops: 0 });
+      }
+    }
+    while (pending.length) {
+      const next = pending.shift()!;
+      if (nodes.has(next.id)) continue;
+      if (nodes.size >= 100 || next.hops > 20) { partial = true; continue; }
+      const item = this.queue.getById(next.id);
+      if (!item || item.contentErasedAt) { partial = true; continue; }
+      nodes.set(item.qitemId, item);
+      const related = this.queue.relatedTo(item.qitemId);
+      if (related.length >= 101) partial = true;
+      for (const edge of related.slice(0, 100)) {
+        addEdge(item.qitemId, edge.item.qitemId, edge.relation);
+        pending.push({ id: edge.item.qitemId, hops: next.hops + (edge.relation === "handed-off-from" ? 1 : 0) });
+      }
+      // A handed-to session address isn't an item ID. Only the actual successor's handedOffFrom is followable.
+      if (item.handedOffTo && !related.some(edge => edge.relation === "handed-off-from" && edge.item.destinationSession === item.handedOffTo)) partial = true;
+    }
+    // A directed cycle is real but can't establish a complete handoff/dependency outcome.
+    const active = new Set<string>(), visited = new Set<string>();
+    const cycle = (id: string): boolean => {
+      if (active.has(id)) return true;
+      if (visited.has(id)) return false;
+      visited.add(id); active.add(id);
+      const found = edges.some(edge => edge.from === id && cycle(edge.to)); active.delete(id); return found;
+    };
+    if (cycle(requestId)) partial = true;
+    return { nodes, edges, partial };
+  }
+  private permission(item: QueueItem, nodes: Map<string, QueueItem>) {
+    const origin = runnerPermissionOrigin(item);
+    if (!origin) return { status: "not-applicable", nativeEffect: "unknown" };
+    const generation = new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid;
+    let live: QueueItem | undefined = item;
+    const seen = new Set<string>();
+    for (let hops = 0; live && (live.state === "handed-off" || live.state === "done" && live.closureReason === "handed_off_to"); hops++) {
+      if (hops >= 20 || seen.has(live.qitemId)) { live = undefined; break; }
+      seen.add(live.qitemId);
+      const prior: QueueItem = live;
+      live = [...nodes.values()].filter(row => row.handedOffFrom === prior.qitemId && row.destinationSession === prior.handedOffTo).at(-1);
+    }
+    if (!live) return { status: "unknown", nativeEffect: "unknown", reason: "handoff_unavailable" };
+    const transitions = this.queue.listTransitions(live.qitemId);
+    const withdrawal = [...transitions].reverse().find(t => t.transitionNote?.startsWith("runner-permission-withdrawn"));
+    const stale = [...transitions].reverse().find(t => t.transitionNote?.startsWith("runner-permission-stale"));
+    const source = (t: NonNullable<typeof withdrawal>) => ({ sourceQitemId: live!.qitemId, sourceTransitionId: t.transitionId, decider: t.actorSession, reason: t.transitionNote });
+    if (withdrawal) return { status: "withdrawn", nativeEffect: "unknown", ...source(withdrawal) };
+    if (stale || generation && generation !== origin.generation) return { status: "stale", nativeEffect: "unknown", ...(stale ? source(stale) : { sourceQitemId: item.qitemId }) };
+    if (!generation) return { status: "unknown", nativeEffect: "unknown", reason: "occupant_unavailable" };
+    // Only transitions in the current final state establish a decision, as the receiving-agent owner requires.
+    let decision: ReturnType<QueueRepository["listTransitions"]>[number] | undefined;
+    for (let i = transitions.length - 1; i >= 0 && transitions[i]!.state === live.state; i--) {
+      const transition = transitions[i]!;
+      if (transition.transitionNote?.startsWith("runner-permission-decided") || transition.ownerNotificationKind === "human-decision-resolved") { decision = transition; break; }
+    }
+    if (decision && !["pending", "in-progress", "blocked"].includes(live.state)) return { status: "decided", nativeEffect: "unknown", ...source(decision), option: typeof live.humanAnswers?.permission === "string" ? live.humanAnswers.permission : null };
+    return { status: Object.keys(item.humanAnswers ?? {}).length ? "awaiting-agent" : "unknown", nativeEffect: "unknown", sourceQitemId: live.qitemId };
+  }
+  result(credential: CoreAppCredential, requestId: string, actor: string) {
+    return this.snapshot(() => {
+      const request = this.queue.getById(requestId);
+      if (!request || request.contentErasedAt) throw new CoreAppError("source_unavailable", 404);
+      if (appAskUnsupported(this.queue, request) === "unsupported_request_kind") throw new CoreAppError("unsupported_request_kind", 422);
+      const graph = this.graph(credential.appId, requestId), permission = this.permission(request, graph.nodes);
+      const reply = [...graph.nodes.values()].find(item => item.replyTo === requestId && item.tags?.includes("human-answer"));
+      const isPermission = !!runnerPermissionOrigin(request);
+      const answerReturn = reply ? { status: "returned", replyQitemId: reply.qitemId, source: reply.sourceSession, target: reply.destinationSession,
+        body: reply.body, replyTo: reply.replyTo, links: { self: this.workLink(reply.qitemId, requestId, actor) } }
+        : isPermission && Object.keys(request.humanAnswers ?? {}).length ? { status: permission.status === "decided" ? "returned" : "kept-for-agent", replyQitemId: null, sourceQitemId: requestId }
+        : { status: graph.partial ? "unknown" : "not-returned", replyQitemId: null };
+      const records = [...graph.nodes.values()].filter(item => item.qitemId !== requestId).map(item => this.workRecord(item, requestId, actor));
+      return { request: this.request(credential, requestId, actor), submissions: this.submissions(credential.appId, requestId)
+        .filter(row => !row.erased_at && parse<Binding>(row.binding_json)?.actor === actor).map(row => this.readAnswer(credential, row.answer_id, actor)),
+        answerReturn, permissionDecision: permission, work: { status: graph.partial ? "partial" : "available", records, edges: graph.edges,
+          completion: { status: "unknown", sourceQitemId: null, reason: "Inspect each recorded work closure; no product outcome is inferred." } },
+        links: this.links(requestId, actor), sources: [{ source: "queue", state: graph.partial ? "partial" : "available" }] };
+    });
+  }
+  work(credential: CoreAppCredential, qitemId: string, requestId: string, actor: string) {
+    return this.snapshot(() => {
+      if (!requestId) throw new CoreAppError("request_id_required", 400);
+      const request = this.queue.getById(requestId);
+      if (!request || appAskUnsupported(this.queue, request) === "unsupported_request_kind") throw new CoreAppError("work_not_found", 404);
+      const item = this.graph(credential.appId, requestId).nodes.get(qitemId);
+      if (!item || item.qitemId === requestId) throw new CoreAppError("work_not_found", 404);
+      return this.workRecord(item, requestId, actor);
     });
   }
   private row(appId: string, answerId: string): CoreAppSubmission | undefined {
@@ -123,6 +266,9 @@ export class CoreAppJob {
     return { code: ownReply || checkpoint?.revision !== binding.expectedRevision ? "recovery_conflict" : "decision_revision_changed", revision: current, retry: false };
   }
   readAnswer(credential: CoreAppCredential, answerId: string, actor: string) {
+    return this.snapshot(() => this.answerStatus(credential, answerId, actor));
+  }
+  private answerStatus(credential: CoreAppCredential, answerId: string, actor: string) {
     const row = this.row(credential.appId, answerId);
     if (!row) throw new CoreAppError("answer_not_found", 404);
     if (row.erased_at) return { answerId, submission: { state: "source_unavailable" }, retrySameSubmission: false };
@@ -164,7 +310,7 @@ export class CoreAppJob {
       db.transaction(() => {
         const item = this.queue.getById(binding.requestId);
         if (!item) throw new CoreAppError("request_not_found", 404);
-        const reason = appAskUnsupported(this.queue, item);
+        const reason = this.unsupported(item);
         if (reason) throw new CoreAppError(reason, 422);
         if (this.queue.decisionRevision(item) !== binding.expectedRevision) throw new CoreAppError("decision_revision_changed", 409);
         if ((this.episodeKey(item.qitemId)) !== binding.episodeKey) throw new CoreAppError("episode_changed", 409);
@@ -213,8 +359,9 @@ export class CoreAppJob {
     } catch (error) {
       const fresh = this.row(credential.appId, answerId)!;
       const recovery = this.recovery(fresh, binding);
+      if (recovery.receipt) return { ...recovery.receipt, replayed: true };
       const retry = recovery.retry;
-      if (error instanceof MissionControlWriteContractError || retry) throw new CoreAppError(retry ? "submission_incomplete" : recovery.code ?? "submission_conflict", retry ? 503 : 409,
+      if (error instanceof MissionControlWriteContractError || retry || recovery.code) throw new CoreAppError(retry ? "submission_incomplete" : recovery.code ?? "submission_conflict", retry ? 503 : 409,
         { answerId, retrySameSubmission: retry, currentRevision: recovery.revision, links: this.answerLinks(answerId, binding) });
       throw error;
     }

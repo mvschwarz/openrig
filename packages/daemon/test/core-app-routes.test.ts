@@ -1,3 +1,11 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { RunnerPermissions } from "../src/domain/runner-permissions.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { eraseQueue } from "../src/domain/queue-erasure.js";
 import { CoreAppJob } from "../src/domain/core-app-job.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
@@ -34,10 +42,10 @@ describe("Core app boundary", () => {
 const PERSON = "human-test@external", OTHER = "human-other@external";
 const registry = { ok: true as const, entities: [PERSON, OTHER].map(address => ({ entityId: address.split("@")[0]!, class: "human" as const,
   displayName: address, address, connectorBindings: [], prefs: { deliveryClass: "A" as const } })) };
-function fixture(operatorToken: string | null = "operator") {
+function fixture(operatorToken: string | null = "operator", permissionDecider?: () => { session: string } | null) {
   const db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS); closes.push(() => db.close());
   const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry,
+  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry, ...(permissionDecider ? { permissionDecider } : {}),
     transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
   const access = new CoreAppAccess(db, repo);
   const log = new MissionControlActionLog(db), writes = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: log });
@@ -249,4 +257,272 @@ it("preserves the original-return disposition when a fresh identical choice fini
     state: "committed", outcome: "answered", message: expect.stringContaining("Already answered"), replyQitemId: returned.qitemId,
   } });
   expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+});
+
+
+describe("follow actual results and erase retained submissions", () => {
+  it("follows A -> R and captured A -> W -> Z after attention disappears, without exposing unrelated work", async () => {
+    const f = await jobFixture();
+    const work = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "Prepare report", nudge: false });
+    f.repo.claim({ qitemId: work.qitemId, destinationSession: "builder@test" });
+    f.repo.update({ qitemId: work.qitemId, actorSession: "builder@test", state: "blocked", blockedOn: f.ask.qitemId });
+    expect((await f.send("/v1/answers/answer_follow", f.binding(), f.token)).status).toBe(200);
+    f.db.prepare("UPDATE queue_items SET blocked_on = NULL, state = 'in-progress' WHERE qitem_id = ?").run(work.qitemId);
+    const result = await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Actual result: report delivered", inboundReplyTo: work.qitemId, humanIntent: "update", nudge: false });
+    f.repo.update({ qitemId: work.qitemId, actorSession: "builder@test", state: "done", closureReason: "no-follow-on", evidenceRef: "artifact:report" });
+    const unrelated = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "unrelated secret", nudge: false });
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+    const response = await f.send(`/v1/requests/${f.ask.qitemId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+    expect(response.status).toBe(200); const body = await response.json();
+    expect(body.answerReturn).toMatchObject({ status: "returned", replyQitemId: f.repo.getHumanAnswer(f.ask.qitemId, PERSON)!.qitemId });
+    expect(body.permissionDecision).toMatchObject({ status: "not-applicable", nativeEffect: "unknown" });
+    expect(body.work.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ qitemId: work.qitemId, completion: { status: "closed-as-recorded", sourceQitemId: work.qitemId, closureReason: "no-follow-on", evidenceRef: "artifact:report" } }),
+      expect.objectContaining({ qitemId: result.qitemId, body: "Actual result: report delivered" }),
+    ]));
+    expect(body.work.edges).toContainEqual(expect.objectContaining({ from: f.ask.qitemId, to: work.qitemId, relation: "blocked-on", captured: true }));
+    expect(JSON.stringify(body)).not.toContain("unrelated secret");
+    const path = `/v1/work/${result.qitemId}?requestId=${f.ask.qitemId}&actor=${encodeURIComponent(PERSON)}`;
+    expect((await f.send(path, undefined, f.token)).status).toBe(200);
+    expect((await f.send(`/v1/work/${unrelated.qitemId}?requestId=${f.ask.qitemId}&actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).status).toBe(404);
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+  });
+  it.each(["scrub", "delete"] as const)("%s of the source redacts binding, checkpoint, receipt and audit content while preserving a no-reexecute tombstone", async action => {
+    const f = await jobFixture(); const binding = { ...f.binding(), answer: { kind: "typed-reply", text: "Private answer content" } };
+    expect((await f.send("/v1/answers/answer_erase", binding, f.token)).status).toBe(200);
+    const report = await eraseQueue(f.db, { apply: true, nowIso: new Date().toISOString(), scope: { kind: "ids", entries: [{ qitemId: f.ask.qitemId, action }] } });
+    expect(report.error).toBeUndefined(); expect(report.qitems).toContainEqual(expect.objectContaining({ qitemId: f.ask.qitemId, action }));
+    const row = f.db.prepare("SELECT binding_hash,binding_json,checkpoint_json,receipt_json,erased_at FROM core_app_submissions").get() as Record<string, unknown>;
+    expect(row).toMatchObject({ binding_json: null, checkpoint_json: null, receipt_json: null, erased_at: expect.any(String), binding_hash: expect.any(String) });
+    expect(JSON.stringify(row)).not.toContain("Private answer content");
+    const changes = f.db.prepare("SELECT total_changes() n").get();
+    expect(await (await f.send(`/v1/answers/answer_erase?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ submission: { state: "source_unavailable" }, retrySameSubmission: false });
+    const replay = await f.send("/v1/answers/answer_erase", binding, f.token); expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: "source_unavailable", retrySameSubmission: false });
+    expect((await f.send("/v1/answers/answer_erase", { ...binding, answer: { kind: "typed-reply", text: "replacement" } }, f.token)).status).toBe(409);
+    expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+  });
+});
+
+async function appStream(f: ReturnType<typeof fixture>, token: string, cursor?: string) {
+  const response = await f.app.request("/api/apps/v1/events", { headers: { Authorization: `Bearer ${token}`, ...(cursor ? { "Last-Event-ID": cursor } : {}) } });
+  expect(response.status).toBe(200);
+  const reader = response.body!.getReader(); let buffer = "";
+  const next = async () => {
+    while (!buffer.includes("\n\n")) { const chunk = await reader.read(); if (chunk.done) return null; buffer += new TextDecoder().decode(chunk.value); }
+    const at = buffer.indexOf("\n\n"), event = buffer.slice(0, at); buffer = buffer.slice(at + 2);
+    return JSON.parse(event.split("\n").find(line => line.startsWith("data: "))!.slice(6));
+  };
+  return { next, reader };
+}
+describe("authenticated invalidation refresh", () => {
+  it("requires app auth without an actor query, replays filtered invalidations and exposes no raw queue payload", async () => {
+    const f = await jobFixture(); const cursor = f.job.cursor();
+    f.bus.emit({ type: "test.internal", private: "secret internal payload" } as any);
+    await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Private raw update", humanIntent: "update", nudge: false });
+    const stream = await appStream(f, f.token, cursor);
+    const invalidation = await stream.next();
+    expect(invalidation).toEqual({ kind: "invalidate", cursor: expect.any(String), requestId: null });
+    expect(Object.keys(invalidation).sort()).toEqual(["cursor", "kind", "requestId"]);
+    expect((await stream.next()).kind).toBe("heartbeat");
+    await stream.reader.cancel(); expect(f.bus.subscriberCount).toBe(0);
+    expect((await f.send("/v1/events", undefined, "operator")).status).toBe(401);
+  });
+  it.each(["invalid", "old-boot", "ahead", "retained-floor", "deleted-row", "overflow"])("resets and closes when continuity is unproven: %s", async reason => {
+    const f = await jobFixture(); let cursor = f.job.cursor();
+    if (reason === "invalid") cursor = "invalid-cursor";
+    if (reason === "old-boot") cursor = new CoreAppJob(f.access, f.repo, f.bus, f.writes, f.log).cursor();
+    if (reason === "ahead") cursor = f.job.cursor(f.bus.maxSeq() + 1);
+    if (reason === "retained-floor") f.db.prepare("INSERT INTO events_retention_marks (id,low_water_seq,prunable_types,updated_at) VALUES (1,?,'[]',?)").run(f.bus.maxSeq() + 1, new Date().toISOString());
+    if (reason === "deleted-row") { f.bus.emit({ type: "test.internal" } as any); f.bus.emit({ type: "test.internal" } as any); f.db.prepare("DELETE FROM events WHERE seq = ?").run(f.bus.maxSeq() - 1); }
+    if (reason === "overflow") for (let i = 0; i < 501; i++) f.bus.emit({ type: "queue.created", qitemId: `fictional-${i}` } as any);
+    const stream = await appStream(f, f.token, cursor);
+    expect(await stream.next()).toEqual({ kind: "reset", reason: "continuity-unproven" }); expect(await stream.next()).toBeNull();
+    expect(f.bus.subscriberCount).toBe(0);
+  });
+  it("subscribes before replay, deduplicates the boundary, and resets live overflow", async () => {
+    const f = await jobFixture(); const cursor = f.job.cursor();
+    const original = f.job.eventReplay.bind(f.job);
+    vi.spyOn(f.job, "eventReplay").mockImplementationOnce(value => {
+      f.bus.emit({ type: "queue.created", qitemId: "fictional-race" } as any); return original(value);
+    });
+    const stream = await appStream(f, f.token, cursor);
+    expect((await stream.next()).kind).toBe("invalidate"); expect((await stream.next()).kind).toBe("heartbeat");
+    for (let i = 0; i < 501; i++) f.bus.emit({ type: "queue.updated", qitemId: `fictional-${i}` } as any);
+    expect(await stream.next()).toMatchObject({ kind: "reset", reason: "continuity-unproven" }); expect(await stream.next()).toBeNull();
+    expect(f.bus.subscriberCount).toBe(0);
+  });
+  it("terminates a revoked stream at the next event, and snapshot polling observes eventless source changes", async () => {
+    const f = await jobFixture(); const stream = await appStream(f, f.token); expect((await stream.next()).kind).toBe("heartbeat");
+    const credential = f.access.authenticate(`Bearer ${f.token}`);
+    f.access.revoke(credential.credentialId);
+    f.bus.emit({ type: "queue.updated", qitemId: f.ask.qitemId } as any);
+    expect(await stream.next()).toBeNull(); expect(f.bus.subscriberCount).toBe(0);
+    const token = (await (await f.provision()).json()).token;
+    const seq = f.bus.maxSeq();
+    f.db.prepare("UPDATE queue_items SET body = 'Changed without an event' WHERE qitem_id = ?").run(f.ask.qitemId);
+    const snapshot = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, token)).json();
+    expect(snapshot.requests[0].body).toBe("Changed without an event"); expect(f.bus.maxSeq()).toBe(seq);
+  });
+});
+
+async function permissionFixture(receiving = true) {
+  const f = fixture("operator", receiving ? () => ({ session: "lead@test" }) : undefined);
+  f.repo.attachOutbox(new OutboxHandler(f.db));
+  const token = (await (await f.provision()).json()).token;
+  const rigs = new RigRepository(f.db), rig = rigs.createRig("test"), node = rigs.addNode(rig.id, "runner", { runtime: "synth" });
+  const sessions = new SessionRegistry(f.db); sessions.registerSession(node.id, "runner@test");
+  const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+  const permissions = new RunnerPermissions({ db: f.db, queueRepo: f.repo, eventBus: f.bus, humanRegistry: () => registry,
+    ownerOf: () => PERSON, currentGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null });
+  const submitted = await permissions.submit({ nodeId: node.id, sessionName: "runner@test", generation }, {
+    nativeRef: "fixture-session", turnId: "fixture-turn", requestId: "fixture-permission", toolCall: { title: "Write report", kind: "edit" },
+    options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "reject", name: "Reject once", kind: "reject_once" }],
+  });
+  if (!submitted.ok || !("askId" in submitted)) throw new Error("fixture permission ask unavailable");
+  return { ...f, token, permissions, sessions, node, askId: submitted.askId, generation };
+}
+describe("permission and refresh truth", () => {
+  it("distinguishes the person's answer from the receiving agent's decision and unknown native effect", async () => {
+    const f = await permissionFixture();
+    const ask = f.repo.getById(f.askId)!;
+    const response = await f.send("/v1/answers/answer_permission", { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+      expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } }, f.token);
+    expect(response.status).toBe(200);
+    const resultPath = `/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`;
+    const current = await (await f.send(resultPath, undefined, f.token)).json();
+    expect(current.answerReturn).toMatchObject({ status: "kept-for-agent", replyQitemId: null });
+    expect(current.permissionDecision).toMatchObject({ status: "awaiting-agent", nativeEffect: "unknown" });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.askId)).toEqual({ n: 0 });
+    const live = f.repo.relatedTo(f.askId).find(edge => edge.relation === "handed-off-from")!.item;
+    expect(f.permissions.decide(f.askId, "allow", "lead@test", "The person's choice is clear")).toMatchObject({ state: "answered", optionId: "allow" });
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+    expect(await (await f.send(resultPath, undefined, f.token)).json()).toMatchObject({ permissionDecision: { status: "decided", nativeEffect: "unknown", sourceQitemId: live.qitemId, decider: "lead@test", option: "allow" } });
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  it("shows stale/withdrawn requests without closing them during reads and filters stale asks from needs-me", async () => {
+    const f = await permissionFixture();
+    f.sessions.registerSession(f.node.id, "runner@test", "handover");
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+    expect(await (await f.send(`/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json())
+      .toMatchObject({ permissionDecision: { status: "stale", nativeEffect: "unknown" } });
+    const needs = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+    expect(needs.requests).toEqual([]); expect(f.repo.getById(f.askId)?.state).toBe("pending");
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+    const g = await permissionFixture();
+    expect(g.permissions.withdraw(null, g.askId, "turn_ended")).toMatchObject({ state: "withdrawn" });
+    expect(await (await g.send(`/v1/requests/${g.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, g.token)).json())
+      .toMatchObject({ permissionDecision: { status: "withdrawn", nativeEffect: "unknown", sourceTransitionId: expect.any(Number) } });
+  });
+  it("advertises the complete versioned job, preserves app-scoped receipts through scoped credential rotation and exposes source failure", async () => {
+    const f = await jobFixture(); const binding = f.binding();
+    expect((await f.send("/v1/answers/answer_rotation", binding, f.token)).status).toBe(200);
+    const replacement = (await (await f.provision()).json()).token;
+    f.access.revoke(f.access.authenticate(`Bearer ${f.token}`).credentialId);
+    expect((await f.send("/v1/answers/answer_rotation", binding, replacement)).status).toBe(200);
+    const capabilities = await (await f.send("/v1/capabilities", undefined, replacement)).json();
+    expect(capabilities).toMatchObject({ contract: "openrig.core-app", version: 1, jobs: [expect.objectContaining({ id: "human-answer", stableSubmissionIds: true, resultRead: true, independentHumanAuthentication: false })],
+      app: { id: "test", actors: [PERSON] }, refresh: { events: "invalidation-only", pollAfterMs: 5000 } });
+    vi.spyOn(f.repo, "listAttention").mockImplementationOnce(() => { throw new Error("fixture source unavailable"); });
+    expect(await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, replacement)).json()).toMatchObject({ sources: [{ source: "queue", state: "unavailable" }], requests: [] });
+  });
+});
+
+it("two independent app services reconcile the same in-flight submission from durable evidence", async () => {
+  const f = await jobFixture(), binding = f.binding();
+  // Independent composition has no shared inFlight map, as after a reconnect to another request handler.
+  const independent = new CoreAppJob(f.access, f.repo, f.bus, new MissionControlWriteContract({ db: f.db, queueRepo: f.repo, eventBus: f.bus, actionLog: f.log }), f.log);
+  const credential = f.access.authenticate(`Bearer ${f.token}`);
+  const [first, second] = await Promise.all([f.job.submit(credential, "answer_twoservices", binding), independent.submit(credential, "answer_twoservices", binding)]);
+  expect(first.submission).toEqual(second.submission); expect(f.log.countAll()).toBe(1);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+});
+
+
+it("two SQLite connections preserve one bound receipt, audit and return on identical concurrent submissions", async () => {
+  const f = await jobFixture(), binding = f.binding();
+  const directory = mkdtempSync(join(tmpdir(), "core-app-connections-")), file = join(directory, "fixture.sqlite");
+  writeFileSync(file, f.db.serialize());
+  const firstDb = new Database(file), secondDb = new Database(file);
+  firstDb.pragma("journal_mode = WAL"); secondDb.pragma("busy_timeout = 5000");
+  closes.push(() => { firstDb.close(); secondDb.close(); rmSync(directory, { recursive: true, force: true }); });
+  const compose = (db: Database.Database) => {
+    const bus = new EventBus(db), repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry,
+      transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
+    const access = new CoreAppAccess(db, repo), log = new MissionControlActionLog(db);
+    return { access, log, job: new CoreAppJob(access, repo, bus, new MissionControlWriteContract({ db, queueRepo: repo, eventBus: bus, actionLog: log }), log) };
+  };
+  const a = compose(firstDb), b = compose(secondDb), actorA = a.access.authenticate(`Bearer ${f.token}`), actorB = b.access.authenticate(`Bearer ${f.token}`);
+  const [first, second] = await Promise.all([a.job.submit(actorA, "answer_connections", binding), b.job.submit(actorB, "answer_connections", binding)]);
+  expect(first.submission).toEqual(second.submission); expect(a.log.countAll()).toBe(1);
+  expect(firstDb.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+});
+
+it("marks bounded, missing and cyclic relation graphs partial and explains unsupported direct reads without general queue browsing", async () => {
+  const f = await jobFixture();
+  const unrelated = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "Unrelated task private body", nudge: false });
+  const direct = await (await f.send(`/v1/requests/${unrelated.qitemId}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+  expect(direct).toMatchObject({ answer: null, unsupportedReason: "unsupported_request_kind" });
+  expect(JSON.stringify(direct)).not.toContain("Unrelated task private body");
+  expect((await f.send(`/v1/work/${unrelated.qitemId}?requestId=${unrelated.qitemId}&actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).status).toBe(404);
+  f.db.prepare("UPDATE queue_items SET handed_off_to = 'remote@rig@elsewhere' WHERE qitem_id = ?").run(f.ask.qitemId);
+  const path = `/v1/requests/${f.ask.qitemId}/result?actor=${encodeURIComponent(PERSON)}`;
+  expect(await (await f.send(path, undefined, f.token)).json()).toMatchObject({ sources: [{ source: "queue", state: "partial" }], answerReturn: { status: "unknown" } });
+  f.db.prepare("UPDATE queue_items SET handed_off_to = NULL WHERE qitem_id = ?").run(f.ask.qitemId);
+  const work = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "Cycle fixture", inboundReplyTo: f.ask.qitemId, nudge: false });
+  f.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(work.qitemId, f.ask.qitemId);
+  expect(await (await f.send(path, undefined, f.token)).json()).toMatchObject({ work: { status: "partial" } });
+  f.db.prepare("UPDATE queue_items SET reply_to = NULL WHERE qitem_id = ?").run(f.ask.qitemId);
+  for (let i = 0; i < 103; i++) await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: `Result fixture ${i}`, humanIntent: "update", inboundReplyTo: f.ask.qitemId, nudge: false });
+  const bounded = await (await f.send(path, undefined, f.token)).json();
+  expect(bounded.work.status).toBe("partial"); expect(bounded.work.records.length).toBeLessThanOrEqual(99);
+});
+
+it("production route mounting retains Host/Origin checks and rejects app tokens on configured operator writes", async () => {
+  const f = await jobFixture();
+  const { app } = createTestApp(f.db, { appDeps: { queueRepo: f.repo, eventBus: f.bus, missionControlWriteContract: f.writes,
+    missionControlBearerToken: "operator", terminalBearerToken: "terminal" } });
+  const response = await app.request("/api/apps/v1/capabilities", { headers: { Authorization: `Bearer ${f.token}`, Host: "localhost" } });
+  expect(response.status).toBe(200); expect((await response.json()).jobs[0].id).toBe("human-answer");
+  for (const headers of [{ Host: "evil.example" }, { Host: "localhost", Origin: "https://evil.example" }]) {
+    expect((await app.request("/api/apps/v1/capabilities", { headers: { Authorization: `Bearer ${f.token}`, ...headers } })).status).toBe(403);
+  }
+  const body = JSON.stringify({ verb: "annotate", qitemId: f.ask.qitemId, annotation: "Authorized operator note" });
+  expect((await app.request("/api/mission-control/action", { method: "POST", headers: { Authorization: `Bearer ${f.token}`, "Content-Type": "application/json", "X-OpenRig-Session": PERSON }, body })).status).toBe(401);
+  expect((await app.request("/api/mission-control/action", { method: "POST", headers: { Authorization: "Bearer operator", "Content-Type": "application/json", "X-OpenRig-Session": PERSON }, body })).status).toBe(200);
+});
+
+it("a revoked stream closes at its 15 second heartbeat without waiting for a queue event", async () => {
+  vi.useFakeTimers();
+  try {
+    const f = await jobFixture(); const stream = await appStream(f, f.token);
+    expect((await stream.next()).kind).toBe("heartbeat");
+    f.access.revoke(f.access.authenticate(`Bearer ${f.token}`).credentialId);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(await stream.next()).toBeNull(); expect(f.bus.subscriberCount).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
+
+it("rechecks a typed decision at the first transactional reply write, so an intervening edit creates no return", async () => {
+  const f = await jobFixture();
+  const create = f.repo.createHumanAnswer.bind(f.repo);
+  vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(input => {
+    f.db.prepare("UPDATE queue_items SET body = 'Intervening decision edit' WHERE qitem_id = ?").run(f.ask.qitemId);
+    return create(input);
+  });
+  const sent = { ...f.binding(), answer: { kind: "typed-reply", text: "Do not send on another decision" } };
+  expect((await f.send("/v1/answers/answer_first_write", sent, f.token)).status).toBe(409);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 0 });
+  expect(f.log.countAll()).toBe(0);
+});
+
+it("does not advertise a functional job when the current registry or schema is unavailable", async () => {
+  const f = await jobFixture();
+  const registryRead = vi.spyOn(f.repo, "humanRegistry").mockReturnValueOnce({ ok: false, error: "fixture registry unavailable" });
+  const response = await f.send("/v1/capabilities", undefined, f.token);
+  expect(response.status).toBe(503); expect(await response.json()).toEqual({ error: "app_job_unavailable" }); registryRead.mockRestore();
+  f.db.exec("DROP TABLE core_app_submissions");
+  const schema = await f.send("/v1/capabilities", undefined, f.token);
+  expect(schema.status).toBe(503); expect(await schema.json()).toEqual({ error: "app_job_unavailable" });
 });
