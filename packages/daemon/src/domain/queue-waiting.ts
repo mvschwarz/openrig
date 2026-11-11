@@ -178,10 +178,11 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
       intervalSeconds: timer.interval_seconds, scanIntervalSeconds: timer.scan_interval_seconds, lastEvaluationAt: timer.last_evaluation_at }) : null;
+    const liveBlocker = blocker && ["pending", "in-progress", "blocked"].includes(blocker.state);
     view.nextBackstop = timer ? {
       owner: row.destination_session, mechanism: `watchdog:${timer.job_id}`, intervalSeconds: timer.interval_seconds,
       dueAt: new Date(timerDue ?? Date.now()).toISOString(),
-    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
+    } :{ owner: liveBlocker ? blocker.destination_session : row.destination_session, mechanism: liveBlocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: liveBlocker ? sweepInterval : null };
     if (timer) {
       let notice: { at: string; deliveryStatus: string } | undefined;
       try {

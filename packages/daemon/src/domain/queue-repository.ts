@@ -5850,7 +5850,7 @@ export class QueueRepository {
    *  their qitem blockers' last meaningful transitions too. */
   private listingReads(rows: QueueItemRow[], includeWaiting: boolean): ListingReads {
     const ids = rows.map((r) => r.qitem_id);
-    if (includeWaiting) for (const r of rows) if (r.blocked_on?.startsWith("qitem-")) ids.push(r.blocked_on);
+    if (includeWaiting) for (const r of rows) if (r.blocked_on) ids.push(r.blocked_on);
     // Each owner's activity once per listing: a row and its waiting view (and every other row to that owner) read the
     // same seat state. ownerActivity reads a failure as null, so one session's failure stays that session's.
     const activities = new Map<string, ReturnType<WaitingActivityReader>>();

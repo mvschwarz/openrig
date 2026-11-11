@@ -213,6 +213,17 @@ describe("waiting face names the next action the existing ladder can actually ta
     expect(queue.getByIdOrThrow(row.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
   });
 
+  it("does not promise a transition wake for a custom blocker that already finished", async () => {
+    const blocker = await queue.create({ qitemId: "finished-blocker", sourceSession: "owner@rig", destinationSession: "healthy@rig", body: "Finished dependency", nudge: false });
+    await queue.update({ qitemId: blocker.qitemId, actorSession: "healthy@rig", state: "done", closureReason: "no-follow-on" });
+    const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "Wait for dependency", nudge: false });
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(view(row.qitemId).blocker).toEqual({ ref: blocker.qitemId, owner: "healthy@rig", state: "done" });
+    expect(view(row.qitemId).nextBackstop).toMatchObject({ mechanism: "UNVERIFIED: no timed backstop", dueAt: null });
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId, wakeAfterSeconds: 600 });
+    expect(view(row.qitemId).nextBackstop.mechanism).toMatch(/^watchdog:/);
+  });
+
   it("#2739: a claimed row parked with no wake reads as having no timed backstop, and a later wake on the same blocker arms one it shows", async () => {
     const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "park-without-wake repro", nudge: false });
     await queue.claim({ qitemId: row.qitemId, destinationSession: "worker@rig" });
