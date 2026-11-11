@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { guidanceFileKey, managedBlockBodyHash } from "./managed-block-records.js";
-import { managedBlockBodies } from "./managed-blocks.js";
+import { managedBlockBodies, managedBlockOpenings } from "./managed-blocks.js";
 
 /** When OpenRig last wrote each of its blocks in a seat's guidance file, set against a recorded moment of the running
  *  session: when its startup finished (a launched session), or when OpenRig recorded it (a claimed session, whose process
@@ -13,8 +13,9 @@ export interface GuidanceProjection {
   /** The recorded session moment the writes are set against, or null when the session has none to use. */
   mark: { at: string; kind: "startup_finished" | "session_recorded" } | null;
   /** OpenRig's blocks now in the file, in file order: written `before` or `after` the mark, or `unknown` with the reason
-   *  (no write record, bytes that differ from OpenRig's last recorded write, a time that can't be read, no mark, or a write
-   *  before a claimed session was recorded). `before` is only that: it doesn't mean the agent had the block. */
+   *  (no write record, only part of a block, bytes that differ from OpenRig's last recorded write, a time that can't be
+   *  read, no mark, or a write before a claimed session was recorded). `before` is only that: it doesn't mean the agent
+   *  had the block. */
   blocks: Array<{ id: string; writtenAt: string | null; written: "before" | "after" | "unknown"; reason?: string }>;
   detail: string;
 }
@@ -76,7 +77,10 @@ export function readGuidanceProjection(input: {
     const record = records.get(id);
     if (!record) return unknown(id, "no write record");
     // The record's time belongs to the bytes OpenRig wrote: an edit since, or a later write whose record didn't save, isn't them.
-    if (!managedBlockBodies(content, id).every((body) => managedBlockBodyHash(body) === record.hash)) {
+    // A copy missing its END has no body to compare, so it gets no time either.
+    const bodies = managedBlockBodies(content, id);
+    if (bodies.length !== managedBlockOpenings(content, id)) return unknown(id, "holds only part of this block");
+    if (!bodies.every((body) => managedBlockBodyHash(body) === record.hash)) {
       return unknown(id, "differs from OpenRig's last recorded write");
     }
     const writtenMs = timeMs(record.writtenAt);

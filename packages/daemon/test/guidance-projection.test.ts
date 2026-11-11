@@ -92,6 +92,22 @@ describe("readGuidanceProjection", () => {
     expect(result.blocks[0]).toMatchObject({ written: "unknown", reason: "differs from OpenRig's last recorded write" });
   });
 
+  // A block missing its END marker has no complete body to match against the record, so it gets no time from it; nor does
+  // an unclosed copy beside a complete matching one.
+  it("a recorded block whose END marker is gone can't be placed, and borrows no time", () => {
+    written("SOP.md", "How work flows here.", "2026-11-10T09:59:30.000Z");
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("<!-- END OpenRig MANAGED BLOCK: SOP.md -->", ""));
+    const result = read(launched("2026-11-10T10:00:00.000Z"));
+    expect(result.blocks).toEqual([{ id: "SOP.md", writtenAt: null, written: "unknown", reason: "holds only part of this block" }]);
+  });
+
+  it("a complete matching block followed by an unclosed copy of the same id can't be placed", () => {
+    written("SOP.md", "How work flows here.", "2026-11-10T09:59:30.000Z");
+    fs.appendFileSync(file, "\n<!-- BEGIN OpenRig MANAGED BLOCK: SOP.md -->\nHow work flows here.\n");
+    const result = read(launched("2026-11-10T10:00:00.000Z"));
+    expect(result.blocks).toEqual([{ id: "SOP.md", writtenAt: null, written: "unknown", reason: "holds only part of this block" }]);
+  });
+
   it("a sole unplaced block is never summarised as 'none written after'", () => {
     mergeManagedBlock(nodeFs, file, "SOP.md", "How work flows here.");
     const result = read(launched("2026-11-10T10:00:00.000Z"));

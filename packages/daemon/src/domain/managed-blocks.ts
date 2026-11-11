@@ -124,6 +124,12 @@ export function managedBlockBodies(content: string, blockId: string): string[] {
   return [...content.matchAll(managedBlockPattern(blockId)), ...content.matchAll(legacy)].map((m) => m[1]!);
 }
 
+/** How many `blockId` blocks `content` opens, in the current or the legacy marker form, complete or not. More openings than
+ *  `managedBlockBodies` returns means part of a block is missing its END. */
+export function managedBlockOpenings(content: string, blockId: string): number {
+  return content.split(MANAGED_BLOCK_START(blockId)).length - 1 + content.split(LEGACY_BLOCK_START(blockId)).length - 1;
+}
+
 /** #2456: how a block already in a guidance file stands against its current source and OpenRig's record of what it last
  *  wrote there (a hash of the framed body, `managedBlockBodyHash`):
  *  - `absent`: the file holds no such block;
