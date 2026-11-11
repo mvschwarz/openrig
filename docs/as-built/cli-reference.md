@@ -1092,6 +1092,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |

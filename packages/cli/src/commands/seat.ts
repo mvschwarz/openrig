@@ -987,6 +987,47 @@ Examples:
     });
 
   cmd
+    .command("decide-permission")
+    .argument("<request>", "The permission request's id (qitem-runner-permission-…), as the row handed to you names it")
+    .requiredOption("--option <id>", "One of the options the agent offered, by its id")
+    .option("--reason <text>", "Why, recorded with the decision (say what the person meant)")
+    .option("--json", "JSON output for agents")
+    .description("Decide a runner seat's permission request that its person answered: one of the agent's offered options")
+    .addHelpText("after", `
+When a person answers a runner seat's permission request, with a click or in their own
+words, the request goes to this host's receiving agent to decide while the runner waits.
+This records that agent's decision: one of the options the agent offered, which the runner
+then gives its agent. It's recorded as an agent's decision, not the person's, with the
+deciding seat and the reason. A request that's already decided, withdrawn or stale is
+reported as it is, and nothing is written. See docs/reference/harness-runner-contract.md,
+section 7.
+Example:
+  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"`)
+    .action(async (request: string, opts: { option: string; reason?: string; json?: boolean }) => {
+      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string };
+      let res: { status: number; data: Decided };
+      try {
+        res = await new DaemonClient().post<Decided>(`/api/activity/permission-requests/${encodeURIComponent(request.trim())}/decide`,
+          { optionId: opts.option.trim(), reason: opts.reason ?? "" });
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(res.data));
+      if (res.status !== 200 || !res.data?.ok) {
+        if (!opts.json) console.error(res.data?.error ?? `the decision failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) return;
+      const state = res.data.state;
+      console.log(state === "answered" ? `Decided: ${res.data.optionId}. The runner gives it to its agent at its next read.`
+        : state === "refused" ? "Decided: refused. The runner gives its agent the refusal at its next read."
+        : `Nothing was decided: the request is ${state}.`);
+    });
+
+  cmd
     .command("effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--json", "JSON output for agents")

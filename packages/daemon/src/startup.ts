@@ -132,6 +132,7 @@ import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
 import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
+import { describeDefaultReceiver, permissionDeciderFor } from "./domain/default-receiver.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
@@ -478,6 +479,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     resolveSessionAddresses: (sessionName) => sessionRegistry.sessionAddresses(sessionName),
     // #2575: a prompt-clear wake retry waits for a managed compaction's owed steps, as parked-owner reminders do.
     hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
+    // A runner's permission ask its person answered goes to the receiving agent to decide, never to the requester itself.
+    permissionDecider: (_ask, requester) => {
+      const decider = permissionDeciderFor(db, requester);
+      return decider?.session ? { session: decider.session, describe: describeDefaultReceiver(decider) } : null;
+    },
   });
   // W1 (transactional closure): ONE OutboxHandler shared between the deps slot
   // (sender-side audit surface) and the queue repo's durable wake-intent

@@ -298,8 +298,30 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
 | routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
 | routes or hands it to an agent seat | that seat gets no options. The request waits until that row is closed, by the seat or a person. Closed as done without a choice (including a drop), or as failed, is no answer, so it's permitted. Closed as denied (the Feed's deny, `--closure-reason denied`, or the state `denied`) is a no. A row set to the state `canceled` cancels the request, and a further handoff is followed; a person it reaches gets the same options. Or the request waits until the agent's turn ends |
-| closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| closes it with no answer at all (a drop) | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| answers in other words that nobody decides on | after 0.7.11, **the request waits**: the words are kept, never the default permit, until an explicit decision (`rig seat decide-permission`) or the turn's end |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
+
+**After 0.7.11, a person's answer goes to an agent that decides, or waits:**
+- **Who decides:** this host's receiving agent (`agents.operator_session`, else the kernel operator
+  `operator-agent@kernel`), unless it's the runner that asked (the request's first row, however it was handed on) or
+  a seat this host doesn't have; then the kernel operator, unless it's the runner that asked.
+- **What happens to the answer:** a click, a plain yes or no, other words, or Steering's Approve or Deny on the request
+  (a yes or a no) is kept on the row it was given on. The request is handed to that agent with the person's whole
+  answer, the question and the options, and the person is told once who decides and in what recorded state.
+- **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
+  --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - It accepts only an option the agent offered.
+  - It records an agent's decision: who decided, why, and the person's words.
+  - A request that's no longer pending comes back as it is, and nothing is written.
+- **A kept answer counts only through an explicit decision.** If the row is closed without one (an agent's or a
+  person's ordinary close), the answer stays kept and the request waits; `rig seat decide-permission` still settles it.
+  A refusing close (denied) is still a no.
+- **With no agent that can decide,** any answer is kept, the request waits, and the person is told once that the tool
+  hasn't run and how to decide directly (`rig seat decide-permission`) or set up a receiving agent. A handoff that fails
+  leaves the request waiting the same way.
+- **No timeout refuses a request.** If the turn ends first, nothing is sent.
+- **The default permit stays** for a request nobody can be asked about (above), and one closed with no answer at all.
 
 - **An answer reaches only the live request it was asked for,** once. A request from an earlier occupant reads
   `stale`, and one withdrawn at the turn's end reads `withdrawn`. Neither can take a later answer.
@@ -345,7 +367,9 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
      `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
      `stale`.
    - **From 0.7.9, `said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they
-     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome.
+     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome. After 0.7.11, words are never
+     answered with the default permit (they keep the request waiting), so `said` no longer arrives. A runner that handles
+     it keeps working.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that

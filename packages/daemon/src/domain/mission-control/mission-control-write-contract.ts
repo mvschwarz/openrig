@@ -218,6 +218,19 @@ export class MissionControlWriteContract {
     const acting = this.asActor(input, runnerPermissionOrigin(source) && this.queueRepo.answersAsk(source, input.actorSession) ? null : asked);
     input = acting.input;
 
+    // A runner's permission ask approved or denied from the Feed or Steering is the person's answer, as a click on its
+    // options is: a yes or a no that goes the same way, to the receiving agent to decide, or straight to the request
+    // where no agent can.
+    if ((input.verb === "approve" || input.verb === "deny") && source.state === "pending" && runnerPermissionOrigin(source)) {
+      const verb = input.verb;
+      return this.recordAnswer(input, snapshotQitem(source), verb === "approve" ? "yes" : "no", { outcome: "answered", unanswered: [] }, null, {
+        primaryUser: input.authority === "primary-user",
+        allowAlreadyDone: false,
+        onUnclosed: () => new MissionControlWriteContractError("answer_not_closed",
+          `The ${verb} on ${input.qitemId} wasn't recorded as an answer: it changed meanwhile, or couldn't be passed on. Read it again.`, { qitemId: input.qitemId }),
+      });
+    }
+
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {
       throw new MissionControlWriteContractError(
         "destination_required",
@@ -725,7 +738,9 @@ export class MissionControlWriteContract {
         onUnclosed: () =>
           new MissionControlWriteContractError(
             "answer_not_closed",
-            `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
+            runnerPermissionOrigin(ask)
+              ? `Your answer is kept on ${input.qitemId}, but it couldn't be passed to its receiving agent just now, and nothing ran. Answer again, or decide directly: rig seat decide-permission ${input.qitemId} --option <id>.`
+              : `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
             { qitemId: input.qitemId, replyQitemId: replyId },
           ),
       },
@@ -756,6 +771,10 @@ export class MissionControlWriteContract {
     },
   ): MissionControlActionResult {
     const evaluatedAt = this.now().toISOString();
+    // A runner's permission ask approved or denied from the Feed or Steering goes through the answer path, and the
+    // audit keeps what the person did: their verb, and their reason when they gave one.
+    const actionVerb: MissionControlVerb = input.verb === "approve" || input.verb === "deny" ? input.verb : "answer";
+    const auditReason = actionVerb !== "answer" && input.reason ? input.reason : reason;
     let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
     try {
@@ -773,13 +792,13 @@ export class MissionControlWriteContract {
         }
         after = this.queueRepo.getById(input.qitemId);
         actionEntry = this.actionLog.record({
-          actionVerb: "answer",
+          actionVerb,
           qitemId: input.qitemId,
           actorSession: input.actorSession,
           actedAt: evaluatedAt,
           beforeState: before,
           afterState: after ? snapshotQitem(after) : null,
-          reason,
+          reason: auditReason,
           auditNotes: input.auditNotes ?? null,
           identityProvenance: input.identityProvenance ?? null,
         });
@@ -787,7 +806,7 @@ export class MissionControlWriteContract {
           this.eventBus.persistWithinTransaction({
             type: "mission_control.action_executed",
             actionId: actionEntry.actionId,
-            actionVerb: "answer",
+            actionVerb,
             qitemId: input.qitemId,
             actorSession: input.actorSession,
           }),
@@ -801,7 +820,7 @@ export class MissionControlWriteContract {
     }
     return {
       actionId: actionEntry!.actionId,
-      verb: "answer",
+      verb: actionVerb,
       qitemId: input.qitemId,
       closedQitem: after,
       createdQitemId,

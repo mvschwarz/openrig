@@ -72,3 +72,22 @@ export function describeDefaultReceiver(receiver: DefaultReceiver): string {
             : "its seat couldn't be read: answers may wait";
   return `${note}${receiver.session}, ${from}; ${state}.`;
 }
+
+/** Who decides a runner's permission request once its person has answered, while the runner waits on it: the receiving
+ *  agent, unless that's the requesting seat itself (blocked in the very turn that asked); else the kernel operator, when
+ *  its seat is on this host and isn't the requester; else nobody, and OpenRig's default applies. Never the requester, and
+ *  never a seat picked because it happens to be running. */
+export function permissionDeciderFor(
+  db: Database.Database,
+  requester: string,
+  configured: () => string | null | { session: string | null; problem?: string } = readReceivingAgentSetting,
+): DefaultReceiver | null {
+  const receiver = resolveDefaultReceiver(db, configured);
+  // A seat this host doesn't have can't read anything: it isn't a decider (a stopped one is, and its delay is told).
+  if (receiver.session && receiver.session !== requester && receiver.state !== "missing") return receiver;
+  if (requester === KERNEL_OPERATOR_SESSION) return null;
+  const kernel = seatState(db, KERNEL_OPERATOR_SESSION);
+  if (kernel.state === "missing" || (kernel.state === "unknown" && !kernel.recorded)) return null;
+  return { session: KERNEL_OPERATOR_SESSION, source: "kernel-operator", ...kernel,
+    note: receiver.session ? `${receiver.session}, the receiving agent, ${receiver.session === requester ? "is the seat asking" : "isn't on this host"}` : undefined };
+}
