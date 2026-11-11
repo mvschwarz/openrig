@@ -224,20 +224,20 @@ describe("the conformance check's test double against OpenRig's real permission 
 
 
 describe("run-bound native channel custody", () => {
-  async function fixture(enabled = true) {
+  async function fixture(enabled = true, runtime = "pi", runner = 2) {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
     const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanups.push(() => db.close());
     const rigs = new RigRepository(db), rig = rigs.createRig("channel");
-    const node = rigs.addNode(rig.id, "dev", { runtime: "pi" });
+    const node = rigs.addNode(rig.id, "dev", { runtime });
     const registry = new SessionRegistry(db); registry.registerSession(node.id, "dev@channel");
     db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('binding',?,'dev@channel','%1')").run(node.id);
     const grants = new ActivityGrantStore(db);
     const grant = grants.issue({ nodeId: node.id, generation: registry.currentOccupantTenure(node.id)!.generationUuid, issuedBy: "launch",
-      run: { runId: "run-one", binding: { runtime: "pi", runner: 2, pane: "%1", panePid: 101 } } });
+      run: { runId: "run-one", binding: { runtime, runner, pane: "%1", panePid: 101 } } });
     expect(grants.activate(grant.grantId)).toBe(true);
     const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
-    const outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox, enabled ? new Set(["pi"]) : new Set());
+    const outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox, enabled ? new Set([runner === 0 ? "managed-pi" : runner === 1 ? "preset" : "hosted-pi-rpc"]) : new Set());
     const { SeatDeliveryGuard, resolveGuardTarget } = await import("../src/domain/seat-delivery-guard.js");
     const { SessionTransport } = await import("../src/domain/session-transport.js");
     const { seatRoutes } = await import("../src/routes/seat.js");
@@ -381,6 +381,21 @@ describe("run-bound native channel custody", () => {
     f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
     expect((await request(f.grant.token, f.hello)).status).toBe(401);
   });
+  it.each([["pi", 0], ["arbitrary-preset", 1], ["arbitrary-rpc", 2]] as const)("recognizes Core-selected %s runner code %i without changing session provenance", async (runtime, runner) => {
+    const f = await fixture(true, runtime, runner);
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: true, cancel: false } });
+  });
+  it("raw builtins do not become managed native runners by sharing runner code zero", async () => {
+    const { runnerChannelKind } = await import("../src/domain/runner-channel.js");
+    expect(runnerChannelKind({ runtime: "terminal", runner: 0, pane: "%1", panePid: 1 })).toBeNull();
+    expect(runnerChannelKind({ runtime: "claude-code", runner: 0, pane: "%1", panePid: 1 })).toBeNull();
+  });
+  it("intersects a recorded runner kind/version and explicit declaration without a community app-name whitelist", async () => {
+    const f = await fixture(true, "community-future", 1);
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: true, cancel: false } });
+    expect(f.channel.post(f.grant.token, { ...f.hello, capabilities: { input: false, wake: false, cancel: false } }))
+      .toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });
+  });
   it("keeps capabilities disabled until complete consumers exist, and never grants cancellation", async () => {
     const f = await fixture(false);
     expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });
@@ -399,7 +414,7 @@ describe("run-bound native channel custody", () => {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
     const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
-    const restarted = new RunnerChannel(new ActivityGrantStore(f.db), new OutboxHandler(f.db), new Set(["pi"]));
+    const restarted = new RunnerChannel(new ActivityGrantStore(f.db), new OutboxHandler(f.db), new Set(["hosted-pi-rpc"]));
     expect(restarted.post(f.grant.token, f.hello)).toMatchObject({ unresolved: [expect.objectContaining({ requestId: "one", stage: "accepted" }), expect.anything()] });
     expect(restarted.frames(f.grant.token, 1).map(frame => frame.requestId)).toEqual(["two"]);
     expect(() => f.channel.frames(f.grant.token, 3)).toThrow(/cursor/);

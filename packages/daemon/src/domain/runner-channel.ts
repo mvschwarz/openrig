@@ -1,5 +1,13 @@
-import { ActivityGrantStore, type ActivityGrant } from "./activity-grants.js";
+import { AGENT_RUNNER_PRESET, AGENT_RUNNER_HOSTED_PI_RPC } from "./session-registry.js";
+import { ActivityGrantStore, type ActivityGrant, type RunGrantBinding } from "./activity-grants.js";
 import { OutboxHandler, OutboxHandlerError, type RunnerAdmission, type RunnerReceipt } from "./outbox-handler.js";
+
+/** Internal implementation kinds preserve the recorded 0/1/2 provenance codes. A plain builtin is not a runner. */
+export function runnerChannelKind(binding: RunGrantBinding | null): "managed-pi" | "preset" | "hosted-pi-rpc" | null {
+  if (binding?.runner === AGENT_RUNNER_PRESET) return "preset";
+  if (binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) return "hosted-pi-rpc";
+  return binding?.runner === 0 && binding.runtime === "pi" ? "managed-pi" : null;
+}
 
 export class RunnerChannelError extends Error {
   constructor(readonly code: string, message: string, readonly status: 400 | 401 | 409 | 503 = 409) { super(message); }
@@ -13,7 +21,7 @@ export class RunnerChannel {
   private readonly listeners = new Set<() => void>();
   // Empty until actual consumers and their complete paths have passed their milestone review.
   constructor(private readonly grants: ActivityGrantStore, readonly outbox: OutboxHandler,
-    private readonly implemented: ReadonlySet<string> = new Set()) {}
+    private readonly implementedKinds: ReadonlySet<string> = new Set()) {}
 
   authenticate(token: string | undefined): ActivityGrant & { runId: string } {
     const grant = this.grants.authenticate(token);
@@ -47,9 +55,10 @@ export class RunnerChannel {
       if (body.version !== 1 || typeof body.retained !== "boolean" || !declared
         || ["input", "wake", "cancel"].some(key => typeof declared[key] !== "boolean"))
         throw new RunnerChannelError("invalid_runner_hello", "Supply version 1, retained state and explicit capabilities.", 400);
-      // A wrapper or Pi-RPC-compatible program does not inherit Pi support.
-      const supported = !!grant.binding && this.implemented.has(grant.binding.runtime)
-        && (grant.binding.runtime === "pi" && grant.binding.runner === 2 || grant.binding.runtime === "dsh" && grant.binding.runner === 1);
+      // The contract is generic across apps. Recorded runner kind/version and a live declaration bound to this
+      // actual run authorize an optional operation; neither a wrapper nor hello establishes program qualification.
+      const kind = runnerChannelKind(grant.binding);
+      const supported = kind !== null && this.implementedKinds.has(kind);
       const capabilities: Capabilities = { input: supported && declared.input === true, wake: supported && declared.wake === true, cancel: false };
       if (!body.retained) this.outbox.forgetRunnerMap(grant.nodeId, grant.runId);
       this.live.set(grant.grantId, capabilities);
