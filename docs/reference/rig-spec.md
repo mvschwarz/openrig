@@ -1088,6 +1088,17 @@ and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports n
 Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
 
+Managed Claude compaction also uses the delegation parent for two diagnostic notices: repeated
+unsent preparation attempts and repeated restore-delivery failures. If the seat has no recorded
+parent session (including when it is outside the recorded topology), these notices go to the
+configured registered human operator, or the default registered person when no operator is set.
+If human selection is missing, ambiguous or invalid, OpenRig reports an error rather than inventing
+a destination. A parent is the source of a `delegates_to` edge to the seat; declare one when an
+agent should receive these notices. The restore-delivery notice to a person omits local paths and
+points to `rig compact <seat> --state` on the host; the preparation notice includes its state-file
+evidence reference and attempt details. Treat these notices and any chat relay accordingly. Existing
+notices retain their destination when the topology changes.
+
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's
 representative, its one delegation root, unless that channel names an `inbound` seat; with no single root it
