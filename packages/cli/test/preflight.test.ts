@@ -76,7 +76,7 @@ describe("SystemPreflight", () => {
   it("Node version below 22 → ready: false with guidance", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
     const pf = createPreflight();
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const nodeCheck = result.checks.find((c) => c.name === "node_version");
     expect(nodeCheck!.ok).toBe(false);
@@ -104,7 +104,7 @@ describe("SystemPreflight", () => {
   // Test 3
   it("tmux missing → ready: false with guidance", async () => {
     const pf = createPreflight({ tmuxMode: "missing" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
     expect(tmuxCheck!.ok).toBe(false);
@@ -114,7 +114,7 @@ describe("SystemPreflight", () => {
 
   it("tmux installed but default control socket unhealthy → ready: false with guidance", async () => {
     const pf = createPreflight({ tmuxMode: "unhealthy" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
 
     expect(result.ready).toBe(false);
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
@@ -135,7 +135,7 @@ describe("SystemPreflight", () => {
       getDaemonStatus: makeStatus(),
       riggedHome: join(readonlyDir, "nested"),
     });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const homeCheck = result.checks.find((c) => c.name === "writable_home");
     expect(homeCheck!.ok).toBe(false);
@@ -233,7 +233,7 @@ describe("SystemPreflight", () => {
   it("multiple failures reported together (additive)", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
     const pf = createPreflight({ tmuxMode: "missing" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const failedChecks = result.checks.filter((c) => !c.ok);
     expect(failedChecks.length).toBeGreaterThanOrEqual(2);
@@ -367,9 +367,12 @@ describe("Preflight CLI", () => {
   it("rig preflight with failure prints three-part error and exits 1", async () => {
     const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: 0 } }));
     const cmd = preflightCommand({
       exec: makeExec("missing"),
-      configPath: join(tmpDir, "config.json"),
+      configPath,
       riggedHome: homeDir,
       getDaemonStatus: makeStatus(),
     });
