@@ -128,6 +128,25 @@ export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unkno
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
 
+/** Facts a runner reports about its own process; launch authentication is not independent native verification. */
+export interface RunnerObservations {
+  session?: { nativeRef: string };
+  model?: { id: string };
+  context?: { usedTokens?: number; windowTokens?: number; usedPercentage?: number; inputTokens?: number; outputTokens?: number };
+}
+export interface RunnerObservation {
+  nodeId: string;
+  sessionRowId: string;
+  generation: string;
+  runId: string;
+  grantId: string;
+  family: "observation";
+  sequence: number;
+  occurredAt: string;
+  receivedAt: string;
+  observations: RunnerObservations;
+}
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -186,6 +205,7 @@ export type RigEvent =
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the

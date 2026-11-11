@@ -153,6 +153,20 @@ host hooks, contained guest grants and install-token Pi usage keep their legacy 
 current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
+
+The same endpoint accepts an observation-only report from a current run-bound credential:
+
+```json
+{"runId":"<OPENRIG_RUN_ID>","sequence":1,"occurredAt":"2026-11-12T00:00:00Z",
+ "observations":{"model":{"id":"provider/model"},"context":{"usedTokens":1000,"windowTokens":10000}}}
+```
+
+Send this separately from activity and identity posts, without `hookEvent` or `eventFamily`. It records no activity
+or verified identity. Core stores a receipt with the authenticated run/session binding in its existing event log;
+retrying the same observation sequence and payload returns that receipt, while conflicting reuse returns 409.
+Observation ordering is separate from activity/turn ordering. Omitted components keep their own ages; a new run
+cannot inherit an earlier run's reports. Counts without capacity or an explicit percentage remain reported counts,
+not an inferred context occupancy. These retained facts alone do not change the existing model/context displays.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.

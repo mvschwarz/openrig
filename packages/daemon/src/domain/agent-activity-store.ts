@@ -1,8 +1,12 @@
+import { ActivityGrantStore, type ActivityGrant } from "./activity-grants.js";
+import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
+import { validateSessionFileFormat } from "./resume-token-validation.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
-import type { AgentActivity, PersistedEvent } from "./types.js";
+import type { AgentActivity, PersistedEvent, RunnerObservation, RunnerObservations } from "./types.js";
 import { PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
@@ -36,6 +40,12 @@ export interface HookActivityInput {
 export type RecordHookActivityResult =
   | { ok: true; activity: AgentActivity; event: PersistedEvent }
   | { ok: false; code: "missing_session_identity" | "session_not_found"; error: string };
+
+export type RunnerObservationReceipt = Pick<RunnerObservation, "runId" | "family" | "sequence" | "receivedAt"> & { eventSeq: number };
+export type RecordRunnerObservationResult = { ok: true; observation: RunnerObservationReceipt }
+  | { ok: false; code: "invalid_runner_observation" | "runner_observation_conflict" | "runner_observation_unavailable"; error: string };
+export type RunnerObservationRead = { report: RunnerObservation | null;
+  reason: null | "no_data" | "binding_changed" | "stale" | "sample_time_invalid" | "session_mismatch" };
 
 interface AgentActivityStoreDeps {
   db: Database.Database;
@@ -189,6 +199,78 @@ export class AgentActivityStore {
     });
 
     return { ok: true, activity, event };
+  }
+
+  /** Observation-only ingress. The receipt and dedup decision share the existing event transaction;
+   * no activity, resume token, model/context cache or independent identity verdict is invented here. */
+  recordRunnerObservation(grant: ActivityGrant, input: Record<string, unknown>): RecordRunnerObservationResult {
+    const invalid = (): RecordRunnerObservationResult => ({ ok: false, code: "invalid_runner_observation", error: "Invalid observation report." });
+    const occurredAt = runnerTimestamp(input.occurredAt);
+    const observations = normalizeRunnerObservations(input.observations, grant);
+    if (!grant.runId || input.runId !== grant.runId || !Number.isSafeInteger(input.sequence) || (input.sequence as number) <= 0
+      || !occurredAt || !observations || input.hookEvent !== undefined || input.eventFamily !== undefined
+      || (input.runtime !== undefined && input.runtime !== grant.binding?.runtime)) return invalid();
+    const sequence = input.sequence as number;
+    const receipt = (report: RunnerObservation, eventSeq: number): RunnerObservationReceipt => ({ runId: report.runId,
+      family: report.family, sequence: report.sequence, receivedAt: report.receivedAt, eventSeq });
+    return this.eventBus.withNotifyEnvelope(register => {
+      const grants = new ActivityGrantStore(this.db);
+      if (grants.standing(grant.grantId) !== "current") return { ok: false, code: "runner_observation_unavailable", error: "The bound runner is unavailable." };
+      const session = this.db.prepare(`SELECT s.id AS sessionId, n.rig_id AS rigId FROM sessions s JOIN nodes n ON n.id=s.node_id
+        WHERE s.node_id=? ORDER BY s.id DESC LIMIT 1`).get(grant.nodeId) as { sessionId: string; rigId: string } | undefined;
+      if (!session) return { ok: false, code: "runner_observation_unavailable", error: "The bound session is unavailable." };
+      const previous = this.db.prepare(`SELECT seq, payload FROM events WHERE node_id=? AND type='agent.runner_observation'
+        AND json_extract(payload,'$.runId')=? AND json_extract(payload,'$.family')='observation'
+        AND json_extract(payload,'$.sequence')=? LIMIT 1`).get(grant.nodeId, grant.runId, sequence) as { seq: number; payload: string } | undefined;
+      if (previous) {
+        const report = JSON.parse(previous.payload) as RunnerObservation;
+        if (report.occurredAt !== occurredAt || JSON.stringify(report.observations) !== JSON.stringify(observations)) {
+          return { ok: false, code: "runner_observation_conflict", error: "This observation sequence already names a different report." };
+        }
+        return { ok: true, observation: receipt(report, previous.seq) };
+      }
+      const report: RunnerObservation = { nodeId: grant.nodeId, sessionRowId: session.sessionId, generation: grant.generation,
+        runId: grant.runId!, grantId: grant.grantId, family: "observation", sequence, occurredAt,
+        receivedAt: this.now().toISOString(), observations };
+      const event = this.eventBus.persistWithinTransaction({ type: "agent.runner_observation", rigId: session.rigId, ...report });
+      register(event);
+      return { ok: true, observation: receipt(report, event.seq) };
+    });
+  }
+
+  /** Latest supplied component in the current authenticated run. A bad newest sample never selects an older one.
+   * The reader supplies its existing freshness policy; rotation/adoption can retain facts, a new run cannot. */
+  getRunnerObservation(nodeId: string, component: keyof RunnerObservations, policy: { freshnessMs: number }): RunnerObservationRead {
+    const unknown = (reason: RunnerObservationRead["reason"]): RunnerObservationRead => ({ report: null, reason });
+    try {
+      const grants = new ActivityGrantStore(this.db), active = grants.activeForNode(nodeId);
+      if (!active?.runId) return unknown("no_data");
+      if (grants.standing(active.grantId) !== "current") return unknown("binding_changed");
+      const latest = (key: keyof RunnerObservations): RunnerObservation | null => {
+        const row = this.db.prepare(`SELECT payload FROM events WHERE node_id=? AND type='agent.runner_observation'
+          AND json_extract(payload,'$.runId')=? AND json_extract(payload,'$.family')='observation'
+          AND json_type(payload,?) IS NOT NULL ORDER BY json_extract(payload,'$.sequence') DESC, seq DESC LIMIT 1`)
+          .get(nodeId, active.runId, `$.observations.${key}`) as { payload: string } | undefined;
+        return row ? JSON.parse(row.payload) as RunnerObservation : null;
+      };
+      const report = latest(component);
+      if (!report) return unknown("no_data");
+      const source = grants.get(report.grantId);
+      if (!source || source.nodeId !== nodeId || source.runId !== active.runId || report.generation !== active.generation
+        || (["runtime", "runner", "pane", "panePid"] as const).some(key => source.binding?.[key] !== active.binding?.[key])) return unknown("binding_changed");
+      const tenure = this.db.prepare("SELECT boot_at FROM occupant_tenures WHERE node_id=? AND generation_uuid=?")
+        .get(nodeId, source.generation) as { boot_at: string } | undefined;
+      const sample = Date.parse(report.occurredAt), received = Date.parse(report.receivedAt), now = this.now().getTime();
+      const boot = tenure ? parseSqliteUtcMs(tenure.boot_at) : NaN;
+      if (!Number.isFinite(sample) || !Number.isFinite(boot) || sample < boot || sample < Date.parse(source.issuedAt)
+        || sample > received || sample > now) return unknown("sample_time_invalid");
+      if (now - sample >= policy.freshnessMs) return unknown("stale");
+      const session = this.db.prepare("SELECT resume_token FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1")
+        .get(nodeId) as { resume_token: string | null } | undefined;
+      const nativeRef = report.observations.session?.nativeRef ?? latest("session")?.observations.session?.nativeRef;
+      if (session?.resume_token && nativeRef && session.resume_token !== nativeRef) return unknown("session_mismatch");
+      return { report, reason: null };
+    } catch { return unknown("binding_changed"); }
   }
 
   getLatestForNode(input: {
@@ -546,6 +628,56 @@ function normalizeReason(value: string): string {
     .replace(/[^a-zA-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .toLowerCase();
+}
+
+/** RFC3339 calendar/time validation for new reports; legacy hook timestamp behavior is unchanged. */
+function runnerTimestamp(raw: unknown): string | null {
+  if (typeof raw !== "string" || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(raw)) return null;
+  const date = Date.parse(`${raw.slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(date) || new Date(date).toISOString().slice(0, 10) !== raw.slice(0, 10)) return null;
+  return parseTimestamp(raw);
+}
+
+function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): RunnerObservations | null {
+  const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+  const only = (value: Record<string, unknown>, keys: string[]): boolean => Object.keys(value).every(key => keys.includes(key));
+  if (!object(raw) || !Object.keys(raw).length || !only(raw, ["session", "model", "context"])) return null;
+  const out: RunnerObservations = {};
+  if (raw.session !== undefined) {
+    if (!object(raw.session) || !only(raw.session, ["nativeRef"])) return null;
+    const ref = raw.session.nativeRef;
+    if (grant.binding?.runtime === "pi" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
+      const valid = validateSessionFileFormat(ref);
+      if (!valid.ok) return null;
+      out.session = { nativeRef: valid.token };
+    } else {
+      if (!usableCommunityNativeRef(ref)) return null;
+      out.session = { nativeRef: ref };
+    }
+  }
+  if (raw.model !== undefined) {
+    if (!object(raw.model) || !only(raw.model, ["id"]) || !usableCommunityNativeRef(raw.model.id)) return null;
+    out.model = { id: raw.model.id };
+  }
+  if (raw.context !== undefined) {
+    const keys = ["usedTokens", "windowTokens", "usedPercentage", "inputTokens", "outputTokens"];
+    if (!object(raw.context) || !Object.keys(raw.context).length || !only(raw.context, keys)) return null;
+    const context: NonNullable<RunnerObservations["context"]> = {};
+    for (const key of keys as Array<keyof typeof context>) {
+      const value = raw.context[key];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0
+        || (key === "windowTokens" && value === 0) || (key === "usedPercentage" && value > 100)) return null;
+      context[key] = value;
+    }
+    if (!Object.keys(context).length) return null;
+    if (context.usedTokens !== undefined && context.windowTokens !== undefined) {
+      const derived = context.usedTokens / context.windowTokens * 100;
+      if (derived > 100 || (context.usedPercentage !== undefined && Math.abs(derived - context.usedPercentage) > Number.EPSILON * 100)) return null;
+    }
+    out.context = context;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function parseTimestamp(value: string | null | undefined): string | null {

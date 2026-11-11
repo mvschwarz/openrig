@@ -12,6 +12,10 @@ import { getDefaultOpenRigPath } from "../openrig-compat.js";
 
 export const LAUNCH_RESULT_FORMAT = 1;
 const MAX_REF = 512;
+/** The existing community conversation grammar; format only, never independent identity proof. */
+export function usableCommunityNativeRef(ref: unknown): ref is string {
+  return typeof ref === "string" && ref.length > 0 && ref.length <= MAX_REF && !/[\s\x00-\x1f\x7f]/.test(ref);
+}
 /** A record is a few hundred bytes; anything larger isn't one (a launcher writing its log there, say) and isn't read. */
 const MAX_RECORD_BYTES = 64 * 1024;
 
@@ -62,7 +66,7 @@ export function readLaunchResult(attempt: LaunchAttempt, harness: string, root: 
     return { ok: false, missing: true, reason: `its launcher (${record.producer.trim()}) says the conversation doesn't exist, and started nothing` };
   }
   const ref = record.nativeRef;
-  if (typeof ref !== "string" || !ref || ref.length > MAX_REF || /[\s\x00-\x1f\x7f]/.test(ref)) {
+  if (!usableCommunityNativeRef(ref)) {
     return unusable(`has no usable nativeRef (a non-empty string of at most ${MAX_REF} characters, without spaces or control characters)`);
   }
   if (typeof record.producer !== "string" || !record.producer.trim()) return unusable("doesn't name its producer");
