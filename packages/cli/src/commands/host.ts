@@ -172,7 +172,9 @@ function defaultDoctorDeps(): DoctorDeps {
  *  Null when ssh can't resolve the target or a ProxyJump/ProxyCommand sits in between, since no
  *  direct dial stands for that transport. */
 export function resolveSshEndpoint(host: SshHostEntry, timeoutMs = 1500): Promise<{ hostname: string; port: number } | null> {
-  const args = [...(host.user ? ["-l", host.user] : []), "-G", host.target];
+  // `--` before the target: a destination that begins with `-` is fed to ssh as the host, not
+  // read as an option. ssh answers an invalid hostname on its own.
+  const args = [...(host.user ? ["-l", host.user] : []), "-G", "--", host.target];
   return new Promise((resolve) => {
     execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
       if (error) return resolve(null);
