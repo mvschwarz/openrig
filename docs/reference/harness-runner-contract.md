@@ -241,8 +241,15 @@ permission or input handling in existing built-in runtimes or require every poss
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
   and record when you sent it.
-  - A person cancels by typing `/abort` in the seat's pane. A `/abort` sent with `rig send` arrives inside a From/To
-    envelope, so it's an ordinary prompt.
+  - **Sending it:** a person types `/abort` in the seat's pane. From another seat or a script,
+    `rig send <seat> "/abort" --raw` pastes exactly `/abort`, with no From/To envelope, and presses Enter, so a runner
+    that follows section 5 gets the control. 0.7.8's native runs typed it in the pane; a raw send hasn't been run
+    natively. An ordinary `rig send` wraps its text in a From/To envelope, so there `/abort` is an ordinary prompt.
+  - **Not while the seat needs input:** a raw send is still refused while the seat reads needs input
+    (`target_needs_input`), for example while the runner holds a permission request for a person (section 7). Type
+    `/abort` in the pane then.
+  - **A sent `/abort` is a request.** A typed control can't name the turn it was meant for: the runner cancels whatever
+    turn is running when it reads it. Whether a turn was cancelled is the runner's `Stop` / `cancelled` below.
 - **Report "cancelled" only when the agent says so:** for ACP, when `session/prompt` returns `stopReason: "cancelled"`.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
