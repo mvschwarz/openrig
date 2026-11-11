@@ -81,8 +81,9 @@ Other layouts and other herdr-app windows don't show Rig views. Each window (app
 - **Your tabs** gives the keyboard back to your own pane.
 - OpenRig's own rewrites (another view opening or closing, a cell ending) never move the keyboard, whether you are in
   a view or in your tabs.
-- Typing in an interactive cell, once the view is shown, attaches its tile to the seat; after 30 seconds without a key
-  it goes back to showing it. When the seat's session is replaced (a handover, a fresh launch, a restart), the tile follows the same seat to
+- Once the view is shown, an interactive cell attaches its tile to the seat with plain tmux, as a writable tile does
+  ([terminal sessions](terminal-sessions.md#replacing-a-seats-session)). Until then it only shows the seat, and
+  anything typed in it is dropped. When the seat's session is replaced (a handover, a fresh launch, a restart), the tile follows the same seat to
   its new session, as every OpenRig tile does.
 
 ## What OpenRig keeps in the app home
