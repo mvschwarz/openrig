@@ -290,7 +290,9 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string, targets:
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     for (const token of note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)) {
-      const named = [token, ...token.split(",").map((t) => t.trim())].filter(Boolean);
+      const named = [token, ...token.split(",").map((t) => t.trim())]
+        .filter(Boolean)
+        .map((t) => targets.includes(t) ? t : t.replace(/[.,;:)]$/, ""));
       if (!named.some((t) => targets.includes(t))) continue;
       for (const t of named) verified.add(t);
       break;
