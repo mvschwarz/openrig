@@ -66,8 +66,11 @@ interface Receipt {
   settled_at: string | null; outcome: string | null;
 }
 
-/** The states a local item ends in. A handed-off item ends at its successor. */
+/** The states a local item ends in. A handed-off local item ends at its successor, which is followed. */
 const FINAL = new Set(["done", "canceled", "denied", "failed"]);
+/** The states in which the hub item is closed to this connector. A hub item handed on by someone there is closed here:
+ *  its successor isn't followed, and it's never written to again. */
+const HUB_CLOSED = new Set([...FINAL, "handed-off"]);
 
 /** One pass for one binding, bounded by its deadline and the connector's stop. Never throws: a failure is recorded on
  *  the binding and returned. */
@@ -286,7 +289,7 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
       // A final check before the close: a hub item already closed, by our own close whose answer was lost or by someone
       // else, gets no write, so another actor's failure or cancel never becomes our done.
       let shown = await hub.show(receipt.hub_qitem_id);
-      if (!FINAL.has(shown.state)) {
+      if (!HUB_CLOSED.has(shown.state)) {
         try {
           await hub.close(receipt.hub_qitem_id, { state, closureReason, resolution: words });
         } catch (error) {
@@ -294,8 +297,8 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
           if (!(error instanceof HubError) || error.kind !== "refused") throw error;
         }
         shown = await hub.show(receipt.hub_qitem_id);
-        if (!FINAL.has(shown.state)) {
-          deps.db.prepare("UPDATE network_receipts SET last_error = ? WHERE local_qitem_id = ?").run("The hub accepted the close but the item still reads open; trying again.", receipt.local_qitem_id);
+        if (!HUB_CLOSED.has(shown.state)) {
+          deps.db.prepare("UPDATE network_receipts SET last_error = ? WHERE local_qitem_id = ?").run("The close didn't take: the hub item still reads open. Trying again.", receipt.local_qitem_id);
           continue;
         }
       }

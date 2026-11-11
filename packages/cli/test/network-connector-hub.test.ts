@@ -17,7 +17,7 @@ import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { RigRepository } from "../../daemon/src/domain/rig-repository.js";
 import { NetworkBindingStore } from "../../daemon/src/domain/network/network-bindings.js";
-import { runNetworkBindingPass, type NetworkConnectorDeps } from "../../daemon/src/domain/network/network-connector.js";
+import { networkClosedElsewhere, runNetworkBindingPass, type NetworkConnectorDeps } from "../../daemon/src/domain/network/network-connector.js";
 import { addGrant, revokeGrant, startMcpHttpServer } from "../src/mcp-http.js";
 
 let hubDb: Database.Database;
@@ -136,6 +136,22 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(await pass()).toMatchObject({ resultsSent: 0 });
   for (const item of theirs) expect(hubRepo.getById(item.qitemId)).toMatchObject({ state: "failed", resolution: "Dropped by the requester." });
   expect(localDb.prepare("SELECT DISTINCT outcome FROM network_receipts WHERE hub_qitem_id IN (?, ?)").all(theirs[0]!.qitemId, theirs[1]!.qitemId)).toEqual([{ outcome: "closed_on_hub" }]);
+
+  // An operator on the hub hands the original on to another seat while it's queued here. It's closed to the connector:
+  // nothing is written to it, the original and its successor are unchanged, status shows it, and it isn't retried.
+  const handed = await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Three", body: "Third.", nudge: false } as never);
+  expect(await pass()).toMatchObject({ taken: 1 });
+  const { created: successor } = await hubRepo.handoff({ qitemId: handed.qitemId, fromSession: "lead@team", toSession: "other@team", nudge: false });
+  const before = hubRepo.listTransitions(handed.qitemId).length;
+  await localRepo.update({ qitemId: byHub(handed.qitemId).qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Done here." });
+  expect(await pass()).toMatchObject({ resultsSent: 0 });
+  expect(hubRepo.getById(handed.qitemId)!.state).toBe("handed-off");
+  expect(hubRepo.listTransitions(handed.qitemId)).toHaveLength(before);
+  expect(hubRepo.getById(successor.qitemId)).toMatchObject({ state: "pending", destinationSession: "other@team" });
+  expect(networkClosedElsewhere(localDb, binding.id)).toContainEqual(expect.objectContaining({ hubItem: handed.qitemId, localItem: byHub(handed.qitemId).qitemId,
+    note: expect.stringContaining("closed elsewhere (handed-off") }));
+  await pass();
+  expect(hubRepo.listTransitions(handed.qitemId)).toHaveLength(before);
 
   await revokeGrant(tokenFile, "alex");
   expect(await pass()).toMatchObject({ error: "revoked" });
