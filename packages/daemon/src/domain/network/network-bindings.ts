@@ -4,7 +4,7 @@
 // The credential is a private file under the OpenRig home; this table only says where the binding stands.
 import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveSessionNodeId } from "../queue-owner.js";
 
@@ -157,9 +157,10 @@ export class NetworkBindingStore {
       this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`).run(id, nodeId, session, hubUrl, hubSeat, at, at);
     } catch (error) {
-      // Only what this call made: the file it opened, or the folder it made for it. A collision touches nothing.
-      if (created) this.removeCredential(id);
-      else if (madeFolder === dirname(file)) rmSync(madeFolder, { recursive: true, force: true });
+      // Only what this call made: the file it opened, and this binding's folder if it made it (`mkdirSync` returns the
+      // first folder it made, so any value means this one is new). A folder that was already there keeps its other files.
+      if (created) rmSync(file, { force: true });
+      if (madeFolder !== undefined) rmSync(dirname(file), { recursive: true, force: true });
       throw error;
     }
     return this.get(id)!;
@@ -201,9 +202,22 @@ export class NetworkBindingStore {
       this.removeCredential(binding.id);
     } catch (error) {
       throw new NetworkBindingError("credential_cleanup_failed",
-        `${binding.id} is ${this.get(binding.id)!.state}, but its credential at ${networkCredentialFile(this.home, binding.id)} couldn't be removed (${(error as Error).message}). Disconnect it again to retry.`, 500);
+        `${binding.id} is ${this.get(binding.id)!.state}, but its credential at ${networkCredentialFile(this.home, binding.id)} couldn't be removed (${(error as Error).message}). Run \`rig network disconnect ${binding.id}\` again to retry.`, 500);
     }
     return this.get(binding.id)!;
+  }
+
+  /** Removes the credential folders whose binding isn't active: one a stop left between the credential write and its
+   *  row, or one whose removal failed when its binding ended. Other names under the folder are left alone. */
+  sweepCredentials(): { removed: string[]; failed: string[] } {
+    const swept = { removed: [] as string[], failed: [] as string[] };
+    let names: string[];
+    try { names = readdirSync(join(this.home, "network-secrets")); } catch { return swept; }
+    for (const name of names.sort()) {
+      if (!/^netb-[0-9a-f]{20}$/.test(name) || this.get(name)?.state === "active") continue;
+      try { this.removeCredential(name); swept.removed.push(name); } catch { swept.failed.push(name); }
+    }
+    return swept;
   }
 
   private removeCredential(id: string): void {

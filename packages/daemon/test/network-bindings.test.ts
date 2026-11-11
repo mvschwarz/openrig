@@ -74,7 +74,8 @@ describe("network bindings", () => {
     const again = connect("a@lab");
     expect(again.id).not.toBe(first.id);
     expect(store.active().map((b) => b.id)).toEqual([again.id]);
-    expect(store.list().map((b) => b.state)).toEqual(["disconnected", "active"]);
+    // Two binds in the same millisecond list in id order, so compare by id.
+    expect(Object.fromEntries(store.list().map((b) => [b.id, b.state]))).toEqual({ [first.id]: "disconnected", [again.id]: "active" });
   });
 
   it("a revoked binding is ended the same way, and contact and errors are recorded on the active one", () => {
@@ -116,21 +117,62 @@ describe("network bindings", () => {
     expect(store.list()).toHaveLength(0);
   });
 
-  it("a disconnect whose credential can't be removed still ends the binding, says so, and the next disconnect removes it", async () => {
+  it("a disconnect whose credential can't be removed still ends the binding, says so, and the retry it names removes it", async () => {
     const { chmodSync } = await import("node:fs");
     seat("a@lab");
     const binding = connect("a@lab");
     const secrets = join(home, "network-secrets");
     chmodSync(secrets, 0o500);
+    let message = "";
     try {
-      expect(() => store.disconnect(binding.id)).toThrow(expect.objectContaining({ code: "credential_cleanup_failed", status: 500 }));
+      try { store.disconnect("a@lab"); } catch (error) {
+        expect(error).toMatchObject({ code: "credential_cleanup_failed", status: 500 });
+        message = (error as Error).message;
+      }
       expect(store.get(binding.id)!.state).toBe("disconnected");
       expect(store.active()).toHaveLength(0);
     } finally {
       chmodSync(secrets, 0o700);
     }
-    expect(store.disconnect(binding.id).state).toBe("disconnected");
+    // The seat's name no longer finds an ended binding, so the message names the id to retry with.
+    expect(() => store.disconnect("a@lab")).toThrow(expect.objectContaining({ code: "binding_not_found" }));
+    const retry = /`rig network disconnect (\S+)`/.exec(message)?.[1];
+    expect(retry).toBe(binding.id);
+    expect(store.disconnect(retry!).state).toBe("disconnected");
     expect(existsSync(networkCredentialFile(home, binding.id))).toBe(false);
+  });
+
+  it("a failed bind into a folder that was already there removes only its own credential file", async () => {
+    const { mkdirSync, readFileSync: read, writeFileSync } = await import("node:fs");
+    seat("a@lab");
+    const id = "netb-00000000000000000004";
+    const path = networkCredentialFile(home, id);
+    mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+    writeFileSync(join(path, "..", "other.txt"), "keep me");
+    db.exec("CREATE TRIGGER refuse_bind BEFORE INSERT ON network_bindings BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;");
+    const pinned = new NetworkBindingStore(db, home, () => new Date(), () => id);
+    expect(() => pinned.create({ session: "a@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "tok" })).toThrow(/refused for the test/);
+    expect(existsSync(path)).toBe(false);
+    expect(read(join(path, "..", "other.txt"), "utf8")).toBe("keep me");
+  });
+
+  it("the credential sweep removes folders whose binding isn't active and leaves the active one and other names", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    seat("a@lab"); seat("b@lab");
+    const kept = connect("a@lab");
+    const ended = connect("b@lab", { hubSeat: "b@team" });
+    store.disconnect(ended.id);
+    // An ended binding whose removal failed, a folder a stop left before its row, and a name that isn't a binding.
+    const leftovers = [ended.id, "netb-00000000000000000009"];
+    for (const id of leftovers) {
+      mkdirSync(join(networkCredentialFile(home, id), ".."), { recursive: true, mode: 0o700 });
+      writeFileSync(networkCredentialFile(home, id), "{}", { mode: 0o600 });
+    }
+    mkdirSync(join(home, "network-secrets", "notes"));
+    expect(store.sweepCredentials()).toEqual({ removed: [...leftovers].sort(), failed: [] });
+    for (const id of leftovers) expect(existsSync(join(networkCredentialFile(home, id), ".."))).toBe(false);
+    expect(readNetworkCredential(home, kept.id)).toBe("tok-123");
+    expect(existsSync(join(home, "network-secrets", "notes"))).toBe(true);
   });
 
   it("a corrupt credential file is refused by its path alone, without quoting what it holds", async () => {

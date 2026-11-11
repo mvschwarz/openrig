@@ -19,7 +19,11 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
     throw error;
   };
 
-  router.get("/bindings", (c) => c.json({ bindings: store(c).list() }));
+  // The connector's own view (next pass, backoff, last pass) when it runs in this daemon; null otherwise.
+  router.get("/bindings", (c) => {
+    const connector = c.get("networkConnector" as never) as { snapshot(): unknown } | undefined;
+    return c.json({ bindings: store(c).list(), connector: connector?.snapshot() ?? null });
+  });
 
   router.post("/bindings", async (c) => {
     let body: Record<string, unknown>;
