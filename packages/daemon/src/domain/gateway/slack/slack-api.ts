@@ -385,13 +385,21 @@ export async function getUploadURLExternal(
 }
 
 /** Leg 2: POST the raw bytes to the pre-signed upload URL (octet-stream, no auth header). The
- *  default timeout grows with the size (a screen recording can be tens of MB): 15 s plus 1 s per 512 KiB. */
+ *  default timeout grows with the size (a screen recording can be tens of MB): 15 s plus 1 s per 512 KiB.
+ *
+ *  The upload URL arrives from Slack's API rather than from OpenRig, so it gets the same
+ *  Slack-host verdict `downloadPrivateFile` applies on the way in: the bytes here are the
+ *  user's own screenshot or recording, and this leg is the only one that could carry them
+ *  off slack.com. Refusing before the request keeps that true even if the URL is wrong. */
 export async function uploadBytesExternal(
   uploadUrl: string,
   bytes: Uint8Array,
   fetchImpl: FetchImpl = defaultFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS + Math.ceil(bytes.length / 524_288) * 1000,
 ): Promise<HttpResult> {
+  if (!isSlackHost(uploadUrl)) {
+    return { ok: false, status: 0, error: "refused: non-Slack url host" };
+  }
   try {
     return await withTimeout(timeoutMs, async (signal) => {
       const res = await fetchImpl(uploadUrl, {

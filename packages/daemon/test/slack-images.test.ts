@@ -42,9 +42,9 @@ function slackFetch(failLeg?: "get-url" | "put" | "complete"): { fetchImpl: Fetc
         if (failLeg === "get-url") return new Response(JSON.stringify({ ok: false, error: "not_allowed" }), { status: 200, headers: { "content-type": "application/json" } });
         // Live Slack reads this method's form fields only: a JSON body is "invalid_arguments".
         if (!isForm) return new Response(JSON.stringify({ ok: false, error: "invalid_arguments" }), { status: 200, headers: { "content-type": "application/json" } });
-        return new Response(JSON.stringify({ ok: true, upload_url: "https://files.slack.invalid/put/abc", file_id: "F-ID-1" }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ ok: true, upload_url: "https://files.slack.com/put/abc", file_id: "F-ID-1" }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url === "https://files.slack.invalid/put/abc") {
+      if (url === "https://files.slack.com/put/abc") {
         return new Response("ok", { status: failLeg === "put" ? 500 : 200 });
       }
       if (url.endsWith("files.completeUploadExternal")) {
@@ -86,7 +86,7 @@ describe("S10 outbound images — external-upload flow (founder screenshot class
     expect(urls[1]).toBe("https://slack.com/api/files.getUploadURLExternal");
     expect(calls[1]!.contentType).toBe("application/x-www-form-urlencoded; charset=utf-8");
     expect(calls[1]!.body).toEqual({ filename: "founder-shot.png", length: "2048" });
-    expect(urls[2]).toBe("https://files.slack.invalid/put/abc");
+    expect(urls[2]).toBe("https://files.slack.com/put/abc");
     expect(calls[2]!.contentType).toBe("application/octet-stream");
     expect(urls[3]).toBe("https://slack.com/api/files.completeUploadExternal");
     expect(calls[3]!.contentType).toBe("application/x-www-form-urlencoded; charset=utf-8");
@@ -180,7 +180,7 @@ describe("local attachments: images, video and PDF from disk, size-capped, misse
     const out = await deliverWithDefaultReader(fetchImpl, logs)(decision(file("walkthrough.mp4", 3000)));
     expect(out.ok).toBe(true);
     expect(calls.map((c) => c.url)).toEqual(["https://slack.com/api/chat.postMessage", "https://slack.com/api/files.getUploadURLExternal",
-      "https://files.slack.invalid/put/abc", "https://slack.com/api/files.completeUploadExternal"]);
+      "https://files.slack.com/put/abc", "https://slack.com/api/files.completeUploadExternal"]);
     expect(calls[1]!.body).toEqual({ filename: "walkthrough.mp4", length: "3000" });
     expect(calls[2]!.body).toBe("<3000 bytes>");
     expect(logs.join("\n")).toMatch(/uploaded walkthrough\.mp4 into thread 9000\.1/);

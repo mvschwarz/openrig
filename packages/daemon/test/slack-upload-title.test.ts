@@ -26,8 +26,8 @@ function slack(): { fetchImpl: FetchImpl; calls: { url: string; body: string }[]
     calls,
     fetchImpl: async (url, init) => {
       calls.push({ url, body: init?.body instanceof Uint8Array ? "<bytes>" : String(init?.body ?? "") });
-      if (url.endsWith("files.getUploadURLExternal")) return json({ ok: true, upload_url: "https://files.slack.invalid/put/abc", file_id: "F-ID-1" });
-      if (url === "https://files.slack.invalid/put/abc") return new Response("ok", { status: 200 });
+      if (url.endsWith("files.getUploadURLExternal")) return json({ ok: true, upload_url: "https://files.slack.com/put/abc", file_id: "F-ID-1" });
+      if (url === "https://files.slack.com/put/abc") return new Response("ok", { status: 200 });
       if (url.endsWith("files.completeUploadExternal")) return json({ ok: true });
       return json({ ok: true, ts: "9000.1" });
     },
