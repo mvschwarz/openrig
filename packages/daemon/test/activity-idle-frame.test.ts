@@ -57,6 +57,25 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
     const streaming = codexFrame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer");
     expect((await adapterFold(streaming, { sourceRuntime: "codex" })).activity.state).toBe("running");
   });
+  it.each(["0.167.0", "99.0.0"])("an unrecorded Codex %s frame stays unknown under redraw motion", async (version) => {
+    // Synthetic version edits of the recorded 0.160 fixture, not native newer-version captures.
+    const frame = codexFrame.replaceAll("0.160.0", version);
+    for (const pane of [frame, frame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer")]) {
+      expect(readSeatBeforePaste(pane, "codex")).toBe("unknown");
+      const result = await adapterFold(pane, { sourceRuntime: "codex", hook: null, lastWriteAge: 2000 });
+      expect(result.activity.state).toBe("unknown");
+      expect(result.activity.reason).not.toBe("window_activity_motion");
+    }
+  });
+  it("an unsupported Codex frame cannot turn an idle or stale hook into running, while positive work and attention remain", async () => {
+    const frame = codexFrame.replaceAll("0.160.0", "99.0.0");
+    for (const hook of [oldIdle, { ...oldIdle, state: "unknown", stale: true }]) {
+      expect((await adapterFold(frame, { sourceRuntime: "codex", hook })).activity.state).toBe("unknown");
+    }
+    for (const state of ["running", "needs_input"]) {
+      expect((await adapterFold(frame, { sourceRuntime: "codex", hook: { ...oldIdle, state } })).activity.state).toBe(state);
+    }
+  });
   it("a newer redraw after an old idle capture keeps D2 running", async () => {
     expect((await adapterFold(cframe, { age: 2000 })).activity.state).toBe("running");
     // The write and capture are in the same second: ordering is unknown,

@@ -1865,7 +1865,7 @@ const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
 };
 
 /** Whether a frame visibly names a client version other than the recorded one (see RECORDED_CLIENT_VERSION). */
-function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
+export function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
   return VISIBLE_CLIENT_VERSION[runtime].some((pattern) =>
     [...pane.matchAll(pattern)].some((match) => match[1] !== RECORDED_CLIENT_VERSION[runtime]));
 }

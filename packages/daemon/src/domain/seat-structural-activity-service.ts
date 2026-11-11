@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
-import { communityHarnessPaneActivity, classifyPaneActivity, codexWorkingElapsed, isCodexLiveWorkingFrame, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
+import { communityHarnessPaneActivity, classifyPaneActivity, codexWorkingElapsed, isCodexLiveWorkingFrame, namesAnotherClientVersion, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
@@ -122,6 +122,9 @@ export class SeatStructuralActivityService {
       return null;
     }
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
+    // Redraws from an unrecorded Codex layout cannot establish work or completed idle.
+    // Keep attention visible; native hook evidence is resolved separately by the activity fold.
+    const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && namesAnotherClientVersion(content, "codex");
     const at = observedAt ?? this.now();
     const previous = this.latestBySession.get(sessionName);
     const seconds = runtime === "codex" && captureStartedAt && c.state !== "attention" ? codexWorkingElapsed(content) : null;
@@ -137,8 +140,8 @@ export class SeatStructuralActivityService {
         ...(advanced ? { previousCaptureStartedAt: previous!.codexWorkingClock!.captureStartedAt } : {}) }
       : priorProof;
     const obs: StructuralObservation = {
-      state: c.state,
-      reason: c.reason,
+      state: unrecognizedVersion ? "unknown" : c.state,
+      reason: unrecognizedVersion ? "unrecognized_client_version" : c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
       ...(captureStartedAt && seconds !== null ? { codexWorkingClock: { seconds, captureStartedAt: captureStartedAt.toISOString() } } : {}),

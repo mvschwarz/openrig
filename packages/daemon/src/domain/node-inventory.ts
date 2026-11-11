@@ -1508,7 +1508,7 @@ export function hookOrPaneActivity(
   // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
   // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
   // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-  if (structural && structural.state !== "unknown") {
+  if (structural && (structural.state !== "unknown" || structural.reason === "unrecognized_client_version")) {
     return {
       source: "pane",
       activity: {
@@ -1644,7 +1644,7 @@ export async function attachAgentActivity(
      * signal improving. Silence therefore leaves the prior verdict exactly as it was.
      */
     const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
-      if (!motionRunning || (currentIdleFrame && activity.state === "idle")) return activity;
+      if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
       if (activity.state !== "idle" && activity.state !== "unknown") return activity;
       return {
         state: "running",
@@ -1682,7 +1682,8 @@ export async function attachAgentActivity(
 
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
     // that frame's provenance instead.
-    const resolved = hookOrPaneActivity(hookActivity, structural, motionRunning && currentIdleFrame, entry.runtime);
+    const resolved = hookOrPaneActivity(hookActivity, structural,
+      (motionRunning && currentIdleFrame) || structural?.reason === "unrecognized_client_version", entry.runtime);
     if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
     if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
     if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };
