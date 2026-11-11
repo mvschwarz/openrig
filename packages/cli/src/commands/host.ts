@@ -890,7 +890,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
           console.log(`The request went to ${issued.person} on the target.`);
           console.log(issued.owner
             ? `${issued.owner} reads their answer and decides${issued.ownerNote ? ` (${issued.ownerNote}, so ${issued.owner} reads it instead)` : ""}.`
-            : `No agent reads answers there yet: ${issued.noReader ?? "the target didn't say why"}. The request names how to decide directly on the target.`);
+            // The target's own words: none reads answers, or it couldn't tell. Never a categorical "nobody" over an unknown.
+            : `On the target: ${issued.noReader ?? "it didn't say whether an agent reads answers there"}. The request names how to decide directly on the target.`);
         } else console.log("On the target, its person answers the pairing request in the TUI (rig tui, then attention), on Steering, or in Slack: with Approve or Deny, or in their own words. On a 0.7.11 or later target with a kernel operator, the operator reads the answer and decides (a stopped operator's answer waits for it); on a target with no kernel operator, Approve and Deny decide, and typed words are kept and the person is asked again. On an older target any typed reply approves.");
         console.log(`On a 0.7.11 or later target, anyone at its terminal with its operator bearer token can also decide: rig host approve ${issued.code} (or rig host deny ${issued.code}), with OPENRIG_AUTH_BEARER_TOKEN set or --bearer <token>.`);
       }

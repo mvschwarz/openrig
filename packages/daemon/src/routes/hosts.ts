@@ -400,16 +400,17 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     }
     const body = (await c.req.json<{ requester?: string; human?: string; timeoutMs?: number }>().catch(() => ({}))) as { requester?: string; human?: string; timeoutMs?: number };
     const registry = (opts?.humanRegistry ?? loadHumanRegistry)();
-    if (!registry.ok) return c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
+    // Nobody registered on this host (never, or no longer): the fix is here, and the requester's CLI prints this.
+    const noPerson = { error: "pair_human_required", addresses: [] as string[],
+      message: "No person is registered on the target host, so nobody there can be asked to approve pairing. On the target, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created." };
+    if (!registry.ok) return registry.noHumans ? c.json(noPerson, 409) : c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
+    if (registry.entities.length === 0) return c.json(noPerson, 409);
     // Named, or else the default person (chosen, or the only one); never the first of several.
     const fallback = body.human ? null : resolveDefaultPerson(registry.entities).person;
     const humans = body.human ? registry.entities.filter((human) => human.address === body.human) : fallback ? [fallback] : [];
     if (humans.length !== 1) return c.json({
       error: "pair_human_required", addresses: registry.entities.map((human) => human.address),
-      // Nobody registered here: the fix is on this host, where the request is answered.
-      message: registry.entities.length === 0
-        ? "No person is registered on this host, so nobody here can be asked to approve pairing. On this host, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created."
-        : "Pair approval needs one registered human, or a default when several exist. Inspect rig gateway participants --json; select --human <entityId>@external, or choose a default with rig gateway default <id>. No approval row was created.",
+      message: "Pair approval needs one registered human, or a default when several exist. Inspect rig gateway participants --json; select --human <entityId>@external, or choose a default with rig gateway default <id>. No approval row was created.",
     }, 409);
 
     // Prune stale issued pairs past the grace window (keep recently expired entries

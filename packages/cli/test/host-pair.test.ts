@@ -110,7 +110,14 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     const free = fakeDeps({ post: { status: 200, body: { pairId: "p-2", code: "515151", approvalQitemId: "qitem-2", person: "alex@external", owner: null,
       noReader: "no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel)" } }, poll: approved });
     const b = await capture(() => run(free, ["pair", "vps-b:7433", "--id", "vps-b", "--timeout", "10"]));
-    expect(b.out.join("\n")).toContain("No agent reads answers there yet: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel). The request names how to decide directly on the target.");
+    expect(b.out.join("\n")).toContain("On the target: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel). The request names how to decide directly on the target.");
+    // A target that couldn't tell is printed as unknown, never as "nobody reads".
+    fs.rmSync(path.join(dir, "hosts.yaml"), { force: true }); fs.rmSync(path.join(dir, "secrets"), { recursive: true, force: true });
+    const unknown = fakeDeps({ post: { status: 200, body: { pairId: "p-3", code: "616161", approvalQitemId: "qitem-3", person: "alex@external", owner: null,
+      noReader: "OpenRig couldn't tell whether an agent reads answers on this host" } }, poll: approved });
+    const c = await capture(() => run(unknown, ["pair", "vps-c:7433", "--id", "vps-c", "--timeout", "10"]));
+    expect(c.out.join("\n")).toContain("On the target: OpenRig couldn't tell whether an agent reads answers on this host. The request names how to decide directly on the target.");
+    expect(c.out.join("\n")).not.toContain("No agent reads answers there");
   }, 15_000);
 
   it("--timeout reaches the target, which keeps the request open that long", async () => {
