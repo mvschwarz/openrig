@@ -71,7 +71,7 @@ describe("stuck sweep: a failed wake at a seat with no declared route", () => {
     await sweep();
     const [finding] = findingsFor(row);
     expect(finding!.destinationSession).toBe("root@front");
-    expect(finding!.body).toContain("its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery or not an address this queue takes, so this finding stays addressed to it");
+    expect(finding!.body).toContain("its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery, a terminal seat or not an address this queue takes, so this finding stays addressed to it");
   });
 
   // Rows that OpenRig's own machinery creates (stream intake and startup write them as daemon@kernel) have no creator that
@@ -115,6 +115,20 @@ describe("stuck sweep: a failed wake at a seat with no declared route", () => {
     const row = await failedWake("root@front", "sender@ops@elsewhere");
     await sweep({ resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
     expect(findingsFor(row)[0]!.destinationSession).toBe("operator-admin@kernel");
+  });
+
+  // A bound terminal seat (a shell or a TUI) can't act on a finding: no wake is typed into it, and nothing there claims
+  // work. The no-wake rule passes it over, and so must this one.
+  it("passes over a creator that is a bound terminal seat", async () => {
+    const { rig } = seat("front", "door.root", "root@front");
+    const logger = rigs.addNode(rig.id, "logger", { runtime: "terminal" });
+    db.prepare("INSERT INTO sessions (id,node_id,session_name,status) VALUES (?,?,?,?)").run(`session-${++seq}`, logger.id, "logger@front", "running");
+    db.prepare("INSERT INTO bindings (id,node_id,attachment_type,tmux_session,tmux_pane) VALUES (?,?,'tmux',?,'%2')").run("bind-logger", logger.id, "logger@front");
+    const row = await failedWake("root@front", "logger@front");
+    await sweep({ resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
+    const [finding] = findingsFor(row);
+    expect(finding!.destinationSession).toBe("operator-admin@kernel");
+    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel, the operator agent (agents.operator_session)");
   });
 
   it("a hosted member whose ring failed keeps the no-wake rule's choice when that rule finds nobody", async () => {

@@ -179,8 +179,8 @@ destination itself, and that seat may be dead. A wake that failed (`failed:…`)
 at a recorded agent seat with no `delegates_to` parent or `escalates_to` route is
 the exception: its finding tries the row's creator, then the operator agent
 (`agents.operator_session`), skipping an unset, confirmed-missing, self or
-unaccepted address and OpenRig's own machinery (`daemon@kernel` or a `@system`
-actor), so the finding's own wake isn't sent to the seat that just failed to
+unaccepted address, a bound terminal seat, and OpenRig's own machinery
+(`daemon@kernel` or a `@system` actor), so the finding's own wake isn't sent to the seat that just failed to
 take one. If neither can be used, it stays with the original seat and says why.
 Overdue claims go to their destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
