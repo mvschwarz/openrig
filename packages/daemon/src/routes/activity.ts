@@ -7,6 +7,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
 import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
+import { inputBoundaryCorrelatorFor } from "../domain/input-boundary-correlator.js";
 import type { StreamStore } from "../domain/stream-store.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
@@ -733,6 +734,7 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     const status = result.code === "missing_session_identity" ? 400 : 404;
     return { refused: c.json({ ok: false, code: result.code, error: result.error }, status) };
   }
+  noteInputBoundary(c, body, (result.event as { sessionName?: string } | undefined)?.sessionName ?? stringOrNull(body.sessionName));
 
   // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
   // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
@@ -1072,6 +1074,24 @@ activityRoutes.get("/parked", (c) => {
     },
   });
 });
+
+/** A prompt hook's input-boundary facts (a fingerprint of the prompt the harness received), handed to the correlator that
+ *  matches them to the message OpenRig wrote. Malformed or missing facts are dropped, never refused: the boundary stays
+ *  unknown. */
+function noteInputBoundary(c: Context, body: Record<string, unknown>, sessionName: string | null): void {
+  if (body.hookEvent !== "UserPromptSubmit") return;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  const generation = stringOrNull(body.generation);
+  const occurredAt = stringOrNull(body.occurredAt);
+  const sha256 = typeof body.promptSha256 === "string" && /^[0-9a-f]{64}$/.test(body.promptSha256) ? body.promptSha256 : null;
+  const bytes = typeof body.promptBytes === "number" && Number.isSafeInteger(body.promptBytes) && body.promptBytes >= 0 ? body.promptBytes : null;
+  if (!eventBus || !sessionName || !generation || !occurredAt || !sha256 || bytes === null) return;
+  const nativeId = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+  try {
+    inputBoundaryCorrelatorFor(eventBus).noteHook({ sessionName, generation, sha256, bytes, occurredAt, runtime: stringOrNull(body.runtime),
+      nativePromptId: nativeId(body.nativePromptId), nativeTurnId: nativeId(body.turnId) });
+  } catch { /* Best effort: the hook is recorded either way. */ }
+}
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;

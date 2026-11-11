@@ -39,6 +39,7 @@ import { resolveExternal } from "./domain/gateway/external-admission.js";
 import { makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
 import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
+import { inputBoundaryCorrelatorFor } from "./domain/input-boundary-correlator.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
@@ -386,6 +387,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
+  // Subscribed from the start, so every written message can be matched to its harness's own prompt hook.
+  inputBoundaryCorrelatorFor(eventBus);
   const streamStore = new StreamStore(db, eventBus);
   // Explicit source opt-in only. No sink I/O until a separate drain request.
   const shadow = configureShadowCapture(process.env.OPENRIG_SHADOW_CAPTURE);

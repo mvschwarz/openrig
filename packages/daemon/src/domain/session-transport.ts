@@ -6,7 +6,7 @@ import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CLAUDE_NOT_STATUS_LINE_ROW, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
@@ -158,6 +158,14 @@ export interface PaneActivityClassification {
 
 /** Refusal codes from the checks that run before Enter reaches the adapter (the seat's input guard, the expected
  *  conversation and managed compaction): a written send that stopped with one left its text without Enter. */
+/** The written text's fingerprint, byte length and paste time, to match a harness's own prompt hook against; nulls when
+ *  nothing was pasted. The text itself is never recorded. */
+function wireFingerprint(wire: { text: string; at: string } | null): { wireSha256: string | null; wireBytes: number | null; writtenAt: string | null } {
+  if (wire === null) return { wireSha256: null, wireBytes: null, writtenAt: null };
+  const bytes = Buffer.from(wire.text, "utf8");
+  return { wireSha256: createHash("sha256").update(bytes).digest("hex"), wireBytes: bytes.length, writtenAt: wire.at };
+}
+
 function enterWithheld(reason: string | undefined): boolean {
   return typeof reason === "string" && (reason.startsWith("expected_identity_") || reason.startsWith("draft_") || reason === "managed_compaction_pending");
 }
@@ -1962,8 +1970,9 @@ export interface SendOpts {
    *  decision), with how the seat's level would treat each input now. It returns the members that still go with this send:
    *  their text and outbox ids. Never accepted from HTTP. */
   recheckMembers?: (holds: (input: AdmissionInput) => boolean, held: boolean) => { text: string; outboxIds: string[] };
-  /** Internal observation of a completed input effect; never a permission callback. */
-  onInputEffect?: (phase: "pasted" | "submitted") => void;
+  /** Internal observation of a completed input effect; never a permission callback. A paste reports the exact text it
+   *  wrote, for delivery evidence. */
+  onInputEffect?: (phase: "pasted" | "submitted", written?: { text: string }) => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
   /** Explicit internal composer-preservation request. Managed compaction instead uses ordinary draft-delivery defaults.
@@ -2672,8 +2681,14 @@ export class SessionTransport {
   private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // The seat and occupant this send is for, frozen before it runs: a later handover doesn't relabel its evidence.
     const seat = this.evidenceSeat(sessionName);
-    const result = await this.sendMarkingUrgent(sessionName, text, opts);
-    this.recordDeliveryEvidence(sessionName, seat, opts, result);
+    // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
+    let wire: { text: string; at: string } | null = null;
+    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: (phase, written) => {
+      if (phase === "pasted" && written) wire = { text: written.text, at: this.now().toISOString() };
+      opts?.onInputEffect?.(phase, written);
+    } } : opts;
+    const result = await this.sendMarkingUrgent(sessionName, text, observed);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire);
     return result;
   }
 
@@ -2693,7 +2708,8 @@ export class SessionTransport {
   /** One additive record of what this send's result says, beside it. Best effort: a record that
    *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
    *  unknown. Only an outbox row that exists counts as admitted. */
-  private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult): void {
+  private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
+    wire: { text: string; at: string } | null): void {
     if (!this.eventBus || !seat) return;
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
@@ -2707,6 +2723,7 @@ export class SessionTransport {
         pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
+        ...wireFingerprint(wire),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {
@@ -3711,7 +3728,7 @@ export class SessionTransport {
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });
     }
-    try { opts?.onInputEffect?.("pasted"); } catch { /* Observation cannot change a completed paste. */ }
+    try { opts?.onInputEffect?.("pasted", { text }); } catch { /* Observation cannot change a completed paste. */ }
 
     // From the successful paste to Enter the text may sit in the seat's input. Any throw in this span is
     // tagged inputWritten, so no caller reports it as unsent; a step added here later stays covered.

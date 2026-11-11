@@ -264,7 +264,7 @@ describe("SSE events route", () => {
 
     const evidence = (i: number) => eventBus.emit({ type: "transport.delivery_evidence", sessionName: "dev-impl@my-rig", seatKind: "tmux", pane: null,
       occupantGeneration: null, messageId: `m${i}`, attemptId: `a${i}`, admitted: "none", written: "submitted",
-      terminalObserved: { outcome: null, verified: null }, inputBoundary: "unknown", source: "send_result" }).seq;
+      terminalObserved: { outcome: null, verified: null }, inputBoundary: "unknown", source: "send_result", wireSha256: null, wireBytes: null, writtenAt: null }).seq;
 
     it("a fresh replay=<n> skips per-send delivery evidence, so sends after the newest real events never empty a new feed", async () => {
       const rig = rigRepo.createRig("r01");
@@ -275,11 +275,16 @@ describe("SSE events route", () => {
       expect(ids(await readSSEEvents(await app.request("/api/events?replay=2"), 3))).toEqual(seqs);
     });
 
-    it("live delivery evidence isn't written to the stream, so a viewer's cache never holds it, and a reconnect's replay skips it", async () => {
+    it("live delivery evidence and input-boundary records aren't written to the stream, so a viewer's cache never holds them, and a reconnect's replay skips them", async () => {
       const rig = rigRepo.createRig("r01");
       const [first] = emitMany(rig.id, 1);
       const live = await app.request("/api/events?replay=0");
-      setTimeout(() => { evidence(0); eventBus.emit({ type: "rig.created", rigId: rig.id }); }, 10);
+      setTimeout(() => {
+        evidence(0);
+        eventBus.emit({ type: "transport.input_boundary", sessionName: "dev-impl@my-rig", occupantGeneration: "g", messageId: "m0", attemptId: "a0",
+          observed: "UserPromptSubmit", runtime: "claude-code", nativePromptId: null, nativeTurnId: null, observedAt: new Date().toISOString() });
+        eventBus.emit({ type: "rig.created", rigId: rig.id });
+      }, 10);
       expect((await readSSEEvents(live, 2)).map((e) => JSON.parse(e.data).type)).toEqual(["rig.created"]);
       const again = await app.request("/api/events?replay=0", { headers: { "Last-Event-ID": String(first) } });
       expect((await readSSEEvents(again, 3)).map((e) => JSON.parse(e.data).type)).toEqual(["rig.created"]);

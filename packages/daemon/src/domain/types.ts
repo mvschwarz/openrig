@@ -196,7 +196,13 @@ export type RigEvent =
       pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
-      terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result" }
+      terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+  /** A harness's own prompt hook matched to the one message OpenRig wrote (same session and occupant generation, an equal
+   *  text fingerprint, a single candidate): that message reached the input boundary. Never a claim, completion or
+   *  acceptance. It names no node. */
+  | { type: "transport.input_boundary"; sessionName: string; occupantGeneration: string; messageId: string; attemptId: string;
+      observed: "UserPromptSubmit"; runtime: string | null; nativePromptId: string | null; nativeTurnId: string | null; observedAt: string }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
