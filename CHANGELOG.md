@@ -96,7 +96,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   ([#2818](https://github.com/mvschwarz/openrig/pull/2818), [#2799](https://github.com/mvschwarz/openrig/pull/2799), [#2797](https://github.com/mvschwarz/openrig/pull/2797), [#2915](https://github.com/mvschwarz/openrig/pull/2915), [#2965](https://github.com/mvschwarz/openrig/pull/2965), [#2796](https://github.com/mvschwarz/openrig/pull/2796), [#2853](https://github.com/mvschwarz/openrig/pull/2853), [#2906](https://github.com/mvschwarz/openrig/pull/2906))
 - **Queue and recovery:** a polling hosted member (an outside assistant on the
   team; experimental and off by default) gets one standing notice; a hosted
-  member's ring that times out reads unknown and isn't rung again;
+  member's ring that times out reads unknown, and durable recovery doesn't
+  repeat that recorded wake (other recovery paths can still ring it again);
   unroutable items wake as soon as the seat is reachable; the stuck sweep counts
   a finding once; an escalation keeps its owner through a handoff; findings route to the
   seat's own fallback; a park on an outside condition with no wake says so;
