@@ -1,11 +1,10 @@
-// Refocus: the hook's time budget against the harness's outer kill, its failure report, and (characterized, unresolved)
-// overlapping events for one occupant.
+// Refocus: the hook's time budget, its failure report, and overlapping events for one occupant.
 // Each case runs the real hook as a harness does (JSON on stdin, killed at the registration's outer bound), with a stub
 // `rig` and a stub trace script whose delays are set per case. The overlaps are hook processes overlapping; whether a
 // harness overlaps these events natively is not established here.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +61,7 @@ echo "TRACE OK: work and topology"
 interface Run { killed: boolean; ms: number; stdout: string; stderr: string }
 
 // Run the hook as the harness does, killed at `outerMs` (both registrations' bound for refocus: 60 s).
-function hook(f: Fixture, event: string, session: string, extra: Record<string, string> = {}, outerMs = 60_000): Promise<Run> {
+function hook(f: Fixture, event: string, session: string, extra: Record<string, string> = {}, outerMs = 60_000, promptId?: string): Promise<Run> {
   const transcript = join(root!, `${session}.jsonl`);
   if (!existsSync(transcript)) writeFileSync(transcript, "");
   const started = Date.now();
@@ -81,7 +80,7 @@ function hook(f: Fixture, event: string, session: string, extra: Record<string, 
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, outerMs);
     child.on("close", () => { clearTimeout(timer); done({ killed, ms: Date.now() - started, stdout, stderr }); });
-    child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: session, transcript_path: transcript, prompt: "next" }));
+    child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: session, transcript_path: transcript, prompt: "next", prompt_id: promptId }));
   });
 }
 
@@ -90,7 +89,6 @@ const stateOf = (f: Fixture, session: string) =>
   JSON.parse(readFileSync(join(f.home, "refocus", `${SEAT}__${session}.json`), "utf8")) as Record<string, unknown>;
 const healthOf = (f: Fixture) => readdirSync(join(f.home, "refocus")).filter((n) => n.endsWith(".health.json"))
   .map((n) => JSON.parse(readFileSync(join(f.home, "refocus", n), "utf8")) as { failures?: number });
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("refocus: the registrations' outer bound", () => {
   it("allows refocus.cjs 60 s on both harnesses and leaves every other hook at 5 s", () => {
@@ -205,12 +203,8 @@ describe("refocus: the time budget", () => {
   }, 60_000);
 });
 
-describe("refocus: overlapping events for one occupant (UNRESOLVED; characterized, not fixed)", () => {
-  // These describe main's behaviour, which this change keeps: two hook runs for one occupant are not serialized, so
-  // overlapping hook processes can lose a just-recorded compaction or deliver one refocus twice. Whether a harness
-  // overlaps these events natively is NOT ESTABLISHED; the gap is open, not shown safe. If a later change serializes
-  // the state, these flip and should then assert the fixed behaviour.
-  it("can lose a PostCompact that lands while an earlier refocus is being delivered", async () => {
+describe("refocus: overlapping events for one occupant", () => {
+  it("preserves a PostCompact that lands while an earlier refocus is being delivered", async () => {
     const f = fixture();
     await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" });
     const file = join(f.home, "refocus", `${SEAT}__s1.json`);
@@ -220,7 +214,7 @@ describe("refocus: overlapping events for one occupant (UNRESOLVED; characterize
     // Hold delivery after it has read the state; process start-up time cannot choose the interleaving.
     const delivering = hook(f, "UserPromptSubmit", "s1", {
       OPENRIG_REFOCUS_BUDGET_MS: "52000", STUB_TRACE_READY: ready, STUB_TRACE_RELEASE: release,
-    });
+    }, 60_000, "prompt-1");
     try {
       await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 });
       await hook(f, "PostCompact", "s1");
@@ -229,20 +223,117 @@ describe("refocus: overlapping events for one occupant (UNRESOLVED; characterize
       writeFileSync(release, "");
     }
     expect(context(await delivering)).toContain("REFOCUS");
-    // The delivery wrote back the state it read before the PostCompact: the compaction's pending is gone.
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
+    expect(context(await hook(f, "UserPromptSubmit", "s1", {}, 60_000, "prompt-1"))).toBe("");
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
+    expect(context(await hook(f, "UserPromptSubmit", "s1", {}, 60_000, "prompt-2"))).toContain("REFOCUS (just compacted");
     expect(stateOf(f, "s1")["pendingOn"]).toBeUndefined();
-    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
   }, 20_000);
 
-  it("can deliver one pending refocus twice when two prompts overlap", async () => {
+  it("delivers a pending refocus once when two handlers overlap", async () => {
     const f = fixture();
     await hook(f, "PostCompact", "s1");
-    const first = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "1000" });
-    await wait(200);
-    const second = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "1000" });
-    const delivered = (await Promise.all([first, second])).filter((r) => context(r).includes("REFOCUS"));
-    expect(delivered).toHaveLength(2);
+    const ready = join(root!, "trace-ready");
+    const release = join(root!, "trace-release");
+    const first = hook(f, "UserPromptSubmit", "s1", {
+      OPENRIG_REFOCUS_BUDGET_MS: "10000", STUB_TRACE_READY: ready, STUB_TRACE_RELEASE: release,
+    });
+    try {
+      await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 5000 });
+      const second = await hook(f, "UserPromptSubmit", "s1");
+      expect(context(second)).toBe("");
+      expect(second.stderr).toContain("another hook is delivering");
+    } finally {
+      writeFileSync(release, "");
+      expect(context(await first)).toContain("REFOCUS");
+    }
   }, 20_000);
+
+  it("delivers once per identified prompt even if the second handler starts after completion", async () => {
+    const f = fixture();
+    const env = { OPENRIG_REFOCUS_NOW: "1" };
+    expect(context(await hook(f, "UserPromptSubmit", "s1", env, 60_000, "prompt-1"))).toContain("REFOCUS");
+    expect(context(await hook(f, "UserPromptSubmit", "s1", env, 60_000, "prompt-1"))).toBe("");
+    expect(context(await hook(f, "UserPromptSubmit", "s1", env, 60_000, "prompt-2"))).toContain("REFOCUS");
+  });
+
+  it("recovers pending work after the rendering hook is killed", async () => {
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const ready = join(root!, "trace-ready");
+    const release = join(root!, "trace-release");
+    const interrupted = hook(f, "UserPromptSubmit", "s1", {
+      OPENRIG_REFOCUS_BUDGET_MS: "10000", STUB_TRACE_READY: ready, STUB_TRACE_RELEASE: release,
+    }, 1000);
+    try {
+      await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 5000 });
+      expect(await interrupted).toMatchObject({ killed: true, stdout: "" });
+    } finally {
+      writeFileSync(release, "");
+    }
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact", deliveryClaim: { pid: expect.any(Number) } });
+    const resumed = await hook(f, "UserPromptSubmit", "s1");
+    expect(resumed.stderr).toContain("prior delivery owner could not be confirmed");
+    expect(context(resumed)).toContain("REFOCUS (just compacted");
+    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
+  });
+
+  it("uses a shared successor guard after its former owner exits", async () => {
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const guard = join(f.home, "refocus", `${SEAT}__s1.json.guard`);
+    const owner = spawnSync(process.execPath, ["-e", ""]).pid;
+    const token = `${owner}-00000000-0000-4000-8000-000000000001`;
+    symlinkSync(token, guard);
+    const first = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "200" });
+    const second = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "200" });
+    const runs = await Promise.all([first, second]);
+    expect(runs.filter((run) => context(run).includes("REFOCUS"))).toHaveLength(1);
+    expect(readlinkSync(guard)).toBe(token);
+  });
+
+  it("does not take a successor when the old guard was released before the owner exited", async () => {
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const stateFile = join(f.home, "refocus", `${SEAT}__s1.json`);
+    const guard = stateFile + ".guard";
+    const oldPid = spawnSync(process.execPath, ["-e", ""]).pid;
+    symlinkSync(`${oldPid}-00000000-0000-4000-8000-000000000001`, guard);
+    const liveToken = `${process.pid}-00000000-0000-4000-8000-000000000002`;
+    const result = spawnSync(process.execPath, ["-e", `
+      const fs = require("node:fs");
+      const [helper, stateFile, liveToken, oldPid] = process.argv.slice(1);
+      const kill = process.kill;
+      process.kill = (pid, signal) => {
+        if (pid === Number(oldPid)) {
+          fs.unlinkSync(stateFile + ".guard");
+          fs.symlinkSync(liveToken, stateFile + ".guard");
+        }
+        return kill(pid, signal);
+      };
+      const access = require(helper).openRefocusState(stateFile);
+      console.log(access.exclusive);
+      access.close();
+    `, join(dirname(HOOK), "refocus-state.cjs"), stateFile, liveToken, String(oldPid)], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("false");
+    expect(readlinkSync(guard)).toBe(liveToken);
+  });
+
+  it("reports an unreadable guard and leaves the pending compaction available", async () => {
+    const f = fixture();
+    await hook(f, "UserPromptSubmit", "s1");
+    const guard = join(f.home, "refocus", `${SEAT}__s1.json.guard`);
+    mkdirSync(guard);
+    const compact = await hook(f, "PostCompact", "s1");
+    expect(compact.stderr).toContain("could not coordinate state");
+    const uncoordinated = await hook(f, "UserPromptSubmit", "s1");
+    expect(uncoordinated.stderr).toContain("could not coordinate state");
+    expect(context(uncoordinated)).toContain("REFOCUS (just compacted");
+    rmSync(guard, { recursive: true });
+    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toContain("REFOCUS (just compacted");
+    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
+  });
 
   it("still delivers to each of two occupants of one seat when they overlap", async () => {
     const f = fixture();
