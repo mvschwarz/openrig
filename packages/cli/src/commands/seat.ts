@@ -702,7 +702,7 @@ rig seat handover, THEN retarget the view. Examples:
   cmd
     .command("clear-attention")
     .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
-    .option("--reason <text>", "Attest startup or subset-restore attention, or that a prompt the latest hook names is gone; cannot bypass full-restore or pane-identity checks")
+    .option("--reason <text>", "Attest startup or subset-restore attention, acknowledge a full restore's attention its checks can't settle (recovery stays unproven), or say a prompt the latest hook names is gone; cannot bypass pane-identity checks")
     .option("--json", "JSON output for agents")
     .description("Reconcile seat attention using the checks for its attention class")
     .addHelpText("after", `
@@ -715,9 +715,13 @@ Examples:
 also say a prompt is gone: when the seat's latest hook still says it waits on a
 person (a permission prompt declined or answered with no hook after) and sends
 are refused, --reason "<what you saw>" records the prompt cleared. Each send
-still checks the pane for a prompt it recognizes. It does
-not bypass full-restore continuity or pane-identity checks. Acknowledgment alone
-does not prove that the original conversation resumed.
+still checks the pane for a prompt it recognizes. A full restore's attention is
+first checked against the live seat; when that check can't settle it, --reason
+acknowledges it and prints what stays unproven. The outcome stays as it was:
+acknowledgment never records the conversation as resumed. It covers only the
+attempt and occupant you addressed: a newer occupant, a changed binding or
+token, or a restore that includes the seat while it was checked is not
+acknowledged. It does not bypass pane-identity checks.
 If the recorded native token needs correction and you know the actual token:
   printf '%s' "$TOKEN" | rig seat set-resume-token dev-impl@my-rig --token-stdin --reason "verified native token"
 Then rerun clear-attention to check the live evidence. Setting the token alone,
@@ -753,6 +757,13 @@ identity remains unverified; a version number alone cannot clear it.
       }
       const clearedBy = res.data["clearedBy"] as string | undefined;
       const from = res.data["from"] as string | undefined;
+      const ack = res.data["acknowledgment"] as { attemptId?: number; from?: string; unproven?: { code?: string; detail?: string };
+        paneIdentity?: string } | undefined;
+      if (ack) {
+        console.log(`Acknowledged ${session}'s full-restore attention (attempt ${ack.attemptId}, ${ack.from}): recovery not proven (${ack.unproven?.code}: ${ack.unproven?.detail})`
+          + (ack.paneIdentity === "unverified" ? ". Its pane identity is still unverified; only live evidence clears that." : ""));
+        return;
+      }
       console.log(`Cleared ${session}: ${from} -> ready (${clearedBy})`);
     });
 

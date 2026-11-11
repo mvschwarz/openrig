@@ -186,6 +186,10 @@ export type RigEvent =
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  // A person acknowledged one full-restore attempt's attention for one occupant session when the strict reconciler
+  // couldn't prove recovery. Not a recovery: the outcome stays, and `unproven` names what the reconciler couldn't show.
+  // Its own type, so no reader of `restore.outcome_reconciled` takes it for one.
+  | { type: "restore.outcome_acknowledged"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; sessionId: string; reason: string; unproven: { code: string; detail: string; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
@@ -792,6 +796,9 @@ export interface NodeInventoryEntry {
   /** Persisted startup outcome, before current identity projection. */
   storedStartupStatus?: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
+  /** Present when a person acknowledged this occupant's current full-restore attention without proof of recovery:
+   *  `restoreOutcome` and `continuityOutcome` are unchanged, and `unproven` says what the reconciler couldn't show. */
+  restoreAcknowledgment?: { attemptId: number; reason: string; unproven: { code: string; detail: string } };
   // OPR.0.4.3.06 — challenge-verified orientation, surfaced beside (never
   // folded into) startupStatus.
   oriented: NodeOriented;

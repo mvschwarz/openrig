@@ -465,8 +465,14 @@ rig seat clear-attention <session> --json
 ```
 
 `--reason <text>` can acknowledge startup-status and subset-restore attention.
-It does not bypass full-restore continuity checks or an active pane-identity
-mismatch/missing-pane check; those run first. Successful identity re-verification
+Full-restore continuity checks and an active pane-identity mismatch/missing-pane
+check run first. When the full-restore check can't settle the outcome (an
+unreadable process list, an older runner, a timeout), `--reason` acknowledges
+that attempt's attention for the current occupant and prints what stays
+unproven; the outcome is unchanged and nothing records the conversation as
+resumed. It does not bypass a pane-identity mismatch, and a newer occupant,
+changed binding or token, or a restore that includes the seat while it was
+checked is not acknowledged. Successful identity re-verification
 can also clear coexisting startup or subset-restore attention. If neither earlier
 path clears attention, omitting `--reason` requires activity or send evidence.
 Startup and restore clears write their corresponding audit events; an identity-only

@@ -222,6 +222,8 @@ export function deriveNodeLifecycleState(input: {
   /** Startup attention is live seat state, independent of restore history. */
   startupStatus?: string | null;
   restoreOutcome: NodeRestoreOutcome;
+  /** A person acknowledged this occupant's full-restore outcome: it no longer asks for attention (still unrecovered). */
+  restoreAcknowledged?: boolean;
   nodeId: string;
   usableSnapshot: Snapshot | null;
   /** OPR.0.4.3.19 — the persisted liveness identity verdict for this node.
@@ -235,8 +237,9 @@ export function deriveNodeLifecycleState(input: {
   // lifecycleState=attention_required.
   if (
     input.startupStatus === "attention_required"
-    || input.restoreOutcome === "attention_required"
-    || (input.restoreOutcome === "failed" && input.sessionStatus === "running")
+    || (!input.restoreAcknowledged && (
+      input.restoreOutcome === "attention_required"
+      || (input.restoreOutcome === "failed" && input.sessionStatus === "running")))
   ) {
     return "attention_required";
   }
@@ -318,6 +321,8 @@ function deriveContinuityOutcome(
 interface RestoreProjection {
   outcome: NodeRestoreOutcome;
   resumedRuntime?: "claude-code" | "codex";
+  /** A person's acknowledgement of this full-restore attempt's outcome, for the occupant session it names. */
+  acknowledgment?: { sessionId: string; attemptId: number; reason: string; unproven: { code: string; detail: string } };
 }
 
 function restoreKey(rigId: string, nodeId: string): string {
@@ -350,8 +355,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     type: string; payload: string; seq: number; rig_id: string; node_id: string | null;
   }[];
   const map = new Map<string, RestoreProjection>();
-  // Each entry's attempt, by its start seq; a subset restore records no start.
-  const attemptOf = new Map<string, { nodeId: string; seq: number }>();
+  // Each entry's attempt, by its start seq; a subset restore records no start. `full` marks a full restore's outcome.
+  const attemptOf = new Map<string, { nodeId: string; seq: number; full?: true }>();
   const attempts = new Map<string, {
     seq: number;
     start?: Record<string, any>;
@@ -412,7 +417,7 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
       if (typeof node?.nodeId === "string") {
         const key = restoreKey(row.rig_id, node.nodeId);
         map.set(key, { outcome: mapStatus(node.status) });
-        attemptOf.set(key, { nodeId: node.nodeId, seq: attemptSeq });
+        attemptOf.set(key, { nodeId: node.nodeId, seq: attemptSeq, ...(row.type === "restore.completed" ? { full: true as const } : {}) });
       }
     }
   }
@@ -423,6 +428,25 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
   for (const [key, entry] of attemptOf) {
     const fence = fences.get(entry.nodeId);
     if (fence !== undefined && entry.seq < fence) map.delete(key);
+  }
+  // A person's acknowledgement of a full restore's attention (clear-attention --reason, when the strict reconciler
+  // couldn't settle it) applies to that attempt's outcome only. Only those outcomes look one up: the node's latest,
+  // through the node/type index.
+  const latestAck = db.prepare(
+    "SELECT payload FROM events WHERE node_id = ? AND type = 'restore.outcome_acknowledged' ORDER BY seq DESC LIMIT 1",
+  );
+  for (const [key, entry] of attemptOf) {
+    const projection = map.get(key);
+    if (!projection || !entry.full || (projection.outcome !== "failed" && projection.outcome !== "attention_required")) continue;
+    const row = latestAck.get(entry.nodeId) as { payload: string } | undefined;
+    let ack: Record<string, any> | undefined;
+    try { ack = row ? eventObject(JSON.parse(row.payload)) : undefined; } catch { /* Unknown evidence: no acknowledgement. */ }
+    if (ack && JSON.stringify([ack.rigId, ack.nodeId]) === key && ack.attemptId === entry.seq && ack.from === projection.outcome
+      && typeof ack.sessionId === "string" && typeof ack.reason === "string"
+      && typeof ack.unproven?.code === "string" && typeof ack.unproven?.detail === "string") {
+      projection.acknowledgment = { sessionId: ack.sessionId, attemptId: entry.seq, reason: ack.reason,
+        unproven: { code: ack.unproven.code, detail: ack.unproven.detail } };
+    }
   }
   return map;
 }
@@ -754,6 +778,9 @@ function buildInventoryEntry(
   // is referenced by no restore event, matching the prior fall-through).
   const restore = restoreOutcomes.get(restoreKey(row.rig_id, row.node_id));
   const restoreOutcome = restore?.outcome ?? "n-a";
+  // An acknowledgement covers the occupant session it named; a newer occupant's attention stands.
+  const restoreAcknowledgment = restore?.acknowledgment && restore.acknowledgment.sessionId === row.session_id
+    ? restore.acknowledgment : undefined;
   // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
   // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
   // `verified` verdict for the OLD pane would otherwise be served for the new
@@ -777,6 +804,7 @@ function buildInventoryEntry(
     sessionStatus,
     startupStatus,
     restoreOutcome,
+    restoreAcknowledged: restoreAcknowledgment !== undefined,
     nodeId: row.node_id,
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
@@ -808,6 +836,8 @@ function buildInventoryEntry(
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
     startupStatus,
     restoreOutcome,
+    ...(restoreAcknowledgment ? { restoreAcknowledgment: { attemptId: restoreAcknowledgment.attemptId,
+      reason: restoreAcknowledgment.reason, unproven: restoreAcknowledgment.unproven } } : {}),
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has
     // no proof events, matching deriveOriented's no-challenge branch).
