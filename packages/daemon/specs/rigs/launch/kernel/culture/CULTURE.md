@@ -44,11 +44,13 @@ machine and have things happen.
     SQLite. The daemon's kernel-boot path short-circuits
     `already-managed` — no re-instantiation, no fresh agents. Member
     tmux sessions survive a daemon-restart-only and the reconciler
-    marks them healthy. A HOST reboot drops tmux entirely; the next
-    `rig daemon start` restores the kernel by itself when it finds every
-    kernel seat lost. A kernel that was already down before the reboot
-    stays down until `rig up kernel --existing`. See "Incomplete setup
-    and restart":
+    marks them healthy. A HOST reboot drops tmux entirely. After a host
+    reboot, the next `rig daemon start` attempts to restore the kernel
+    when startup reconciliation newly marks at least one seat detached
+    and every kernel seat is detached and still bound. A deliberately
+    stopped kernel, or one whose seats were all already recorded as
+    detached before that start, stays down until
+    `rig up kernel --existing`. See "Incomplete setup and restart":
     `rig context get reference/getting-started.md#incomplete-setup-and-restart`.
   Other rigs are NOT auto-instantiated by the daemon at any point —
   they require explicit operator-initiated `rig up` / `rig restore`
