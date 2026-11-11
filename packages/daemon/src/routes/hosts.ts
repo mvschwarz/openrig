@@ -92,9 +92,9 @@ function describePairTtl(ms: number): string {
 }
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
 
-/** The pairing request's one question. A person answers it with a click or in their own words. Where an agent reads
- *  answers (the request's owner), both are context it acts on with `rig host approve|deny`; on an agent-free host the
- *  person's click is the decision. */
+/** The pairing request's one question. A person answers it with a click or in their own words. Both are context for the
+ *  receiving agent (the request's owner), which acts on them with `rig host approve|deny`; where none reads answers yet,
+ *  they're kept for one, and neither decides by itself. */
 const PAIR_QUESTION_ID = "pair";
 const PAIR_APPROVE = "approve";
 function pairQuestion(requester: string, code: string): HumanQuestion[] {
@@ -129,8 +129,9 @@ interface IssuedPair {
   expiresAt: number;
   /** The person asked. */
   person: string;
-  /** The seat that reads the person's answer and decides (the kernel operator); null when this host is agent-free, where
-   *  the person's own click, or `rig host approve|deny` in a terminal, decides. */
+  /** The seat that reads the person's answer and decides (the host's receiving agent); null when no agent reads answers
+   *  here yet, where the answer is kept and a direct decision (`rig host approve|deny`, or the TUI's pairing settings)
+   *  decides. */
   owner: string | null;
   /** The explicit decision (`rig host approve|deny`), made once. */
   decision?: { approve: boolean; by: string };
@@ -138,7 +139,7 @@ interface IssuedPair {
   receipted?: boolean;
   /** The expiry has been settled (its ask closed, the person told), by the poll or the expiry timer. */
   expirySettled?: boolean;
-  /** Why an agent-free request has no owner: this host has no kernel operator, the queue can't take rows to it, or
+  /** Why an agent-free request has no owner: this host has no receiving agent, the queue can't take rows to it, or
    *  OpenRig couldn't read which. */
   freeReason?: "none" | "unroutable" | "unknown";
   /** The receiving agent the queue couldn't take rows to (`unroutable`). */
@@ -551,7 +552,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     }
     // Single-shot: the first decided read consumes the pairing.
     issued.delete(pairId);
-    // A decision from a close (the person's click on an agent-free host, an agent seat's close) is told to the person
+    // A decision from a close (an agent seat's close, or a refusing close) is told to the person
     // here; `rig host approve|deny` told them when it decided. Not awaited: nothing between the expiry check above and
     // this response yields, so a slow update can't carry the handover past expiry.
     if (!rec.decision) {
@@ -584,8 +585,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     if (Date.now() > rec.expiresAt) {
       return c.json({ error: "pair_request_expired", message: `Pairing request ${rec.code} from ${rec.requester} expired at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC. Nothing was decided; the requester can run rig host pair again.` }, 409);
     }
-    // One decision per request: an earlier `rig host approve|deny`, or one its row already records (a click on an
-    // agent-free host, a refusing close, an agent seat's close naming Approve), even before the requester's next poll.
+    // One decision per request: an earlier `rig host approve|deny`, or one its row already records (a refusing close, or
+    // an agent seat's close naming Approve), even before the requester's next poll.
     const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
     const decided = rec.decision ?? (() => {
       const approve = rowDecision(c, rec, item);
