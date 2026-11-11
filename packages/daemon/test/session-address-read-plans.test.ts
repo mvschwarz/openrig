@@ -11,7 +11,7 @@ afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
 function fixture(indexed = true) {
   const db = createDb(); databases.push(db);
-  migrate(db, ALL_MIGRATIONS.filter(m => indexed || m.name !== "160_session_address_read_indexes.sql"));
+  migrate(db, ALL_MIGRATIONS.filter(m => indexed || m.name !== "162_session_address_read_indexes.sql"));
   db.exec("INSERT INTO rigs(id,name) VALUES('r','team')");
   const node = db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES(?,'r',?,'claude-code')");
   const session = db.prepare("INSERT INTO sessions(id,node_id,session_name,status,created_at) VALUES(?,?,?,'running',?)");

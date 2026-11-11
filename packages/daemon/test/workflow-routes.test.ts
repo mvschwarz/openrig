@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -582,7 +583,7 @@ describe("workflow routes — WF-2 structured error boundaries", () => {
     migrate(db, [
       outboxEntriesSchema,
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,

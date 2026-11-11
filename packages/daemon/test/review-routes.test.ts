@@ -13,6 +13,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
@@ -70,7 +71,7 @@ describe("GET /api/review/*", () => {
     db = createDb(":memory:");
     migrate(db, [
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       streamItemsSchema,
       queueItemsSchema,
@@ -335,7 +336,7 @@ describe("GET /api/review/rig (OPR.0.4.4.22)", () => {
     db = createDb(":memory:");
     migrate(db, [
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       streamItemsSchema,
       queueItemsSchema,
@@ -668,7 +669,7 @@ describe("qitem-ccf87c0d — composeMission MEMBERSHIP-scan load contract", () =
   it("one composeMission over 40 indexed slices executes <= 4 membership queue scans AND composes all 40 ledger entries", () => {
     const db = createDb();
     migrate(db, [
-      coreSchema, bindingsSessionsSchema, eventsSchema, streamItemsSchema,
+      coreSchema, bindingsSessionsSchema, rigArchiveSchema, eventsSchema, streamItemsSchema,
       queueItemsSchema, queueTransitionsSchema, missionControlActionsSchema,
       queueItemSummarySchema,
     ]);
