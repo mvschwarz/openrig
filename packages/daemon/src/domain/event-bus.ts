@@ -113,10 +113,13 @@ export class EventBus {
   /**
    * Run a writer whose failure the caller handles, in its own savepoint (a transaction outside one). If it throws
    * anywhere, even after a nested write of its own was released, everything it wrote rolls back, the event tokens it
-   * persisted leave the active envelope too, and the caller's transaction can still commit its fallback.
+   * persisted leave the active envelope too, and the caller's transaction can still commit its fallback. With no
+   * envelope and no transaction open (a direct answer from Slack), it runs in a notify envelope of its own, so its events
+   * reach subscribers only after it commits, and a throw delivers none of them.
    */
   discardOnThrow<T>(writer: () => T): T {
     const envelope = this.activeEnvelope;
+    if (!envelope && !this.db.inTransaction) return this.withNotifyEnvelope(() => writer());
     const persisted = envelope ? new Set(envelope.persisted) : null;
     const registered = envelope ? new Set(envelope.registered) : null;
     try {

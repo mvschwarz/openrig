@@ -129,7 +129,7 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   const grants = new ActivityGrantStore(db);
   /** OpenRig's pull-only records of the permits it decided by default. */
   const permits = () => stream.list({ hintTag: "runner-permission-permit", limit: 100 });
-  return { db, runner, other, sessions, queueRepo, contract, nudges, requesters, generation, submit, read, withdraw, answer, act, decide, waitsOnPerson, rowsToSeat, grants,
+  return { db, bus, runner, other, sessions, queueRepo, contract, nudges, requesters, generation, submit, read, withdraw, answer, act, decide, waitsOnPerson, rowsToSeat, grants,
     permits, relaunch: () => occupy(runner.id, SEAT, "handover") };
 }
 
@@ -978,5 +978,48 @@ describe("an answered request: #2934's follow-ups", () => {
     expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
+  });
+});
+
+// The Slack fallback answers a direct runner ask with resolveDirectHumanReply itself (slack-subsystem.ts:179): no notify
+// envelope and no transaction is open around it.
+describe("a direct answer with no notify envelope (the Slack fallback)", () => {
+  const watch = (f: ReturnType<typeof fixture>) => {
+    const seen: Array<{ type: string; qitemId: string; to?: string; inTransaction: boolean }> = [];
+    const stop = f.bus.subscribe((event) => {
+      if (event.type === "queue.handed_off") seen.push({ type: event.type, qitemId: event.qitemId, to: event.toSession, inTransaction: f.db.inTransaction });
+      if (event.type === "queue.created") seen.push({ type: event.type, qitemId: event.qitemId, to: event.destinationSession, inTransaction: f.db.inTransaction });
+    });
+    return { seen, stop };
+  };
+
+  it("a handoff that throws after its own write delivers nothing to subscribers, and the answer is kept", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const { seen, stop } = watch(f);
+    const spy = vi.spyOn(f.queueRepo as unknown as { deliverWakeIntentAfterCommit: () => void }, "deliverWakeIntentAfterCommit")
+      .mockImplementationOnce(() => { throw new Error("failed after the handoff was written"); });
+    try {
+      f.queueRepo.resolveDirectHumanReply({ qitemId: askId, actorSession: PERSON, decision: "only the test file" });
+    } finally { spy.mockRestore(); stop(); }
+    expect(seen.filter((e) => (e.type === "queue.handed_off" && e.qitemId === askId) || (e.type === "queue.created" && e.to === DECIDER))).toEqual([]);
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE handed_off_from = ?").get(askId)).toEqual({ n: 0 });
+    expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("a handoff that succeeds reaches subscribers once, after it commits", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const { seen, stop } = watch(f);
+    try {
+      expect(f.queueRepo.resolveDirectHumanReply({ qitemId: askId, actorSession: PERSON, decision: "only the test file" })).toBe(true);
+    } finally { stop(); }
+    const successor = f.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").get(askId) as { qitem_id: string };
+    expect(seen.filter((e) => e.qitemId === askId || e.qitemId === successor.qitem_id)).toEqual([
+      { type: "queue.handed_off", qitemId: askId, to: DECIDER, inTransaction: false },
+      { type: "queue.created", qitemId: successor.qitem_id, to: DECIDER, inTransaction: false },
+    ]);
   });
 });
