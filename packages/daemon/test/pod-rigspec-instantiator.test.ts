@@ -13,6 +13,8 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { reconcileSkillLoadout } from "../src/domain/skill-catalog.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { WhoamiService } from "../src/domain/whoami-service.js";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
 import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
@@ -107,6 +109,34 @@ describe("PodRigInstantiator", () => {
 
     return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, codexAdapter, tmux };
   }
+
+  // #2871: a seat that asks who's on its team while `rig up` is still building it is told so; once built, the answer is today's.
+  it("whoami says the team is still being built during instantiate, and answers as before once it's built", async () => {
+    const files = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"), [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa") };
+    const { db, rigRepo, sessionRegistry, inst } = setup(files);
+    const whoami = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore: new TranscriptStore({ transcriptsRoot: "/tmp/transcripts", enabled: true }) });
+    const spec = makeRigSpec({ pods: [{ id: "dev", label: "Dev", members: [
+      { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." },
+      { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." },
+    ], edges: [{ from: "impl", to: "qa", kind: "delegates_to" }] }] });
+    const early: Array<ReturnType<WhoamiService["resolve"]>> = [];
+    let firstNode: string | undefined;
+    const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT, { recordCreated: (_rigId, nodeId) => {
+      if (!nodeId) return;
+      firstNode ??= nodeId;
+      early.push(whoami.resolve({ nodeId: firstNode }));
+    } });
+    expect(result.ok).toBe(true);
+    // Mid-launch: the first seat sees only what exists so far, and is told the team isn't complete.
+    expect(early[0]).toMatchObject({ rosterState: "building", peers: [], edges: { outgoing: [], incoming: [] } });
+    expect(early[0]!.peersNote).toMatch(/^rosterState = building: `rig up` is still creating this team's seats and edges/);
+    // Built: the full roster and edges, with no building state and today's note.
+    const done = whoami.resolve({ nodeId: firstNode! });
+    expect(done).not.toHaveProperty("rosterState");
+    expect(done.peersNote).toBe("peers = this rig's roster excluding self (no edge filter); edges = directional relationships; use `rig ps --nodes` for node inventory including self + live state");
+    expect(done.peers.map((peer) => peer.logicalId)).toEqual(["dev.qa"]);
+    expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
+  });
 
   // T1: valid rig instantiates pods + nodes + edges
   it("instantiates pods + nodes correctly", async () => {
