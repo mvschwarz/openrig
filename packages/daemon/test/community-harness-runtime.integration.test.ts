@@ -329,8 +329,17 @@ exec "$@"
     writePreset("free-harness.yaml", ["format: 1", "name: free-harness", `command: ${JSON.stringify(`node ${shellQuote(appScript)}`)}`, "maintainer: Example Maintainer", ""].join("\n"));
     await sleep(4_000);
     await check();
-    // A relaunch doesn't start the same-named app in its place.
-    expect((await rig(["down", "free-rig", "--json", "--force"])).code).toBe(0);
+    // A relaunch doesn't start the same-named app in its place. The self-attached session is the person's own terminal,
+    // which OpenRig didn't create, so rig down leaves it running and says so (exit 2) instead of stopping a terminal it can't
+    // show is the seat's.
+    const down = await rig(["down", "free-rig", "--json", "--force"]);
+    expect(down.code, JSON.stringify(down)).toBe(2);
+    expect(JSON.parse(down.stdout).errors).toEqual([expect.stringMatching(
+      /^Kill failed for session '[^']+': '[^']+' was left running: its tmux session \$\d+ doesn't carry this seat's OpenRig marker/)]);
+    // The manual path it names: the person stops their own terminal on the daemon's server, then runs rig down again.
+    execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "kill-session", "-t", "=free-seat"], { env: scaffold.env as NodeJS.ProcessEnv });
+    const again = await rig(["down", "free-rig", "--json", "--force"]);
+    expect(JSON.parse(again.stdout).errors, JSON.stringify(again)).toEqual([]);
     // A deliberate fresh launch of the seat gets main's refusal (a self-attached seat has no startup context, checked
     // before any adapter lookup) and starts nothing.
     const seatLaunch = await rig(["seat", "launch", "work.free@free-rig", "--fresh", "--reason", "relaunch a free-text seat", "--json"], 60_000);
