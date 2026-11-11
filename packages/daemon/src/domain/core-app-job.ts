@@ -95,7 +95,9 @@ export class CoreAppJob {
     return { answerId, appId, actor: { address: binding.actor, assurance: "app-attributed" }, requestId: binding.requestId,
       questionId: binding.questionId, episodeKey: binding.episodeKey, expectedRevision: binding.expectedRevision, answer: binding.answer, replayed: false,
       submission: { state: "committed", actionId: result.actionId, recordedAt: result.auditedAt,
-        outcome: result.answer!.outcome, decisionRevisionAfter: result.decisionRevision, unanswered: result.answer!.unanswered },
+        outcome: result.answer!.outcome, decisionRevisionAfter: result.decisionRevision, unanswered: result.answer!.unanswered,
+        ...(result.answer!.message ? { message: result.answer!.message } : {}),
+        replyQitemId: result.createdQitemId === binding.requestId ? null : result.createdQitemId },
       links: this.answerLinks(answerId, binding) };
   }
   /** Read-only: only proven own effects with an unchanged decision can be repaired. */
@@ -169,6 +171,16 @@ export class CoreAppJob {
         const question = item.humanQuestions!.find(q => q.id === binding.questionId);
         const answer = binding.answer;
         if (!question || answer.kind === "option" && !question.options.some(o => o.id === answer.optionId)) throw new CoreAppError("invalid_question_option", 422);
+        const returned = this.queue.getHumanAnswer(binding.requestId, binding.actor);
+        const finalized = unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {}).length === 0;
+        // The existing owner keeps the first committed return / finalized set. A new ID must never claim a
+        // conflicting payload was applied when that original answer wins. The original ID remains repairable.
+        if ((returned || finalized) && (answer.kind !== "option" || item.humanAnswers?.[binding.questionId] !== answer.optionId)) {
+          throw new CoreAppError(returned ? "answer_already_returned" : "answer_already_finalized", 409, {
+            retrySameSubmission: false, replyQitemId: returned?.qitemId ?? null,
+            currentRevision: this.queue.decisionRevision(item), links: this.links(binding.requestId, binding.actor),
+          });
+        }
         if (binding.answer.kind === "typed-reply" && unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {})[0]?.id !== binding.questionId) throw new CoreAppError("typed_reply_question_mismatch", 409);
         const workIds = (db.prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? ORDER BY rowid LIMIT 101").all(binding.requestId) as Array<{ qitem_id: string }>).map(row => row.qitem_id);
         const checkpoint: Checkpoint = { before: item, revision: binding.expectedRevision, workIds };

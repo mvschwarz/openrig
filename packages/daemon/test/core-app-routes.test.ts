@@ -219,3 +219,34 @@ it("keeps a committed return when audit append fails at close, and rejects a lat
   expect((await f.send("/v1/answers/answer_conflict", sent, f.token)).status).toBe(409);
   expect(f.repo.getById(f.ask.qitemId)?.state).toBe("pending"); expect(f.bus.maxSeq()).toBe(seq); expect(f.log.countAll()).toBe(0);
 });
+
+it("rejects a fresh conflicting choice after an interrupted finalized return, preserving the original accepted answer", async () => {
+  const f = await jobFixture(), first = f.binding();
+  const original = f.log.record.bind(f.log);
+  vi.spyOn(f.log, "record").mockImplementationOnce(() => { throw new Error("fixture audit interruption after Yes return"); }).mockImplementation(original);
+  expect((await f.send("/v1/answers/answer_first", first, f.token)).status).toBe(503);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "pending", humanAnswers: { q1: "yes" } });
+  const seq = f.bus.maxSeq();
+  const response = await f.send("/v1/answers/answer_second", f.binding(PERSON, "q1", "no"), f.token);
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ error: "answer_already_returned", retrySameSubmission: false, replyQitemId: f.repo.getHumanAnswer(f.ask.qitemId, PERSON)!.qitemId });
+  expect(f.db.prepare("SELECT 1 FROM core_app_submissions WHERE answer_id = 'answer_second'").get()).toBeUndefined();
+  expect(f.bus.maxSeq()).toBe(seq); expect(f.log.countAll()).toBe(0);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "pending", humanAnswers: { q1: "yes" } });
+  expect(await (await f.send("/v1/answers/answer_first", first, f.token)).json()).toMatchObject({ answer: { kind: "option", optionId: "yes" }, submission: { state: "committed", outcome: "answered" } });
+});
+
+
+it("preserves the original-return disposition when a fresh identical choice finishes an interrupted close", async () => {
+  const f = await jobFixture(), first = f.binding();
+  const resolve = f.repo.resolveDirectHumanReply.bind(f.repo);
+  vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementationOnce(() => { throw new Error("fixture interruption"); }).mockImplementation(resolve);
+  expect((await f.send("/v1/answers/answer_original", first, f.token)).status).toBe(503);
+  const returned = f.repo.getHumanAnswer(f.ask.qitemId, PERSON)!;
+  const response = await f.send("/v1/answers/answer_same_choice", f.binding(), f.token);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ answer: { kind: "option", optionId: "yes" }, submission: {
+    state: "committed", outcome: "answered", message: expect.stringContaining("Already answered"), replyQitemId: returned.qitemId,
+  } });
+  expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+});
