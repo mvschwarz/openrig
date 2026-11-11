@@ -1,5 +1,5 @@
 import type { EventBus } from "../domain/event-bus.js";
-import { listProjects, selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
+import { listProjects, selectedProject, projectMission, workSource, insideProject, projectReadResponse } from "../domain/workspace/project-read.js";
 import { inferCatalogProject, ProjectReadError } from "../domain/workspace/project-catalog.js";
 // Slice Story View v0 — HTTP routes.
 //
@@ -166,15 +166,20 @@ export function slicesRoutes(): Hono {
     const abs = deps.projector.resolveProofAssetPath(slice.proofPacket, relPath);
     if (!abs) return c.json({ error: "proof_asset_not_found" }, 404);
 
+    let servedPath = abs;
+    if (selected.qualified) {
+      try { servedPath = insideProject(selected.projectRoot, abs); }
+      catch (err) { return projectReadResponse(err); }
+    }
     const contentType = inferContentType(abs);
-    return fileAssetResponse(abs, contentType, c.req.header("Range"));
+    return fileAssetResponse(servedPath, contentType, c.req.header("Range"));
   });
 
   // 3) Doc serving for the Docs tab — markdown content of a single file
   //    inside the slice folder. Path-traversal guarded by the projector.
   app.get("/:name/doc/*", (c) => {
     const name = c.req.param("name");
-    const selected = selectSliceDeps(c, name);
+    const selected = selectSliceDeps(c, name, { includeEvidenceRoot: false });
     if ("response" in selected) return selected.response;
     const { deps } = selected;
     const fullPath = c.req.path;
@@ -205,10 +210,23 @@ export function slicesRoutes(): Hono {
   return app;
 }
 
+function qualifiedEvidenceRoot(projectRoot: string, missionsRoot: string): string | null {
+  const candidate = path.join(path.dirname(missionsRoot), "dogfood-evidence");
+  const relative = path.relative(path.resolve(projectRoot), path.resolve(candidate));
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+  try { fs.lstatSync(candidate); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+    throw err;
+  }
+  return insideProject(projectRoot, candidate);
+}
+
 function selectSliceDeps(
   c: Context,
   name: string,
-): { deps: SlicesRoutesDeps; qualified: boolean } | { response: Response } {
+  opts: { includeEvidenceRoot?: boolean } = {},
+): { deps: SlicesRoutesDeps; qualified: false } | { deps: SlicesRoutesDeps; qualified: true; projectRoot: string } | { response: Response } {
   let deps = getDeps(c);
   if (!deps) return { response: c.json({ error: "slices_indexer_unavailable" }, 503) };
   try {
@@ -218,9 +236,15 @@ function selectSliceDeps(
     if (!mission || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return { response: c.json({ error: "exact_mission_and_slice_required" }, 400) };
     const dir = projectMission(project, mission);
     workSource(project.root, path.join(dir, "slices", name));
-    const indexer = new SliceIndexer({ db: deps.indexer.db, slicesRoot: project.missionsRoot, dogfoodEvidenceRoot: null, projectId: project.id, missionId: mission });
+    const indexer = new SliceIndexer({
+      db: deps.indexer.db,
+      slicesRoot: project.missionsRoot,
+      dogfoodEvidenceRoot: (opts.includeEvidenceRoot ?? true) ? qualifiedEvidenceRoot(project.root, project.missionsRoot) : null,
+      projectId: project.id,
+      missionId: mission,
+    });
     deps = { indexer, projector: deps.projector.withIndexer(indexer) };
-    return { deps, qualified: true };
+    return { deps, qualified: true, projectRoot: project.root };
   } catch (err) { return { response: projectReadResponse(err) }; }
 }
 
