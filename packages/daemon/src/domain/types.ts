@@ -1304,6 +1304,9 @@ export interface RigSpecPodMember {
    * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
    */
   starterRef?: StarterRefSpec;
+  /** #2829 slice 1 — opt-in queue-driven cold start: queued work targeting this
+   * dormant seat of a running rig launches just this seat's runner. Default off. */
+  coldStart?: boolean;
 }
 
 export interface RigSpecPodEdge {
@@ -1324,6 +1327,8 @@ export interface RigSpecPod {
   summary?: string;
   continuityPolicy?: ContinuityPolicySpec;
   startup?: StartupBlock;
+  /** #2829 slice 1 — pod-level default for member `cold_start`; a member's own flag wins. */
+  coldStart?: boolean;
   members: RigSpecPodMember[];
   edges: RigSpecPodEdge[];
 }
