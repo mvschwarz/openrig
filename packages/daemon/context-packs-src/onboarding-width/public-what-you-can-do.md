@@ -1596,7 +1596,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   without that storage), so don't copy them by hand; read the `plugin_skill_*` warnings if one
   is missing. TDD is no longer a default skill.
 - **`on_restore: follow_source`** on a spec's `resources.skills[]` entry refreshes that skill from its source when
-  a Claude or Codex seat is restored, keeping its conversation; `keep_saved`, the default, keeps the saved copy.
+  a Claude or Codex seat is restored, keeping its conversation; `keep_saved`, the default, keeps the saved copy, but a
+  skill whose source changed after `rig down` comes back missing, named in the restore's warnings.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.
