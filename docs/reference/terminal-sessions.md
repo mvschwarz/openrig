@@ -74,7 +74,11 @@ New tiles keep their place when a seat's tmux session is replaced. They wait up
 to 30 seconds for the same session name and managed seat identity to return,
 then show the new session with the original read-only setting. This uses the
 shared tile command for Herdr, cmux, Rex and plain tmux, including SSH tiles.
-In-place handover and restart keep showing the same session.
+In-place handover and restart keep showing the same session. The exception is
+an SSH tile when the local tmux server is isolated: it runs
+`rig terminal attach` on the seat's host (`--read-only` for a read-only tile),
+which attaches with tmux once (`tmux attach -r` for a read-only tile). It
+doesn't follow a replaced session or a restarted tmux server; reopen the view.
 
 Writable tiles attach immediately, as in 0.7.10. Their visible terminal sizes
 the agent's PTY under tmux's normal client sizing policy, and resizing the
@@ -368,14 +372,19 @@ redraws only after tmux records new activity, and lets the tile's own terminal
 wrap each line. A read-only tile narrower than the agent's window still shows
 whole lines, and showing a seat never changes its size. A rule drawn across the
 window is cut to the tile's width. A read-only tile has no scrollback of its
-own. A writable tile attaches with plain tmux when it opens (see
+own. (A read-only SSH tile on an isolated local server attaches read-only
+instead; see [Replacing a seat's session](#replacing-a-seats-session).) A
+writable tile attaches with plain tmux when it opens (see
 [Replacing a seat's session](#replacing-a-seats-session)): keys and paste go
 through tmux as in any attached client, tmux's prefix works (prefix then `[` to
 scroll back, for example), and the tile sizes the window while it's the active
 client. If the seat's tmux server restarts, a tile shows the seat again only
 when the same managed seat returns. The printed manual attach commands are
-plain `tmux attach -t` for a writable tile and `tmux attach -r -t` for a
-read-only one. Observers of a Herdr terminal do not themselves resize
+`tmux attach -t` for a writable tile and `tmux attach -r -t` for a read-only
+one, with a local seat's tmux server (`-L <name>` or `-S <path>`) when it
+isn't tmux's default socket. For a seat on another host they run over `ssh -t`, and
+when the local tmux server is isolated, as `rig terminal attach` on that host.
+Observers of a Herdr terminal do not themselves resize
 it; a controlling browser can. No cross-version resize guarantee is implied.
 
 To type into a seat without changing its size, send the text through OpenRig
