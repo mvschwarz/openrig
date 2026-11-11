@@ -6,6 +6,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
+import type { HostRegistryLoadResult } from "../src/host-registry.js";
+import type { HostBindingsFile } from "../src/host-bindings.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
@@ -1523,5 +1525,69 @@ describe("MCP Server", () => {
       expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "pending", reopen: true, transitionNote: "one more detail" });
       await cleanup();
     });
+  });
+});
+
+
+describe("MCP host routing", () => {
+  const noBindings: HostBindingsFile = { version: 1, bindings: {} };
+  const registryOf = (...hosts: Array<{ id: string; transport: "http" | "ssh"; url?: string; bearer_env?: string }>): HostRegistryLoadResult =>
+    ({ ok: true, registry: { hosts: hosts as unknown as never } });
+
+  function remoteMock(url = "http://127.0.0.1:17433"): DaemonClient {
+    const remote = new DaemonClient(url);
+    remote.get = vi.fn(async () => ({ status: 200, data: [] }));
+    remote.post = vi.fn(async () => ({ status: 200, data: {} }));
+    return remote;
+  }
+
+  async function run(local: DaemonClient, options: Parameters<typeof createMcpServer>[1], name: string, args: Record<string, unknown>) {
+    const server = createMcpServer(local, options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "test-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    try {
+      return await mcp.callTool({ name, arguments: args });
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  }
+
+  it("rig_ps with host reads that host's daemon with its bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const remote = remoteMock();
+    const local = mockClient();
+    const result = await run(local, {
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "unipc" });
+
+    expect(result.isError).toBeFalsy();
+    expect(remote.get).toHaveBeenCalledWith("/api/ps", { headers: { Authorization: "Bearer tok-123" } });
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an unregistered host is an error, never a quiet local read", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf(),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "nope" });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("unknown_host");
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an ssh host says MCP reaches http hosts only", async () => {
+    const result = await run(mockClient(), {
+      hostRegistryLoader: () => registryOf({ id: "remote-dev", transport: "ssh" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "remote-dev" });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("host_not_http");
   });
 });
