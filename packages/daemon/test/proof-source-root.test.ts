@@ -25,7 +25,7 @@ it("watches the owning project policy above a nested missions root", async () =>
   expect(readSliceReadiness(slice).state).toBe("ready");
   const events: unknown[] = [];
   let invalidated = 0;
-  const watch = watchProofSources(missions, () => invalidated++, {
+  const watch = await watchProofSources(missions, () => invalidated++, {
     emit: (event: unknown) => events.push(event),
   } as unknown as EventBus);
   try {
@@ -43,11 +43,11 @@ it("watches the owning project policy above a nested missions root", async () =>
   } finally { watch.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-it("retains the existing watch boundary for roots without project.yaml", () => {
+it("retains the existing watch boundary for roots without project.yaml", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "proof-legacy-root-"));
   const missions = path.join(root, "missions");
   fs.mkdirSync(missions);
-  const watch = watchProofSources(missions, () => {}, { emit() {} } as unknown as EventBus);
+  const watch = await watchProofSources(missions, () => {}, { emit() {} } as unknown as EventBus);
   try { expect(watch.observation().state).toBe("watching"); }
   finally { watch.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
