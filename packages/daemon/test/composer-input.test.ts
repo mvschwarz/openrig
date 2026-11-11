@@ -162,6 +162,15 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(claude("\x1b[2;38;5;245mAsk Codex to do anything\x1b[0m", { x: 2, y: 2 })).state).toBe("empty");
   });
 
+  it("recognizes only a single inverse-video Claude cursor blank at the prompt start", () => {
+    const cursor = { x: 2, y: 2 };
+    expect(inspectComposerInput(claude("\x1b[7m \x1b[0m", cursor))).toMatchObject({ state: "empty", rows: [""], cursorAtEnd: true });
+    for (const body of [" ", "\x1b[38;5;7m \x1b[0m", "\x1b[7m\x1b[27m ", "\x1b[7m \x1b[0mdraft"]) {
+      expect(inspectComposerInput(claude(body, cursor)).state).toBe("text");
+    }
+    expect(inspectComposerInput(claude("\x1b[7m \x1b[0m", { x: 3, y: 2 }))).toMatchObject({ state: "text", rows: [" "] });
+  });
+
   it("requires the complete owned text and preserves significant spaces", () => {
     const input = inspectComposerInput(claude("Run two commands\nthen report."));
     expect(composerContainsOwnedText(input, "Run two commands\nthen report.")).toBe(true);
