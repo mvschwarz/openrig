@@ -480,7 +480,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  function seedForeignPaneClaim(opts: { archived: boolean; status: "running" | "exited" }) {
+  function seedForeignPaneClaim(opts: { archived: boolean; status: "running" | "superseded" | "detached" | "exited" }) {
     const rig = rigRepo.createRig("seat-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/project" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
@@ -502,6 +502,39 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(liveSessionId(node.id)).not.toBe(sessionId);
     expect(sessionRegistry.getBindingForNode(node.id)).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it.each(["superseded", "detached"] as const)("reclaims the pane from a %s owner in an archived rig (#2861)", async (status) => {
+    const previous = seedForeignPaneClaim({ archived: true, status });
+    const { node } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("reclaims a pane claim whose owner node was deleted (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(previous.node.id);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: null });
+    const { node } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("reclaims a pane recorded as claimed without a claimant (#2861)", async () => {
+    const { node } = seedSeat();
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    db.prepare("UPDATE discovered_sessions SET status = 'claimed' WHERE id = ?").run(row.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(row.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
   });
 
   it("an archived claim owner with a newer running session still refuses (#2861)", async () => {
@@ -558,8 +591,9 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
   });
 
-  it("does not overwrite a live node's new claim during the presence probe (#2861)", async () => {
+  it.each([false, true])("does not overwrite a new claim during the presence probe; original owner deleted=%s (#2861)", async (deleted) => {
     const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    if (deleted) db.prepare("DELETE FROM nodes WHERE id = ?").run(previous.node.id);
     const { rig, node, sessionId } = seedSeat();
     const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
     const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
@@ -576,11 +610,13 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
   });
 
-  it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
+  it.each([false, true])("a foreign pane claim refuses with a running session present=%s (#237 holds)", async (runningSession) => {
     const { rig, node, sessionId } = seedSeat();
     const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
-    const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
-    sessionRegistry.updateStatus(running.id, "running");
+    if (runningSession) {
+      const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+      sessionRegistry.updateStatus(running.id, "running");
+    }
     const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
     discoveryRepo.markClaimed(row.id, other.id);
 

@@ -823,12 +823,12 @@ export class SeatHandoverService {
     }
     // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
     // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
-    // this seat's own, so commit re-claims it. #2861: an exited owner in an archived earlier rig can
-    // also leave that pane claimed. Other owners and discovered-source successors still refuse.
+    // this seat's own, so commit re-claims it. #2861: a deleted owner or a terminal owner in an archived
+    // earlier rig can also leave that pane claimed. Other owners and discovered-source successors still refuse.
     const ownPaneClaim = input.reportedSource.mode !== "discovered"
       && discovered.status === "claimed"
       && discovered.tmuxSession === input.latestSession.session_name
-      && (discovered.claimedNodeId === input.node.id || this.isArchivedExitedNode(discovered.claimedNodeId));
+      && (discovered.claimedNodeId === input.node.id || this.isStalePaneClaimOwner(discovered.claimedNodeId));
     if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
@@ -1240,11 +1240,12 @@ export class SeatHandoverService {
     return findOtherSessionOwner(this.db, tmuxSession, targetNodeId, { ignoreArchived });
   }
 
-  private isArchivedExitedNode(nodeId: string | null): boolean {
+  private isStalePaneClaimOwner(nodeId: string | null): boolean {
+    if (nodeId === null) return true; // ON DELETE SET NULL retains the claim after its owner is removed.
     return this.db.prepare(`
       SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
       WHERE n.id = ? AND r.archived_at IS NOT NULL
-        AND (SELECT status FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) = 'exited'
+        AND (SELECT status FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) IN ('superseded', 'detached', 'exited')
     `).pluck().get(nodeId) === 1;
   }
 
@@ -1274,7 +1275,7 @@ export class SeatHandoverService {
       if (input.discovered.status === "claimed" && input.discovered.claimedNodeId !== input.node.id) {
         const current = this.discoveryRepo.getDiscoveredSession(input.discovered.id);
         if (current?.status !== "claimed" || current.claimedNodeId !== input.discovered.claimedNodeId
-          || !this.isArchivedExitedNode(current.claimedNodeId)) {
+          || !this.isStalePaneClaimOwner(current.claimedNodeId)) {
           return null;
         }
       }
@@ -1398,7 +1399,7 @@ export class SeatHandoverService {
         return {
           ok: false,
           code: "discovered_not_active",
-          message: `Discovery record "${input.discovered.id}" no longer has a stale archived-owner claim.`,
+          message: `Discovery record "${input.discovered.id}" no longer has a stale owner claim.`,
           guidance: "Inspect the current discovery owner and successor state before retrying.",
         };
       }
