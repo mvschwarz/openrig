@@ -26,7 +26,7 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   seat's own `OPENRIG_NODE_ID`, on the server and session it read. A terminal
   OpenRig didn't create, a mismarked one or a replaced one is left running, and
   `rig down` exits 2 naming it and how to stop it yourself. A seat joined with
-  `rig attach --self` is in that group. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
+  `rig attach --self` from a tmux pane is in that group. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
 - **openrig-core is 0.1.28.** A Codex session kept running across the upgrade
   can ask for hook approval until it's relaunched.
 
@@ -62,9 +62,10 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 - Queue content can be erased for closed-work retention and account deletion,
   and a retried create can't bring erased work back. ([#2837](https://github.com/mvschwarz/openrig/pull/2837), [#2843](https://github.com/mvschwarz/openrig/pull/2843))
-- Each send records what's known about its delivery in one
+- A send records what's known about its delivery in one
   `transport.delivery_evidence` event: what was admitted, what reached the
-  input, what the screen check showed, and for which occupant. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
+  input, what the screen check showed, and for which occupant. The record is
+  best effort, so a missing one doesn't show there was no send. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
 - `rig queue create` advises on an unresolved scope, slice lists show observed
   queue counts, a proof policy can require every listed judge, the execution
   ladder shows each slice's recorded status, `rig queue show` names a handed-off
@@ -150,7 +151,7 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   It doesn't keep a stored host or boot identity, doesn't guard against another
   program running as you, and a daemon restart between losing the tmux server
   and the stop wasn't exercised. For an adopted session, such as a seat joined
-  with `rig attach --self`, `rig seat stop` still suggests `rig down`, which
+  with `rig attach --self` from a tmux pane, `rig seat stop` still suggests `rig down`, which
   leaves that terminal running too. Release it with `rig unclaim <session>`
   (that leaves its process running), then close it in its own terminal. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
 - **Codex working counter:** a capture that doesn't name its pane keeps the old
