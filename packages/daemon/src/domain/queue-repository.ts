@@ -1055,6 +1055,8 @@ export class QueueRepository {
    *     best-effort {@link maybeNudge} when no store is attached (P34 made that
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
+  /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
+  private wakeWithoutReceiverNotifier: ((destinationSession: string) => void) | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1305,6 +1307,13 @@ export class QueueRepository {
       );
     }
     this.outbox = outbox;
+  }
+
+  /** #2829 slice 1 — late-wired cold-start notifier. Fired (fire-and-forget, never
+   * awaited, never throwing) whenever a wake's destination provably has no receiver:
+   * the drain's skip branch and the unroutable send classification both land here. */
+  attachWakeWithoutReceiverNotifier(notifier: (destinationSession: string) => void): void {
+    this.wakeWithoutReceiverNotifier = notifier;
   }
 
   /** The one transition-write classifier. It consumes structured state/action facts only. */
@@ -1663,6 +1672,12 @@ export class QueueRepository {
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
       trigger, recheckMembers,
     );
+    // #2829 slice 1 — a failed wake send is re-classified with the no-receiver rule:
+    // a seat positively proven without a receiver here (its session is gone or the
+    // address is unroutable) triggers the cold-start notifier. Best-effort only.
+    if (outcome.classified === "failed") {
+      try { this.wakeHasNoReceiver(intent.destinationSession); } catch { /* never changes the send's outcome */ }
+    }
     let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered" : outcome.classified;
     for (const intent of group) {
       if (released.includes(intent)) continue;
@@ -1819,14 +1834,25 @@ export class QueueRepository {
   private wakeHasNoReceiver(destinationSession: string): boolean {
     try {
       const destClass = this.classifyDestinationOf(destinationSession).class;
-      if (destClass === "unroutable") return true;
+      if (destClass === "unroutable") return this.noteWakeWithoutReceiver(destinationSession);
       if (destClass !== "pane-bound") return false;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
         .get(physicalSessionName(this.db, destinationSession)) as { status: string } | undefined;
-      return newest?.status === "exited" || newest?.status === "detached";
+      return (newest?.status === "exited" || newest?.status === "detached") && this.noteWakeWithoutReceiver(destinationSession);
     } catch {
       return false;
     }
+  }
+
+  /** #2829 slice 1 — positive no-receiver evidence is the cold-start trigger. The notifier is
+   * fire-and-forget and can never change the predicate's value or throw into its caller. */
+  private noteWakeWithoutReceiver(destinationSession: string): boolean {
+    try {
+      this.wakeWithoutReceiverNotifier?.(destinationSession);
+    } catch {
+      /* a notifier failure must never change delivery semantics */
+    }
+    return true;
   }
 
   /**
@@ -2040,6 +2066,9 @@ export class QueueRepository {
       };
     }
     if (destClass.class === "unroutable") {
+      // #2829 slice 1 — positive no-receiver evidence: the queue's cold-start
+      // trigger. Fire-and-forget; it can never change this classification.
+      this.noteWakeWithoutReceiver(destinationSession);
       return { classified: "failed", nudgeResult: destClass.teaching };
     }
     // A hosted member with a trigger: ring it. Accepted is indeterminate, never verified: pickup is its claim.

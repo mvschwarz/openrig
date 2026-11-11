@@ -5,6 +5,7 @@ import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_i
 import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
 import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
+import { seatColdStartsSchema } from "./migrations/158_seat_cold_starts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -317,4 +318,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueErasureSchema,
   queueErasureLinkIndexesSchema,
   queueErasureBatchesSchema,
+  seatColdStartsSchema,
 ];

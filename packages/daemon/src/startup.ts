@@ -1,4 +1,5 @@
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
+import { SeatColdStarter } from "./domain/seat-cold-start.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -840,6 +841,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
   });
+
+  // #2829 slice 1 — queue-driven seat cold start: the queue's positive no-receiver
+  // evidence hands dormant opted-in seats of running rigs to the existing single-seat
+  // launch door (launchSingleNode), which holds the delivery-guard lifecycle lease.
+  // Late-wired here because the restore orchestrator is constructed after the queue.
+  const seatColdStarter = new SeatColdStarter({
+    db,
+    launchSingleNode: (rigId, logicalId) => restoreOrchestrator.launchSingleNode(rigId, logicalId),
+    hasSession: (sessionName) => tmuxAdapter.hasSession(sessionName),
+    getNodeLaunchRecipe: (nodeId) => rigRepo.getNodeLaunchRecipe(nodeId),
+  });
+  queueRepoInstance.attachWakeWithoutReceiverNotifier(destination => seatColdStarter.notify(destination));
 
   // Connect to cmux at startup — degrades gracefully if absent
   await cmuxAdapter.connect();
