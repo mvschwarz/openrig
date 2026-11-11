@@ -1546,8 +1546,9 @@ export class SliceIndexer {
     // known mission IDs overlap, the longest prefix owns the directory. This
     // is a fixture-supported rule, not a historically documented contract.
     // Unqualified reads retain their legacy slice-only token match. Once a
-    // qualified directory is attributed, slice tokens and `vN` handling are
-    // unchanged; latest mtime remains the tie-break among same-mission matches.
+    // qualified directory is attributed, slice tokens match against the
+    // remainder after that mission prefix and separator (`vN` handling unchanged);
+    // latest mtime remains the tie-break among same-mission matches.
     let knownMissionIds: Set<string> | null = null;
     if (missionId) {
       knownMissionIds = this.discoverMissionIds();
@@ -1558,7 +1559,8 @@ export class SliceIndexer {
     for (const dirent of entries) {
       if (!dirent.isDirectory()) continue;
       if (knownMissionIds && this.proofDirectoryMissionOwner(dirent.name, knownMissionIds) !== missionId) continue;
-      const dirTokenSet = new Set(dirent.name.split(/[-._]/).filter((t) => t.length > 0));
+      const tokenSource = knownMissionIds && missionId ? dirent.name.slice(missionId.length + 1) : dirent.name;
+      const dirTokenSet = new Set(tokenSource.split(/[-._]/).filter((t) => t.length > 0));
       const allTokensPresent = sliceTokens.every((t) => dirTokenSet.has(t));
       if (!allTokensPresent) continue;
       try {
