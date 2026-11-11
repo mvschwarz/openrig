@@ -138,3 +138,18 @@ describe("pairing settings, round 1", () => {
     }
   });
 });
+
+describe("the decide notice escapes what the request carries", () => {
+  it("a requester with control characters or an escape sequence is shown escaped, never written to the terminal raw", async () => {
+    const hostile = "evil\x1b[2J\x1b]0;owned\x07@far-host";
+    const act = { ...approveAct, requester: hostile };
+    const gone: PairDecisionClient = { pairRequests: async () => ({ requests: [] }), pairDecision: async () => ({ status: 200, body: {} }) };
+    const notice = await decidePairRequest(gone, act);
+    expect(notice).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/);
+    expect(notice).toContain("evil\\x1b[2J\\x1b]0;owned\\x07@far-host");
+    // The daemon's own refusal can quote the requester too: escaped the same way.
+    const refusing: PairDecisionClient = { pairRequests: async () => ({ requests: [request({ requester: hostile })] }),
+      pairDecision: async () => ({ status: 409, body: { error: "pair_request_decided", message: `Pairing request 482913 from ${hostile} was already denied` } }) };
+    expect(await decidePairRequest(refusing, act)).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/);
+  });
+});

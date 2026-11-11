@@ -1,4 +1,4 @@
-import { listItem, sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
+import { escapeControlChars, listItem, sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { Action } from "../types.js";
 
 /** One open pairing request on this host, as GET /api/hosts/pair-requests serves it. */
@@ -68,6 +68,12 @@ export interface PairDecisionClient {
  *  decided, is reported and nothing is sent; then decide. When the decision can't be confirmed (a timeout or a lost
  *  connection), the outcome is unknown: it reads the request again and says what that shows, never deciding a second time. */
 export async function decidePairRequest(client: PairDecisionClient, act: PairDecisionAct): Promise<string> {
+  // The notice is printed on the status line, which nothing else cleans: the requester is a host not yet paired, and the
+  // daemon's own messages can quote it, so the whole notice is escaped as the list's lines are.
+  return escapeControlChars(await decideOnce(client, act));
+}
+
+async function decideOnce(client: PairDecisionClient, act: PairDecisionAct): Promise<string> {
   const what = `Pairing request ${act.code} from ${act.requester}`;
   const find = async () => (await client.pairRequests()).requests.find((r) => r.approvalQitemId === act.request);
   let before: PairRequest | undefined;
