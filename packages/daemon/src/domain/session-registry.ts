@@ -794,7 +794,7 @@ export class SessionRegistry {
         `SELECT s.* FROM sessions s
          JOIN nodes n ON s.node_id = n.id
          WHERE n.rig_id = ?
-         ORDER BY s.created_at`
+         ORDER BY s.created_at, s.rowid`
       )
       .all(rigId) as SessionRow[];
 
