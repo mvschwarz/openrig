@@ -42,6 +42,9 @@ export function hubFailure(error: unknown): HubError {
   if (error instanceof StreamableHTTPError && error.code === 401) {
     return new HubError("revoked", "The hub refused this participant's credential: it's unknown there or was revoked.");
   }
+  if (error instanceof StreamableHTTPError && typeof error.code === "number" && error.code >= 300 && error.code < 400) {
+    return new HubError("unavailable", `The hub redirected the connection somewhere else, and the participant's token isn't sent there (${error.message.slice(0, 300)}). Connect the binding to the hub's own URL.`);
+  }
   const message = error instanceof Error ? error.message : String(error);
   return new HubError("unavailable", `The hub couldn't be reached: ${message.slice(0, 300)}`);
 }
@@ -67,9 +70,14 @@ const item = (value: unknown): HubItem => {
   };
 };
 
-/** Connect to a hub as one participant. The bearer goes only in this transport's Authorization header. */
+/** Connect to a hub as one participant. The bearer goes only in this transport's Authorization header. The SDK's
+ *  same-origin policy, set explicitly, follows a redirect only within the hub's origin (or its https form on the same
+ *  host), so the bearer never goes to another origin; any other redirect fails with its target named. */
 export const connectMcpHub: HubConnect = async (hubUrl, token) => {
-  const transport = new StreamableHTTPClientTransport(new URL(hubUrl), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+  const transport = new StreamableHTTPClientTransport(new URL(hubUrl), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    redirectPolicy: "same-origin",
+  });
   const client = new Client({ name: "openrig-network-connector", version: "1" });
   try {
     await client.connect(transport);

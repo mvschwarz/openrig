@@ -2,7 +2,8 @@ import type { Migration } from "../migrate.js";
 
 /** A selected local seat joined to one participant of a remote hub (an account's network rig, reached over MCP). The
  *  participant's credential lives in a private file under the OpenRig home, never in this table. One active binding per
- *  local seat and per hub participant; a disconnected or revoked binding stays as history. */
+ *  local seat and per hub participant; a disconnected or revoked binding stays as history. `allow_http` records the
+ *  person's choice to send the participant's token to a plain-http hub. */
 export const networkBindingsSchema: Migration = {
   name: "160_network_bindings.sql",
   sql: `
@@ -12,6 +13,7 @@ export const networkBindingsSchema: Migration = {
       local_session TEXT NOT NULL,
       hub_url TEXT NOT NULL,
       hub_seat TEXT NOT NULL,
+      allow_http INTEGER NOT NULL DEFAULT 0 CHECK (allow_http IN (0, 1)),
       state TEXT NOT NULL CHECK (state IN ('active', 'revoked', 'disconnected')),
       state_reason TEXT,
       created_at TEXT NOT NULL,

@@ -62,6 +62,30 @@ describe("network bindings", () => {
     expect(store.list()).toHaveLength(1);
   });
 
+  it("plain http needs the person's choice: refused with the remedy, then recorded and marked unencrypted with --allow-http", () => {
+    seat("a@lab");
+    const http = { hubUrl: "http://hub.internal:7433/mcp" };
+    let message = "";
+    try { connect("a@lab", http); } catch (error) {
+      expect(error).toMatchObject({ code: "http_not_allowed", status: 400 });
+      message = (error as Error).message;
+    }
+    expect(message).toContain("unencrypted");
+    expect(message).toContain("https URL");
+    expect(message).toContain("--allow-http");
+    expect(store.list()).toHaveLength(0);
+    expect(existsSync(join(home, "network-secrets"))).toBe(false);
+
+    const binding = connect("a@lab", { ...http, allowHttp: true });
+    // The scheme is kept as given, never switched.
+    expect(binding).toMatchObject({ hubUrl: "http://hub.internal:7433/mcp", allowHttp: true, unencrypted: true });
+    expect(store.list()).toEqual([expect.objectContaining({ id: binding.id, allowHttp: true, unencrypted: true })]);
+    expect(JSON.stringify(store.list())).not.toContain("tok-123");
+    // https needs no choice and isn't marked.
+    seat("b@lab");
+    expect(connect("b@lab", { hubSeat: "b@team" })).toMatchObject({ hubUrl: "https://hub.example/mcp", allowHttp: false, unencrypted: false });
+  });
+
   it("disconnect ends the binding by id or by seat, removes the credential, and frees the seat to connect again", () => {
     seat("a@lab");
     const first = connect("a@lab");

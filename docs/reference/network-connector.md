@@ -18,6 +18,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 - The binding follows the seat's node, so a relaunched or renamed seat keeps it.
 - The token is stored at `<OpenRig home>/network-secrets/<binding>/credential.json` (a 0700 folder and a 0600 file). It
   is never returned by the API or shown in status. A token in the hub URL is refused.
+- A plain-http hub URL needs `--allow-http` (see Limits).
 - One active binding per local seat, and one per hub participant.
 - On a daemon with an operator bearer configured, `connect` and `disconnect` send `OPENRIG_AUTH_BEARER_TOKEN`, as the
   `rig host` writes do.
@@ -83,4 +84,11 @@ each time it starts.
 ## Limits
 
 - The connector polls, so new work can wait up to one interval before it reaches the seat.
-- A hub URL may use `https:` or `http:`. With `http:`, the participant's token crosses the network unencrypted.
+- **Plain http needs your choice.** `rig network connect` refuses an `http:` hub URL until you add `--allow-http`, because
+  the participant's token and its work then cross the network unencrypted, where they can be read. Use the hub's
+  `https:` URL where it has one. The choice is recorded on that binding, so the connector doesn't ask again, and
+  `rig network status` (and its `--json`) marks the binding unencrypted. OpenRig doesn't judge the address: a private or
+  tailnet address doesn't prove the connection is protected.
+- **Redirects:** the connector follows a hub's redirect only within its own origin, or to its `https:` form on the same
+  host. Any other redirect stops the connection with its target named, and the token isn't sent there. Connect the
+  binding to the hub's own URL.

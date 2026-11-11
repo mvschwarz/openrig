@@ -18,6 +18,10 @@ export interface NetworkBinding {
   hubUrl: string;
   /** The participant's address in the hub (`member@rig`). */
   hubSeat: string;
+  /** The person chose, for this binding, to send the participant's token to a plain-http hub. */
+  allowHttp: boolean;
+  /** The hub URL is plain http, so the token and the work cross the network unencrypted. */
+  unencrypted: boolean;
   state: NetworkBindingState;
   stateReason: string | null;
   createdAt: string;
@@ -33,13 +37,13 @@ export class NetworkBindingError extends Error {
 }
 
 interface Row {
-  id: string; node_id: string; local_session: string; hub_url: string; hub_seat: string; state: NetworkBindingState;
+  id: string; node_id: string; local_session: string; hub_url: string; hub_seat: string; allow_http: number; state: NetworkBindingState;
   state_reason: string | null; created_at: string; updated_at: string; last_contact_at: string | null; last_error: string | null;
 }
 
 const project = (row: Row): NetworkBinding => ({
   id: row.id, nodeId: row.node_id, localSession: row.local_session, hubUrl: row.hub_url, hubSeat: row.hub_seat,
-  state: row.state, stateReason: row.state_reason, createdAt: row.created_at, updatedAt: row.updated_at,
+  allowHttp: row.allow_http === 1, unencrypted: row.hub_url.startsWith("http:"), state: row.state, stateReason: row.state_reason, createdAt: row.created_at, updatedAt: row.updated_at,
   lastContactAt: row.last_contact_at, lastError: row.last_error,
 });
 
@@ -73,13 +77,18 @@ export function readNetworkCredential(home: string, bindingId: string): string {
   return value.token;
 }
 
-function validHubUrl(raw: unknown): string {
+function validHubUrl(raw: unknown, allowHttp: boolean): string {
   if (typeof raw !== "string" || !raw.trim()) throw new NetworkBindingError("invalid_hub_url", "A hub URL is required.");
   let url: URL;
   try { url = new URL(raw.trim()); } catch { throw new NetworkBindingError("invalid_hub_url", `'${raw}' isn't a URL.`); }
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new NetworkBindingError("invalid_hub_url", "The hub URL must use https (or http).");
   // A credential in the URL would be stored in plain text in this table and shown in status.
   if (url.username || url.password) throw new NetworkBindingError("invalid_hub_url", "Put the participant's token in its token file, not in the hub URL.");
+  // Plain http is the person's choice per binding. The scheme is kept as given, and the address isn't judged: a private
+  // or tailnet address doesn't prove the connection is protected.
+  if (url.protocol === "http:" && !allowHttp) {
+    throw new NetworkBindingError("http_not_allowed", `${url.toString()} is plain http, so the participant's token and its work would cross the network unencrypted, where they can be read. Use the hub's https URL, or connect again with --allow-http to accept that for this binding.`);
+  }
   return url.toString();
 }
 
@@ -131,12 +140,13 @@ export class NetworkBindingStore {
   /** Bind a local seat to a hub participant with that participant's token. The credential is written first, exclusively
    *  and private, then the row. If either step fails, the credential this call created is removed, so a refused bind
    *  leaves none behind; a file that was already at that path is never touched. */
-  create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown }): NetworkBinding {
+  create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown; allowHttp?: unknown }): NetworkBinding {
     const session = typeof input.session === "string" ? input.session.trim() : "";
     if (!session) throw new NetworkBindingError("invalid_seat", "Name the local seat to connect.");
     const nodeId = resolveSessionNodeId(this.db, session);
     if (!nodeId) throw new NetworkBindingError("seat_not_found", `No local seat is named '${session}'.`, 404);
-    const hubUrl = validHubUrl(input.hubUrl);
+    const allowHttp = input.allowHttp === true;
+    const hubUrl = validHubUrl(input.hubUrl, allowHttp);
     const hubSeat = validHubSeat(input.hubSeat);
     const token = validToken(input.token);
     const bound = this.db.prepare("SELECT id FROM network_bindings WHERE node_id = ? AND state = 'active'").get(nodeId) as { id: string } | undefined;
@@ -154,8 +164,8 @@ export class NetworkBindingStore {
       created = true;
       try { writeFileSync(fd, `${JSON.stringify({ version: 1, token })}\n`); } finally { closeSync(fd); }
       const at = this.now().toISOString();
-      this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`).run(id, nodeId, session, hubUrl, hubSeat, at, at);
+      this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, allow_http, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`).run(id, nodeId, session, hubUrl, hubSeat, allowHttp ? 1 : 0, at, at);
     } catch (error) {
       // Only what this call made: the file it opened, and this binding's folder if it made it (`mkdirSync` returns the
       // first folder it made, so any value means this one is new). A folder that was already there keeps its other files.

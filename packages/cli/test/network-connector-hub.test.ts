@@ -82,7 +82,8 @@ it("takes the participant's item over the wire, carries pickup and the result ba
 
   const localRepo = queue(localDb);
   const bindings = new NetworkBindingStore(localDb, localHome);
-  const binding = bindings.create({ session: "dev-impl@lab", hubUrl, hubSeat: "alex@team", token });
+  // The test hub listens on loopback http, so the binding records the person's --allow-http choice.
+  const binding = bindings.create({ session: "dev-impl@lab", hubUrl, hubSeat: "alex@team", token, allowHttp: true });
   const deps: NetworkConnectorDeps = { db: localDb, queueRepo: localRepo, bindings, home: localHome };
   const pass = () => runNetworkBindingPass(deps, bindings.get(binding.id)!);
   const notes = () => hubRepo.listTransitions(task.qitemId).map((t) => t.transitionNote).filter(Boolean);

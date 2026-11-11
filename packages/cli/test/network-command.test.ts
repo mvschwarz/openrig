@@ -79,6 +79,26 @@ it("names the daemon's refusal and exits 1, and an unreadable token file sends n
   expect((await app.request("/api/network/bindings").then((r) => r.json()) as { bindings: unknown[] }).bindings).toHaveLength(0);
 });
 
+it("a plain-http hub needs --allow-http: refused with the remedy, then connected and shown unencrypted in status and JSON", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const args = ["node", "rig", "network", "connect", "dev-impl@lab", "--hub", "http://192.0.2.7:7433/mcp", "--as", "alex@team", "--token-file", "/tok"];
+  await cli({ "/tok": "tok-abc" }).parseAsync(args);
+  expect(process.exitCode).toBe(1);
+  expect(String(err.mock.calls.at(-1)?.[0])).toMatch(/plain http, .*unencrypted.*--allow-http to accept that for this binding\. \(http_not_allowed\)$/);
+  process.exitCode = undefined;
+
+  await cli({ "/tok": "tok-abc" }).parseAsync([...args, "--allow-http"]);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Connected netb-[0-9a-f]{20}  dev-impl@lab -> alex@team at http:\/\/192\.0\.2\.7:7433\/mcp  UNENCRYPTED \(http, allowed for this binding\)/);
+  await cli().parseAsync(["node", "rig", "network", "status"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).toContain("UNENCRYPTED (http, allowed for this binding)");
+  await cli().parseAsync(["node", "rig", "network", "status", "--json"]);
+  const json = String(out.mock.calls.at(-1)?.[0]);
+  expect(JSON.parse(json).bindings).toEqual([expect.objectContaining({ hubUrl: "http://192.0.2.7:7433/mcp", allowHttp: true, unencrypted: true })]);
+  expect(json).not.toContain("tok-abc");
+});
+
 it("sends the operator bearer on its writes, so a daemon with one configured takes them", async () => {
   app = routesWith("op-secret");
   const out = vi.spyOn(console, "log").mockImplementation(() => {});

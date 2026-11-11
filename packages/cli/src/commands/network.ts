@@ -12,7 +12,7 @@ export interface NetworkDeps {
 
 interface Binding {
   id: string; localSession: string; hubUrl: string; hubSeat: string; state: string; stateReason: string | null;
-  lastContactAt: string | null; lastError: string | null;
+  lastContactAt: string | null; lastError: string | null; unencrypted?: boolean;
 }
 
 /** The participant's token, read from the file the account gave the person. A file others can read is used, with a note. */
@@ -26,7 +26,8 @@ function defaultReadTokenFile(path: string): string {
 function line(b: Binding): string {
   const contact = b.lastContactAt ? `last contact ${b.lastContactAt}` : "no contact yet";
   const state = b.state === "active" ? contact : `${b.state}${b.stateReason ? ` (${b.stateReason})` : ""}`;
-  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${b.hubUrl}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}`;
+  const plain = b.unencrypted ? "  UNENCRYPTED (http, allowed for this binding)" : "";
+  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${b.hubUrl}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}`;
 }
 
 /** `rig network`: connect a selected local seat to a participant of a remote hub (an account's network rig, or
@@ -58,8 +59,9 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .requiredOption("--hub <url>", "The hub's MCP URL")
     .requiredOption("--as <participant>", "The participant's address in the hub (member@rig)")
     .requiredOption("--token-file <path>", "A file holding the participant's token")
+    .option("--allow-http", "Accept a plain-http hub for this binding: its token and work cross the network unencrypted")
     .option("--json", "Print JSON")
-    .action(async (seat: string, opts: { hub: string; as: string; tokenFile: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { hub: string; as: string; tokenFile: string; allowHttp?: boolean; json?: boolean }) => {
       let token: string;
       try { token = (getDeps().readTokenFile ?? defaultReadTokenFile)(opts.tokenFile); } catch (error) {
         console.error(`Can't read the token file: ${(error as Error).message}`);
@@ -68,7 +70,7 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
       }
       const daemon = await client();
       if (!daemon) return;
-      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token }, { headers: operatorAuthHeaders() });
+      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token, allowHttp: opts.allowHttp === true }, { headers: operatorAuthHeaders() });
       finish(res.status, res.data, opts.json, (b) => `Connected ${line(b as unknown as Binding)}\nWork for ${opts.as} reaches ${seat} once the connector runs; rig network status shows its last contact.`);
     });
 

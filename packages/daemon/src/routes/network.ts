@@ -29,7 +29,7 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
     let body: Record<string, unknown>;
     try { body = await c.req.json(); } catch { return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400); }
     try {
-      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token }), 201);
+      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token, allowHttp: body.allowHttp }), 201);
     } catch (error) { return refused(c, error); }
   });
 

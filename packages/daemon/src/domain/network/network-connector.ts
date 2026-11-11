@@ -41,7 +41,7 @@ export interface NetworkPassResult {
   resultsSent: number;
   unknown: number;
   /** Why the pass stopped early, if it did. `revoked` ended the binding; `no_session` left the hub's items pending. */
-  error?: HubError["kind"] | "credential" | "no_session";
+  error?: HubError["kind"] | "credential" | "no_session" | "http_not_allowed";
 }
 
 /** The seat's current address: the node's latest session, as the queue's other node lookups read it. */
@@ -62,6 +62,11 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
   const now = deps.now ?? (() => new Date());
   const result: NetworkPassResult = { bindingId: binding.id, taken: 0, pickupsSent: 0, resultsSent: 0, unknown: 0 };
   const active = () => deps.bindings.get(binding.id)?.state === "active";
+  // The token goes to a plain-http hub only on the person's recorded choice for this binding.
+  if (binding.unencrypted && !binding.allowHttp) {
+    deps.bindings.recordError(binding.id, `${binding.hubUrl} is plain http and this binding has no --allow-http choice, so its token isn't sent. Connect again with the hub's https URL, or with --allow-http.`);
+    return { ...result, error: "http_not_allowed" };
+  }
   let token: string;
   try {
     token = readNetworkCredential(deps.home, binding.id);

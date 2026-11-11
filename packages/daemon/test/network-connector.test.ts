@@ -257,6 +257,47 @@ describe("network connector", () => {
     expect(lines).toEqual([`network connector: removed the credentials of ended bindings ${b.id}`]);
   });
 
+  it("a plain-http binding with its recorded choice is used pass after pass, and one without a choice sends no token", async () => {
+    const b = bindings.create({ session: "dev-impl@lab", hubUrl: "http://192.0.2.7:7433/mcp", hubSeat: PARTICIPANT, token: "tok-1", allowHttp: true });
+    hub.add("hub-9");
+    expect((await pass(b.id)).error).toBeUndefined();
+    expect((await pass(b.id)).error).toBeUndefined();
+    expect(hub.tokens).toEqual(["tok-1", "tok-1"]);
+    expect(runs("hub-9")).toHaveLength(1);
+
+    db.prepare("UPDATE network_bindings SET allow_http = 0 WHERE id = ?").run(b.id);
+    expect(await pass(b.id)).toMatchObject({ error: "http_not_allowed" });
+    expect(hub.tokens).toHaveLength(2);
+    expect(bindings.get(b.id)!.lastError).toContain("--allow-http");
+  });
+
+  it("a hub that redirects to another origin gets no token there, and the error names where it pointed", async () => {
+    const { createServer } = await import("node:http");
+    const listen = (handler: Parameters<typeof createServer>[1]) => new Promise<{ url: string; close: () => Promise<void> }>((resolve) => {
+      const server = createServer(handler).listen(0, "127.0.0.1", () => {
+        const port = (server.address() as { port: number }).port;
+        resolve({ url: `http://127.0.0.1:${port}/mcp`, close: () => new Promise((done) => server.close(() => done())) });
+      });
+    });
+    const elsewhere: Array<string | undefined> = [];
+    const other = await listen((req, res) => { elsewhere.push(req.headers.authorization); res.writeHead(500).end(); });
+    const asked: Array<string | undefined> = [];
+    const hubServer = await listen((req, res) => { asked.push(req.headers.authorization); res.writeHead(307, { Location: other.url }).end(); });
+    try {
+      const b = bindings.create({ session: "dev-impl@lab", hubUrl: hubServer.url, hubSeat: PARTICIPANT, token: "tok-redirect", allowHttp: true });
+      const result = await runNetworkBindingPass({ db, queueRepo: repo, bindings, home }, bindings.get(b.id)!);
+      expect(result.error).toBe("unavailable");
+      expect(asked[0]).toBe("Bearer tok-redirect");
+      expect(elsewhere).toEqual([]);
+      expect(bindings.get(b.id)!.lastError).toContain("redirected the connection somewhere else");
+      expect(bindings.get(b.id)!.lastError).toContain(other.url);
+      expect(bindings.get(b.id)!.state).toBe("active");
+    } finally {
+      await hubServer.close();
+      await other.close();
+    }
+  });
+
   it("with no active binding, a round reaches no hub", async () => {
     const service = new NetworkConnectorService(deps, { intervalMs: 1000 });
     await service.round();
