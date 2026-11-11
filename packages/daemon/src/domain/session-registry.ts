@@ -124,14 +124,25 @@ export interface CurrentSessionAddress {
  * Physical names win over derived names. Archived/historical bindings cannot
  * advertise a new alias, and two current matches never pick an arbitrary seat. */
 export function resolveCurrentSessionAddress(db: Database.Database, address: string): CurrentSessionAddress | null {
-  const rows = db.prepare(`SELECT r.*, n.id AS nodeId, n.logical_id AS logicalId,
+  const current = `SELECT r.name, r.archived_at, n.id AS nodeId, n.logical_id AS logicalId,
       s.id AS sessionId, s.session_name AS sessionName, s.status,
       replace(n.logical_id, '.', '-') || '@' || r.name AS senderAddress
     FROM nodes n JOIN rigs r ON r.id=n.rig_id
     JOIN bindings b ON b.node_id=n.id AND b.tmux_session IS NOT NULL
-    JOIN sessions s ON s.node_id=n.id AND s.session_name=b.tmux_session
-      AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
-    WHERE s.session_name=? OR replace(n.logical_id, '.', '-') || '@' || r.name=?`)
+    CROSS JOIN sessions s ON s.node_id=n.id AND s.session_name=b.tmux_session
+      AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)`;
+  // Inventory passes physical names for every seat. The OR with a derived alias
+  // made each lookup walk all nodes (or all historical sessions). Seek the exact
+  // name first; only an absent active exact match needs the alias walk. Keep this
+  // in one statement so both alternatives observe the same database snapshot.
+  const rows = db.prepare(`WITH exact AS MATERIALIZED (
+      ${current} WHERE b.tmux_session=? AND r.archived_at IS NULL
+        AND COALESCE(s.status, '') NOT IN ('superseded', 'detached', 'exited')
+    ) SELECT * FROM exact
+    UNION ALL
+    ${current}
+    WHERE replace(n.logical_id, '.', '-') || '@' || r.name=?
+      AND NOT EXISTS (SELECT 1 FROM exact)`)
     .all(address, address) as Array<CurrentSessionAddress & { name: string; archived_at?: string | null; status: string }>;
   const active = rows.filter(row => row.archived_at == null && !['superseded', 'detached', 'exited'].includes(row.status));
   const exact = active.filter(row => row.sessionName === address);
