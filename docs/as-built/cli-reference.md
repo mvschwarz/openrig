@@ -367,7 +367,10 @@ registered person can approve (none, or several with no default; name one with
 `--human`) (`packages/daemon/src/routes/hosts.ts:379-398`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
-approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+approval says how long and until when, in UTC. A target that reports who was asked (`person`) and who reads their answer (`owner`), or why
+nobody does yet (`noReader`), has `rig host pair` name them; an older target's reply keeps the general text. With
+nobody registered on the target, its refusal (409 `pair_human_required`) says to register a person there:
+`rig gateway human add <entityId> --display-name <name> --delivery-class B --default`. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
 On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on

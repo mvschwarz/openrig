@@ -17,6 +17,7 @@ import net from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -458,6 +459,35 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     const response = await target.request("/api/hosts/pair-request", { method: "POST", body: JSON.stringify({ human: "blair@external" }) });
     expect(response.status).toBe(200);
     expect(repo.list({ limit: 100 })[0]?.destinationSession).toBe("blair@external");
+  });
+
+  it("a target with nobody registered (never, or no longer) says so from the requester's side; several with no default keep today's text", async () => {
+    const neverHome = mkdtempSync(join(tmpdir(), "pair-never-registered-"));
+    try {
+      expect(loadHumanRegistry(neverHome)).toMatchObject({ ok: false, noHumans: true });
+      for (const registry of [() => loadHumanRegistry(neverHome), () => ({ ok: true as const, entities: [] })]) {
+        const res = await buildApp(repo, BEARER, registry).request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: "pair_human_required", addresses: [],
+          message: "No person is registered on the target host, so nobody there can be asked to approve pairing. On the target, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created." });
+      }
+      expect(repo.list({ limit: 100 })).toHaveLength(0);
+    } finally { rmSync(neverHome, { recursive: true, force: true }); }
+    const several = await buildApp(repo, BEARER, () => ({ ok: true, entities: [human, { ...human, entityId: "blair", address: "blair@external" }] }))
+      .request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+    expect(((await several.json()) as { message: string }).message).toContain("Pair approval needs one registered human, or a default when several exist.");
+  });
+
+  it("the reply names who was asked and who reads their answer, or why nobody does yet", async () => {
+    const res = await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) });
+    expect(await res.json()).toMatchObject({ person: "alex@external", owner: null,
+      noReader: "no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel)" });
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@rig");
+    try {
+      const owned = await (await app.request("/api/hosts/pair-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "tester@somewhere" }) })).json() as Record<string, unknown>;
+      expect(owned).toMatchObject({ person: "alex@external", owner: "lead@rig" });
+      expect(owned.noReader).toBeUndefined();
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("issuance mints the ONE human approval moment: a human-routed qitem with code + summary + evidence_ref", async () => {

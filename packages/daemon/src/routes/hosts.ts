@@ -412,7 +412,11 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     }
     const body = (await c.req.json<{ requester?: string; human?: string; timeoutMs?: number }>().catch(() => ({}))) as { requester?: string; human?: string; timeoutMs?: number };
     const registry = (opts?.humanRegistry ?? loadHumanRegistry)();
-    if (!registry.ok) return c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
+    // Nobody registered on this host (never, or no longer): the fix is here, and the requester's CLI prints this.
+    const noPerson = { error: "pair_human_required", addresses: [] as string[],
+      message: "No person is registered on the target host, so nobody there can be asked to approve pairing. On the target, register one: rig gateway human add <entityId> --display-name <name> --delivery-class B --default (a connector --binding is optional). No approval row was created." };
+    if (!registry.ok) return registry.noHumans ? c.json(noPerson, 409) : c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
+    if (registry.entities.length === 0) return c.json(noPerson, 409);
     // Named, or else the default person (chosen, or the only one); never the first of several.
     const fallback = body.human ? null : resolveDefaultPerson(registry.entities).person;
     const humans = body.human ? registry.entities.filter((human) => human.address === body.human) : fallback ? [fallback] : [];
@@ -451,7 +455,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       return c.json({ error: "pair_approval_item_failed", message }, 500);
     }
 
-    return c.json({ pairId, code, approvalQitemId: qitemId });
+    // Who was asked, and who reads their answer here (or why nobody does yet), for the requester to show.
+    return c.json({ pairId, code, approvalQitemId: qitemId, person: rec.person, owner: rec.owner,
+      ...(rec.owner ? (rec.ownerNote ? { ownerNote: rec.ownerNote } : {}) : { noReader: noReader(rec) }) });
   });
 
   // The requests on this host that haven't expired, for its pairing settings: who asks, the code, when it expires, its
