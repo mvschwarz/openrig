@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { NetworkBindingError, NetworkBindingStore } from "../domain/network/network-bindings.js";
 import { networkClosedElsewhere } from "../domain/network/network-connector.js";
-import { accountRemoval, NetworkInstallationStore, type AccountFetch } from "../domain/network/network-installations.js";
+import { NetworkInstallationStore, type AccountFetch } from "../domain/network/network-installations.js";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
@@ -33,8 +33,9 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
   router.get("/bindings", (c) => {
     const connector = c.get("networkConnector" as never) as { snapshot(): unknown } | undefined;
     // Hub items someone else closed before a binding's result reached them: a conflict the person sees.
-    const bindings = store(c).list().map((b) => ({ ...b, closedElsewhere: networkClosedElsewhere(db(c), b.id), accountRemoval: accountRemoval(b) }));
-    return c.json({ bindings, installations: installations(c).list(), connector: connector?.snapshot() ?? null });
+    const enrolled = installations(c);
+    const bindings = store(c).list().map((b) => ({ ...b, closedElsewhere: networkClosedElsewhere(db(c), b.id), accountRemoval: enrolled.removalOf(b) }));
+    return c.json({ bindings, installations: enrolled.list(), connector: connector?.snapshot() ?? null });
   });
 
   // With a hub URL and token, bind to that hub directly; with only a participant name, through the enrolled account.
@@ -66,8 +67,9 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
     let cleanup: unknown = null;
     try { bindings.disconnect(target.id, typeof body.reason === "string" ? body.reason : undefined); } catch (error) { cleanup = error; }
     try {
-      const ended = await installations(c).removeAtAccount(bindings, bindings.get(target.id)!);
-      return cleanup ? refused(c, cleanup) : c.json({ ...ended, accountRemoval: accountRemoval(ended) });
+      const enrolled = installations(c);
+      const ended = await enrolled.removeAtAccount(bindings, bindings.get(target.id)!);
+      return cleanup ? refused(c, cleanup) : c.json({ ...ended, accountRemoval: enrolled.removalOf(ended) });
     } catch (error) { return refused(c, cleanup ?? error); }
   });
 

@@ -1,7 +1,7 @@
 // Enrolling in an account and connecting seats by name, through the daemon's real network routes, against an account
 // that answers the way the account's connector routes do: a one-time code for an installation key, then a participant
 // list that answers a bearer for each newly listed name and revokes a name dropped from it.
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -14,6 +14,19 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { readNetworkCredential, readPrivateToken } from "../src/domain/network/network-bindings.js";
 import { networkInstallationKeyFile, type AccountFetch } from "../src/domain/network/network-installations.js";
 import { networkRoutes } from "../src/routes/network.js";
+
+/** Makes removing a path with this ending fail, the way a busy file does. */
+const failRemoval = vi.hoisted(() => ({ suffix: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...real,
+    rmSync: (...args: Parameters<typeof real.rmSync>) => {
+      if (failRemoval.suffix && String(args[0]).endsWith(failRemoval.suffix)) throw Object.assign(new Error("EBUSY: resource busy or locked, rm"), { code: "EBUSY" });
+      return real.rmSync(...args);
+    },
+  };
+});
 
 const KEY = `oik1_cust_inst-1_${"k".repeat(43)}`;
 
@@ -107,7 +120,7 @@ beforeEach(() => {
   app.use("*", async (c, next) => { c.set("rigRepo" as never, rigs as never); await next(); });
   app.route("/api/network", networkRoutes({ home, accountFetch: account.fetch, selfHostId: () => hostId, accountTimeoutMs: 1000 }));
 });
-afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { failRemoval.suffix = null; db.close(); rmSync(home, { recursive: true, force: true }); });
 
 function seat(session: string): void {
   const rig = rigs.listRigs().find((r) => r.name === "lab") ?? rigs.createRig("lab");
@@ -120,6 +133,9 @@ const post = async (path: string, body: unknown) => {
 };
 const enroll = () => post("/installations", { code: "ec1.good", site: "https://account.example" });
 const connect = (session: string, name: string) => post("/bindings", { session, participantName: name });
+const replace = () => post("/installations", { code: "ec1.next", site: "https://account.example", replace: true });
+const status = async () => (await (await app.request("/api/network/bindings")).json()) as {
+  bindings: Array<{ id: string; state: string; accountRemoval: string | null; accountRemovedAt: string | null }>; installations: Array<{ installationId: string }> };
 
 it("enrolling trades the code for a key kept privately; a used code is refused with its reason; a second enroll at the site sends nothing", async () => {
   const enrolled = await enroll();
@@ -367,4 +383,99 @@ it("a name-only connect without an enrollment says how to enroll", async () => {
   expect(refused).toMatchObject({ status: 404, data: { error: "not_enrolled" } });
   expect(refused.data.message).toContain("rig network enroll <code> --site <site>");
   expect(account.calls).toBe(0);
+});
+
+it("an unconfirmed drop from before a replace stays with the old installation: the new installation's lists never confirm it", async () => {
+  seat("a@lab"); seat("b@lab");
+  await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  account.down = true;
+  expect(await post(`/bindings/${alpha.data.id}/disconnect`, {})).toMatchObject({ status: 502, data: { error: "account_update_unconfirmed" } });
+  account.down = false;
+  expect(await replace()).toMatchObject({ status: 201, data: { installationId: "inst-2", replaced: { endedBindings: [] } } });
+  const alphaNow = async () => (await status()).bindings.find((b) => b.id === alpha.data.id);
+  expect(await alphaNow()).toMatchObject({ accountRemoval: "old-installation", accountRemovedAt: null });
+
+  // The new installation's list doesn't have alpha, which was never listed there.
+  expect((await connect("b@lab", "beta")).status).toBe(201);
+  expect(account.puts.at(-1)).toEqual(["beta"]);
+  expect(await alphaNow()).toMatchObject({ accountRemoval: "old-installation", accountRemovedAt: null });
+  // Disconnecting it again sends nothing this key could use and claims no drop.
+  const puts = account.puts.length;
+  expect(await post(`/bindings/${alpha.data.id}/disconnect`, {})).toMatchObject({ status: 200, data: { accountRemoval: "old-installation", accountRemovedAt: null } });
+  expect(account.puts.length).toBe(puts);
+});
+
+it("a plain local failure to save the binding, with the account's drop failing too, still says the account may list the name", async () => {
+  seat("a@lab");
+  await enroll();
+  db.exec("CREATE TRIGGER fail_bind BEFORE INSERT ON network_bindings BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  account.downAfterPuts = 1;
+  const failed = await connect("a@lab", "alpha");
+  expect(failed).toMatchObject({ status: 500, data: { error: "binding_write_failed" } });
+  expect(failed.data.message).toContain("disk I/O error");
+  expect(failed.data.message).toContain("couldn't confirm the account dropped alpha again");
+  expect(JSON.stringify(failed.data)).not.toContain("bear-alpha");
+  expect(account.names.get("alpha")!.state).toBe("connected");
+});
+
+it("a replace whose wait for the installation's turn uses up its deadline sends no code and changes nothing", async () => {
+  seat("a@lab");
+  const first = await enroll();
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  const oldKey = readPrivateToken(keyFile, () => "missing");
+  // A list that overruns holds the installation's turn past the replace's 1 s deadline.
+  account.delayMs = 1800;
+  const slow = connect("a@lab", "alpha");
+  await sleep(50);
+  const late = await replace();
+  expect(late).toMatchObject({ status: 503, data: { error: "account_unavailable" } });
+  expect(late.data.message).toContain("The code wasn't sent");
+  expect(account.used.has("ec1.next")).toBe(false);
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(oldKey);
+  await slow;
+});
+
+it("a replace that fails here with only the key file missing leaves no key behind, as before it, and says what the account now has", async () => {
+  seat("a@lab");
+  const first = await enroll();
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  rmSync(keyFile);
+  db.exec("CREATE TRIGGER fail_replace BEFORE UPDATE ON network_installations BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  const failed = await replace();
+  expect(failed).toMatchObject({ status: 500, data: { error: "replace_failed" } });
+  expect(failed.data.message).toContain("nothing here changed");
+  expect(failed.data.message).toContain("a new installation whose key nothing here holds");
+  expect(readdirSync(dirname(keyFile))).toEqual([]);
+  expect((await status()).installations.map((i) => i.installationId)).toEqual(["inst-1"]);
+  db.exec("DROP TRIGGER fail_replace");
+  expect(await connect("a@lab", "alpha")).toMatchObject({ status: 404, data: { error: "credential_missing" } });
+});
+
+it("a replace whose old binding can't be ended changes nothing here: the switch and the bindings' end commit together", async () => {
+  seat("a@lab");
+  const first = await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  const oldKey = readPrivateToken(keyFile, () => "missing");
+  db.exec("CREATE TRIGGER fail_end BEFORE UPDATE OF state ON network_bindings BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  expect(await replace()).toMatchObject({ status: 500, data: { error: "replace_failed" } });
+  expect(readPrivateToken(keyFile, () => "missing")).toBe(oldKey);
+  expect(readdirSync(dirname(keyFile))).toEqual(["key.json"]);
+  const now = await status();
+  expect(now.installations.map((i) => i.installationId)).toEqual(["inst-1"]);
+  expect(now.bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "active" });
+});
+
+it("a replace whose old key's backup can't be removed after the switch still ends the old bindings, and reports the cleanup", async () => {
+  seat("a@lab");
+  const first = await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  failRemoval.suffix = "key.json.prev";
+  const replaced = await replace();
+  failRemoval.suffix = null;
+  expect(replaced).toMatchObject({ status: 201, data: { installationId: "inst-2", replaced: { endedBindings: [{ id: alpha.data.id, participantName: "alpha" }] } } });
+  expect(replaced.data.replaced.problems).toEqual([expect.stringMatching(/backup at .*key\.json\.prev couldn't be removed \(EBUSY/)]);
+  expect(readPrivateToken(networkInstallationKeyFile(home, first.data.id), () => "missing")).toBe(account.key);
+  expect((await status()).bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "disconnected", accountRemoval: "old-installation" });
 });

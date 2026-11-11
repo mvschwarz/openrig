@@ -41,7 +41,7 @@ rig network connect <seat> --as <name>
   account's answer no longer lists the name, `disconnect` says the account stopped listing it. If the account can't be
   reached or its answer is lost, the binding is still ended, the error says OpenRig couldn't confirm the account dropped
   the name and names the `rig network disconnect <binding id>` to run again, and `rig network status` keeps showing it
-  as unconfirmed. A later answer from the account that no longer lists the name marks it dropped.
+  as unconfirmed. A later answer from the same account installation that no longer lists the name marks it dropped.
 - `rig network status` shows the enrollment above the bindings.
 
 ### Enroll again after a lost key or a removed installation
@@ -53,11 +53,20 @@ again with a new code from the account page:
 rig network enroll <code> --site <site URL> --replace
 ```
 
-Without `--replace`, a second enroll at the same site is refused and the code isn't spent. With it, the new key takes the
-old one's place only after the account accepts the new code, so a failed replace leaves the old enrollment working. The
-bindings made through the old installation end, and `enroll` names them: the old installation may still list their
-names, and the new key can't drop them, so remove them on the account page. `rig network status` marks each of them as
-possibly still listed under the old installation.
+Without `--replace`, a second enroll at the same site is refused and the code isn't spent. With it, the replace first
+waits for any other change to this enrollment to finish, within the same 30 seconds; one that runs out of time while
+waiting says so and doesn't send the code. The account makes a new installation, with a new key, for the new code. Here,
+that key takes the old one's place and the bindings made through the old installation end, in one step:
+
+- If that step fails after the account accepted the code, nothing here changes, and the error says so. The old
+  enrollment keeps working only while the account keeps the old installation, and the account now has a new
+  installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.
+- Once the step is done, `enroll` names the bindings it ended. The old installation may still list their names, and the
+  new key can't drop them, so remove them on the account page. `rig network status` marks each of them as possibly still
+  listed under the old installation, as it does a binding that ended earlier without the account confirming the drop:
+  only the installation a name was listed under can confirm it.
+- If cleanup after the step doesn't finish (removing the old key's backup, or an ended binding's credential), `enroll`
+  reports it, and the replace still stands.
 
 ## Connect with a hub URL and a token
 

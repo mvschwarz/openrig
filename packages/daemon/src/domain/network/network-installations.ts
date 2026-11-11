@@ -3,9 +3,9 @@
 // installation's participants with the account, which answers a bearer for a newly listed name, and the account's MCP
 // front and rig, where the binding then reaches. A name the installation stops listing is revoked there.
 //
-// The account replaces the whole list on every change, so changes to one installation's list run one at a time, each
-// reading the names to keep inside its turn. One enroll, connect or disconnect spends at most one deadline with the
-// account, waiting for its turn included.
+// The account replaces the whole list on every change, so changes to one installation's list, and a replaced enrollment,
+// run one at a time, each reading what it needs inside its turn. One enroll, connect or disconnect spends at most one
+// deadline with the account, waiting for its turn included.
 import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, renameSync, rmSync } from "node:fs";
@@ -22,9 +22,10 @@ export interface NetworkInstallation {
   createdAt: string;
 }
 
-/** An enroll's answer. A replaced enrollment names the bindings it ended, whose names the old installation may still list. */
+/** An enroll's answer. A replaced enrollment names the bindings it ended, whose names the old installation may still list,
+ *  and any cleanup after the switch that didn't finish. */
 export interface EnrollResult extends NetworkInstallation {
-  replaced?: { endedBindings: Array<{ id: string; localSession: string; participantName: string | null }> };
+  replaced?: { endedBindings: Array<{ id: string; localSession: string; participantName: string | null }>; problems?: string[] };
 }
 
 interface Row { id: string; site: string; installation_id: string; name: string | null; allow_http: number; created_at: string }
@@ -45,15 +46,20 @@ const NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const REPLACED_REASON = "replaced by a new enrollment";
 
 /** What's known about the account's side of an ended binding made through it: confirmed dropped, unconfirmed (a removal
- *  that failed or whose answer was lost), or left with the old installation when the enrollment was replaced. */
-export function accountRemoval(binding: NetworkBinding): "confirmed" | "unconfirmed" | "old-installation" | null {
+ *  that failed or whose answer was lost), or left with an earlier account installation after the enrollment was replaced,
+ *  which this daemon's key can neither drop nor confirm. `accountInstallationNow` is the account's id for the binding's
+ *  enrollment as it is now. */
+export function accountRemoval(binding: NetworkBinding, accountInstallationNow: string | null | undefined): "confirmed" | "unconfirmed" | "old-installation" | null {
   if (!binding.installationId || binding.state === "active") return null;
-  if (binding.stateReason === REPLACED_REASON) return "old-installation";
   if (binding.accountRemovedAt) return "confirmed";
   // The hub refused its credential, so nothing live is left there.
   if (binding.state === "revoked") return null;
+  if (binding.accountInstallationId !== accountInstallationNow) return "old-installation";
   return "unconfirmed";
 }
+
+/** The command's time with the account ran out before a call was sent. */
+class NotSent extends NetworkBindingError {}
 
 /** What the account answers for the installation's participant list. */
 interface Identities { participants: Array<{ name: string; state?: string; bearer?: string }>; mcp: string; rig: string }
@@ -97,8 +103,8 @@ export class NetworkInstallationStore {
 
   /** Trade the account page's one-time code for this installation's key. The code is checked by the account only, so a
    *  refused enroll here (a URL, a second enroll at the same site without `replace`) never spends it. With `replace`, the
-   *  new key takes the old one's place only after the account accepted the new code, so a failed replace leaves the old
-   *  enrollment working. */
+   *  installation's turn comes first, so its wait counts against the same deadline: a wait that runs out sends no code,
+   *  and the new key takes the old one's place only after the account accepted the new code. */
   async enroll(bindings: NetworkBindingStore, input: { code: unknown; site: unknown; allowHttp?: unknown; replace?: unknown }): Promise<EnrollResult> {
     const code = typeof input.code === "string" ? input.code.trim() : "";
     if (!code || /\s/.test(code)) throw new NetworkBindingError("invalid_code", "Give the one-time code the account page shows.");
@@ -109,11 +115,34 @@ export class NetworkInstallationStore {
     }
     const instance = this.instance();
     const until = this.deadline();
+    const allowHttp = input.allowHttp === true ? 1 : 0;
+    if (existing) {
+      return inListTurn(existing.id, async () => {
+        const next = await this.exchange(site, code, instance, until);
+        return this.replace(bindings, this.get(existing.id), next.installation, next.key, allowHttp);
+      });
+    }
 
+    const { installation, key } = await this.exchange(site, code, instance, until);
+    const id = this.opts.newId?.() ?? `neti-${randomBytes(10).toString("hex")}`;
+    const cleanup = writePrivateToken(networkInstallationKeyFile(this.home, id), key);
+    try {
+      this.db.prepare("INSERT INTO network_installations (id, site, installation_id, name, allow_http, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, site, installation.id, installation.name, allowHttp, (this.opts.now?.() ?? new Date()).toISOString());
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    return this.get(id);
+  }
+
+  /** The code, with this daemon's host id, for an account installation and its key. */
+  private async exchange(site: string, code: string, instance: string, until: number): Promise<{ installation: { id: string; name: string | null }; key: string }> {
     let answer;
     try {
       answer = await this.call(site, "POST", "/api/connector/enroll", null, { code, instance }, until);
     } catch (error) {
+      if (error instanceof NotSent) throw new NetworkBindingError(error.code, `${error.message} The code wasn't sent, so it's still good while it's current: try again.`, 503);
       if (error instanceof NetworkBindingError && error.code === "account_unavailable") {
         throw new NetworkBindingError("account_unavailable", `${error.message} Whether the account took the code is unknown: try again with the same code, and if it's refused, get a new one.`, 503);
       }
@@ -130,47 +159,48 @@ export class NetworkInstallationStore {
     if (typeof body.installation?.id !== "string" || typeof body.key !== "string" || !body.key || /\s/.test(body.key)) {
       throw new NetworkBindingError("account_unexpected", "The account's answer to the enroll had no installation or key.", 502);
     }
-    const installation = { id: body.installation.id, name: typeof body.installation.name === "string" ? body.installation.name : null };
-    const allowHttp = input.allowHttp === true ? 1 : 0;
-    if (existing) return inListTurn(existing.id, async () => this.replace(bindings, project(existing), installation, body.key as string, allowHttp));
-
-    const id = this.opts.newId?.() ?? `neti-${randomBytes(10).toString("hex")}`;
-    const cleanup = writePrivateToken(networkInstallationKeyFile(this.home, id), body.key);
-    try {
-      this.db.prepare("INSERT INTO network_installations (id, site, installation_id, name, allow_http, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(id, site, installation.id, installation.name, allowHttp, (this.opts.now?.() ?? new Date()).toISOString());
-    } catch (error) {
-      cleanup();
-      throw error;
-    }
-    return this.get(id);
+    return { installation: { id: body.installation.id, name: typeof body.installation.name === "string" ? body.installation.name : null }, key: body.key };
   }
 
-  /** The new key goes in beside the old one, then takes its place, then the row follows; a failure on the way puts the
-   *  old key back. The bindings made through the old installation end here, and their names are returned: the old
-   *  installation may still list them, and this key can't drop them. */
+  /** The new key goes in beside the old one and takes its place, then the row and the old installation's active bindings
+   *  change in one transaction. A failure before that commits puts the old key back (with no old key, it removes the new
+   *  one), so nothing here changes, though the account has already made the new installation and nothing here holds its
+   *  key. After the commit the replace has happened: the ended bindings' names are returned, since the old installation
+   *  may still list them and this key can't drop them, with any cleanup that didn't finish. */
   private replace(bindings: NetworkBindingStore, old: NetworkInstallation, next: { id: string; name: string | null }, key: string, allowHttp: number): EnrollResult {
     const file = networkInstallationKeyFile(this.home, old.id);
     const staged = `${file}.next`;
     const kept = `${file}.prev`;
+    const ending = bindings.active().filter((b) => b.installationId === old.id);
     rmSync(staged, { force: true });
     const cleanup = writePrivateToken(staged, key);
     const hadKey = existsSync(file);
     try {
       if (hadKey) renameSync(file, kept);
       renameSync(staged, file);
-      this.db.prepare("UPDATE network_installations SET installation_id = ?, name = ?, allow_http = ? WHERE id = ?").run(next.id, next.name, allowHttp, old.id);
+      this.db.transaction(() => {
+        this.db.prepare("UPDATE network_installations SET installation_id = ?, name = ?, allow_http = ? WHERE id = ?").run(next.id, next.name, allowHttp, old.id);
+        bindings.markDisconnected(ending.map((b) => b.id), REPLACED_REASON);
+      })();
     } catch (error) {
-      if (existsSync(kept)) renameSync(kept, file);
+      if (!hadKey) rmSync(file, { force: true });
+      else if (existsSync(kept)) renameSync(kept, file);
       cleanup();
-      throw error;
+      throw new NetworkBindingError("replace_failed",
+        `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)}), so nothing here changed. The account now has a new installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.`, 500);
     }
-    rmSync(kept, { force: true });
-    const ended = bindings.active().filter((b) => b.installationId === old.id);
-    for (const binding of ended) {
-      try { bindings.disconnect(binding.id, REPLACED_REASON); } catch { /* ended either way; its credential cleanup says how to retry */ }
+    const problems: string[] = [];
+    try {
+      rmSync(kept, { force: true });
+    } catch (error) {
+      problems.push(`The earlier key's backup at ${kept} couldn't be removed (${(error as Error).message.slice(0, 200)}). It's no longer used; remove it by hand.`);
     }
-    return { ...this.get(old.id), replaced: { endedBindings: ended.map((b) => ({ id: b.id, localSession: b.localSession, participantName: b.participantName })) } };
+    for (const binding of ending) {
+      // Already ended in the transaction; this removes its credential, and a failure says how to retry.
+      try { bindings.disconnect(binding.id, REPLACED_REASON); } catch (error) { problems.push((error as Error).message); }
+    }
+    return { ...this.get(old.id), replaced: { endedBindings: ending.map((b) => ({ id: b.id, localSession: b.localSession, participantName: b.participantName })),
+      ...(problems.length ? { problems } : {}) } };
   }
 
   /** The one installation a name-only connect goes through. */
@@ -191,32 +221,35 @@ export class NetworkInstallationStore {
     if (!NAME.test(name)) throw new NetworkBindingError("invalid_name", `'${name}' isn't a participant name: lowercase letters, digits and inner dashes, up to 32.`);
     const until = this.deadline();
     return inListTurn(installation.id, async () => {
-      // In this installation's turn: checked again, and every list sent reads the names to keep afresh.
+      // In this installation's turn: checked again, with the enrollment as it is now (a replace may have run while this
+      // waited), and every list sent reads the names to keep afresh.
+      const current = this.get(installation.id);
       bindings.freeSeat(input.session);
-      if (this.listedNames(bindings, installation).includes(name)) throw new NetworkBindingError("participant_already_connected", `${name} is already connected here.`, 409);
-      const others = () => this.listedNames(bindings, installation).filter((n) => n !== name);
-      let answer = await this.setParticipants(bindings, installation, () => [...others(), name], until);
+      if (this.listedNames(bindings, current).includes(name)) throw new NetworkBindingError("participant_already_connected", `${name} is already connected here.`, 409);
+      const others = () => this.listedNames(bindings, current).filter((n) => n !== name);
+      let answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
       let bearer = answer.participants.find((p) => p.name === name)?.bearer;
       if (!bearer) {
-        await this.setParticipants(bindings, installation, others, until);
-        answer = await this.setParticipants(bindings, installation, () => [...others(), name], until);
+        await this.setParticipants(bindings, current, others, until);
+        answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
         bearer = answer.participants.find((p) => p.name === name)?.bearer;
         if (!bearer) throw new NetworkBindingError("account_unexpected", `The account listed ${name} without a bearer, twice.`, 502);
       }
       try {
         return bindings.create({ session: input.session, hubUrl: answer.mcp, hubSeat: `${name}@${answer.rig}`, token: bearer,
-          allowHttp: installation.allowHttp, installation: { id: installation.id, name } });
+          allowHttp: current.allowHttp, installation: { id: current.id, name, account: current.installationId } });
       } catch (error) {
         // Best effort: nothing here holds that bearer, so the account is asked to stop listing the name. If that fails,
-        // the error says so; the account may still list it.
+        // the error says so, whatever failed here; the account may still list it.
         let unconfirmed = "";
         try {
-          await this.setParticipants(bindings, installation, others, until);
+          await this.setParticipants(bindings, current, others, until);
         } catch (drop) {
           unconfirmed = ` OpenRig couldn't confirm the account dropped ${name} again (${(drop as Error).message}); it may still list it.`;
         }
-        if (unconfirmed && error instanceof NetworkBindingError) throw new NetworkBindingError(error.code, `${error.message}${unconfirmed}`, error.status);
-        throw error;
+        if (!unconfirmed) throw error;
+        if (error instanceof NetworkBindingError) throw new NetworkBindingError(error.code, `${error.message}${unconfirmed}`, error.status);
+        throw new NetworkBindingError("binding_write_failed", `The binding couldn't be saved here (${(error as Error).message.slice(0, 200)}).${unconfirmed}`, 500);
       }
     });
   }
@@ -224,19 +257,27 @@ export class NetworkInstallationStore {
   /** After a binding made through the account ended here, the account stops listing its name, which revokes it there.
    *  Only an answered list that no longer has the name marks it removed; a failed or lost one leaves it unconfirmed. */
   async removeAtAccount(bindings: NetworkBindingStore, binding: NetworkBinding): Promise<NetworkBinding> {
-    if (accountRemoval(binding) !== "unconfirmed") return binding;
     const installation = this.list().find((i) => i.id === binding.installationId);
-    if (!installation) return binding;
+    if (!installation || accountRemoval(binding, installation.installationId) !== "unconfirmed") return binding;
     const until = this.deadline();
     return inListTurn(installation.id, async () => {
+      // A replace while this waited moved the enrollment to another account installation, which can't drop this name.
+      const current = this.get(installation.id);
+      if (accountRemoval(binding, current.installationId) !== "unconfirmed") return bindings.get(binding.id)!;
       try {
-        await this.setParticipants(bindings, installation, () => this.listedNames(bindings, installation), until);
+        await this.setParticipants(bindings, current, () => this.listedNames(bindings, current), until);
       } catch (error) {
         throw new NetworkBindingError("account_update_unconfirmed",
           `${binding.id} is ${binding.state} here, but OpenRig couldn't confirm that the account dropped ${binding.participantName} (${(error as Error).message}). Run \`rig network disconnect ${binding.id}\` again.`, 502);
       }
       return bindings.get(binding.id)!;
     });
+  }
+
+  /** `accountRemoval` against this binding's enrollment as it is now. */
+  removalOf(binding: NetworkBinding): ReturnType<typeof accountRemoval> {
+    const now = binding.installationId ? this.list().find((i) => i.id === binding.installationId) : undefined;
+    return accountRemoval(binding, now?.installationId);
   }
 
   private get(id: string): NetworkInstallation {
@@ -280,10 +321,12 @@ export class NetworkInstallationStore {
     if (!Array.isArray(body.participants) || typeof body.mcp !== "string" || typeof body.rig !== "string") {
       throw new NetworkBindingError("account_unexpected", "The account's answer had no participants, MCP front or rig.", 502);
     }
-    // The answer is what the account now lists: an ended binding's name that isn't in it is confirmed dropped.
+    // The answer is what this account installation now lists: a binding that ended while listed under it, whose name
+    // isn't in the answer, is confirmed dropped. A name listed under an earlier installation is never confirmed here.
     const listed = new Set(body.participants.map((p) => p.name));
     for (const ended of bindings.list()) {
-      if (ended.installationId === installation.id && ended.participantName && !listed.has(ended.participantName) && accountRemoval(ended) === "unconfirmed") {
+      if (ended.installationId === installation.id && ended.participantName && !listed.has(ended.participantName)
+        && accountRemoval(ended, installation.installationId) === "unconfirmed") {
         bindings.markAccountRemoved(ended.id);
       }
     }
@@ -292,7 +335,7 @@ export class NetworkInstallationStore {
 
   private async call(site: string, method: string, path: string, key: string | null, payload: unknown, until: number): Promise<{ status: number; body: unknown }> {
     const left = until - Date.now();
-    if (left <= 0) throw new NetworkBindingError("account_unavailable", `The account at ${site} wasn't reached in time: this command's time with the account ran out.`, 503);
+    if (left <= 0) throw new NotSent("account_unavailable", `The account at ${site} wasn't reached in time: this command's time with the account ran out.`, 503);
     let res;
     try {
       // The key goes only to the site the person enrolled at: a redirect isn't followed with it, and a stalled call ends.

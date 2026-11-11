@@ -86,12 +86,14 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
       const res = await daemon.post<Record<string, unknown>>("/api/network/installations", { code, site: opts.site, allowHttp: opts.allowHttp === true, replace: opts.replace === true },
         { headers: operatorAuthHeaders(), timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
       finish(res.status, res.data, opts.json, (i) => {
-        const ended = ((i as { replaced?: { endedBindings?: Array<{ id: string; localSession: string; participantName: string | null }> } }).replaced?.endedBindings ?? []);
+        const replaced = (i as { replaced?: { endedBindings?: Array<{ id: string; localSession: string; participantName: string | null }>; problems?: string[] } }).replaced;
+        const ended = replaced?.endedBindings ?? [];
         const lines = [enrolled(i as unknown as Installation)];
         if (ended.length) {
           lines.push(`Ended ${ended.length} binding${ended.length === 1 ? "" : "s"} made through the old installation; their names may still be listed under it, so remove them on the account page:`);
           for (const b of ended) lines.push(`  ${b.id}  ${b.localSession} as ${b.participantName}`);
         }
+        for (const problem of replaced?.problems ?? []) lines.push(`Replaced, with cleanup left over: ${problem}`);
         lines.push("Connect a seat with rig network connect <seat> --as <name>.");
         return lines.join("\n");
       });

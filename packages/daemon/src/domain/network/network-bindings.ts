@@ -31,6 +31,9 @@ export interface NetworkBinding {
   /** Set when the binding was made through an enrolled account: its installation (`neti-…`) and participant name. */
   installationId: string | null;
   participantName: string | null;
+  /** The account's own id for the installation the name was listed under. A replaced enrollment keeps the local id and
+   *  moves to a new account installation, so only a list from this one can confirm the name was dropped. */
+  accountInstallationId: string | null;
   /** When the account stopped listing this participant, after the binding ended here. */
   accountRemovedAt: string | null;
 }
@@ -44,7 +47,7 @@ export class NetworkBindingError extends Error {
 interface Row {
   id: string; node_id: string; local_session: string; hub_url: string; hub_seat: string; allow_http: number; state: NetworkBindingState;
   state_reason: string | null; created_at: string; updated_at: string; last_contact_at: string | null; last_error: string | null;
-  installation_id: string | null; participant_name: string | null; account_removed_at: string | null;
+  installation_id: string | null; participant_name: string | null; account_removed_at: string | null; account_installation_id: string | null;
 }
 
 const project = (row: Row): NetworkBinding => ({
@@ -52,6 +55,7 @@ const project = (row: Row): NetworkBinding => ({
   allowHttp: row.allow_http === 1, unencrypted: row.hub_url.startsWith("http:"), state: row.state, stateReason: row.state_reason, createdAt: row.created_at, updatedAt: row.updated_at,
   lastContactAt: row.last_contact_at, lastError: row.last_error,
   installationId: row.installation_id, participantName: row.participant_name, accountRemovedAt: row.account_removed_at,
+  accountInstallationId: row.account_installation_id,
 });
 
 const MAX_CREDENTIAL_BYTES = 16384;
@@ -186,7 +190,7 @@ export class NetworkBindingStore {
   }
 
   create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown; allowHttp?: unknown;
-    installation?: { id: string; name: string } }): NetworkBinding {
+    installation?: { id: string; name: string; account: string } }): NetworkBinding {
     const { session, nodeId } = this.freeSeat(input.session);
     const allowHttp = input.allowHttp === true;
     const hubUrl = validHubUrl(input.hubUrl, allowHttp);
@@ -202,8 +206,9 @@ export class NetworkBindingStore {
     try {
       const at = this.now().toISOString();
       this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, allow_http, state, created_at, updated_at,
-        installation_id, participant_name) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
-        .run(id, nodeId, session, hubUrl, hubSeat, allowHttp ? 1 : 0, at, at, input.installation?.id ?? null, input.installation?.name ?? null);
+        installation_id, participant_name, account_installation_id) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`)
+        .run(id, nodeId, session, hubUrl, hubSeat, allowHttp ? 1 : 0, at, at, input.installation?.id ?? null, input.installation?.name ?? null,
+          input.installation?.account ?? null);
     } catch (error) {
       cleanup();
       throw error;
@@ -220,6 +225,13 @@ export class NetworkBindingStore {
   /** The hub refused the credential: it was revoked there. Same effect as a local disconnect. */
   markRevoked(id: string, reason: string): NetworkBinding {
     return this.end(id, "revoked", reason);
+  }
+
+  /** Ends these active bindings' state only, so a caller can do it in one transaction with its own change. Their
+   *  credentials stay until the caller ends each one again with `disconnect`, which removes them. */
+  markDisconnected(ids: string[], reason: string): void {
+    const end = this.db.prepare("UPDATE network_bindings SET state = 'disconnected', state_reason = ?, updated_at = ? WHERE id = ? AND state = 'active'");
+    for (const id of ids) end.run(reason, this.now().toISOString(), id);
   }
 
   /** The account stopped listing this ended binding's participant. */

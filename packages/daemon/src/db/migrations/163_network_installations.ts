@@ -2,7 +2,8 @@ import type { Migration } from "../migrate.js";
 
 /** This daemon enrolled in an account: the account's site, its installation id, and whether the person chose plain http
  *  for it. The installation key lives in a private file under the OpenRig home, never in this table. A binding made
- *  through the account names its installation and participant, and records when the account stopped listing it. */
+ *  through the account names its installation, its participant and the account's installation id the name was listed under,
+ *  and records when the account stopped listing it. */
 export const networkInstallationsSchema: Migration = {
   name: "163_network_installations.sql",
   sql: `
@@ -18,5 +19,6 @@ export const networkInstallationsSchema: Migration = {
     ALTER TABLE network_bindings ADD COLUMN installation_id TEXT;
     ALTER TABLE network_bindings ADD COLUMN participant_name TEXT;
     ALTER TABLE network_bindings ADD COLUMN account_removed_at TEXT;
+    ALTER TABLE network_bindings ADD COLUMN account_installation_id TEXT;
   `,
 };
