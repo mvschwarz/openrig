@@ -58,6 +58,12 @@ const NO_WAKE_ROUTE_RULES = [
   "the operator agent (agents.operator_session)",
 ] as const;
 
+/** How a failed wake's finding at a seat with no declared route names the rule that chose its recipient, in the order tried. */
+const FAILED_WAKE_ROUTE_RULES = [
+  "the row's creator",
+  "the operator agent (agents.operator_session)",
+] as const;
+
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
 // prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
 // LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
@@ -320,6 +326,12 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
  *  Use the closing transition, including archived history; later same-state notes
  *  and delivery receipts do not transfer responsibility. A newer cancellation
  *  without closure metadata still supersedes an older closing actor. */
+/** OpenRig's own machinery (the daemon, or a `@system` actor such as this sweep): it creates and closes rows, but it isn't
+ *  a seat that can act on a finding. */
+function isMachinerySession(session: string): boolean {
+  return session === "daemon@kernel" || session.endsWith("@system");
+}
+
 function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, row: QueueItem): string {
   // Unknown identity cannot establish a new owner. The caller retains this row's
   // established destination if the registry needed for classification is unavailable.
@@ -338,7 +350,7 @@ function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, 
        ORDER BY transition_id DESC LIMIT 1`,
   ).get(row.qitemId, row.qitemId) as { actor_session: string } | undefined;
   for (const session of [closure?.actor_session, row.sourceSession]) {
-    if (!session || session === "daemon@kernel" || session.endsWith("@system")) continue;
+    if (!session || isMachinerySession(session)) continue;
     if (!queueRepo.isHumanDestination(session) && queueRepo.acceptsDestination(session)) {
       return session;
     }
@@ -684,7 +696,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // Every yield and every awaited write lets other code run: indexes read before it are dropped, and `othersRan`
     // tells a list read before it that its rows need a fresh read.
     let othersRan = 0;
-    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); };
+    /** Each seat's agent-seat reading (agentSeatNode, below), dropped with the indexes: another writer can declare a
+     *  seat's delegation parent while the pass yields or awaits a write. */
+    const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
+    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); agentSeats.clear(); };
     // A successor index whose build took at least half of a stretch that yielded by elapsed time is not rebuilt for
     // the rest of the pass: the yield drops it, the next stretch would pay the build again and end the same way after a
     // few rows, so the rows would pay about one build each instead of one per STUCK_SWEEP_YIELD_EVERY_ROWS. Those rows
@@ -1274,8 +1289,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       c.why += `. This finding goes to ${recipient.seat}, ${NO_WAKE_ROUTE_RULES[recipient.chosen]}`;
       c.route = recipient.seat;
     };
-    /** The two re-routes, in order, for one candidate. */
-    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); };
     for (const c of candidates) {
       if (dueToYield()) await yieldLoop();
       routeAroundMissing(c);
@@ -1299,10 +1312,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // (below). A finding per row stays for a person's address or a terminal seat, for a declared route that failed (its
     // finding names why, and a declared delegation parent with no session is one), and for a row that already has a
     // recovery.
-    const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
     /** An agent seat's node: one whose runtime isn't a terminal, with no declared delegation parent, at an address that
      *  isn't a person's. An address the human registry can't classify counts as a person's. null for anything else. Read
-     *  once per seat per pass. */
+     *  once per seat until other code may have run (agentSeats). */
     const agentSeatNode = (session: string): { logicalId: string; rig: string } | null => {
       if (agentSeats.has(session)) return agentSeats.get(session)!;
       const nodeId = resolveSessionNodeId(deps.db, session);
@@ -1319,6 +1331,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       agentSeats.set(session, agent);
       return agent;
     };
+    // A wake that failed at a live agent seat with no delegation parent or escalates_to made its finding that same seat's,
+    // so the finding's own wake went to the seat that had just failed to take one, onto whatever was in its input box.
+    // The row's creator can act on it (resend, reroute or ask), as the waiting and parked-owner findings already route;
+    // for a seat that sent itself the work, or a row OpenRig's own machinery created, the operator agent can. A declared
+    // route that failed keeps its fallback, and a finding the two re-routes above moved keeps its recipient. A wake that
+    // found no route never reached the seat, so a seat launched since keeps its own finding, whose wake is the one it missed.
+    const routeAroundFailedWake = (c: Candidate): void => {
+      if (c.kind !== "undelivered-wake" || !startsWithCI(c.row.lastNudgeResult, "failed:") || c.noWake
+        || c.route !== c.row.destinationSession
+        || routeNotes.has(c.row.qitemId) || agentSeatNode(c.route) === null) return;
+      const choices = [c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !isMachinerySession(seat)
+        && !sessionMissing(seat) && deps.queueRepo.acceptsDestination(seat));
+      if (chosen < 0) {
+        c.why += `; ${c.route} declares no delegation parent or escalates_to, and its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery or not an address this queue takes, so this finding stays addressed to it`;
+        return;
+      }
+      c.why += `; ${c.route} declares no delegation parent or escalates_to, so this finding goes to ${choices[chosen]}, ${FAILED_WAKE_ROUTE_RULES[chosen]}`;
+      c.route = choices[chosen]!;
+    };
+    /** The three re-routes, in order, for one candidate. The third reads no earlier pass: a failed wake's finding is
+     *  routed only here, on the row as it is right before the finding is created. */
+    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); routeAroundFailedWake(c); };
     const selfRoutedUnclaimed = (c: Candidate): boolean => c.kind === "unclaimed-obligation"
       && c.route === c.row.destinationSession && !routeNotes.has(c.row.qitemId) && agentSeatNode(c.route) !== null;
     // A hosted member that polls for its work (no wake trigger) can't hear a finding, so each unclaimed row went to a
