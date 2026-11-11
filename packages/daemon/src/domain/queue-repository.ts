@@ -2193,8 +2193,9 @@ export class QueueRepository {
   /** Every answer returned to this ask, oldest first, under getHumanAnswer's rule for whoever answered: an ask to a person
    *  (never an update), a row back to the asker linked by reply_to, from someone who may answer it (never a shared
    *  channel). An answer row carries the human-answer tag; the unnamed primary user's own is one. An untagged Slack reply
-   *  (from before that tag) counts only when it came before the ask's first tagged answer and no later than the ask's
-   *  close, and only each person's first: after an answer or a close, a reply on the thread is correspondence. Each gives who, when,
+   *  (from before that tag) counts only when it came before the ask's first tagged answer (in this read's order) and no
+   *  later than the ask's first close, even if it was reopened since, and only each person's first: after an answer or a
+   *  close, a reply on the thread is correspondence. Each gives who, when,
    *  their words without the footer, the park it answered (null for the ask itself or an older Slack reply), and the
    *  identity recorded when the answer row was created. An ask answered in place (a runner's permission request, a host
    *  pairing request) has no answer row: its answer is on the ask. */
@@ -2211,14 +2212,16 @@ export class QueueRepository {
       ORDER BY ts_created, rowid`).all(askId, ask.sourceSession) as Array<{ qitem_id: string; source_session: string; ts_created: string; tagged: number }>)
       .filter((row) => !this.isSharedChannel(row.source_session)
         && (this.answersAsk(ask, row.source_session) || (row.tagged === 1 && row.source_session === UNATTRIBUTED_ACTOR)));
-    const firstTagged = candidates.find((row) => row.tagged === 1)?.ts_created;
-    const closed = this.closingTransition(askId, ask.state)?.ts;
+    const firstTagged = candidates.findIndex((row) => row.tagged === 1);
+    const history = this.transitionLog.listForQitem(askId);
+    // The ask's first close, whatever its state now: a reopen doesn't make later thread replies its answers.
+    const firstClose = history.find((transition) => !isBlockerLive(transition.state))?.ts;
     const legacyFirst = new Set<string>();
-    const rows = candidates.filter((row) => row.tagged === 1 || ((!firstTagged || row.ts_created < firstTagged)
-      && (!closed || row.ts_created <= closed) && !legacyFirst.has(row.source_session) && !!legacyFirst.add(row.source_session)));
+    const rows = candidates.filter((row, index) => row.tagged === 1 || ((firstTagged < 0 || index < firstTagged)
+      && (!firstClose || row.ts_created <= firstClose) && !legacyFirst.has(row.source_session) && !!legacyFirst.add(row.source_session)));
     if (rows.length === 0) return [];
     // An answer to a park's question has the ID made from that park's episode, so the episode is read back from the ID.
-    const episodes = new Map(this.transitionLog.listForQitem(askId)
+    const episodes = new Map(history
       .filter((transition) => transition.ownerNotificationKind === "human-required")
       .map((transition) => `${askId}:${transition.transitionId}`)
       .map((key) => [humanAnswerId(askId, key), key] as const));

@@ -116,6 +116,26 @@ describe("needs-me.read: answers on the ask, by link", () => {
     f.repo.update({ qitemId: inPlace, actorSession: PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "decided in place" });
     legacy("qitem-slack-inbound-after-close", inPlace, PERSON, ASKER, new Date(Date.now() + 60_000).toISOString());
     expect((await f.read(inPlace)).answers).toEqual([]);
+    // Reopening the ask, or closing it again later, doesn't make that reply its answer.
+    f.repo.update({ qitemId: inPlace, actorSession: ASKER, state: "pending", reopen: true, transitionNote: "reopened to ask again" });
+    expect((await f.read(inPlace)).answers).toEqual([]);
+    f.repo.update({ qitemId: inPlace, actorSession: PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "decided again" });
+    expect((await f.read(inPlace)).answers).toEqual([]);
+  });
+
+  it("at the same time as the first tagged answer, an older reply counts only when it was recorded first", async () => {
+    const f = fixture();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const insert = (qitemId: string, askId: string, tags: string) => f.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,reply_to,tags) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(qitemId, at, at, PERSON, ASKER, "pending", "routine", `Words in ${qitemId}`, askId, tags);
+    const legacyFirst = await f.ask();
+    insert("qitem-slack-inbound-tie-first", legacyFirst, "[]");
+    insert("qitem-tagged-tie-second", legacyFirst, '["human-answer"]');
+    expect((await f.read(legacyFirst)).answers.map((a: { qitemId: string }) => a.qitemId)).toEqual(["qitem-slack-inbound-tie-first", "qitem-tagged-tie-second"]);
+    const taggedFirst = await f.ask();
+    insert("qitem-tagged-tie-first", taggedFirst, '["human-answer"]');
+    insert("qitem-slack-inbound-tie-second", taggedFirst, "[]");
+    expect((await f.read(taggedFirst)).answers.map((a: { qitemId: string }) => a.qitemId)).toEqual(["qitem-tagged-tie-first"]);
   });
 
   it("keeps a real older Slack answer that came before a re-park's tagged answer, and lists both", async () => {
