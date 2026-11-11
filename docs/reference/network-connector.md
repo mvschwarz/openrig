@@ -8,7 +8,32 @@ with one grant per participant. The network connector puts one selected local se
 The connector opens no port: your daemon makes every connection outward, and the hub never connects to your machine. Work the hub
 sends that participant runs on your seat, under your accounts, and the result goes back to the hub item.
 
-## Connect
+## Enroll in an account, then connect by name
+
+When your hub is an account's network, enroll this daemon once with the one-time code its page shows, then connect
+seats by name:
+
+```bash
+rig network enroll <code> --site <site URL>
+rig network connect <seat> --as <name>
+```
+
+- `enroll` trades the code, with this daemon's host id, for an installation key. The key is stored like a participant's
+  token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A code is
+  single-use and short-lived; a refused one says why, so get a new one from the page.
+- The installation key goes only to the site you enrolled at: a redirect from it isn't followed, and a call to the
+  account that doesn't answer within 20 seconds ends with an error.
+- `connect --as <name>` lists the name with the account, which answers that participant's bearer, its MCP front and its
+  rig. The binding then reaches that front as `<name>@<rig>`, the same as a direct connect. A name is lowercase letters,
+  digits and inner dashes, up to 32. One that another connection to the account uses is refused.
+- If the answer to a connect is lost, the next connect drops the name and lists it again, which gets a fresh bearer and
+  ends the old one.
+- `disconnect` ends the binding here, then has the account stop listing the name, which revokes it there. If the account
+  can't be reached, the binding is still ended, and the error names the `rig network disconnect <binding id>` to run
+  again.
+- `rig network status` shows the enrollment above the bindings.
+
+## Connect with a hub URL and a token
 
 ```bash
 rig network connect <seat> --hub <url> --as <participant> --token-file <path>
@@ -108,7 +133,7 @@ each time it starts.
   the participant's token and its work then cross the network unencrypted, where they can be read. Use the hub's
   `https:` URL where it has one. The choice is recorded on that binding, so the connector doesn't ask again, and
   `rig network status` (and its `--json`) marks the binding unencrypted. OpenRig doesn't judge the address: a private or
-  tailnet address doesn't prove the connection is protected.
+  tailnet address doesn't prove the connection is protected. `rig network enroll` asks the same for a plain-http site.
 - **Redirects:** the connector follows a hub's redirect only within its own origin, or to its `https:` form on the same
   host. Any other redirect stops the connection with its target named, and the token isn't sent there. Connect the
   binding to the hub's own URL.

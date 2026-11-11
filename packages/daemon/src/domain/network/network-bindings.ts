@@ -28,10 +28,15 @@ export interface NetworkBinding {
   updatedAt: string;
   lastContactAt: string | null;
   lastError: string | null;
+  /** Set when the binding was made through an enrolled account: its installation (`neti-…`) and participant name. */
+  installationId: string | null;
+  participantName: string | null;
+  /** When the account stopped listing this participant, after the binding ended here. */
+  accountRemovedAt: string | null;
 }
 
 export class NetworkBindingError extends Error {
-  constructor(readonly code: string, message: string, readonly status: 400 | 404 | 409 | 500 = 400) {
+  constructor(readonly code: string, message: string, readonly status: 400 | 401 | 404 | 409 | 500 | 502 | 503 = 400) {
     super(message);
   }
 }
@@ -39,12 +44,14 @@ export class NetworkBindingError extends Error {
 interface Row {
   id: string; node_id: string; local_session: string; hub_url: string; hub_seat: string; allow_http: number; state: NetworkBindingState;
   state_reason: string | null; created_at: string; updated_at: string; last_contact_at: string | null; last_error: string | null;
+  installation_id: string | null; participant_name: string | null; account_removed_at: string | null;
 }
 
 const project = (row: Row): NetworkBinding => ({
   id: row.id, nodeId: row.node_id, localSession: row.local_session, hubUrl: row.hub_url, hubSeat: row.hub_seat,
   allowHttp: row.allow_http === 1, unencrypted: row.hub_url.startsWith("http:"), state: row.state, stateReason: row.state_reason, createdAt: row.created_at, updatedAt: row.updated_at,
   lastContactAt: row.last_contact_at, lastError: row.last_error,
+  installationId: row.installation_id, participantName: row.participant_name, accountRemovedAt: row.account_removed_at,
 });
 
 const MAX_CREDENTIAL_BYTES = 16384;
@@ -58,10 +65,15 @@ export function networkCredentialFile(home: string, bindingId: string): string {
 /** The participant's bearer, read from its private file. A file anyone else can read, a link or an oversized file is
  *  refused, with the path named and the value never shown. */
 export function readNetworkCredential(home: string, bindingId: string): string {
-  const file = networkCredentialFile(home, bindingId);
+  return readPrivateToken(networkCredentialFile(home, bindingId),
+    (file) => `The credential for ${bindingId} isn't at ${file}. Connect the seat again with its token file.`);
+}
+
+/** A token from one of the network's private files (`{"version":1,"token":…}`), checked the same way for every kind. */
+export function readPrivateToken(file: string, missing: (file: string) => string): string {
   let stat;
   try { stat = lstatSync(file); } catch {
-    throw new NetworkBindingError("credential_missing", `The credential for ${bindingId} isn't at ${file}. Connect the seat again with its token file.`, 404);
+    throw new NetworkBindingError("credential_missing", missing(file), 404);
   }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CREDENTIAL_BYTES || (stat.mode & 0o077) !== 0) {
     throw new NetworkBindingError("credential_unsafe", `${file} must be a regular file readable only by this user.`);
@@ -77,7 +89,29 @@ export function readNetworkCredential(home: string, bindingId: string): string {
   return value.token;
 }
 
-function validHubUrl(raw: unknown, allowHttp: boolean): string {
+/** Write a token to its own private file: a 0700 folder and a 0600 file, opened exclusively. On failure, only what
+ *  this call made is removed: the file it opened, and the folder if it made it (`mkdirSync` returns the first folder it
+ *  made, so any value means this one is new). Returns the cleanup for a later step that fails. */
+export function writePrivateToken(file: string, token: string): () => void {
+  let created = false;
+  let madeFolder: string | undefined;
+  const cleanup = () => {
+    if (created) rmSync(file, { force: true });
+    if (madeFolder !== undefined) rmSync(dirname(file), { recursive: true, force: true });
+  };
+  try {
+    madeFolder = mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const fd = openSync(file, "wx", 0o600);
+    created = true;
+    try { writeFileSync(fd, `${JSON.stringify({ version: 1, token })}\n`); } finally { closeSync(fd); }
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+  return cleanup;
+}
+
+export function validHubUrl(raw: unknown, allowHttp: boolean): string {
   if (typeof raw !== "string" || !raw.trim()) throw new NetworkBindingError("invalid_hub_url", "A hub URL is required.");
   let url: URL;
   try { url = new URL(raw.trim()); } catch { throw new NetworkBindingError("invalid_hub_url", `'${raw}' isn't a URL.`); }
@@ -140,37 +174,38 @@ export class NetworkBindingStore {
   /** Bind a local seat to a hub participant with that participant's token. The credential is written first, exclusively
    *  and private, then the row. If either step fails, the credential this call created is removed, so a refused bind
    *  leaves none behind; a file that was already at that path is never touched. */
-  create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown; allowHttp?: unknown }): NetworkBinding {
-    const session = typeof input.session === "string" ? input.session.trim() : "";
+  /** The seat to bind, by its node: it must exist and have no active binding. Checked before anything is sent anywhere. */
+  freeSeat(rawSession: unknown): { session: string; nodeId: string } {
+    const session = typeof rawSession === "string" ? rawSession.trim() : "";
     if (!session) throw new NetworkBindingError("invalid_seat", "Name the local seat to connect.");
     const nodeId = resolveSessionNodeId(this.db, session);
     if (!nodeId) throw new NetworkBindingError("seat_not_found", `No local seat is named '${session}'.`, 404);
+    const bound = this.db.prepare("SELECT id FROM network_bindings WHERE node_id = ? AND state = 'active'").get(nodeId) as { id: string } | undefined;
+    if (bound) throw new NetworkBindingError("seat_already_connected", `${session} is already connected (${bound.id}). Disconnect it first.`, 409);
+    return { session, nodeId };
+  }
+
+  create(input: { session: unknown; hubUrl: unknown; hubSeat: unknown; token: unknown; allowHttp?: unknown;
+    installation?: { id: string; name: string } }): NetworkBinding {
+    const { session, nodeId } = this.freeSeat(input.session);
     const allowHttp = input.allowHttp === true;
     const hubUrl = validHubUrl(input.hubUrl, allowHttp);
     const hubSeat = validHubSeat(input.hubSeat);
     const token = validToken(input.token);
-    const bound = this.db.prepare("SELECT id FROM network_bindings WHERE node_id = ? AND state = 'active'").get(nodeId) as { id: string } | undefined;
-    if (bound) throw new NetworkBindingError("seat_already_connected", `${session} is already connected (${bound.id}). Disconnect it first.`, 409);
     const taken = this.db.prepare("SELECT id FROM network_bindings WHERE hub_url = ? AND hub_seat = ? AND state = 'active'").get(hubUrl, hubSeat) as { id: string } | undefined;
     if (taken) throw new NetworkBindingError("participant_already_connected", `${hubSeat} at ${hubUrl} is already connected (${taken.id}).`, 409);
 
     const id = this.newId();
-    const file = networkCredentialFile(this.home, id);
-    let created = false;
-    let madeFolder: string | undefined;
+    // The credential first, then the row; a failed row takes the credential with it. A file that was already at the path
+    // is never touched, and a folder that was already there keeps its other files.
+    const cleanup = writePrivateToken(networkCredentialFile(this.home, id), token);
     try {
-      madeFolder = mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-      const fd = openSync(file, "wx", 0o600);
-      created = true;
-      try { writeFileSync(fd, `${JSON.stringify({ version: 1, token })}\n`); } finally { closeSync(fd); }
       const at = this.now().toISOString();
-      this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, allow_http, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`).run(id, nodeId, session, hubUrl, hubSeat, allowHttp ? 1 : 0, at, at);
+      this.db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, allow_http, state, created_at, updated_at,
+        installation_id, participant_name) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
+        .run(id, nodeId, session, hubUrl, hubSeat, allowHttp ? 1 : 0, at, at, input.installation?.id ?? null, input.installation?.name ?? null);
     } catch (error) {
-      // Only what this call made: the file it opened, and this binding's folder if it made it (`mkdirSync` returns the
-      // first folder it made, so any value means this one is new). A folder that was already there keeps its other files.
-      if (created) rmSync(file, { force: true });
-      if (madeFolder !== undefined) rmSync(dirname(file), { recursive: true, force: true });
+      cleanup();
       throw error;
     }
     return this.get(id)!;
@@ -185,6 +220,11 @@ export class NetworkBindingStore {
   /** The hub refused the credential: it was revoked there. Same effect as a local disconnect. */
   markRevoked(id: string, reason: string): NetworkBinding {
     return this.end(id, "revoked", reason);
+  }
+
+  /** The account stopped listing this ended binding's participant. */
+  markAccountRemoved(id: string): void {
+    this.db.prepare("UPDATE network_bindings SET account_removed_at = ?, updated_at = ? WHERE id = ?").run(this.now().toISOString(), this.now().toISOString(), id);
   }
 
   /** The connector reached the hub as this binding. */

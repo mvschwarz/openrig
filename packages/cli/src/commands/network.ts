@@ -17,6 +17,10 @@ interface Binding {
   closedElsewhere?: Array<{ hubItem: string; localItem: string }>;
 }
 
+interface Installation { id: string; site: string; installationId: string; name: string | null }
+
+const enrolled = (i: Installation) => `Enrolled at ${i.site} as installation ${i.name ?? i.installationId} (${i.id})`;
+
 /** The participant's token, read from the file the account gave the person. A file others can read is used, with a note. */
 function defaultReadTokenFile(path: string): string {
   const stat = lstatSync(path);
@@ -56,25 +60,47 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     console.log(json ? JSON.stringify(data, null, 2) : ok(data as Record<string, unknown>));
   };
 
+  cmd.command("enroll")
+    .description("Enroll this daemon in an account with the one-time code its page shows, so seats connect by name")
+    .argument("<code>", "The one-time code from the account page")
+    .requiredOption("--site <url>", "The account's site")
+    .option("--allow-http", "Accept a plain-http site: the installation key and tokens cross the network unencrypted")
+    .option("--json", "Print JSON")
+    .action(async (code: string, opts: { site: string; allowHttp?: boolean; json?: boolean }) => {
+      const daemon = await client();
+      if (!daemon) return;
+      const res = await daemon.post<Record<string, unknown>>("/api/network/installations", { code, site: opts.site, allowHttp: opts.allowHttp === true }, { headers: operatorAuthHeaders() });
+      finish(res.status, res.data, opts.json, (i) => `${enrolled(i as unknown as Installation)}\nConnect a seat with rig network connect <seat> --as <name>.`);
+    });
+
   cmd.command("connect")
-    .description("Connect a local seat to a hub participant, using that participant's token")
+    .description("Connect a local seat to a hub participant: by name through the enrolled account, or with a hub URL and token file")
     .argument("<seat>", "The local seat to connect (its address, member@rig)")
-    .requiredOption("--hub <url>", "The hub's MCP URL")
-    .requiredOption("--as <participant>", "The participant's address in the hub (member@rig)")
-    .requiredOption("--token-file <path>", "A file holding the participant's token")
+    .requiredOption("--as <participant>", "Through the account: the name to connect as. With --hub: the participant's address in the hub (member@rig)")
+    .option("--hub <url>", "The hub's MCP URL, to connect without the account (with --token-file)")
+    .option("--token-file <path>", "A file holding the participant's token (with --hub)")
     .option("--allow-http", "Accept a plain-http hub for this binding: its token and work cross the network unencrypted")
     .option("--json", "Print JSON")
-    .action(async (seat: string, opts: { hub: string; as: string; tokenFile: string; allowHttp?: boolean; json?: boolean }) => {
-      let token: string;
-      try { token = (getDeps().readTokenFile ?? defaultReadTokenFile)(opts.tokenFile); } catch (error) {
-        console.error(`Can't read the token file: ${(error as Error).message}`);
+    .action(async (seat: string, opts: { hub?: string; as: string; tokenFile?: string; allowHttp?: boolean; json?: boolean }) => {
+      if (!opts.hub !== !opts.tokenFile) {
+        console.error("Give both --hub and --token-file, or neither to connect through the enrolled account.");
         process.exitCode = 1;
         return;
       }
+      let body: Record<string, unknown> = { session: seat, participantName: opts.as };
+      if (opts.hub && opts.tokenFile) {
+        let token: string;
+        try { token = (getDeps().readTokenFile ?? defaultReadTokenFile)(opts.tokenFile); } catch (error) {
+          console.error(`Can't read the token file: ${(error as Error).message}`);
+          process.exitCode = 1;
+          return;
+        }
+        body = { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token, allowHttp: opts.allowHttp === true };
+      }
       const daemon = await client();
       if (!daemon) return;
-      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", { session: seat, hubUrl: opts.hub, hubSeat: opts.as, token, allowHttp: opts.allowHttp === true }, { headers: operatorAuthHeaders() });
-      finish(res.status, res.data, opts.json, (b) => `Connected ${line(b as unknown as Binding)}\nWork for ${opts.as} reaches ${seat} once the connector runs; rig network status shows its last contact.`);
+      const res = await daemon.post<Record<string, unknown>>("/api/network/bindings", body, { headers: operatorAuthHeaders() });
+      finish(res.status, res.data, opts.json, (b) => `Connected ${line(b as unknown as Binding)}\nWork for ${(b as unknown as Binding).hubSeat} reaches ${seat} once the connector runs; rig network status shows its last contact.`);
     });
 
   cmd.command("status")
@@ -83,10 +109,11 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .action(async (opts: { json?: boolean }) => {
       const daemon = await client();
       if (!daemon) return;
-      const res = await daemon.get<{ bindings: Binding[] }>("/api/network/bindings");
+      const res = await daemon.get<{ bindings: Binding[]; installations?: Installation[] }>("/api/network/bindings");
       finish(res.status, res.data, opts.json, (d) => {
         const bindings = (d.bindings ?? []) as Binding[];
-        return bindings.length ? bindings.map(line).join("\n") : "No seats are connected to a hub.";
+        const installations = (d.installations ?? []) as Installation[];
+        return [...installations.map(enrolled), ...(bindings.length ? bindings.map(line) : ["No seats are connected to a hub."])].join("\n");
       });
     });
 

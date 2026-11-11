@@ -17,10 +17,20 @@ let db: Database.Database;
 let home: string;
 let app: Hono;
 let rigs: RigRepository;
+/** An account that answers the connector routes: a key for the one-time code, a bearer for each newly listed name. */
+const listed = new Set<string>();
+const accountFetch = async (url: string, init: { method: string; body: string }) => {
+  const path = new URL(url).pathname;
+  const body = JSON.parse(init.body) as { code?: string; participants?: string[] };
+  const reply = (status: number, json: unknown) => ({ status, json: async () => json });
+  if (path === "/api/connector/enroll") return body.code === "ec1.page" ? reply(200, { installation: { id: "inst-1", name: "lab" }, key: "oik1_c_inst-1_key" }) : reply(400, { error: "code_not_current" });
+  const participants = (body.participants ?? []).map((name) => (listed.has(name) ? { name, state: "connected" } : (listed.add(name), { name, state: "connected", bearer: `bear-${name}` })));
+  return reply(200, { participants, mcp: "https://account.example/mcp", rig: "acct" });
+};
 const routesWith = (bearerToken: string | null) => {
   const next = new Hono();
   next.use("*", async (c, n) => { c.set("rigRepo" as never, rigs as never); await n(); });
-  next.route("/api/network", networkRoutes({ home, bearerToken }));
+  next.route("/api/network", networkRoutes({ home, bearerToken, accountFetch, selfHostId: () => "host-a" }));
   return next;
 };
 beforeEach(() => {
@@ -109,6 +119,30 @@ it("status shows a hub item closed elsewhere under its binding, in text and JSON
   expect(String(out.mock.calls.at(-1)?.[0])).toContain("\n  hub item hub-9 was closed elsewhere before its result arrived; the result stays on qitem-net-0001");
   await cli().parseAsync(["node", "rig", "network", "status", "--json"]);
   expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).bindings[0].closedElsewhere).toEqual([{ hubItem: "hub-9", localItem: "qitem-net-0001", note: "closed elsewhere (done, canceled)" }]);
+});
+
+it("enrolls with the account page's code, connects a seat by name through it, and shows both in status", async () => {
+  listed.clear();
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  await cli().parseAsync(["node", "rig", "network", "enroll", "ec1.page", "--site", "https://account.example"]);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Enrolled at https:\/\/account\.example\/ as installation lab \(neti-[0-9a-f]{20}\)\nConnect a seat with rig network connect <seat> --as <name>\.$/);
+
+  await cli().parseAsync(["node", "rig", "network", "connect", "dev-impl@lab", "--hub", "https://hub.example/mcp", "--as", "alex@team"]);
+  expect(process.exitCode).toBe(1);
+  expect(String(err.mock.calls.at(-1)?.[0])).toBe("Give both --hub and --token-file, or neither to connect through the enrolled account.");
+  process.exitCode = undefined;
+
+  await cli().parseAsync(["node", "rig", "network", "connect", "dev-impl@lab", "--as", "alpha"]);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Connected netb-[0-9a-f]{20}  dev-impl@lab -> alpha@acct at https:\/\/account\.example\/mcp  no contact yet\nWork for alpha@acct reaches dev-impl@lab/);
+  await cli().parseAsync(["node", "rig", "network", "status"]);
+  const status = String(out.mock.calls.at(-1)?.[0]).split("\n");
+  expect(status[0]).toMatch(/^Enrolled at https:\/\/account\.example\/ as installation lab \(neti-/);
+  expect(status[1]).toMatch(/^netb-[0-9a-f]{20}  dev-impl@lab -> alpha@acct at https:\/\/account\.example\/mcp/);
+  await cli().parseAsync(["node", "rig", "network", "status", "--json"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).not.toMatch(/oik1_|bear-alpha/);
 });
 
 it("sends the operator bearer on its writes, so a daemon with one configured takes them", async () => {
