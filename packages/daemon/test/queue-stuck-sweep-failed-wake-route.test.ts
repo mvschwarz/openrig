@@ -1,7 +1,7 @@
 // A wake that failed at a live agent seat with no delegation parent or escalates_to got a finding addressed back to that
 // seat, whose own wake then went to the seat that had just failed to take one. That finding now goes to the row's creator,
 // or for a seat that sent itself the work, to the operator agent. A declared route keeps its routing and its fallback.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
@@ -71,7 +71,40 @@ describe("stuck sweep: a failed wake at a seat with no declared route", () => {
     await sweep();
     const [finding] = findingsFor(row);
     expect(finding!.destinationSession).toBe("root@front");
-    expect(finding!.body).toContain("its creator and the operator agent (agents.operator_session) are each unset, missing, this seat or not an address this queue takes, so this finding stays addressed to it");
+    expect(finding!.body).toContain("its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery or not an address this queue takes, so this finding stays addressed to it");
+  });
+
+  // Rows that OpenRig's own machinery creates (stream intake and startup write them as daemon@kernel) have no creator that
+  // can act on a finding.
+  it.each(["daemon@kernel", "stuck-sweep@system"])("a row created by OpenRig's machinery (%s) gets the operator agent", async (machinery) => {
+    seat("front", "door.root", "root@front");
+    const row = await failedWake("root@front", machinery);
+    await sweep({ resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
+    const [finding] = findingsFor(row);
+    expect(finding!.destinationSession).toBe("operator-admin@kernel");
+    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel, the operator agent (agents.operator_session)");
+  });
+
+  it("reads a seat's delegation parent again after the pass writes a finding", async () => {
+    const lead = seat("lane", "work.lead", "lead@lane");
+    const first = await failedWake("lead@lane");
+    const second = await failedWake("lead@lane");
+    // Another writer declares the seat's parent (with no session yet) while the pass awaits its first finding's write.
+    const parent = seat("lane", "coord.owner", "owner@lane", false);
+    const create = queue.create.bind(queue);
+    let declared = false;
+    vi.spyOn(queue, "create").mockImplementation(async (input) => {
+      const created = await create(input);
+      if (!declared && (input.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG)) {
+        declared = true;
+        rigs.addEdge(lead.rig.id, parent.node.id, lead.node.id, "delegates_to");
+      }
+      return created;
+    });
+    await sweep();
+    const routes = [first, second].map((row) => findingsFor(row)[0]!.destinationSession);
+    // The first finding was routed before the parent existed; the second sees it and keeps the parent's fallback.
+    expect(routes.sort()).toEqual(["lead@lane", "sender@lane"]);
   });
 
   it("passes over a creator the queue doesn't take as an address", async () => {

@@ -176,11 +176,13 @@ queue repository, with `evidenceRef: rig queue show <source-qitem-id>` pointing
 to the underlying durable work row. Unclaimed and undelivered findings go to
 the destination's orchestrator when one is derivable, otherwise to the
 destination itself, and that seat may be dead. A wake that failed (`failed:…`)
-at a live agent seat with no `delegates_to` parent or `escalates_to` route is the
-exception: its finding goes to the row's creator, or, for a seat that sent
-itself the work, to the operator agent (`agents.operator_session`), so the
-finding's own wake isn't sent to the seat that just failed to take one. Overdue
-claims go to their destination. Repeated detections reuse the existing finding without changing
+at a recorded agent seat with no `delegates_to` parent or `escalates_to` route is
+the exception: its finding tries the row's creator, then the operator agent
+(`agents.operator_session`), skipping an unset, confirmed-missing, self or
+unaccepted address and OpenRig's own machinery (`daemon@kernel` or a `@system`
+actor), so the finding's own wake isn't sent to the seat that just failed to
+take one. If neither can be used, it stays with the original seat and says why.
+Overdue claims go to their destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
 Previously, falling out of a reporting query could itself close a delivery or
 unclaimed finding. An unconfirmed retry, a fresh human-notification post window,
