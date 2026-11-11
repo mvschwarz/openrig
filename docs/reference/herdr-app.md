@@ -62,14 +62,14 @@ What an open does, in order:
    layout file is never written. A `rig.json` OpenRig didn't write is never overwritten.
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
    goes to the first live cell. Once herdr-app has acknowledged the layout with the view, OpenRig writes the gate file
-   of each of the view's interactive cells, on every page (including pages the strip hasn't shown yet, since the strip
-   moves between pages on its own), and each cell takes input a fraction of a second later (it checks every 0.2 s).
-   Anything that reached a cell before that, typed or written to its terminal (`hc send`), is dropped, not delivered
-   late. The open reports a view herdr-app
-   hasn't confirmed as unconfirmed, not opened; its viewers keep running and it stays in the Rig layout, and its cells
-   take input once herdr-app shows it. OpenRig keeps watching for 10 minutes, across a daemon restart; if herdr-app
-   hasn't shown it by then, each interactive cell says so, takes no input, and names the command that opens the view
-   again (`rig terminal open <view> --provider herdr-app`).
+   of each local interactive cell, on every page (including pages the strip hasn't shown yet, since the strip moves
+   between pages on its own). These cells take input a fraction of a second later (they check every 0.2 s). Anything
+   that reached a local interactive cell before that, typed or written to its terminal (`hc send`), is dropped, not
+   delivered late. Remote cells run their ssh attachments from the start and don't wait for this gate. The open
+   reports a view herdr-app hasn't confirmed as unconfirmed, not opened; its viewers keep running and it stays in the
+   Rig layout, and its local interactive cells take input once herdr-app shows it. OpenRig keeps watching for 10
+   minutes, across a daemon restart; if herdr-app hasn't shown it by then, each local interactive cell says so, takes
+   no input, and names the command that opens the view again (`rig terminal open <view> --provider herdr-app`).
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 
