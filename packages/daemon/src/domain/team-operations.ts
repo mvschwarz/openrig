@@ -21,7 +21,7 @@ export function teamOperationsCapabilities(info: BuildInfo = BUILD_INFO) {
   return {
     contract: TEAM_OPERATIONS_CONTRACT,
     capabilities: TEAM_OPERATIONS_CAPABILITIES,
-    // A source run has no stamp, so its build reads null rather than an invented version.
+    // A source run has null build fields rather than an invented version.
     build: { semver: info.semver, commit: info.commit },
   };
 }

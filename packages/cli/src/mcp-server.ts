@@ -305,15 +305,17 @@ function projectForExternal<T>(row: T, view: ExternalView): T {
   return fields as T;
 }
 
-/** A handed-on item as a scoped caller receives it: without the daemon's own successor fields (successors,
- *  successorsTruncated, successorNote), which name rows and remote ids regardless of this caller's scope. Its answer is
- *  show's scope-checked successor (successorOf). */
-function withoutDaemonSuccessors<T>(row: T): T {
+/** An item as a scoped caller receives it: without the daemon's own fields that carry other rows regardless of this
+ *  caller's scope. Those are the successor fields (successors, successorsTruncated, successorNote), which name rows and
+ *  remote ids; a handed-on item's answer is show's scope-checked successor (successorOf). And the answers people returned
+ *  to the item (answers), which are other rows, from people, to its asker. */
+function withoutDaemonLinkedRows<T>(row: T): T {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
   const fields = { ...(row as Record<string, unknown>) };
   delete fields.successors;
   delete fields.successorsTruncated;
   delete fields.successorNote;
+  delete fields.answers;
   return fields as T;
 }
 
@@ -1445,7 +1447,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const view = externalView(scope);
         let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
-        const shownItem = scope ? withoutDaemonSuccessors(item.data) : item.data;
+        const shownItem = scope ? withoutDaemonLinkedRows(item.data) : item.data;
         const data = view
           ? { item: projectForExternal(shownItem, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data }
           : { item: shownItem, transitions: transitions.data };

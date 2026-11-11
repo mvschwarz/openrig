@@ -163,7 +163,8 @@ build:
 ```
 
 A capability reads `supported`, `not-supported` or `unknown`, and a missing key means `unknown`. A daemon without the
-route (HTTP 404) predates the contract: keep reading what it already returns. `build` is null in a source run.
+route (HTTP 404) predates the contract: keep reading what it already returns. In a source run, `build` is
+`{ semver: null, commit: null }`.
 
 With `needs-me.read` supported:
 

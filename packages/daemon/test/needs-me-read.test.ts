@@ -77,24 +77,61 @@ describe("needs-me.read: answers on the ask, by link", () => {
     expect((await f.read(id)).answers).toMatchObject([{ by: PERSON, text: "Hold until Friday" }]);
   });
 
-  it("names the park an answer belongs to, keeps an older Slack reply, and leaves out an update posted to the thread", async () => {
+  it("names the park an answer belongs to when the ask is parked on its person", async () => {
+    const f = fixture(); const id = await f.ask();
+    f.repo.update({ qitemId: id, actorSession: ASKER, state: "blocked", blockedOn: PERSON, summary: "Still need your call",
+      evidenceRef: "/fixture/decision", transitionNote: "parked on its person" });
+    const episode = f.repo.currentHumanRequiredEpisode(id)!.key;
+    // As the Slack path records a parked ask's answer: under that park's question.
+    const parked = await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: ASKER, body: "Go ahead\n\n---\nIn reply to: x",
+      tags: ["human-answer"], inboundReplyTo: id, episodeKey: episode, nudge: false });
+    expect((await f.read(id)).answers).toMatchObject([{ qitemId: parked.qitemId, by: PERSON, text: "Go ahead", episode }]);
+  });
+
+  it("counts only real answers: not correspondence, another reply after the answer, a reply to an update, or a row to someone else", async () => {
     const f = fixture();
-    const row = await f.repo.create({ sourceSession: ASKER, destinationSession: "owner@test-rig", body: "Work waiting on a person", nudge: false });
-    f.repo.claim({ qitemId: row.qitemId, destinationSession: "owner@test-rig" });
-    f.repo.update({ qitemId: row.qitemId, actorSession: "owner@test-rig", state: "blocked", blockedOn: PERSON });
-    const episode = f.repo.currentHumanRequiredEpisode(row.qitemId);
-    expect(episode).not.toBeNull();
-    const parked = await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: "owner@test-rig",
-      body: "Go ahead\n\n---\nIn reply to: x", inboundReplyTo: row.qitemId, episodeKey: episode!.key, nudge: false });
-    const at = new Date().toISOString();
-    f.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,reply_to,tags) VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .run("qitem-slack-inbound-legacy", at, at, PERSON, "owner@test-rig", "pending", "routine", "Older reply", row.qitemId, "[]");
-    await f.repo.create({ sourceSession: "owner@test-rig", destinationSession: PERSON, body: "FYI, still going", humanIntent: "update",
-      replyTo: row.qitemId, nudge: false });
-    expect((await f.read(row.qitemId)).answers).toMatchObject([
-      { qitemId: parked.qitemId, text: "Go ahead", episode: episode!.key },
-      { qitemId: "qitem-slack-inbound-legacy", text: "Older reply", episode: null },
-    ]);
+    const legacy = (qitemId: string, replyTo: string, source: string, destination: string) => {
+      const at = new Date().toISOString();
+      f.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,reply_to,tags) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(qitemId, at, at, source, destination, "pending", "routine", `Words in ${qitemId}`, replyTo, "[]");
+    };
+    // An older Slack reply from before the answer tag: the asked person's first one counts, and a second one doesn't.
+    const old = await f.ask();
+    legacy("qitem-slack-inbound-old-1", old, PERSON, ASKER);
+    legacy("qitem-slack-inbound-old-2", old, PERSON, ASKER);
+    // A reply from someone who can't answer the ask, and one sent to someone other than the asker.
+    legacy("qitem-slack-inbound-agent", old, "owner@test-rig", ASKER);
+    legacy("qitem-slack-inbound-elsewhere", old, PERSON, "owner@test-rig");
+    expect((await f.read(old)).answers).toEqual([expect.objectContaining({ qitemId: "qitem-slack-inbound-old-1", episode: null })]);
+    // Once a tagged answer exists, a later untagged reply on the ask is correspondence, not a second answer.
+    const id = await f.ask();
+    const done = await f.act({ verb: "answer", qitemId: id, decision: "Ship it" });
+    legacy("qitem-slack-inbound-later", id, PERSON, ASKER);
+    expect((await f.read(id)).answers).toEqual([expect.objectContaining({ qitemId: done.body.createdQitemId, text: "Ship it" })]);
+    // Replies posted to an update's thread are never its answers.
+    const update = (await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "FYI", humanIntent: "update", nudge: false })).qitemId;
+    legacy("qitem-slack-inbound-on-update", update, PERSON, ASKER);
+    expect((await f.read(update)).answers).toEqual([]);
+  });
+
+  it("finds an ask's replies through the reply_to index, not a scan of the queue", async () => {
+    const f = fixture(); const id = await f.ask();
+    const replyToQueries = new Set<string>();
+    const prepare = f.db.prepare.bind(f.db);
+    f.db.prepare = ((sql: string) => {
+      if (/reply_to = \?/.test(sql)) replyToQueries.add(sql);
+      return prepare(sql);
+    }) as typeof f.db.prepare;
+    await f.read(id);
+    await f.attention();
+    f.db.prepare = prepare;
+    // The answer lookup and the decision revision's reply lookups, as the reads actually ran them.
+    expect(replyToQueries.size).toBeGreaterThanOrEqual(2);
+    for (const sql of replyToQueries) {
+      const params = (sql.match(/\?/g) ?? []).map(() => "x");
+      const plan = (f.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+      expect(plan, sql).toMatch(/SEARCH queue_items USING INDEX idx_queue_items_reply_to/);
+    }
   });
 });
 
