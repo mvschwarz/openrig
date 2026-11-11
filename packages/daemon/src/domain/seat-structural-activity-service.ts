@@ -14,6 +14,9 @@ export interface StructuralObservation {
   reason: string;
   evidence: string | null;
   observedAt: string;
+  /** A lower bound taken before the capture's read, when known: a reader may use the frame only for the occupant
+   *  present by then. */
+  captureStartedAt?: string;
   /** A complete idle frame read for this capture's target, not a generic footer or hook. */
   idleFrame?: { sessionName: string; runtime: "claude-code" | "codex"; captureStartedAt: string };
   /** A Codex working observation is usable only for the occupant present when capture began. */
@@ -141,6 +144,7 @@ export class SeatStructuralActivityService {
       reason: c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
+      ...(captureStartedAt ? { captureStartedAt: captureStartedAt.toISOString() } : {}),
       ...(captureStartedAt && seconds !== null ? { codexWorkingClock: { seconds, captureStartedAt: captureStartedAt.toISOString() } } : {}),
       ...(workingFrame ? { codexWorkingFrame: workingFrame } : {}),
       ...(captureStartedAt && c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")

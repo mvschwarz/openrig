@@ -15,7 +15,7 @@ import type {
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
 import { recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
-import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
+import type { SeatStructuralActivityService, StructuralObservation } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 
@@ -222,8 +222,9 @@ export class SeatActivityService {
       const seat = this.ladder.get(seatNodeId);
       let codexFrameWorking = false;
       let codexFrameProofAt: string | undefined;
+      const frame = seat?.inventory?.runtime === "codex" && this.structuralActivity
+        ? this.structuralActivity.getStructuralActivity(paneId) : null;
       if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
-        const frame = this.structuralActivity.getStructuralActivity(paneId);
         const capturedAt = frame ? Date.parse(frame.observedAt) : NaN;
         const frameStarted = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.captureStartedAt) : NaN;
         const proofAt = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.proofAt) : NaN;
@@ -245,6 +246,19 @@ export class SeatActivityService {
         observedAt: paneOverridesQuietWindow ? codexFrameProofAt! : record.lastObservedAt,
         activity: isActiveWithinWindow || codexFrameWorking ? "working" : "idle-at-prompt",
       });
+      // #2515: a Codex choice prompt can be answered on screen with no hook after it. The same structural frame, under
+      // the working frame's boundary (captured after this seat's inventory began, and fresh), says whether a choice is
+      // showing (1) or the composer is complete and empty (0). Any other frame (a draft, work, an unrecognised screen)
+      // withdraws this source, so the prompt reads unknown again. A tracked tool approval keeps its own path.
+      if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
+        const prompt = codexPromptObservation(frame, paneId, seat.inventorySinceMs);
+        if (prompt) {
+          this.reportEvidence({ seatNodeId, sessionName: paneId, rung: "needs-input-chrome", sourceId: CODEX_STRUCTURAL_PROMPT_SOURCE,
+            seq, observedAt: prompt.observedAt, needsInput: prompt.needsInput });
+        } else if (seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE)) {
+          this.arbitrate(seat);
+        }
+      }
       if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
         const evd = this.selfReportReader(paneId, seatNodeId);
         if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
@@ -996,6 +1010,24 @@ interface SeatWaiter {
 interface NeedsInputShape {
   count: number;
   reason: string | null;
+}
+
+const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
+
+/** What a Codex seat's latest structural frame says about a prompt, for the occupant present when it was captured:
+ *  a choice or permission prompt on screen (1), or a complete empty composer (0), observed at the capture's start.
+ *  Null for anything else, or a frame captured before this seat's current inventory. */
+function codexPromptObservation(frame: StructuralObservation | null, sessionName: string, inventorySinceMs: number):
+  { observedAt: string; needsInput: NeedsInputShape } | null {
+  const started = frame?.captureStartedAt ? Date.parse(frame.captureStartedAt) : NaN;
+  if (!frame || !Number.isFinite(started) || started < inventorySinceMs) return null;
+  if (frame.state === "attention" && (frame.reason === "selection_prompt" || frame.reason === "permission_prompt")) {
+    return { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } };
+  }
+  if (frame.idleFrame?.runtime === "codex" && frame.idleFrame.sessionName === sessionName) {
+    return { observedAt: frame.idleFrame.captureStartedAt, needsInput: { count: 0, reason: null } };
+  }
+  return null;
 }
 
 /** One relay route's consecutive agreements toward promoting a trial rung. */
