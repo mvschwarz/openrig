@@ -62,8 +62,8 @@ one command away. Your memory of the fleet is a claim about the past.
   arguments) and Claude's bounded suggested rules, which can contain paths, patterns or sensitive
   values. It's evidence, not an applied permission: it applies and approves nothing, and it's held
   in memory for five minutes and lost on a daemon restart (`docs/reference/seat-delivery.md`).
-  It also shows guidance written after the agent loaded it and what the seat's refocus hook
-  recorded; every seat's managed guidance points to its skills, help and project context.
+  It also shows when guidance was written relative to the session's recorded moments, and what
+  the seat's refocus hook recorded; every seat's managed guidance points to its skills, help and project context.
 - **`rig view list` / `rig view show <lens>`** — named lenses over coordination state: use
   `view show escalations` for owner attention, `view show pickup` for claimed-row state, and
   `view show execution` for done/now/next and current authored planning guidance with its

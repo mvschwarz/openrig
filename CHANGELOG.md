@@ -70,7 +70,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   row's successor, and a custom blocker ID explains the wait.
   ([#2901](https://github.com/mvschwarz/openrig/pull/2901), [#2902](https://github.com/mvschwarz/openrig/pull/2902), [#2867](https://github.com/mvschwarz/openrig/pull/2867), [#2872](https://github.com/mvschwarz/openrig/pull/2872), [#2874](https://github.com/mvschwarz/openrig/pull/2874), [#2983](https://github.com/mvschwarz/openrig/pull/2983))
 - Every seat's managed guidance points to its skills, help and project context.
-  `rig seat status` shows guidance written after the agent loaded it and what
+  `rig seat status` shows when guidance was written relative to the session's
+  recorded moments, and what
   the seat's refocus hook recorded. A rebuilt seat's briefing lists older recaps
   as optional history. ([#2918](https://github.com/mvschwarz/openrig/pull/2918), [#2920](https://github.com/mvschwarz/openrig/pull/2920), [#2916](https://github.com/mvschwarz/openrig/pull/2916), [#2876](https://github.com/mvschwarz/openrig/pull/2876))
 
@@ -81,8 +82,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   Claude's context hint and drawn cursor are read correctly; a deliberate
   override is delivered when the input can't be read; update notices beside the
   paste hint are recognized. ([#2807](https://github.com/mvschwarz/openrig/pull/2807), [#2813](https://github.com/mvschwarz/openrig/pull/2813), [#2947](https://github.com/mvschwarz/openrig/pull/2947), [#2942](https://github.com/mvschwarz/openrig/pull/2942), [#2933](https://github.com/mvschwarz/openrig/pull/2933), [#2800](https://github.com/mvschwarz/openrig/pull/2800), [#2786](https://github.com/mvschwarz/openrig/pull/2786))
-- **Codex:** answering a Codex choice prompt lets a held wake resume without
-  escalating; a working counter is compared only within one pane process; hook
+- **Codex:** when you answer a Codex choice prompt, a message waiting on it is
+  delivered instead of escalated; a working counter is compared only within one pane process; hook
   trust records are written under smol-toml 1.9, so launches no longer stop at
   "Hooks need review". ([#2952](https://github.com/mvschwarz/openrig/pull/2952), [#2980](https://github.com/mvschwarz/openrig/pull/2980), [#2804](https://github.com/mvschwarz/openrig/pull/2804))
 - **Restore, start and handover:** owed restore input is delivered after a
@@ -97,7 +98,7 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   team; experimental and off by default) gets one standing notice; a hosted
   member's ring that times out reads unknown and isn't rung again;
   unroutable items wake as soon as the seat is reachable; the stuck sweep counts
-  a finding once; escalation custody survives a handoff; findings route to the
+  a finding once; an escalation keeps its owner through a handoff; findings route to the
   seat's own fallback; a park on an outside condition with no wake says so;
   `rig workflow validate` is read-only.
   ([#2864](https://github.com/mvschwarz/openrig/pull/2864), [#2957](https://github.com/mvschwarz/openrig/pull/2957), [#2790](https://github.com/mvschwarz/openrig/pull/2790), [#2824](https://github.com/mvschwarz/openrig/pull/2824), [#2946](https://github.com/mvschwarz/openrig/pull/2946), [#2865](https://github.com/mvschwarz/openrig/pull/2865), [#2851](https://github.com/mvschwarz/openrig/pull/2851), [#2852](https://github.com/mvschwarz/openrig/pull/2852), [#2817](https://github.com/mvschwarz/openrig/pull/2817), [#2763](https://github.com/mvschwarz/openrig/pull/2763))
@@ -113,7 +114,13 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   attention; a seat waiting on a person names its question; the installer
   reports PATH gaps with shell hints; daemon credentials stay out of the tmux
   server's environment. ([#2914](https://github.com/mvschwarz/openrig/pull/2914), [#2969](https://github.com/mvschwarz/openrig/pull/2969), [#2955](https://github.com/mvschwarz/openrig/pull/2955), [#2949](https://github.com/mvschwarz/openrig/pull/2949), [#2891](https://github.com/mvschwarz/openrig/pull/2891), [#2888](https://github.com/mvschwarz/openrig/pull/2888), [#2883](https://github.com/mvschwarz/openrig/pull/2883), [#2850](https://github.com/mvschwarz/openrig/pull/2850))
-- **Speed:** queue listings, show and the parked view stop re-reading each row;
+- **Pi and OMP:** typed edits submit in order on the affected Node releases
+  (22.21.x to 22.22.0, 24.9.0 to 24.11.1, 25.0.0 to 25.1.0) instead of appending an
+  insertion at the end. ([#2847](https://github.com/mvschwarz/openrig/pull/2847))
+- **Terminals:** a Herdr grid whose blank filler cells have no label is confirmed,
+  instead of reading every seat unconfirmed. ([#2849](https://github.com/mvschwarz/openrig/pull/2849))
+- **Speed:** queue listings, `rig queue show` and `rig parked` stop re-reading
+  each item;
   the stuck sweep yields by elapsed time; Markdown section ends are found in one
   pass. ([#2825](https://github.com/mvschwarz/openrig/pull/2825), [#2926](https://github.com/mvschwarz/openrig/pull/2926), [#2833](https://github.com/mvschwarz/openrig/pull/2833))
 
@@ -146,7 +153,7 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 - **Custom blocker IDs** explain the wait, but their progress gives no event
   wake; the timer remains. ([#2983](https://github.com/mvschwarz/openrig/pull/2983))
 - **Delivery evidence** records what was known, not that the agent read the
-  message; where the input landed can read unknown. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
+  message; where the input ended up can read unknown. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
 - **Runner permission answers** are checked with test runners; a real runner
   waiting on a person's answer hasn't been run end to end. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
 - **herdr-app views** are one-shot; following isn't claimed. **Pull relay**
@@ -160,7 +167,11 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 Thanks to @billbenetti, @oodadoudou, @DeryFerd, @Aummadour, @seanmcn, @w4rc0n,
 @ziadeh, @vanducng, @smota, @sn1thy, @dajiaohuang and @Vaishnavi220506 for
-merged contributions.
+merged contributions, and to @KM199, co-author of [#2947](https://github.com/mvschwarz/openrig/pull/2947) and [#2952](https://github.com/mvschwarz/openrig/pull/2952), which finish
+their [#2513](https://github.com/mvschwarz/openrig/pull/2513) and [#2515](https://github.com/mvschwarz/openrig/pull/2515).
+Thanks also for the reports behind these fixes: @nassersala ([#2955](https://github.com/mvschwarz/openrig/pull/2955)), @djuntgen
+([#2804](https://github.com/mvschwarz/openrig/pull/2804)), @todd-dhango ([#2851](https://github.com/mvschwarz/openrig/pull/2851)), @Kayhusk ([#2796](https://github.com/mvschwarz/openrig/pull/2796)), @pr0xc3nt4ur1 ([#2849](https://github.com/mvschwarz/openrig/pull/2849) and [#2850](https://github.com/mvschwarz/openrig/pull/2850)), @amsayfi
+([#2776](https://github.com/mvschwarz/openrig/pull/2776)), @oodadoudou ([#2847](https://github.com/mvschwarz/openrig/pull/2847)) and @CaptObvious ([#2933](https://github.com/mvschwarz/openrig/pull/2933) and [#2942](https://github.com/mvschwarz/openrig/pull/2942)).
 
 ## [0.7.11]
 

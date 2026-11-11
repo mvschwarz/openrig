@@ -66,7 +66,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   event. Read it as what was known about a delivery, not proof the agent read
   it. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
 - **Seat self-knowledge:** managed guidance points to skills, help and project
-  context; `rig seat status` shows guidance written after load and what the
+  context; `rig seat status` shows when guidance was written relative to the session's recorded moments, and what the
   refocus hook recorded. ([#2918](https://github.com/mvschwarz/openrig/pull/2918), [#2920](https://github.com/mvschwarz/openrig/pull/2920), [#2916](https://github.com/mvschwarz/openrig/pull/2916))
 - **Codex "Hooks need review" with smol-toml 1.9** is fixed; stop working around
   it by hand. ([#2804](https://github.com/mvschwarz/openrig/pull/2804))
