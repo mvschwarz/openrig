@@ -413,6 +413,8 @@ export interface FleetSnapshot {
   specsLoaded?: boolean;
   config?: import("./config/config-model.js").ConfigRead | null;
   configError?: string;
+  /** This host's open pairing requests, read with Settings; null when unavailable. */
+  pairRequests?: import("./config/pairing.js").PairRequestsRead | null;
   connections?: import("./connections/connections-model.js").ConnectionsRead | null;
   controlPlane?: import("./connections/connections-model.js").ControlPlaneRead | null;
   /** OPR.0.6.0.5 — the shipped Slack app manifest (same object as `rig slack manifest`); null when unavailable. */
@@ -533,7 +535,8 @@ export type Action =
   | { type: "timezone" }
   | { type: "recent-open"; transitionId: number }
   | { type: "back" }
-  | { type: "config-category"; category: string }
+  /** `focus`: an item the category opens on, such as a pairing request's approval row in Instance & work. */
+  | { type: "config-category"; category: string; focus?: string }
   | { type: "config-setting"; key: string }
   | { type: "noop" }
   | { type: "error"; message: string }
@@ -581,6 +584,8 @@ export type Action =
   /** Answer a request on its own row, as the person the Feed served: Steering's Approve, or a choice
    * (questionId + optionId) or their own words (decision) through mission control's answer. */
   | { type: "act"; act: "answer"; qitemId: string; verb: "approve" | "answer" | "resolve"; actorSession: string; questionId?: string; optionId?: string; decision?: string }
+  /** Decide a pairing request directly on this host, as `rig host approve|deny` does, by its approval row. */
+  | { type: "act"; act: "pair-decision"; request: string; decision: "approve" | "deny"; code: string; requester: string }
   /** Answer the open request in your own words (the `reply` command); main resolves it to the served answer act. */
   | { type: "attention-reply"; text: string }
   | { type: "notice"; message: string };
@@ -612,6 +617,8 @@ export interface ViewState {
   history?: NavigationFrame[];
   configCategory?: string | null;
   configKey?: string | null;
+  /** The item an opened category is focused on (a pairing request's approval row). */
+  configFocus?: string | null;
   pendingDrill?: PendingDrill | null;
   /** Last PendingDrill seq handed out; never reused while this view lives. */
   pendingSeq?: number;
@@ -655,7 +662,7 @@ export interface ViewState {
   lastError: string | null;
 }
 
-export type NavigationFrame = Pick<ViewState, "attentionCategory" | "attentionOpen" | "project" | "terminalView" | "terminalPage" | "file" | "externalUrl" | "section" | "drill" | "filter" | "selection" | "runningOf" | "viewTab" | "contentOffset" | "contentMaxOffset" | "contentTargetCount" | "contentSelection" | "focusedPane" | "scopesMission" | "scopesSelected" | "scopesCollapseReqs" | "scopesNarrative" | "executionOpen" | "expanded" | "timeZoneHelp" | "recentOpen" | "configCategory" | "configKey">;
+export type NavigationFrame = Pick<ViewState, "attentionCategory" | "attentionOpen" | "project" | "terminalView" | "terminalPage" | "file" | "externalUrl" | "section" | "drill" | "filter" | "selection" | "runningOf" | "viewTab" | "contentOffset" | "contentMaxOffset" | "contentTargetCount" | "contentSelection" | "focusedPane" | "scopesMission" | "scopesSelected" | "scopesCollapseReqs" | "scopesNarrative" | "executionOpen" | "expanded" | "timeZoneHelp" | "recentOpen" | "configCategory" | "configKey" | "configFocus">;
 
 export interface ViewStateStore {
   instanceId: string;

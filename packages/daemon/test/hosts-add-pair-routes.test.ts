@@ -471,11 +471,11 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
-    // This host has no kernel operator, so the request is agent-free: Approve and Deny decide, typed words are kept and the
-    // person is asked again, and a terminal on this host can decide with rig host approve|deny.
+    // This host has no receiving agent, so the request says so: the person's answer is kept for one, and the direct
+    // controls are the TUI's pairing settings and rig host approve|deny on this host.
     expect(item.sourceSession).toBe("host-pair@kernel");
-    expect(item.body).toContain("Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel).");
-    expect(item.body).toContain(`To decide in a terminal on this host with its operator bearer token: rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
+    expect(item.body).toContain("No agent reads answers here yet: no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no operator-agent@kernel). Your answer, a click or your words, is kept, and goes to the receiving agent once one is set; nothing is granted or denied meanwhile.");
+    expect(item.body).toContain(`To decide now on this host: open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`);
   });
 
   it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {

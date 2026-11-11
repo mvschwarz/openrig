@@ -147,6 +147,10 @@ interface IssuedPair {
   freeNote?: string;
   /** Why the owner is a receiver used instead of the chosen one (an unusable agents.operator_session). */
   ownerNote?: string;
+  /** The owner was resolved after the request was made (a receiving agent set meanwhile), so the person's ask still
+   *  comes from the synthetic source and their answer is passed on to it once (`forwarded`). */
+  lateOwner?: boolean;
+  forwarded?: boolean;
 }
 
 interface ClientPair {
@@ -211,6 +215,12 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       : `no agent reads answers on this host (no receiving agent is set in agents.operator_session, and it has no ${KERNEL_OPERATOR_SESSION})`;
   }
 
+  /** The direct controls on this host, apart from a Needs-you answer: the TUI's pairing settings, or the CLI with the
+   *  operator bearer token. */
+  function directDecision(code: string): string {
+    return `open the TUI's pairing settings (rig tui, then Settings, Instance & work, Pairing requests), or in a terminal with its operator bearer token run rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>)`;
+  }
+
   /** Whether the owner's session is running now; null when that can't be read. */
   function ownerRunning(c: { get: (key: string) => unknown }, owner: string): boolean | null {
     try { return !!getRepo(c).db.prepare("SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1").get(owner); }
@@ -226,12 +236,13 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   }
 
   /** What the request's own row has decided, read the same way by the poll and by `rig host approve|deny`: a refusing
-   *  close, an agent seat's close naming Approve, or, on an agent-free host, the person's Approve or Deny click. Null
-   *  while it's undecided; a person's reply never decides it. */
+   *  close, or an agent seat's close naming Approve. Null while it's undecided: a person's click or words are an answer
+   *  for the receiving agent, never a decision by themselves, with or without an agent here. */
   function rowDecision(c: { get: (key: string) => unknown }, rec: IssuedPair, item: QueueItem | null): boolean | null {
     const answer = item?.humanAnswers?.[PAIR_QUESTION_ID];
-    if (pairClosedRefusing(item, answer != null || closedByReply(c, item)) || (!rec.owner && answer === "deny")) return false;
-    if (pairClosedApproving(item) || (!rec.owner && answer === PAIR_APPROVE)) return true;
+    if (pairClosedRefusing(item, answer != null || closedByReply(c, item))) return false;
+    // A close never approves over the person's own recorded Deny: it would hand the token over against what they chose.
+    if (pairClosedApproving(item) && answer !== "deny") return true;
     return null;
   }
 
@@ -256,11 +267,11 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         `Pairing code: ${code} — confirm it matches the code shown on the requesting side.`,
         ...(owner ? [
           `Answer with Approve or Deny, or in your own words. ${owner} reads your answer and acts on it: a clear yes pairs, a clear no denies, and if your answer isn't clear it asks you back.${rec.ownerNote ? ` (${rec.ownerNote}, so ${owner} reads it instead.)` : ""}`,
-          ...((running) => running === true ? [] : [`${running === false ? `${owner} isn't running right now, so your answer waits` : `OpenRig couldn't tell whether ${owner} is running, so your answer may wait`} until it starts; nothing is granted or denied meanwhile. To decide sooner, in a terminal on this host with its operator bearer token: rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`])(ownerRunning(c, owner)),
+          ...((running) => running === true ? [] : [`${running === false ? `${owner} isn't running right now, so your answer waits` : `OpenRig couldn't tell whether ${owner} is running, so your answer may wait`} until it starts; nothing is granted or denied meanwhile. To decide sooner on this host: ${directDecision(code)}.`])(ownerRunning(c, owner)),
           `For ${owner}: when the person's answer to this request comes back, act on it. A clear yes or an Approve click: rig host approve ${code}. A clear no or a Deny click: rig host deny ${code}. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming pairing code ${code}, and act on what they answer.`,
         ] : [
-          `Answer with Approve or Deny. Typed words are kept but don't decide it, and you're asked again: ${noReader(rec)}.`,
-          `To decide in a terminal on this host with its operator bearer token: rig host approve ${code}, or rig host deny ${code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`,
+          `No agent reads answers here yet: ${noReader(rec)}. Your answer, a click or your words, is kept, and goes to the receiving agent once one is set; nothing is granted or denied meanwhile.`,
+          `To decide now on this host: ${directDecision(code)}.`,
         ]),
         `Approval hands this daemon's bearer token to the requester (full API access).`,
         `This request expires ${describePairTtl(rec.expiresAt - rec.createdAt)} after creation, at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC; expiry persists nothing.`,
@@ -442,6 +453,31 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     return c.json({ pairId, code, approvalQitemId: qitemId });
   });
 
+  // The requests on this host that haven't expired, for its pairing settings: who asks, the code, when it expires, its
+  // status, and who reads the person's answer. No credential is listed; the code decides nothing without the operator
+  // bearer token (POST /pair-decision).
+  router.get("/pair-requests", (c) => {
+    const now = Date.now();
+    // Decided means what `rig host approve|deny` would find: its own decision, or one the request's row records.
+    // A row that can't be read is "unknown", never "pending".
+    const decidedOf = (rec: IssuedPair): boolean | null | undefined => {
+      if (rec.decision) return rec.decision.approve;
+      try { return rowDecision(c, rec, rec.qitemId ? getRepo(c).getById(rec.qitemId) : null); } catch { return undefined; }
+    };
+    const requests = [...issued.values()].filter((rec) => now <= rec.expiresAt).map((rec) => ({
+      code: rec.code,
+      requester: rec.requester,
+      createdAt: new Date(rec.createdAt).toISOString(),
+      expiresAt: new Date(rec.expiresAt).toISOString(),
+      status: ((d) => d === undefined ? "unknown" : d === null ? "pending" : d ? "approved" : "denied")(decidedOf(rec)),
+      person: rec.person,
+      owner: rec.owner ?? null,
+      ...(rec.owner ? {} : { noReader: noReader(rec) }),
+      approvalQitemId: rec.qitemId || null,
+    }));
+    return c.json({ requests });
+  });
+
   router.get("/pair-request/:pairId", async (c) => {
     const pairId = c.req.param("pairId");
     const rec = issued.get(pairId);
@@ -452,36 +488,56 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       await settlePairRequest(getRepo(c), rec, "expired", PAIR_SOURCE_SESSION);
       return c.json({ status: "expired" });
     }
-    // Approval hands over this daemon's bearer token, so only an explicit decision does: `rig host approve`, an agent
-    // seat's close naming Approve, or, on an agent-free host, the person's own Approve click. A person's answer arriving
-    // decides nothing where an agent reads it: the request stays pending until the agent acts or it expires.
+    // Approval hands over this daemon's bearer token, so only an explicit decision does: `rig host approve` (or the TUI's
+    // pairing settings), or an agent seat's close naming Approve. A person's answer arriving decides nothing by itself:
+    // it's for the receiving agent, and where there's none yet it's kept for one. The request stays pending until a
+    // decision or expiry.
     const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
     const answer = item?.humanAnswers?.[PAIR_QUESTION_ID];
     const approved = rec.decision ? rec.decision.approve : rowDecision(c, rec, item);
     if (approved === null) {
       // The person's reply (their words, or a reply with no words, such as a file) decides nothing by itself.
       const replied = (answer != null && typeof answer === "object") || (answer == null && closedByReply(c, item));
-      // Agent-free, the reply closed the request and its buttons, and nothing reads it: ask again, keeping their words on
-      // the closed row, so the person still has a way to decide. A reply never denies.
-      if (!rec.owner && replied) {
-        const closed = rec.qitemId;
-        rec.qitemId = ""; // one ask at a time: a poll meanwhile reads pending
-        const words = answer != null && typeof answer === "object" ? answer.text.replace(/\s+/g, " ").trim() : "";
+      const answered = answer != null || replied;
+      const said = typeof answer === "string" ? `your ${answer === PAIR_APPROVE ? "Approve" : answer === "deny" ? "Deny" : answer} choice`
+        : answer != null && typeof answer === "object" ? `"${answer.text.replace(/\s+/g, " ").trim().slice(0, 200)}"` : "your reply";
+      if (!rec.owner) {
+        // A receiving agent set since the request was made takes it from here, with what the person already answered.
+        const now = pairOwner(c);
+        if (now.owner) {
+          rec.owner = now.owner;
+          rec.lateOwner = true;
+          if (now.ownerNote) rec.ownerNote = now.ownerNote;
+          delete rec.freeReason;
+          delete rec.freeSession;
+          delete rec.freeNote;
+        }
+      }
+      if (rec.owner && rec.lateOwner && answered && !rec.forwarded) {
+        rec.forwarded = true;
         try {
-          rec.qitemId = await askPerson(c, pairId, rec, [words
-            ? `You wrote "${words.length > 200 ? `${words.slice(0, 200)}…` : words}" in reply to this request. Your words are kept, and they didn't deny anything: ${noReader(rec)}, so please decide with Approve or Deny here.`
-            : `Your reply to this request had no words to keep here, and it didn't deny anything: ${noReader(rec)}, so please decide with Approve or Deny here.`]);
-        } catch { rec.qitemId = closed; } // the next poll asks again
-        return c.json({ status: "pending", code: rec.code });
+          await getRepo(c).create({ sourceSession: PAIR_SOURCE_SESSION, destinationSession: rec.owner,
+            summary: `Pairing ${rec.code} from ${rec.requester}: ${rec.person} answered before you were its receiving agent`,
+            body: [`${rec.person} answered pairing request ${rec.code} from ${rec.requester} with ${said.replace(/^your /, "their ")}, while no agent read answers on this host. You're its receiving agent now.`,
+              `Act on what they meant: a clear yes or an Approve click, rig host approve ${rec.code}; a clear no or a Deny click, rig host deny ${rec.code}. If it isn't clear, ask them back, naming pairing code ${rec.code}.`,
+              `The request expires at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC.`].join("\n") });
+        } catch { rec.forwarded = false; } // the next poll passes it on
+      }
+      // No agent reads answers here: tell the person once that their answer is kept, and how to decide directly.
+      if (!rec.owner && answered && !rec.receipted) {
+        rec.receipted = true;
+        try {
+          await getRepo(c).create({ sourceSession: PAIR_SOURCE_SESSION, destinationSession: rec.person, humanIntent: "update",
+            summary: `Pairing ${rec.code} from ${rec.requester}: answer kept`,
+            body: `Received ${said} on pairing request ${rec.code} from ${rec.requester}. No agent reads answers on this host yet (${noReader(rec)}), so it's kept for the receiving agent once one is set, and nothing is granted or denied meanwhile. To decide now: ${directDecision(rec.code)}.` });
+        } catch { /* the answer is kept either way */ }
       }
       // Where the owner reads answers, tell the person once that their answer was received, and whether the owner is
       // running to read it.
-      if (rec.owner && !rec.receipted && (answer != null || replied)) {
+      if (rec.owner && !rec.receipted && answered) {
         rec.receipted = true;
-        const said = typeof answer === "string" ? `your ${answer === PAIR_APPROVE ? "Approve" : answer === "deny" ? "Deny" : answer} choice`
-          : answer != null && typeof answer === "object" ? `"${answer.text.replace(/\s+/g, " ").trim().slice(0, 200)}"` : "your reply";
         const running = ownerRunning(c, rec.owner);
-        const waiting = `Nothing is granted or denied until it acts, or the request expires at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC. To decide now, in a terminal on this host with its operator bearer token: rig host approve ${rec.code}, or rig host deny ${rec.code} (OPENRIG_AUTH_BEARER_TOKEN set, or --bearer <token>).`;
+        const waiting = `Nothing is granted or denied until it acts, or the request expires at ${new Date(rec.expiresAt).toISOString().slice(0, 19).replace("T", " ")} UTC. To decide now on this host: ${directDecision(rec.code)}.`;
         const reading = running === true ? `${rec.owner} reads it and acts on it. You'll see the result here, or a question if your answer isn't clear.`
           : running === false ? `${rec.owner} isn't running, so it may not have read it yet. ${waiting}`
           : `OpenRig couldn't tell whether ${rec.owner} is running, so it may not have read it yet. ${waiting}`;

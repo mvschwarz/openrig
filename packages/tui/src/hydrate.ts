@@ -16,6 +16,7 @@ import { fileTargetForPath } from "./reading.js";
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { emptySnapshot } from "./state.js";
 import type { ConfigRead } from "./config/config-model.js";
+import type { PairRequestsRead } from "./config/pairing.js";
 import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
 import type { UsageRead } from "./usage/usage-model.js";
 import { DaemonClient } from "./daemon-client.js";
@@ -485,17 +486,19 @@ export async function hydrateSnapshot(
     const passive = async <T>(label: string, read: () => Promise<unknown>): Promise<T | null> => {
       try { return await read() as T; } catch { readErrors.push(`${label}: unavailable`); return null; }
     };
-    const [config, controlPlane, connections] = await Promise.all([
+    const [config, controlPlane, connections, pairRequests] = await Promise.all([
       passive<ConfigRead>("CONFIG", () => client.configBrowser().catch(error => {
         configError = error instanceof Error ? error.message : "Read failed; cause not identified.";
         throw error;
       })),
       passive<ControlPlaneRead>("control plane", () => client.health()),
       passive<ConnectionsRead>("Slack observation", () => client.connections()),
+      // Instance & work's pairing requests: an in-memory, read-only list on this host.
+      passive<PairRequestsRead>("pairing requests", async () => ({ requests: (await client.pairRequests()).requests, readAt: new Date().toISOString() })),
     ]);
     let daemonTarget = "unreported";
     try { daemonTarget = new URL(client.baseUrl).origin; } catch { /* no raw invalid target */ }
-    return { ...emptySnapshot(), config, configError, controlPlane, connections, daemonTarget, hydratedAt: new Date().toISOString(), readErrors };
+    return { ...emptySnapshot(), config, configError, controlPlane, connections, pairRequests, daemonTarget, hydratedAt: new Date().toISOString(), readErrors };
   }
 
   const readingOnly = viewContext?.section === "specs";
