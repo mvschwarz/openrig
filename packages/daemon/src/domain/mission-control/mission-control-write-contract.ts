@@ -967,7 +967,7 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
  *  person's own receipt says why). Undefined for a request the answer closed (no agent wired here). */
 function runnerAnswerNotice(ask: QueueItem): string | undefined {
   if (ask.state === "handed-off" && ask.handedOffTo) {
-    return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run.`;
+    return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.`;
   }
   if (ask.state === "pending" || ask.state === "in-progress" || ask.state === "blocked") {
     return `Your answer is kept on ${ask.qitemId}, and the request is still waiting: the tool hasn't run, and nothing was permitted or refused. A note to you says why it wasn't passed to a receiving agent. To decide directly: rig seat decide-permission ${ask.qitemId} --option <id>.`;

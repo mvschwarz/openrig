@@ -535,4 +535,180 @@ describe("workflow spec persisted capture and Library reads", () => {
       afterScanCachedAt: P3_REFRESH_TIME.toISOString(),
     });
   });
+
+  it("lists an identical built-in alias with two user reads while keeping edited user source links", async () => {
+    const builtin = join(root, "builtins", "same.yaml");
+    const user = join(folder, "same.yaml");
+    const identicalYaml = VALID_YAML("same");
+    const expectedSourceId = `workflow-source:${captureHash(user)}`;
+    let observedAt = CAPTURE_TIME;
+    const cache = new WorkflowSpecCache(db, () => observedAt);
+    const app = makeLibraryApp({ db, cache, folder, root });
+
+    fs.writeFileSync(builtin, identicalYaml);
+    cache.readThrough(builtin);
+    fs.writeFileSync(user, identicalYaml);
+    statAt(builtin);
+    statAt(user);
+
+    const readThroughSpy = vi.spyOn(cache, "readThrough");
+    fileProbe.readPaths.length = 0;
+
+    const firstList = await app.request("/api/specs/library?kind=workflow");
+    const firstEntries = await firstList.json() as Array<{
+      id: string; kind: string; name: string; version: string; sourcePath: string; sourceType: string; isBuiltIn: boolean;
+    }>;
+    const firstPassCounts = {
+      status: firstList.status,
+      userReads: readsOf(user),
+      builtinReads: readsOf(builtin),
+      readThroughPaths: readThroughSpy.mock.calls.map(([specPath]) => specPath),
+    };
+
+    fileProbe.readPaths.length = 0;
+    readThroughSpy.mockClear();
+    const secondList = await app.request("/api/specs/library?kind=workflow");
+    const secondPassCounts = {
+      status: secondList.status,
+      userReads: readsOf(user),
+      builtinReads: readsOf(builtin),
+      readThroughPaths: readThroughSpy.mock.calls.map(([specPath]) => specPath),
+    };
+
+    expect(firstPassCounts).toEqual({
+      status: 200,
+      userReads: 2,
+      builtinReads: 1,
+      readThroughPaths: [user],
+    });
+    expect(secondPassCounts).toEqual({
+      status: 200,
+      userReads: 2,
+      builtinReads: 1,
+      readThroughPaths: [user],
+    });
+    expect(firstEntries).toEqual([
+      expect.objectContaining({
+        id: expectedSourceId,
+        kind: "workflow",
+        name: "same",
+        version: "1",
+        sourcePath: user,
+        sourceType: "user_file",
+        isBuiltIn: false,
+      }),
+    ]);
+    expect(db.prepare("SELECT source_path, source_hash, cached_at FROM workflow_specs WHERE name = 'same' AND version = '1'").get())
+      .toEqual({
+        source_path: builtin,
+        source_hash: captureHash(identicalYaml),
+        cached_at: CAPTURE_TIME.toISOString(),
+      });
+
+    const withBuiltins = await (await app.request("/api/specs/library?kind=workflow&include_builtins=true")).json() as Array<{
+      id: string; sourcePath: string; sourceType: string; isBuiltIn: boolean;
+    }>;
+    expect(withBuiltins.map(({ id, sourcePath, sourceType, isBuiltIn }) => ({ id, sourcePath, sourceType, isBuiltIn }))).toEqual([
+      { id: "workflow:same:1", sourcePath: builtin, sourceType: "builtin", isBuiltIn: true },
+      { id: expectedSourceId, sourcePath: user, sourceType: "user_file", isBuiltIn: false },
+    ]);
+
+    const aliasReview = await app.request(`/api/specs/library/${encodeURIComponent(expectedSourceId)}/review`);
+    expect(aliasReview.status).toBe(200);
+    expect(await aliasReview.json()).toMatchObject({
+      name: "same",
+      version: "1",
+      sourcePath: user,
+      isBuiltIn: false,
+      libraryEntryId: expectedSourceId,
+      purpose: "capture fixture",
+    });
+
+    // Deleting the identical user copy removes the synthetic alias entry without removing the canonical built-in row.
+    fs.rmSync(user);
+    fileProbe.statOverrides.delete(user);
+    const syncAfterDelete = await app.request("/api/specs/library/sync", { method: "POST" });
+    expect(syncAfterDelete.status).toBe(200);
+    expect(await syncAfterDelete.json()).toEqual([]);
+    expect(await (await app.request("/api/specs/library?kind=workflow")).json()).toEqual([]);
+    expect((await app.request(`/api/specs/library/${encodeURIComponent(expectedSourceId)}/review`)).status).toBe(404);
+    expect(db.prepare("SELECT source_path, cached_at FROM workflow_specs WHERE name = 'same' AND version = '1'").get())
+      .toEqual({ source_path: builtin, cached_at: CAPTURE_TIME.toISOString() });
+
+    // Control: an ordinary edited user copy owns the cache row and still receives its source-specific review link.
+    const editedYaml = identicalYaml.replace("objective: capture fixture", "objective: edited capture fixture");
+    fs.writeFileSync(user, editedYaml);
+    statAt(user, TOUCHED_STAT_TIME);
+    observedAt = P3_REFRESH_TIME;
+
+    const editedList = await app.request("/api/specs/library?kind=workflow");
+    const editedEntries = await editedList.json() as Array<{
+      id: string; sourcePath: string; sourceType: string; isBuiltIn: boolean;
+    }>;
+    expect(editedList.status).toBe(200);
+    expect(editedEntries.map(({ id, sourcePath, sourceType, isBuiltIn }) => ({ id, sourcePath, sourceType, isBuiltIn }))).toEqual([
+      { id: "workflow:same:1", sourcePath: user, sourceType: "user_file", isBuiltIn: false },
+    ]);
+    expect(db.prepare("SELECT source_path, source_hash, cached_at FROM workflow_specs WHERE name = 'same' AND version = '1'").get())
+      .toEqual({
+        source_path: user,
+        source_hash: captureHash(editedYaml),
+        cached_at: P3_REFRESH_TIME.toISOString(),
+      });
+
+    statAt(user);
+    fileProbe.readPaths.length = 0;
+    const warmEditedList = await app.request("/api/specs/library?kind=workflow");
+    expect(warmEditedList.status).toBe(200);
+    expect(readsOf(user)).toBe(0);
+
+    fileProbe.readPaths.length = 0;
+    const editedSourceReview = await app.request(`/api/specs/library/${encodeURIComponent(expectedSourceId)}/review`);
+    expect(editedSourceReview.status).toBe(200);
+    expect(await editedSourceReview.json()).toMatchObject({
+      name: "same",
+      version: "1",
+      sourcePath: user,
+      isBuiltIn: false,
+      libraryEntryId: expectedSourceId,
+      purpose: "edited capture fixture",
+    });
+    // SpecLibraryService.get reads the workflow YAML once on /:id/review; refreshWorkflowEntries itself adds 0 reads.
+    expect(readsOf(user)).toBe(1);
+
+    // Exclude ordinary user-file fallback verification from the synthetic-entry skip: when the scanner skips without
+    // pre-populating verifiedSourceHashes (e.g. a newer #503 diagnostic row shares the path), the route still reads
+    // the ordinary user file once to verify its cached bytes (plus one SpecLibraryService.get read on 200 review)
+    // and rejects changed disk bytes before SpecLibraryService.get runs.
+    const fallbackSpec = join(folder, "fallback.yaml");
+    const fallbackSourceId = `workflow-source:${captureHash(fallbackSpec)}`;
+    const fallbackYaml = VALID_YAML("fallback-flow");
+    observedAt = CAPTURE_TIME;
+    fs.writeFileSync(fallbackSpec, fallbackYaml);
+    cache.readThrough(fallbackSpec);
+    cache.writeDiagnostic({
+      sourcePath: fallbackSpec,
+      sourceHash: captureHash(BROKEN_YAML),
+      errorMessage: "diagnostic alongside cached v1",
+      cachedAt: P3_REFRESH_TIME.toISOString(),
+    });
+    statAt(fallbackSpec);
+    fileProbe.readPaths.length = 0;
+
+    const fallbackReview = await app.request(`/api/specs/library/${encodeURIComponent(fallbackSourceId)}/review`);
+    expect(fallbackReview.status).toBe(200);
+    expect(await fallbackReview.json()).toMatchObject({
+      name: "fallback-flow",
+      version: "1",
+      sourcePath: fallbackSpec,
+      isBuiltIn: false,
+      libraryEntryId: fallbackSourceId,
+    });
+    expect(readsOf(fallbackSpec)).toBe(2);
+
+    fs.writeFileSync(fallbackSpec, BROKEN_YAML);
+    fileProbe.readPaths.length = 0;
+    expect((await app.request(`/api/specs/library/${encodeURIComponent(fallbackSourceId)}/review`)).status).toBe(404);
+    expect(readsOf(fallbackSpec)).toBe(1);
+  });
 });
