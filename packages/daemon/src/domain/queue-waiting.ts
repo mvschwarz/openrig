@@ -142,7 +142,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const row = held && held.qitem_id === id ? held : statements.statement(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at, tags
     FROM queue_items WHERE qitem_id = ?`).get(id) as WaitingRow | undefined;
   if (!row) return null;
-  const blocker = row.blocked_on?.startsWith("qitem-") ? statements.statement(
+  const blocker = row.blocked_on ? statements.statement(
     "SELECT destination_session, state FROM queue_items WHERE qitem_id = ?",
   ).get(row.blocked_on) as { destination_session: string; state: string } | undefined : undefined;
   let recoveryOwner: string | null = null;
@@ -151,7 +151,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const subject = row.blocked_on ? blocker?.destination_session ?? row.blocked_on : row.destination_session;
   let observed: ReturnType<WaitingActivityReader> = null;
   try { observed = readActivity?.(subject) ?? null; } catch { /* unavailable remains unknown */ }
-  const meaningful = meaningfulFor(db, row.blocked_on?.startsWith("qitem-") ? row.blocked_on : id, reads);
+  const meaningful = meaningfulFor(db, blocker ? row.blocked_on! : id, reads);
   const sweepInterval = sweepSeconds();
   const view: WaitingView = {
     obligation: id, owner: row.destination_session, state: row.state, actionableSince: row.state === "pending" ? pendingSince(db, id, statements) : null,

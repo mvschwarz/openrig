@@ -197,6 +197,22 @@ describe("waiting face names the next action the existing ladder can actually ta
     expect(view(row.qitemId).nextBackstop.dueAt).toBe("2026-09-08T00:00:00.000Z");
   });
 
+  it("shows the owner, progress and backstop of a blocker with a custom queue ID", async () => {
+    const blocker = await queue.create({ qitemId: "custom-blocker", sourceSession: "owner@rig", destinationSession: "healthy@rig", body: "Resolve dependency", nudge: false });
+    const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "Wait for dependency", nudge: false });
+    await queue.claim({ qitemId: blocker.qitemId, destinationSession: "healthy@rig" });
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId });
+    advance(1);
+    await queue.update({ qitemId: blocker.qitemId, actorSession: "healthy@rig", transitionNote: "Dependency progress" });
+    const waiting = view(row.qitemId);
+    expect(waiting.blocker).toEqual({ ref: "custom-blocker", owner: "healthy@rig", state: "in-progress" });
+    expect(waiting.liveness.subject).toBe("healthy@rig");
+    expect(waiting.lastMeaningfulChange).toEqual(lastMeaningfulTransition(db, blocker.qitemId));
+    expect(waiting.nextBackstop).toMatchObject({ owner: "healthy@rig", mechanism: "blocker-transition / queue-stuck-sweep" });
+    await queue.update({ qitemId: blocker.qitemId, actorSession: "healthy@rig", state: "done", closureReason: "no-follow-on" });
+    expect(queue.getByIdOrThrow(row.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+  });
+
   it("#2739: a claimed row parked with no wake reads as having no timed backstop, and a later wake on the same blocker arms one it shows", async () => {
     const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "park-without-wake repro", nudge: false });
     await queue.claim({ qitemId: row.qitemId, destinationSession: "worker@rig" });
