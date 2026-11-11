@@ -2741,6 +2741,27 @@ describe("SessionTransport", () => {
     expect(hasSessionSpy).not.toHaveBeenCalled();
   });
 
+  // A stored kind that isn't one of today's (only reachable by writing the column directly) takes today's path, the tmux
+  // one, for send and capture: the seat boundary adds no refusal and changes nothing for it.
+  it("a binding whose stored kind isn't tmux or external_cli sends and captures through tmux, as before the boundary", async () => {
+    const { node } = seedCanonicalRig();
+    db.prepare("UPDATE bindings SET attachment_type = 'herdr' WHERE node_id = ?").run(node.id);
+    const callOrder: string[] = [];
+    const tmux = mockTmux({
+      sendText: async () => { callOrder.push("sendText"); return { ok: true }; },
+      sendKeys: async (_t, keys) => { callOrder.push(`sendKeys:${keys.join(",")}`); return { ok: true }; },
+      capturePaneContent: async () => "line1",
+    });
+    const transport = createTransport(tmux);
+
+    const sent = await transport.send("dev-impl@my-rig", "hello");
+    expect(sent.reason).not.toBe("transport_unavailable");
+    expect(callOrder).toContain("sendText");
+    const captured = await transport.capture("dev-impl@my-rig");
+    expect(captured.ok).toBe(true);
+    expect(captured.content).toContain("line1");
+  });
+
   // Test 11: resolveSessions by rig returns running sessions
   it("resolveSessions by rig returns running sessions", async () => {
     seedCanonicalRig();

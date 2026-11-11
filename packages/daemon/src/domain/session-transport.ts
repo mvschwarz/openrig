@@ -51,6 +51,7 @@ import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
+import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -969,7 +970,7 @@ export async function probeSessionActivity(input: {
     };
   }
   const readTarget = binding?.pane ?? sessionName;
-  if (attachmentType === "external_cli") {
+  if (seatInboundTransport(resolveSeatKind(attachmentType)) === "none") {
     return {
       state: "unknown",
       reason: "unsupported_attachment",
@@ -2569,7 +2570,7 @@ export class SessionTransport {
       const binding = this.sessionRegistry.getBindingForNode(node.id);
       const latestSession = latestByNode.get(node.id);
 
-      if (binding?.attachmentType === "external_cli" && binding.externalSessionName) {
+      if (resolveSeatKind(binding?.attachmentType).kind === "external_cli" && binding?.externalSessionName) {
         targets.push({
           sessionName: binding.externalSessionName,
           rigName,
@@ -2900,7 +2901,7 @@ export class SessionTransport {
     // External CLI seats never wait: main refuses them before anything else,
     // and a probe or wait would only delay that refusal (or mistake it for
     // an absent session).
-    if (meta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(meta.attachmentType)) === "none") {
       return { ok: false, failure: {
         ok: false,
         sessionName,
@@ -3094,7 +3095,7 @@ export class SessionTransport {
     const waitMode = waitForIdleMs !== undefined;
     let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
 
-    if (sessionMeta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(sessionMeta.attachmentType)) === "none") {
       return {
         ok: false,
         sessionName,
@@ -4360,7 +4361,7 @@ export class SessionTransport {
     readable?: { width: number; height: number }; readableBudget?: ReadableBudget }): Promise<CaptureResult> {
     sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
-    if (sessionMeta.attachmentType === "external_cli") {
+    if (seatInboundTransport(resolveSeatKind(sessionMeta.attachmentType)) === "none") {
       return {
         ok: false,
         sessionName,
