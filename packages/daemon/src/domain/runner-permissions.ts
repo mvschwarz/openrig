@@ -266,6 +266,8 @@ export class RunnerPermissions {
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
+    // A request withdrawn after its row closed without a decision: it ended, so nothing decides it now.
+    if (this.withdrawnAfterClose(item)) return { ok: true, state: "withdrawn" };
     // The person's answer, from the live row or back along the rows the request was handed through.
     const answer = this.personAnswer(item);
     // The options travel with the ask: a row handed to an agent to decide carries none of its own.
@@ -363,7 +365,7 @@ export class RunnerPermissions {
     const typed = this.personAnswer(live) as { kind?: unknown; text?: unknown } | string | undefined;
     const words = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
     this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
-      transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${clip(words, MAX_AGENT_TEXT)}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}` });
+      transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${words}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}` });
     return this.read(null, askId);
   }
 
@@ -375,8 +377,11 @@ export class RunnerPermissions {
     if (!now.ok || now.state !== "pending") return now;
     const asked = this.deps.queueRepo.getById(askId)!;
     const live = this.liveEnd(asked);
-    // A handoff this host can't follow leaves its rows as they are; the runner just stops waiting.
-    if (live) this.close(live, WITHDRAWN_NOTE, reason);
+    // A handoff this host can't follow leaves its rows as they are; the runner just stops waiting. A row closed without a
+    // decision (its answer kept, so the request read pending) can't be canceled: the withdrawal is recorded on it instead.
+    if (live && (live.state === "pending" || live.state === "in-progress" || live.state === "blocked")) this.close(live, WITHDRAWN_NOTE, reason);
+    else if (live) this.deps.queueRepo.update({ qitemId: live.qitemId, actorSession: live.sourceSession, state: live.state,
+      transitionNote: `${WITHDRAWN_NOTE} reason=${reason}: the runner's request ended, so any answer or decision here is not sent.` });
     return { ok: true, state: "withdrawn" };
   }
 
@@ -388,6 +393,15 @@ export class RunnerPermissions {
     const live = asked ? this.liveEnd(asked) : null;
     const said = typedWords(live ? this.personAnswer(live) : undefined);
     return said ? { ...result, said } : result;
+  }
+
+  /** Whether the runner's request was withdrawn after this row closed (recorded on the row, since it can't be canceled). */
+  private withdrawnAfterClose(item: QueueItem): boolean {
+    const transitions = this.deps.queueRepo.listTransitions(item.qitemId);
+    for (let i = transitions.length - 1; i >= 0 && transitions[i]!.state === item.state; i--) {
+      if (transitions[i]!.transitionNote?.startsWith(WITHDRAWN_NOTE)) return true;
+    }
+    return false;
   }
 
   /** Whether the row's close is an explicit decision: `rig seat decide-permission`'s, recorded on the row (also after an

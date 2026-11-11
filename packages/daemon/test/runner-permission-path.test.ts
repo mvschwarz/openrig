@@ -749,9 +749,18 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     const askId = String((await f.submit()).body.askId);
     const spy = vi.spyOn(f.queueRepo as unknown as { handoffNow: () => unknown }, "handoffNow").mockImplementation(() => { throw new Error("staging failed"); });
     try {
-      expect((await f.answer(askId, { decision: "only the test file" })).status).not.toBe(200);
+      expect(await f.answer(askId, { decision: "only the test file" })).toMatchObject({ status: 200 });
+      // Steering's Approve fails the same way, and is kept too.
+      const other = String((await f.submit({ requestId: "8" })).body.askId);
+      expect(await f.act(other, "approve")).toMatchObject({ status: 200 });
+      expect((f.queueRepo.getById(other)!.humanAnswers?.permission as { text?: string })?.text).toBe("yes");
     } finally { spy.mockRestore(); }
+    // The words are committed on the request, which stays open; the person is told it couldn't be passed on.
     expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+    expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.destinationSession === PERSON && row.humanIntent === "update")
+      .some((row) => row.body.includes(`it couldn't be passed to ${DECIDER}, the receiving agent, just now (answer again to retry)`))).toBe(true);
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
     // Answering again once it works passes the kept words on.
@@ -869,5 +878,31 @@ describe("a kept answer counts only through an explicit decision (Root's source 
     const askId = String((await f.submit()).body.askId);
     await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
     expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+  });
+});
+
+describe("an answered request: review-r2's round-1 questions", () => {
+  it("a direct decision settles a request whose row closed as failed, and records the person's whole words", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    const words = `${"careful with this one, it touches the release branch config and the CI cache. ".repeat(8)}only the test file`;
+    await f.answer(askId, { decision: words });
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "failed" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.decide(askId, "allow", PERSON, "only the test file")).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    const note = f.queueRepo.listTransitions(askId).at(-1)?.transitionNote ?? "";
+    expect(note).toContain(`the person wrote "${words.trim()}"`);
+  });
+
+  it("a withdrawal after the row closed without a decision ends it: it reads withdrawn, and a later decision writes nothing", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { optionId: "allow" });
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.withdraw(askId, "turn_ended")).toMatchObject({ status: 200, body: { state: "withdrawn" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(f.queueRepo.listTransitions(askId).some((t) => t.transitionNote?.startsWith("runner-permission-decided"))).toBe(false);
   });
 });

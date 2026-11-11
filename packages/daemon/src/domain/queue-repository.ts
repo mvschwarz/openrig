@@ -4261,9 +4261,10 @@ export class QueueRepository {
         "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
       ].join("\n"),
     }); } catch (error) {
-      // The answer is kept on the ask, which stays open: a failed handoff is never a default permit.
-      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; the request stays open`, error);
-      return false;
+      // Kept, and committed with the answer's own write (a throw here would roll it back): the request stays open, and
+      // the person is told it couldn't be passed on. Never a default permit.
+      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; it's kept and the request stays open`, error);
+      return this.keepRunnerAnswer(item, person, input.decision, root.sourceSession, decider);
     }
     // The person learns who decides and in what recorded state, so a delay is shown: one update per request.
     const toldId = `qitem-runner-permission-passed-${item.qitemId.replace(/^qitem-runner-permission-/, "").replace(/^qitem-/, "")}`;
@@ -4287,10 +4288,10 @@ export class QueueRepository {
       const answers: HumanAnswers = { ...item.humanAnswers, [input.questionId]: input.optionId };
       // A row closed without a decision (an agent's or a person's ordinary close): the decision is recorded on it, with
       // its own transition, over any kept answer (which the transition names); the runner's next read takes it.
-      // (The caller read it first: a row already decided explicitly never reaches here.)
-      if (item.state === "done") {
+      // (The caller read it first: a row already decided explicitly, withdrawn or stale never reaches here.)
+      if (item.state === "done" || item.state === "failed") {
         this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
-        this.transitionLog.append({ qitemId: item.qitemId, state: "done", actorSession: input.actorSession, transitionNote: input.transitionNote });
+        this.transitionLog.append({ qitemId: item.qitemId, state: item.state, actorSession: input.actorSession, transitionNote: input.transitionNote });
         return { persistedEvents: [] as PersistedEvent[] };
       }
       if (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked") return null;
@@ -4308,7 +4309,7 @@ export class QueueRepository {
   /** No agent here can read a runner permission answer before the tool runs (none is set, or the only one is the seat
    *  asking): the person's answer, a click or words, is kept on the ask, the request stays pending, and the person is
    *  told once that the tool hasn't run and how to decide directly. Never a default permit, never read as a refusal. */
-  private keepRunnerAnswer(item: QueueItem, person: string, decision: string, requester: string): boolean {
+  private keepRunnerAnswer(item: QueueItem, person: string, decision: string, requester: string, unreachable?: string): boolean {
     this.db.transaction(() => { this.placeTypedReply(item, decision); })();
     const options = (this.permissionQuestionsFor(item) ?? [])[0]?.options ?? [];
     const receiptId = `qitem-runner-permission-kept-${item.qitemId.replace(/^qitem-runner-permission-/, "")}`;
@@ -4316,7 +4317,7 @@ export class QueueRepository {
     setImmediate(() => {
       void this.create({ qitemId: receiptId, sourceSession: requester, destinationSession: person, humanIntent: "update",
         summary: `Your answer to ${requester}'s permission request is kept; the tool hasn't run`,
-        body: [`Your answer to ${requester}'s permission request ${item.qitemId} is kept, and the request is still waiting: no receiving agent on this host can read it before the tool runs (none is set, or the only one is ${requester} itself). The tool hasn't run, and nothing was permitted or refused.`,
+        body: [`Your answer to ${requester}'s permission request ${item.qitemId} is kept, and the request is still waiting: ${unreachable ? `it couldn't be passed to ${unreachable}, the receiving agent, just now (answer again to retry)` : `no receiving agent on this host can read it before the tool runs (none is set, or the only one is ${requester} itself)`}. The tool hasn't run, and nothing was permitted or refused.`,
           `To decide now: rig seat decide-permission ${item.qitemId} --option <id>${options.length ? ` (options: ${options.map((o) => `${o.id}, ${o.label}`).join("; ")})` : ""}. Or set up a receiving agent that isn't ${requester}: rig config set agents.operator_session <seat>@<rig>.`,
           "If the agent's turn ends first, the tool call doesn't happen, and nothing is sent later."].join("\n") })
         .catch((error) => console.error(`[queue] the kept-answer receipt for ${item.qitemId} wasn't written`, error));
