@@ -438,7 +438,7 @@ test("npm output that lists more than one package is refused before any scan or 
       const result = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo),
         env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /npm artifact enumeration listed 2 packages where one was packed/);
+      assert.match(result.stderr, /npm artifact enumeration listed 2 packages where one was packed; run the gate for one package \(check --package-root and any npm workspaces setting\)/);
       assert.equal(existsSync(receipt), false);
     });
   }

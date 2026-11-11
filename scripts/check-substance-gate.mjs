@@ -166,7 +166,10 @@ function derivePackageArtifacts(packageRoot) {
   }
   // One package is packed here; scanning only the first of several would issue a receipt for part of the artifact.
   if (entries.length > 1) {
-    throw new Error(`npm artifact enumeration listed ${entries.length} packages where one was packed`);
+    throw new Error(
+      `npm artifact enumeration listed ${entries.length} packages where one was packed; `
+      + "run the gate for one package (check --package-root and any npm workspaces setting)",
+    );
   }
   const rawFiles = entries[0]?.files;
   if (!Array.isArray(rawFiles)) throw new Error("npm artifact enumeration returned no files array");
