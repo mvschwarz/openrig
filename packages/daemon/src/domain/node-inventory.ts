@@ -32,7 +32,7 @@ import {
 } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
-import { resolvePersistedRestorePosture } from "./permission-policy/policy-ref.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";

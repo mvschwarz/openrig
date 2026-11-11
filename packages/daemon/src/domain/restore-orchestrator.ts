@@ -15,7 +15,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
-import { resolvePermissionPolicyAttachment, resolvePersistedRestorePosture } from "./permission-policy/policy-ref.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
