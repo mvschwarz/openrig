@@ -84,7 +84,7 @@ import { classifyDestination, type DestinationClass } from "./gateway/destinatio
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { hostedWakeFor, isHostedMemberAt, type RosterWake } from "./rosters.js";
-import { ringHostedWake } from "./hosted-wake.js";
+import { hostedRingMayHaveArrived, ringHostedWake } from "./hosted-wake.js";
 import { effectiveGateRoles } from "./gate-predicate.js";
 import {
   computeClosureRequiredAt,
@@ -1677,8 +1677,8 @@ export class QueueRepository {
     // The level can change while this send waits for the seat's lease. Under the lease, each member is admitted again with
     // its own source and urgency; only those with the first member's outcome go with this send, and the others go back
     // to their state before this claim (never marked delivered, held or failed) for their own delivery.
-    // A hosted member's trigger already accepted the ring for exactly these intents (tagged below): recovery doesn't ring
-    // it again, since each ring can start a run. Any other wake rings: a new intent, or one claimed but never sent.
+    // A hosted member's trigger already accepted the ring for exactly these intents, or may have before it stopped
+    // answering (tagged below): recovery doesn't ring it again, since each ring can start a run. Any other wake rings: a new intent, or one claimed but never sent.
     if (group.every((entry) => entry.tags?.includes(HOSTED_WAKE_ACCEPTED_TAG))) {
       for (const entry of group) this.outbox.finalizeDelivery(entry.outboxId, "indeterminate");
       return "indeterminate";
@@ -1719,8 +1719,8 @@ export class QueueRepository {
       const wakeEvent = this.db.transaction(() => {
         this.recordNudgeAttempt(qitemId, nudgeResult);
         this.outbox!.finalizeDelivery(intent.outboxId, finalState);
-        // The acceptance belongs to this intent, so recovery can tell this wake already rang.
-        if (outcome.nudgeResult.startsWith("wake-accepted:")) {
+        // The acceptance (or a ring that may have arrived) belongs to this intent, so recovery can tell this wake already rang.
+        if (hostedRingMayHaveArrived(outcome.nudgeResult)) {
           this.db.prepare(`UPDATE outbox_entries SET tags = json_insert(COALESCE(tags, '[]'), '$[#]', ?)
             WHERE outbox_id = ? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags, '[]')) WHERE value = ?)`)
             .run(HOSTED_WAKE_ACCEPTED_TAG, intent.outboxId, HOSTED_WAKE_ACCEPTED_TAG);
