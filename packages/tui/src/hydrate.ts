@@ -692,12 +692,27 @@ export async function hydrateSnapshot(
   const remoteRigs = drilledRemote
     ? await safe<RigSummaryRead[]>(`rigs-summary(${drilledRemote})`, () => client.rigsSummary(drilledRemote))
     : null;
+  // ui.topology_remote_seats — an OPEN remote rig page may read that rig's seats through this daemon's read-only
+  // `?host=` forwarding. The toggle is the daemon's resolved setting (config browser); a failed or absent read
+  // keeps the shipped refusal line, never a fabricated page. Bounded: one config read only while a remote host is
+  // drilled into, and one nodes read only for the open rig while the toggle is on.
+  const remoteSeatRig = drilledRemote && (topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod") ? drillRig : null;
+  const topologyRemoteSeats = remoteSeatRig
+    ? (await client.configBrowser().catch(() => null))?.entries?.find((entry) => entry.key === "ui.topology_remote_seats")?.value === true
+    : false;
+  const remoteSeatRigId = topologyRemoteSeats ? (remoteRigs ?? []).find((rig) => rig.name === remoteSeatRig)?.id : undefined;
+  const remoteNodes = remoteSeatRigId
+    ? await safe<NodeInventoryRead[]>(`nodes(${remoteSeatRig})`, () => client.rigNodes(remoteSeatRigId, drilledRemote!))
+    : null;
+  const remoteInventory: Partial<HostNode["rigs"][number]> = remoteSeatRigId
+    ? remoteNodes === null ? { inventoryUnavailable: true } : { pods: groupPods(remoteNodes) }
+    : {};
   const remoteHosts: HostNode[] = remoteIds.map((id) => ({
     id,
     name: id,
     reachable: aggStatus.has(id) ? aggStatus.get(id) === "ok" : registered.some((h) => h.id === id && h.reachable),
     rigs: id === drilledRemote
-      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id })).sort(byRigName)
+      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id, ...(rig.name === remoteSeatRig ? remoteInventory : {}) })).sort(byRigName)
       : [],
   }));
 
@@ -841,6 +856,7 @@ export async function hydrateSnapshot(
         }
       : healthRequested ? { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
     hosts: [localHost, ...remoteHosts],
+    ...(topologyRemoteSeats ? { topologyRemoteSeats: true } : {}),
     specs,
     specsLoaded: wantsSpecs && library != null,
     fileRoots: fileRoots?.roots,

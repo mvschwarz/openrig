@@ -52,7 +52,7 @@ const LABELS: Record<string, string> = {
   "workspace.steering_path": "Steering file", "workspace.catalog_path": "Workspace catalog",
   "workspace.operator_seat_name": "Operator seat", "db.path": "Database",
   "topology.root": "Topology root", "context.root": "Context root", "skills.root": "Skills root",
-  "ui.timezone": "Timezone", "workflow.exception_routing": "Exception routing",
+  "ui.timezone": "Timezone", "ui.topology_remote_seats": "Remote topology seats", "workflow.exception_routing": "Exception routing",
   "queue.wake_retry_interval_seconds": "Retry interval", "queue.wake_retry_cap": "Retry limit",
   "queue.wake_unconfirmed_window_minutes": "Unconfirmed window", "queue.wake_swap_grace_seconds": "Post-swap grace",
   "queue.wake_human_rung": "Human escalation",
