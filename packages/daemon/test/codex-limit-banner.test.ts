@@ -498,11 +498,11 @@ describe("codex-limit-banner — store mapping and seat status", () => {
   it.each([
     { name: "whitespace-only capture", frame: " \n\t\n  " },
     { name: "unrecognized non-empty capture", frame: "unclassified output" },
-    ...["completed", "working"].map(state => ({
-      name: `unsupported client version on a ${state} layout`,
+    {
+      name: "unsupported client version on a completed layout",
       frame: "  >_ OpenAI Codex (v99.0.0)\n" + readFileSync(
-        new URL(`./fixtures/input-box/codex-0.167.0/${state}.txt`, import.meta.url), "utf8"),
-    })),
+        new URL("./fixtures/input-box/codex-0.167.0/completed.txt", import.meta.url), "utf8"),
+    },
     { name: "banner above draft composer", frame: `${BANNER}\n› Continue the task` },
     { name: "banner above indented empty composer", frame: `${BANNER}\n  › Ask Codex to do anything` },
   ])("does not clear a current limit for $name", async ({ frame }) => {
@@ -536,6 +536,35 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       clock = new Date(NOW.getTime() + 3000);
       expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state).toBe("agent_active");
       expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit_cleared" });
+    } finally { db.close(); }
+  });
+
+  it("positive work on a version-named frame clears a prior limit durably", async () => {
+    const db = createFullTestDb();
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      let clock = NOW;
+      const deps = { db, eventBus: new EventBus(db), now: () => clock, resolveOccupantGeneration: () => "current-generation" };
+      const store = new AgentActivityStore(deps);
+      const capturePaneContent = vi.fn(async () => BANNER);
+      const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+      structuralActivity.attachCodexLimitBanner((sessionName, banner, at) => {
+        recordCodexLimitBanner({ store, resolveGeneration: () => "current-generation", sessionName, banner, now: () => at });
+      });
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit" });
+      capturePaneContent.mockResolvedValue("  >_ OpenAI Codex (v99.0.0)\n" + readFileSync(
+        new URL("./fixtures/input-box/codex-0.167.0/working.txt", import.meta.url), "utf8"));
+      for (let poll = 1; poll <= 2; poll++) {
+        clock = new Date(NOW.getTime() + poll * 1000);
+        expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state).toBe("agent_active");
+        expect(new AgentActivityStore(deps).getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit_cleared" });
+        const out = await attachAgentActivity(entries(sessionName), {
+          tmuxAdapter: { capturePaneContent } as never, activityStore: store, structuralActivity, now: clock,
+        });
+        expect(out[0]!.agentActivity).toMatchObject({ state: "running", reason: "mid_work_pattern" });
+      }
+      expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get()).toEqual({ n: 2 });
     } finally { db.close(); }
   });
 

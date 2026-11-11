@@ -123,8 +123,8 @@ export class SeatStructuralActivityService {
     }
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     // Redraws from an unrecorded Codex layout cannot establish work or completed idle.
-    // Keep attention visible; native hook evidence is resolved separately by the activity fold.
-    const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && namesAnotherClientVersion(content, "codex");
+    // Keep positive work and attention visible; native hooks are resolved separately by the activity fold.
+    const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && c.state !== "agent_active" && namesAnotherClientVersion(content, "codex");
     const at = observedAt ?? this.now();
     const previous = this.latestBySession.get(sessionName);
     const seconds = runtime === "codex" && captureStartedAt && c.state !== "attention" ? codexWorkingElapsed(content) : null;

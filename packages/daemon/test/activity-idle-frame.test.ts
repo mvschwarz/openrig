@@ -98,6 +98,24 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
       expect((await adapterFold(frame, { sourceRuntime: "codex", hook: { ...oldIdle, state } })).activity.state).toBe(state);
     }
   });
+  it.each(["  >_ OpenAI Codex (v99.0.0)", "Update available! 99.0.0 -> 99.1.0"])("a fresh idle hook wins without motion on a version-named screen: %s", async (header) => {
+    const frame = `${header}\n${codexCompleted}`;
+    const hook = { ...oldIdle, sampledAt: NOW.toISOString() };
+    expect(readSeatBeforePaste(frame, "codex")).toBe("unknown");
+    const still = await adapterFold(frame, { sourceRuntime: "codex", hook, motion: false });
+    expect(still.observation).toMatchObject({ state: "unknown", reason: "unrecognized_client_version" });
+    expect(still.activity).toEqual(hook);
+    const moving = await adapterFold(frame, { sourceRuntime: "codex", hook, motion: true });
+    expect(moving.activity).toMatchObject({ state: "unknown", reason: "unrecognized_client_version" });
+  });
+  it.each([false, true])("positive pane work survives a version header with motion=%s", async (motion) => {
+    // Synthetic version header over the recorded working frame.
+    const frame = `  >_ OpenAI Codex (v99.0.0)\n${codexWorking}`;
+    expect(readSeatBeforePaste(frame, "codex")).toBe("not-idle");
+    const result = await adapterFold(frame, { sourceRuntime: "codex", hook: null, motion });
+    expect(result.observation).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    expect(result.activity).toMatchObject({ state: "running", evidenceSource: "pane_heuristic", reason: "mid_work_pattern" });
+  });
   it("a newer redraw after an old idle capture keeps D2 running", async () => {
     expect((await adapterFold(cframe, { age: 2000 })).activity.state).toBe("running");
     // The write and capture are in the same second: ordering is unknown,

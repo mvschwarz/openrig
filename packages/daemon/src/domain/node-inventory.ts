@@ -1684,7 +1684,7 @@ export async function attachAgentActivity(
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
     // that frame's provenance instead.
     const resolved = hookOrPaneActivity(hookActivity, structural,
-      (motionRunning && currentIdleFrame) || structural?.reason === "unrecognized_client_version", entry.runtime);
+      motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), entry.runtime);
     if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
     if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
     if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };
