@@ -446,6 +446,11 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(nodeRow(node.id).handover_result).not.toBe("complete");
     expect(result.guidance).toMatch(/re-wakeable|binding is unchanged/);
+    // #2985: the harness launch itself failed, so nothing was sent into the pane: the failure keeps the generic
+    // guidance and doesn't claim a successor was launched.
+    expect(result).not.toHaveProperty("replacementStarted");
+    expect(result).not.toHaveProperty("successorPane");
+    expect(result.guidance).not.toContain("a successor was launched");
   });
 
   it("rebuild: an induced priming-delivery failure unwinds the successor candidate and reports the step — binding unchanged", async () => {

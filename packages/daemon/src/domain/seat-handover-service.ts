@@ -12,6 +12,7 @@ import { SessionAddressConflict, type SessionRegistry } from "./session-registry
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
 import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILITIES, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
@@ -118,7 +119,9 @@ export type SeatHandoverResult =
   | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "address_conflict" | "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "successor_create_failed" | "context_delivery_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
+  // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
+  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string }
   | Extract<SeatStatusResult, { ok: false }>;
 
 type ClaudeRestorePacketObservation =
@@ -588,6 +591,24 @@ export class SeatHandoverService {
       },
     });
     if (!launch.ok) {
+      // #2985: the harness was launched into the respawned pane and only readiness failed. The previous occupant is
+      // already ended and the successor may come up (or already be working) there, but the handover never commits,
+      // so its generation is never registered. Retrying the handover would end it, so the guidance says what may be
+      // in the pane instead of "retry". It claims only what holds for every runtime (a Codex successor's hooks are
+      // not held back by generation_uncommitted, which is Claude-only).
+      if (launch.step === "start_agent" && launch.replacementStarted && launch.successorLaunched) {
+        const pane = launch.tmuxPane ?? "unknown";
+        const session = latestSession.session_name;
+        const quoted = shellQuote(session);
+        return {
+          ok: false,
+          code: "successor_create_failed",
+          message: `Handover failed at step "${launch.step}": ${launch.message}`,
+          replacementStarted: true,
+          ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
+          guidance: `The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. If the pane shows only a shell, no successor is running and the seat is re-wakeable from its provider session file.`,
+        };
+      }
       return {
         ok: false,
         code: "successor_create_failed",
