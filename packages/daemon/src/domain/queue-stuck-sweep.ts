@@ -669,9 +669,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // tells a list read before it that its rows need a fresh read.
     let othersRan = 0;
     const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); };
+    // A successor index whose build took at least half of a stretch that yielded by elapsed time is not rebuilt for
+    // the rest of the pass: the yield drops it, the next stretch would pay the build again and end the same way after a
+    // few rows, so the rows would pay about one build each instead of one per STUCK_SWEEP_YIELD_EVERY_ROWS. Those rows
+    // ask their own narrow query (hasLinkedSuccessor), which costs less than a rebuilt index.
+    let successorsPerRow = false;
     // A synchronous read with both indexes lent to what it calls deep inside (a getById's waiting view and handoff
     // advisory ask the same questions per row). Never spans an await: the lend ends when fn returns.
-    const indexed = <T>(fn: () => T): T => recoveries.run(() => (successors ? successors.run(fn) : fn()));
+    const indexed = <T>(fn: () => T): T => recoveries.run(() => (successors && !successorsPerRow ? successors.run(fn) : fn()));
     // `if (dueToYield()) await yieldLoop();` and never a bare await per row: even an await that does not yield lets
     // queued microtasks (other requests' continuations) run and write between two rows the snapshot still covers.
     let rowsSinceYield = 0;
@@ -679,6 +684,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const dueToYield = (): boolean =>
       ++rowsSinceYield >= STUCK_SWEEP_YIELD_EVERY_ROWS || performance.now() - lastYieldAt >= STUCK_SWEEP_YIELD_AFTER_MS;
     const yieldLoop = async (): Promise<void> => {
+      const stretchMs = performance.now() - lastYieldAt;
+      successorsPerRow ||= successors !== null && stretchMs >= STUCK_SWEEP_YIELD_AFTER_MS && 2 * successors.builtMs() >= stretchMs;
       rowsSinceYield = 0;
       await new Promise<void>((resolve) => setImmediate(resolve));
       lastYieldAt = performance.now();
@@ -1168,7 +1175,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const lookup = successors;
     for (const { qitem_id } of custodyRows) {
       if (dueToYield()) await yieldLoop();
-      const c = custodyCandidate(qitem_id, (source, target) => lookup.has(source, target));
+      const c = custodyCandidate(qitem_id, successorsPerRow
+        ? (source, target) => hasLinkedSuccessor(deps.db, source, target)
+        : (source, target) => lookup.has(source, target));
       if (c) candidates.push(c);
     }
 

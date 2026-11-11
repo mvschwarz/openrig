@@ -791,15 +791,20 @@ let successorScope: { db: Database.Database; covers: (source: string) => boolean
  *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
  *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
  *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
- *  for a covered source; any other source keeps the per-row query. */
+ *  for a covered source; any other source keeps the per-row query. builtMs() is how long the build of the index as it
+ *  is now took (0 while it is not built), so a caller can tell when rebuilding after each invalidate() costs more than
+ *  it saves. */
 export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
   has: (sourceQitemId: string, target: string) => boolean;
   run: <T>(fn: () => T) => T;
   invalidate: () => void;
+  builtMs: () => number;
 } {
   const sources = new Set(sourceQitemIds);
   let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  let buildMs = 0;
   const build = () => {
+    const startedAt = performance.now();
     const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
     const ids = JSON.stringify([...sources]);
     const rows = db.prepare(
@@ -815,6 +820,7 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       const entry = { qitemId: r.qitem_id, destination: r.destination_session };
       if (list) list.push(entry); else map.set(r.source, [entry]);
     }
+    buildMs = performance.now() - startedAt;
     return map;
   };
   const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
@@ -828,7 +834,8 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       successorScope = own;
       try { return fn(); } finally { successorScope = previous; }
     },
-    invalidate: () => { bySource = null; },
+    invalidate: () => { bySource = null; buildMs = 0; },
+    builtMs: () => buildMs,
   };
 }
 
