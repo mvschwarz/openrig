@@ -837,6 +837,45 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(alive.has(seat.sessionName)).toBe(true);
     });
 
+    // `rig unclaim` releases an adopted session (its row detached, its binding cleared) and leaves its process running;
+    // the person then ends it and closes its terminal. When that was the server's last session, tmux exits with it.
+    const releaseAdopted = (seat: ReturnType<typeof seedSeat>) => {
+      sessionRegistry.markDetached(seat.session!.id);
+      sessionRegistry.clearBinding(seat.node.id);
+    };
+
+    it("reopens an empty tmux server after rig unclaim released the seat's last session", async () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      releaseAdopted(seat);
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
+    });
+
+    it("still refuses a released seat's fresh launch when its session is live behind a transport blip", async () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      releaseAdopted(seat);
+      // The released process is still running in its session; only the first probe fails.
+      vi.mocked(tmux.probeSession).mockResolvedValueOnce({ state: "transport_unavailable", cause: "probe blip" });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+      expect(server.starts).toBe(0);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(alive.has(seat.sessionName)).toBe(true);
+    });
+
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
       const seat = seedSeat({ clean: true });
       const older = sessionRegistry.registerSession(seat.node.id, "r00-dev-impl@fresh-rig");

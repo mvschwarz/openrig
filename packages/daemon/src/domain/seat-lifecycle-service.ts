@@ -1566,6 +1566,9 @@ export class SeatLifecycleService {
     // probe sees unavailable transport instead of positive absence. Reopen an
     // empty server only when the persisted state proves this seat's managed
     // occupant was deliberately stopped and no other managed row remains live.
+    // `rig unclaim` is as deliberate for an adopted session: it marks the row
+    // detached and clears the binding, and the person ends the process and
+    // closes its terminal, which can be the server's last session too.
     // The probe below still decides absence; a recreated session or failed
     // transport remains a refusal.
     if ("code" in canonicalProbe) {
@@ -1573,8 +1576,8 @@ export class SeatLifecycleService {
       const hasCurrentBinding = this.sessionRegistry.getBindingForNode(node.id) !== null;
       const stoppedManagedOccupant = latest !== null
         && latest.session_name === canonicalSessionName
-        && latest.status === "exited"
-        && latest.origin !== "claimed"
+        && ((latest.status === "exited" && latest.origin !== "claimed")
+          || (latest.status === "detached" && latest.origin === "claimed"))
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
       if (stoppedManagedOccupant) {
