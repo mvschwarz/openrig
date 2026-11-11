@@ -11,9 +11,9 @@ summary: >
   subsequent daemon-restarts the rig record persists in SQLite and the
   daemon's kernel-boot path short-circuits already-managed without
   re-creating the rig. Member tmux sessions survive daemon-restart-only;
-  a HOST reboot drops tmux and the reconciler marks sessions detached,
-  at which point the operator pod owns the agent-restart workflow
-  through the current operator workflow. Dual-runtime variant; Claude Code +
+  a HOST reboot drops tmux, and the next daemon start restores the kernel
+  by itself when it finds every kernel seat lost (a kernel already down
+  before the reboot stays down). Dual-runtime variant; Claude Code +
   Codex both authenticated.
 
 culture_file: culture/CULTURE.md
