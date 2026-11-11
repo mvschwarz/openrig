@@ -1839,9 +1839,10 @@ export class QueueRepository {
       const destClass = this.classifyDestinationOf(destinationSession).class;
       if (destClass === "unroutable") return true;
       if (destClass !== "pane-bound") return false;
-      if (isBoundTerminalSeat(this.db, destinationSession)) return true;
+      const physical = physicalSessionName(this.db, destinationSession);
+      if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physical)) return true;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
-        .get(physicalSessionName(this.db, destinationSession)) as { status: string } | undefined;
+        .get(physical) as { status: string } | undefined;
       return newest?.status === "exited" || newest?.status === "detached";
     } catch {
       return false;

@@ -128,6 +128,27 @@ describe("start-up wake recovery and seats with nothing to receive a wake", () =
       .toEqual({ attempt: before.row.lastNudgeAttempt, result: before.row.lastNudgeResult, state: "pending", transitions: before.transitions });
   });
 
+  it("doesn't replay a failed wake to a terminal seat addressed by a canonical name whose session runs under another (#2939)", async () => {
+    const t = team();
+    // dev-u@rig1 ran once under its own name; the terminal node then reconnected under the physical name u-phys.
+    t.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-u', 'rig-1', 'dev.u', 'terminal')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u1', 'node-u', 'dev-u@rig1', 'exited')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u2', 'node-u', 'u-phys', 'running')").run();
+    t.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-u', 'node-u', 'tmux', 'u-phys')").run();
+    expect(physicalSessionName(t.db, "dev-u@rig1")).toBe("u-phys");
+    const [u] = await owe(t, ["dev-u@rig1"]);
+    t.db.prepare("UPDATE queue_items SET last_nudge_attempt = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(u!);
+    const before = { attempt: t.repo.getById(u!)!.lastNudgeAttempt, transitions: t.transitions(u!) };
+    t.live.add("dev-u@rig1");
+
+    const tally = await t.repo.drainPendingWakeIntents();
+
+    expect(t.send).not.toHaveBeenCalled();
+    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0,
+      waiting: { notifications: 1, seats: ["dev-u@rig1"] } });
+    expect({ attempt: t.repo.getById(u!)!.lastNudgeAttempt, transitions: t.transitions(u!) }).toEqual(before);
+  });
+
   it("replays the failed wake once the seat is an agent again (#2939)", async () => {
     const t = team();
     terminalSeat(t);
