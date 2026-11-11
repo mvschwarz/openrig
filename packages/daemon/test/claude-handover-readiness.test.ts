@@ -468,7 +468,9 @@ describe("Claude fresh in-place handover readiness", () => {
     expect(result.guidance).toContain("OpenRig has not registered the successor as the seat's occupant");
     expect(result.guidance).toContain("rig capture 'dev-impl@seat-rig'");
     expect(result.guidance).toContain(`Another handover, or rig seat launch 'dev-impl@seat-rig' --fresh --stop --reason "<why>", ends that successor if it goes ahead`);
-    expect(result.guidance).toContain("re-wakeable from its provider session file");
+    // A readiness failure doesn't prove the process exited: Claude can still be starting behind shell-looking output.
+    expect(result.guidance).not.toContain("no successor is running");
+    expect(result.guidance).toContain("Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.");
   });
 });
 
