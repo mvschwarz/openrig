@@ -237,7 +237,7 @@ export class RunnerPermissions {
         "**The options the agent offered:**",
         ...offered,
         "",
-        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
+        "Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, a choice goes to the request as given, a reply of just yes or no counts as the agent's allow or reject, and other words choose nothing, so OpenRig's default permits the request when the agent offered an allow option. Closing this without answering counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
       ].join("\n"),
     });
     return { ok: true, askId, created: true };
@@ -267,7 +267,8 @@ export class RunnerPermissions {
     }
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
     const answer = item.humanAnswers?.[QUESTION_ID];
-    const offered = item.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
+    // The options travel with the ask: a row handed to an agent to decide carries none of its own.
+    const offered = this.deps.queueRepo.permissionQuestionsFor(item)?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
     if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
     // A plain no in words, or a deny from the Feed, is the agent's reject, and never a grant; a plain yes is its allow.
     const allowId = tagValue(item, ALLOW_TAG), rejectId = tagValue(item, REJECT_TAG);
@@ -330,6 +331,27 @@ export class RunnerPermissions {
     } finally {
       unsubscribe();
     }
+  }
+
+  /** An agent's decision on a request its person answered (`rig seat decide-permission`): one of the options the agent
+   *  offered, recorded on the row that holds the request now, with who decided and why. A request that's no longer
+   *  pending (decided, withdrawn or stale) returns as it is and nothing is written, so deciding twice changes nothing. */
+  decide(askId: string, optionId: string, decider: string, reason: string): ReadResult | { ok: false; code: "invalid_option"; message: string } {
+    const now = this.read(null, askId);
+    if (!now.ok || now.state !== "pending") return now;
+    const asked = this.deps.queueRepo.getById(askId)!;
+    const live = this.liveEnd(asked);
+    if (!live) return now; // handed somewhere this host can't follow: nothing here to decide on
+    const question = this.deps.queueRepo.permissionQuestionsFor(live)?.find((q) => q.id === QUESTION_ID);
+    if (!question?.options.some((option) => option.id === optionId)) {
+      return { ok: false, code: "invalid_option", message: `${optionId} isn't one of the options the agent offered: ${(question?.options ?? []).map((o) => o.id).join(", ") || "none recorded"}. Nothing was decided.` };
+    }
+    // The person's words as they wrote them, a plain yes or no included (the record says what they said).
+    const typed = asked.humanAnswers?.[QUESTION_ID] as { kind?: unknown; text?: unknown } | string | undefined;
+    const words = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
+    this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
+      transitionNote: `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${reason ? `, because ${clip(reason, MAX_AGENT_TEXT)}` : ""}${words ? `; the person wrote "${clip(words, MAX_AGENT_TEXT)}"` : ""}` });
+    return this.read(null, askId);
   }
 
   withdraw(seat: { nodeId: string; generation?: string } | null, askId: string, reason: string): WithdrawResult {

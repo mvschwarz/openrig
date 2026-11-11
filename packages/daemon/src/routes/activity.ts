@@ -815,6 +815,33 @@ for (const [router, installTokenAccepted] of [[activityRoutes, true], [guestActi
   router.post("/permission-requests/:askId/withdraw", (c) => withdrawPermission(c, installTokenAccepted));
 }
 
+// The receiving agent's decision on a request its person answered (`rig seat decide-permission`): on this host's main
+// routes only. The record names the deciding seat (X-OpenRig-Session), which is attribution, not authentication.
+activityRoutes.post("/permission-requests/:askId/decide", async (c) => {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  if (!store || !queueRepo || !eventBus) {
+    return c.json({ ok: false, code: "permission_requests_unconfigured", error: "This daemon doesn't take runner permission requests." }, 503);
+  }
+  let body: Record<string, unknown>;
+  try { body = await c.req.json() as Record<string, unknown>; } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  const optionId = typeof body.optionId === "string" ? body.optionId.trim() : "";
+  if (!optionId) return c.json({ ok: false, code: "invalid_option", error: "Name the option to decide: optionId." }, 400);
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
+  const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
+    ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    stream: c.get("streamStore" as never) as StreamStore | undefined });
+  const decider = transportSenderSession(c) ?? "someone outside a seat";
+  const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "");
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : 400);
+  return c.json(result);
+});
+
 type PermissionContext = { store: AgentActivityStore; grant: ActivityGrant | null; registry: SessionRegistry; permissions: RunnerPermissions };
 
 function permissionContext(c: Context, installTokenAccepted: boolean): PermissionContext | { refused: Response } {

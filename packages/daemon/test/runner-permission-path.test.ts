@@ -17,9 +17,10 @@ import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { activityRoutes, guestActivityRoutes } from "../src/routes/activity.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { StreamStore } from "../src/domain/stream-store.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { createGuestActivityApp, type AppDeps } from "../src/server.js";
 
-const PERSON = "mike@external", OTHER_PERSON = "dana@external", SEAT = "dev-runner@perm-rig", INSTALL = "install-token";
+const PERSON = "mike@external", OTHER_PERSON = "dana@external", SEAT = "dev-runner@perm-rig", INSTALL = "install-token", DECIDER = "lead@perm-rig";
 const person = (id: string) => ({ entityId: id, class: "human" as const, displayName: id, address: `${id}@external`,
   connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "unused", role: "primary" as const, handle: `U${id.toUpperCase()}` }],
   prefs: { deliveryClass: "A" as const } });
@@ -33,7 +34,7 @@ const OPTIONS = [
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[]; brokenStream?: boolean } = {}) {
+function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[]; brokenStream?: boolean; decider?: string | null } = {}) {
   const people = options.people ? { ok: true as const, entities: options.people.map(person) } : registry;
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
@@ -53,7 +54,11 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   occupy(other.id, "dev-other@perm-rig");
   const nudges: string[] = [];
   const queueRepo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => people,
-    transport: { send: async (session) => { nudges.push(session); return { ok: true, verified: true, sent: true }; } } });
+    transport: { send: async (session) => { nudges.push(session); return { ok: true, verified: true, sent: true }; } },
+    // The receiving agent that decides an answered request; absent, the request closes with the person's answer.
+    ...(options.decider !== undefined ? { permissionDecider: () => options.decider ?? null } : {}) });
+  // A handoff stages its wake durably, as the daemon's queue does with its outbox attached.
+  if (options.decider !== undefined) queueRepo.attachOutbox(new OutboxHandler(db));
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo, actionLog: new MissionControlActionLog(db) });
   const store = new AgentActivityStore({ db, eventBus: bus,
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
@@ -102,12 +107,16 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
     json(await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor },
       body: JSON.stringify({ verb: "answer", qitemId: askId, actorSession: actor, ...(choice.optionId ? { questionId: "permission", optionId: choice.optionId } : {}),
         ...(choice.decision ? { decision: choice.decision } : {}) }) }));
+  /** The receiving agent decides a request its person answered (`rig seat decide-permission`). */
+  const decide = async (askId: string, optionId: string, decider = DECIDER, reason = "they said so") =>
+    json(await app.request(`/api/activity/permission-requests/${askId}/decide`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": decider }, body: JSON.stringify({ optionId, reason }) }));
   const waitsOnPerson = () => latestHookWaitsOnPerson(store.getLatestForNode({ nodeId: runner.id, sessionName: SEAT }), "synth");
   const rowsToSeat = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = ?").get(SEAT) as { n: number }).n;
   const grants = new ActivityGrantStore(db);
   /** OpenRig's pull-only records of the permits it decided by default. */
   const permits = () => stream.list({ hintTag: "runner-permission-permit", limit: 100 });
-  return { db, runner, other, sessions, queueRepo, contract, nudges, generation, submit, read, withdraw, answer, waitsOnPerson, rowsToSeat, grants,
+  return { db, runner, other, sessions, queueRepo, contract, nudges, generation, submit, read, withdraw, answer, decide, waitsOnPerson, rowsToSeat, grants,
     permits, relaunch: () => occupy(runner.id, SEAT, "handover") };
 }
 
@@ -154,7 +163,7 @@ describe("a runner seat's answered permission path", () => {
     expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
     expect(ask.body).toContain("Edit src/app.ts");
     expect(ask.body).toMatch(/Always allow \(allow_always, always\): the agent's harness remembers this choice/);
-    expect(ask.body).toContain("Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.");
+    expect(ask.body).toContain("Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, a choice goes to the request as given, a reply of just yes or no counts as the agent's allow or reject, and other words choose nothing, so OpenRig's default permits the request when the agent offered an allow option.");
     expect(f.waitsOnPerson()).toBe(true);
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ status: 200, body: { state: "pending" } });
     expect(await f.answer(String(submitted.body.askId), { optionId: "always" })).toMatchObject({ status: 200 });
@@ -606,5 +615,61 @@ describe("a default permit's record", () => {
     const askId = String((await asked.submit()).body.askId);
     await asked.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
     expect(await asked.read(askId)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
+  });
+});
+
+describe("an answered request goes to the receiving agent, which decides while the runner waits", () => {
+  it("a person's click is kept and handed to the agent; the runner reads pending until the agent decides, then that option", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.answer(askId, { optionId: "allow" })).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: DECIDER, humanAnswers: { permission: "allow" } });
+    const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
+    expect(handed).toMatchObject({ destinationSession: DECIDER, state: "pending" });
+    expect(handed.body).toContain(`${PERSON} answered ${SEAT}'s permission request ${askId}: they chose "Allow" (option allow).`);
+    expect(handed.body).toContain(`Decide with: rig seat decide-permission ${askId} --option <id>`);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { ok: true, state: "answered", optionId: "allow" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    const note = f.queueRepo.listTransitions(handed.qitemId).at(-1)?.transitionNote ?? "";
+    expect(note).toContain(`runner-permission-decided by ${DECIDER}, an agent, not the person: allow, because they said so`);
+    // Deciding again changes nothing: the request isn't pending any more.
+    expect(await f.decide(askId, "reject")).toMatchObject({ status: 200, body: { state: "answered", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("a person's words, even a plain yes, go to the agent with the question and options, never permitted by default first", async () => {
+    for (const words of ["yes", "only if it's the test file"]) {
+      const f = fixture({ decider: DECIDER });
+      const askId = String((await f.submit()).body.askId);
+      expect(await f.answer(askId, { decision: words })).toMatchObject({ status: 200 });
+      expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+      const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
+      expect(handed.body).toContain(`they wrote "${words}"`);
+      expect(handed.body).toContain("- Reject (reject)");
+      expect(await f.decide(askId, "reject", DECIDER, "they set a condition")).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+      const note = f.queueRepo.listTransitions(handed.qitemId).at(-1)?.transitionNote ?? "";
+      expect(note).toContain(`the person wrote "${words}"`);
+      expect(f.permits()).toHaveLength(0);
+    }
+  });
+
+  it("an option the agent didn't offer is refused and nothing is decided; a withdrawn request decides nothing", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { optionId: "always" });
+    expect(await f.decide(askId, "sure")).toMatchObject({ status: 400, body: { code: "invalid_option" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.withdraw(askId, "turn_ended")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { state: "withdrawn" } });
+    expect(f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)?.humanAnswers?.permission).toBeUndefined();
+  });
+
+  it("with no agent that can decide, the answer closes the request as before: a plain yes is the agent's allow", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { decision: "yes" });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "done" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
   });
 });

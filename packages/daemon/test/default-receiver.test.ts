@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { describeDefaultReceiver, KERNEL_OPERATOR_SESSION, resolveDefaultReceiver } from "../src/domain/default-receiver.js";
+import { describeDefaultReceiver, KERNEL_OPERATOR_SESSION, permissionDeciderFor, resolveDefaultReceiver } from "../src/domain/default-receiver.js";
 import { readReceivingAgentSetting } from "../src/domain/queue-owner.js";
 import { effectiveInboundDestination, inboundDestinationNote, INHERIT_INBOUND_DESTINATION, LEGACY_INBOUND_DESTINATION, loadConfig, saveConfig, configPathFor } from "../src/domain/gateway/slack/config.js";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -144,5 +144,21 @@ describe("the settings view", () => {
     expect(view.entries.find((entry) => entry.key === "slack.inboundDestination")?.application)
       .toBe("Not chosen: when the connector starts, unrouted messages go to the default receiving agent (Agents & runtime).");
     expect(settingsBrowser(store, null, home).entries.some((entry) => entry.key === "agents.default_receiver")).toBe(false);
+  });
+});
+
+describe("who decides a runner's answered permission request", () => {
+  it("is the receiving agent, never the requesting seat itself; then the kernel operator when it isn't the requester; else nobody", () => {
+    const both = db([[KERNEL_OPERATOR_SESSION, "running"], ["lead@team", "running"]]);
+    expect(permissionDeciderFor(both, "runner@team", () => "lead@team")).toBe("lead@team");
+    // The chosen agent is the blocked requester: the kernel operator decides instead.
+    expect(permissionDeciderFor(both, "lead@team", () => "lead@team")).toBe(KERNEL_OPERATOR_SESSION);
+    // No agent chosen: the kernel operator, unless it's the requester.
+    expect(permissionDeciderFor(both, "runner@team", () => null)).toBe(KERNEL_OPERATOR_SESSION);
+    expect(permissionDeciderFor(both, KERNEL_OPERATOR_SESSION, () => null)).toBeNull();
+    // A stopped kernel operator stays responsible; a host without one has nobody, and OpenRig's default applies.
+    expect(permissionDeciderFor(db([[KERNEL_OPERATOR_SESSION, "exited"]]), "runner@team", () => null)).toBe(KERNEL_OPERATOR_SESSION);
+    expect(permissionDeciderFor(db([]), "runner@team", () => null)).toBeNull();
+    expect(permissionDeciderFor(db([]), "lead@team", () => "lead@team")).toBeNull();
   });
 });

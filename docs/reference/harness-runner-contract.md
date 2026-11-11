@@ -301,6 +301,20 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
 
+**When an agent can decide (after 0.7.11):**
+- **Who decides:** this host's receiving agent (`agents.operator_session`, else the kernel operator
+  `operator-agent@kernel`), unless it's the requesting seat itself; then the kernel operator, unless it's the requester.
+- **What happens to the person's answer:** whether it's a click, a plain yes or no, or other words, it isn't applied to
+  the request directly. It's kept on the ask, and the ask is handed to that agent with the person's answer, the question
+  and the options.
+- **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
+  --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - It accepts only an option the agent offered.
+  - It records an agent's decision: who decided, why, and the person's words.
+  - A request that's no longer pending comes back as it is, and nothing is written.
+- **Until the agent decides, the runner waits.** No timeout refuses the request. If the turn ends first, nothing is sent.
+- **With no agent that can decide** (none on this host, or only the requester), the tables above apply unchanged.
+
 - **An answer reaches only the live request it was asked for,** once. A request from an earlier occupant reads
   `stale`, and one withdrawn at the turn's end reads `withdrawn`. Neither can take a later answer.
 - **Text typed into the runner's pane, an agent's own text, and `rig send` are never an answer.** While a request waits

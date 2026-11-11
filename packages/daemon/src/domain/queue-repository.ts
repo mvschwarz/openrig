@@ -1102,6 +1102,7 @@ export class QueueRepository {
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
   /** Whether the rosters list an address as a hosted member, trigger or not. */
   private readonly hostedMemberFn: (destination: string) => boolean;
+  private readonly permissionDecider?: (ask: QueueItem) => string | null;
   private readonly hostedWakeFetch: typeof fetch | undefined;
   /** When this process last wrote each session's inbox check-in, so a seat that polls often writes at most once a minute. */
   private readonly inboxCheckInWrittenAt = new Map<string, number>();
@@ -1155,6 +1156,10 @@ export class QueueRepository {
       hostedWake?: (destination: string) => RosterWake | null;
       isHostedMember?: (destination: string) => boolean;
       hostedWakeFetch?: typeof fetch;
+      /** Who decides a runner's permission ask after its person answers, while the runner waits (startup wires the
+       *  receiving-agent order, `permissionDeciderFor`). Absent, or null for an ask: the ask closes with the answer, as
+       *  before, and the runner reads it there. */
+      permissionDecider?: (ask: QueueItem) => string | null;
     }
   ) {
     this.db = db;
@@ -1173,6 +1178,7 @@ export class QueueRepository {
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
     this.hostedMemberFn = opts?.isHostedMember ?? defaultIsHostedMember;
+    this.permissionDecider = opts?.permissionDecider;
     this.hostedWakeFetch = opts?.hostedWakeFetch;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
@@ -2542,6 +2548,12 @@ export class QueueRepository {
    * with `handed_off_from` recording the chain. One atomic transaction.
    */
   async handoff(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    return this.handoffNow(input);
+  }
+
+  /** {@link handoff}'s whole act, synchronously: its transaction commits before this returns, and the wake is delivered
+   *  after commit without being awaited, so a synchronous caller (an answer's close path) can hand a row on. */
+  private handoffNow(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -2704,8 +2716,10 @@ export class QueueRepository {
     });
 
     txn();
+    // Inside a caller's notify envelope (an answer's close path), the events join it; otherwise they're notified now.
     for (const e of events) {
-      this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
+      const event = e.payload as import("./types.js").PersistedEvent;
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
     }
 
     // Closure and successor are persisted. Delivery is separate and recoverable
@@ -4175,6 +4189,8 @@ export class QueueRepository {
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
   resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+    const passed = this.passRunnerAnswerToDecider(input);
+    if (passed !== null) return passed;
     let mine = true;
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
@@ -4198,6 +4214,67 @@ export class QueueRepository {
       if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
     }
     return mine;
+  }
+
+  /** A runner's permission ask its person answered, where an agent can decide while the runner waits on it: their answer
+   *  (a choice, or their words) stays on the ask, and the ask is handed to that agent to decide, never closed with it. The
+   *  runner reads pending until the agent decides (`rig seat decide-permission`), or the person uses a direct control.
+   *  Null when this doesn't apply (no decider, or another person's answer settles it), and the ask closes as before. */
+  private passRunnerAnswerToDecider(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean | null {
+    const item = this.getById(input.qitemId);
+    if (!this.permissionDecider || item?.state !== "pending" || !runnerPermissionOrigin(item) || item.humanIntent === "update"
+      || (!this.answersAsk(item, input.actorSession) && !input.primaryUser) || !this.isPersonAddress(item.destinationSession)
+      || this.committedAnswerFromAnother(item.qitemId, input.actorSession)) return null;
+    let decider: string | null;
+    try { decider = this.permissionDecider(item); } catch { decider = null; }
+    if (!decider || !this.validateRig(decider)) return null;
+    this.db.transaction(() => { this.placeTypedReply(item, input.decision); })();
+    const answered = this.getById(item.qitemId) ?? item;
+    const question = (this.permissionQuestionsFor(answered) ?? [])[0];
+    const answer = question ? answered.humanAnswers?.[question.id] : undefined;
+    const said = typeof answer === "string" ? `chose "${question?.options.find((o) => o.id === answer)?.label ?? answer}" (option ${answer})`
+      : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).replace(/\s+/g, " ").trim().slice(0, 500)}"`
+      : "answered without a choice or words";
+    const person = input.actorSession;
+    // A handoff that can't be made leaves the ask to close with the person's answer, as where no agent can decide.
+    try { this.handoffNow({
+      qitemId: item.qitemId, fromSession: person, toSession: decider,
+      summary: `Decide: ${item.summary ?? "a runner's permission request"} (${person} answered)`,
+      transitionNote: `runner-permission-answer-passed: ${person}'s answer goes to ${decider}, the receiving agent, to decide while the runner waits`,
+      body: [
+        `${person} answered ${item.sourceSession}'s permission request ${item.qitemId}: they ${said}. Its runner is waiting on your decision: nothing is permitted or refused until you decide.`,
+        "",
+        `- **Question:** ${question?.question ?? "Allow this tool call?"}`,
+        "- **Options:**",
+        ...(question?.options ?? []).map((o) => `  - ${o.label} (${o.id})`),
+        "",
+        `Decide with: rig seat decide-permission ${item.qitemId} --option <id> --reason "<why>"`,
+        "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming this request, then decide.",
+        "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
+      ].join("\n"),
+    }); } catch (error) {
+      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; it closes with the person's answer`, error);
+      return null;
+    }
+    return true;
+  }
+
+  /** An agent's decision on a runner's permission request, on the row that holds it now: the chosen option under its
+   *  question, and the row closed done, in one transaction. False when the row isn't open any more. */
+  recordPermissionDecision(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; transitionNote: string }): boolean {
+    const result = this.db.transaction(() => {
+      const item = this.getById(input.qitemId);
+      if (!item || (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked")) return null;
+      const answers: HumanAnswers = { ...item.humanAnswers, [input.questionId]: input.optionId };
+      this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+      return this.updateInTransactionalContext({ qitemId: item.qitemId, actorSession: input.actorSession, state: "done",
+        closureReason: "no-follow-on", transitionNote: input.transitionNote });
+    })();
+    if (!result) return false;
+    for (const event of result.persistedEvents) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
+    return true;
   }
 
   /** Another person's committed return to this ask: its shared reply (for a park's question, `episodeKey`'s). It's the
