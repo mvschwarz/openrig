@@ -91,7 +91,8 @@ never picks whichever seat happens to be running. The TUI shows the effective ag
 under Settings > Agents & runtime ("Default receiving agent"). It never replaces the default person.
 
 For Slack, `rig slack setup --inbound-destination default-receiver` (the default for a new setup) sends unrouted
-messages to the default receiving agent, read when the connector starts. A destination already saved in the connector
+messages to the default receiving agent, read when the connector starts. With no receiving agent on the host, they go to
+`operator-agent@kernel` for compatibility, as before. A destination already saved in the connector
 config, `operator-agent@kernel` included, is kept as chosen; pass `default-receiver` to switch it.
 
 ## In the TUI: whose queue, and who acts
