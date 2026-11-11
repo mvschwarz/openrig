@@ -5,7 +5,8 @@ import { StringDecoder } from "node:string_decoder";
 import stringWidth from "string-width";
 
 const [runtime, stateFile, footerVariant] = process.argv.slice(2);
-const cursorBlock = footerVariant === "cursor-block";
+const contextHint = footerVariant === "context-hint";
+const cursorBlock = footerVariant === "cursor-block" || contextHint;
 const rule = cursorBlock ? `\x1b[38;5;244m${"─".repeat(68)}\x1b[39m` : "────────────────────────────────────────";
 let input = "", pending = "", pasting = false, cursor = 0, ghost = false;
 const submissions = [];
@@ -13,8 +14,10 @@ const decoder = new StringDecoder("utf8");
 
 function render() {
   const rows = ["Editable delivery fixture", ...submissions.slice(-3).flatMap(text => text.split("\n"))];
-  if (cursorBlock) while (rows.length < 25) rows.push("");
-  if (runtime === "claude") rows.push(rule);
+  if (cursorBlock) while (rows.length < (contextHint ? 22 : 25)) rows.push("");
+  const label = contextHint ? "dev-docs@moonjoy-workshop" : "orch-lead@moonjoy-workshop";
+  const topRule = cursorBlock ? `\x1b[38;5;244m${"─".repeat(68 - stringWidth(label) - 3)} ${label} ─\x1b[39m` : rule;
+  if (runtime === "claude") rows.push(topRule);
   const start = rows.length;
   const displayed = ghost && cursor === input.length ? `${input}\x1b[2m suggested follow-up\x1b[22m`
     : input || (runtime === "codex" ? "\x1b[2mAsk Codex to do anything\x1b[22m" : cursorBlock ? "\x1b[7m \x1b[0m" : "");
@@ -22,6 +25,7 @@ function render() {
   rows.push(`${runtime === "claude" ? "❯\u00a0" : "› "}${body[0]}`, ...body.slice(1).map(line => `  ${line}`));
   rows.push(...(runtime === "claude" ? [rule, cursorBlock
     ? "  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[0m" : "? for shortcuts"] : ["", "fixture · 90% context left"]));
+  if (runtime === "claude" && contextHint) rows.push("                             ~66k uncached · /clear to start fresh");
   if (runtime === "claude" && ghost) {
     rows[rows.length - 1] = "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
     rows.push("✘ Auto-update failed: no write permission to npm prefix · Run claude doctor");

@@ -133,7 +133,7 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
     }
   }, 30_000);
 
-  it.each(["update-banner", "cursor-block"])("submits a multiline paste with %s and keeps a real draft through tmux", async variant => {
+  it.each(["update-banner", "cursor-block", "context-hint"])("submits a multiline paste with %s and keeps a real draft through tmux", async variant => {
     const scratch = mkdtempSync(join(tmpdir(), "draft-banner-"));
     const socket = join(scratch, "s");
     const env = { ...process.env }; delete env.TMUX; delete env.TMUX_TMPDIR;
@@ -144,7 +144,7 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
     let transport: SessionTransport | undefined;
     try {
       const command = [process.execPath, composer, "claude", stateFile, variant].map(shellQuote).join(" ");
-      const [width, height] = variant === "cursor-block" ? ["68", "31"] : ["120", "40"];
+      const [width, height] = variant === "context-hint" ? ["68", "30"] : variant === "cursor-block" ? ["68", "31"] : ["120", "40"];
       const pane = (await tmux(["-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}", "-x", width, "-y", height, "-s", "worker@test", command])).trim();
       await vi.waitFor(() => expect(state().input).toBe(""), { timeout: 5000 });
       migrate(db, ALL_MIGRATIONS);
@@ -158,11 +158,16 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)); adapter.deliveryGuard = guard;
       transport = new SessionTransport({ db, tmuxAdapter: adapter, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db) });
       await guard.set("a", { mode: "draft-aware" }, "human@test", "protect fixture input");
-      if (variant === "cursor-block") {
+      if (variant !== "update-banner") {
         await vi.waitFor(async () => {
           const snapshot = await adapter.captureComposerSnapshot(pane);
-          expect(snapshot?.cursor).toEqual({ x: 2, y: 26, width: 68, height: 31 });
-          expect(snapshot!.screen.split("\n")[26]).toContain("❯\u00a0\x1b[7m ");
+          const row = variant === "context-hint" ? 23 : 26;
+          expect(snapshot?.cursor).toEqual({ x: 2, y: row, width: 68, height: Number(height) });
+          expect(snapshot!.screen.split("\n")[row]).toContain("❯\u00a0\x1b[7m ");
+          expect(snapshot!.screen.split("\n")[row - 1]).toContain("@moonjoy-workshop ─");
+          const plain = await tmux(["capture-pane", "-p", "-t", pane]);
+          expect(plain.split("\n")[row]).toBe("❯\u00a0");
+          if (variant === "context-hint") expect(plain.split("\n")[26].trim()).toBe("~66k uncached · /clear to start fresh");
           expect(annotateInputBox(snapshot!.screen, snapshot!.cursor, "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
         });
       } else await vi.waitFor(async () => expect(inspectComposerInput(await adapter.captureComposerSnapshot(pane), "claude-code").state).toBe("empty"));
