@@ -98,6 +98,18 @@ it("a seat that isn't in this daemon's inventory is unknown, never 'fine'", asyn
     { seat: "x@elsewhere", why: "no rig named elsewhere on this daemon" }]);
 });
 
+it("finds attention for a seat whose rig name contains @", async () => {
+  const { client: c } = client({
+    "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "team@east" }] },
+    "/api/rigs/r1/nodes": { status: 200, data: [
+      { canonicalSessionName: "lead@team@east", needsAttention: true, startupStatus: "attention_required", latestError: LOGIN },
+    ] },
+  });
+  expect(await checkSeatAttention(c, ["lead@team@east"])).toEqual({
+    attention: [{ seat: "lead@team@east", reason: LOGIN, waitingOnPerson: false }], unknown: [],
+  });
+});
+
 it("an unreadable kernel status is reported, not read as no held seat", async () => {
   const { client: c } = client({ "/api/kernel/status": { status: 503, data: { error: "kernel_boot_tracker_unavailable" } } });
   expect(await checkKernelAttention(c)).toEqual({ attention: [],
