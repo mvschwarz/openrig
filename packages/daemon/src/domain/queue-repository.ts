@@ -792,15 +792,20 @@ let successorScope: { db: Database.Database; covers: (source: string) => boolean
  *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
  *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
  *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
- *  for a covered source; any other source keeps the per-row query. */
+ *  for a covered source; any other source keeps the per-row query. builtMs() is how long the build of the index as it
+ *  is now took (0 while it is not built), so a caller can tell when rebuilding after each invalidate() costs more than
+ *  it saves. */
 export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
   has: (sourceQitemId: string, target: string) => boolean;
   run: <T>(fn: () => T) => T;
   invalidate: () => void;
+  builtMs: () => number;
 } {
   const sources = new Set(sourceQitemIds);
   let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  let buildMs = 0;
   const build = () => {
+    const startedAt = performance.now();
     const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
     const ids = JSON.stringify([...sources]);
     const rows = db.prepare(
@@ -816,6 +821,7 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       const entry = { qitemId: r.qitem_id, destination: r.destination_session };
       if (list) list.push(entry); else map.set(r.source, [entry]);
     }
+    buildMs = performance.now() - startedAt;
     return map;
   };
   const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
@@ -829,7 +835,8 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       successorScope = own;
       try { return fn(); } finally { successorScope = previous; }
     },
-    invalidate: () => { bySource = null; },
+    invalidate: () => { bySource = null; buildMs = 0; },
+    builtMs: () => buildMs,
   };
 }
 
@@ -876,8 +883,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+/** waiting: false skips the waiting view of each row (the stuck sweep's own reads); the default builds it. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -4550,7 +4558,9 @@ export class QueueRepository {
     return rows.map((row) => this.rowToItem(row));
   }
 
-  getById(qitemId: string): QueueItem | null {
+  /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:
+   *  it never changes what another read returns. */
+  getById(qitemId: string, opts?: { waiting?: boolean }): QueueItem | null {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
@@ -4558,7 +4568,7 @@ export class QueueRepository {
     // OPR.0.5.6.14 — the row FACE answers "did it reach them" in one read for
     // gateway-routed rows; null for pane-bound (absence-governed, no key lies).
     // The same projection as a listing's, for one row: one read of its owner notifications and ledger.
-    const item = this.projectRows([row], true)[0]!;
+    const item = this.projectRows([row], opts?.waiting !== false)[0]!;
     return {
       ...item,
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
@@ -4912,7 +4922,7 @@ export class QueueRepository {
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
+    const items = rows.map((r) => this.rowToItem(r, !opts?.compact && opts?.waiting !== false));
     return opts?.compact ? items.map(compactRow) : items;
   }
 
@@ -5018,7 +5028,7 @@ export class QueueRepository {
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
     for (const r of rows) {
-      const item = this.rowToItem(r, !opts?.compact);
+      const item = this.rowToItem(r, !opts?.compact && opts?.waiting !== false);
       const ledger = this.deliveryOutcomeFor(item.qitemId);
       if (ledger?.outcome === "posted" || ledger?.outcome === "accepted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {
