@@ -636,8 +636,12 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     const claimed = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(claimed).toMatchObject({ ok: false, code: "claimed_session" });
-    // B5: the refusal names rig down and rig unclaim, not only rig unclaim.
-    expect((claimed as { guidance?: string }).guidance).toMatch(/run rig down '[^']+' \(.*\)\. To release it from OpenRig and leave its process running, run rig unclaim '/);
+    // B5: the refusal's route is rig unclaim, then ending the process in its own terminal; rig down leaves a session
+    // OpenRig didn't start running, so it isn't offered as the way to end this one.
+    const guidance = (claimed as { guidance?: string }).guidance ?? "";
+    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process in its own terminal\. /);
+    expect(guidance).toMatch(/rig down '[^']+' leaves a session OpenRig didn't start running\.$/);
+    expect(guidance).not.toMatch(/run rig down/);
   });
 
   it("names a seat handed over before 0.7.9 instead of pointing at rig unclaim", async () => {
