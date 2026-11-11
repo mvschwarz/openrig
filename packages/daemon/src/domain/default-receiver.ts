@@ -89,5 +89,6 @@ export function permissionDeciderFor(
   const kernel = seatState(db, KERNEL_OPERATOR_SESSION);
   if (kernel.state === "missing" || (kernel.state === "unknown" && !kernel.recorded)) return null;
   return { session: KERNEL_OPERATOR_SESSION, source: "kernel-operator", ...kernel,
-    note: receiver.session ? `${receiver.session}, the receiving agent, ${receiver.session === requester ? "is the seat asking" : "isn't on this host"}` : undefined };
+    // A setting that's set but ignored keeps saying so, rather than reading as unset.
+    note: receiver.session ? `${receiver.session}, the receiving agent, ${receiver.session === requester ? "is the seat asking" : "isn't on this host"}` : receiver.note };
 }

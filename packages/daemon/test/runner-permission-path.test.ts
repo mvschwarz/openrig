@@ -717,7 +717,9 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
   it("Steering's Approve or Deny on the request is the person's yes or no: it goes to the agent, or, with none, to the request as before", async () => {
     const f = fixture({ decider: DECIDER });
     const askId = String((await f.submit()).body.askId);
-    expect(await f.act(askId, "approve")).toMatchObject({ status: 200 });
+    // The result says what became of the answer (the TUI prints it), never that the request closed.
+    expect(await f.act(askId, "approve")).toMatchObject({ status: 200,
+      body: { answer: { message: `Your answer on ${askId} went to ${DECIDER}, the receiving agent, which decides. The runner waits until then; nothing has run.` } } });
     expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: DECIDER });
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(handedFrom(f, askId)!.body).toContain(`they wrote "yes"`);
@@ -725,7 +727,8 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     for (const verb of ["approve", "deny"] as const) {
       const g = fixture({ decider: null });
       const id = String((await g.submit()).body.askId);
-      expect(await g.act(id, verb, { reason: `${verb}: only the test file` })).toMatchObject({ status: 200, body: { verb } });
+      expect(await g.act(id, verb, { reason: `${verb}: only the test file` })).toMatchObject({ status: 200, body: { verb,
+        answer: { message: expect.stringContaining(`Your answer is kept on ${id}, and the request is still waiting: the tool hasn't run`) } } });
       expect(await g.read(id)).toMatchObject({ body: { state: "pending" } });
       // The audit keeps what the person did: their verb, and their reason.
       expect(g.db.prepare("SELECT action_verb, reason FROM mission_control_actions WHERE qitem_id = ?").all(id))
@@ -926,8 +929,37 @@ describe("an answered request: review-r2's round-1 questions", () => {
     await f.answer(askId, { decision: "only the test file" });
     const spy = vi.spyOn(f.queueRepo, "recordPermissionDecision").mockReturnValue(false);
     try {
-      expect(await f.decide(askId, "allow")).toMatchObject({ status: 409, body: { ok: false, code: "not_recorded" } });
+      expect(await f.decide(askId, "allow")).toMatchObject({ status: 409, body: { ok: false, code: "not_recorded",
+        error: expect.stringContaining("Nothing was decided. Read the request again.") } });
     } finally { spy.mockRestore(); }
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+  });
+});
+
+describe("an answered request: #2934's follow-ups", () => {
+  it("a decision on a row closed without one persists queue.updated, so a waiting runner and Steering hear it", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { decision: "only the test file" });
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+    const updates = () => (f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'queue.updated' AND json_extract(payload, '$.qitemId') = ?").get(askId) as { n: number }).n;
+    const before = updates();
+    expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    expect(updates()).toBe(before + 1);
+  });
+
+  it("a handoff that fails after persisting its events still keeps the person's words (the envelope drops the rolled-back tokens)", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    // The real handoff persists its two events, then fails at its last check: its savepoint rolls them back.
+    const spy = vi.spyOn(f.queueRepo as unknown as { assertTerminalClosureHasIntent: () => void }, "assertTerminalClosureHasIntent")
+      .mockImplementationOnce(() => { throw new Error("closure check failed"); });
+    try {
+      expect(await f.answer(askId, { decision: "only the test file" })).toMatchObject({ status: 200 });
+    } finally { spy.mockRestore(); }
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+    expect((f.queueRepo.getById(askId)!.humanAnswers?.permission as { text?: string })?.text).toBe("only the test file");
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
   });
 });

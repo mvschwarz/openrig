@@ -471,7 +471,8 @@ async function run(): Promise<void> {
         const actor = actingAs(snapshot.attentionRead, action.actorSession);
         view.dispatch({ type: "notice", message: action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
           : action.verb === "approve"
-          ? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
+          // A runner's permission request says what became of the answer: handed to its receiving agent, or kept.
+          ? result.answer?.message ?? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
           : result.answer?.message ?? (result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
           : `Answered ${action.qitemId} as ${actor}: the answer went back to the asker, and the request is closed.`) });
       }
