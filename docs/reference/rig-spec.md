@@ -1092,9 +1092,12 @@ Managed Claude compaction also uses the delegation parent for two diagnostic not
 unsent preparation attempts and repeated restore-delivery failures. If the seat has no recorded
 parent session (including when it is outside the recorded topology), these notices go to the
 configured registered human operator, or the default registered person when no operator is set.
-If human selection is missing, ambiguous or invalid, OpenRig reports an error rather than inventing
-a destination. A parent is the source of a `delegates_to` edge to the seat; declare one when an
-agent should receive these notices. The restore-delivery notice to a person omits local paths and
+If no registered person can be selected, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
+preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+to the seat; declare one when an agent should receive these notices. With multiple parents, the
+parent session with the latest creation time is selected; `escalates_to` is not used for these
+notices. The restore-delivery notice to a person omits local paths and
 points to `rig compact <seat> --state` on the host; the preparation notice includes its state-file
 evidence reference and attempt details. Treat these notices and any chat relay accordingly. Existing
 notices retain their destination when the topology changes.
