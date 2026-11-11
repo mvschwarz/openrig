@@ -1493,8 +1493,10 @@ Examples:
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
-session and leaves its process running), then end that process and close its
-terminal. rig down <rig> leaves a session OpenRig didn't start running.
+session and leaves its process running), then end that process and the
+underlying tmux session, including any remaining shell. Closing only its
+viewing window leaves the tmux session running. rig down <rig> leaves a
+session OpenRig didn't start running.
 A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
 adopted and is refused too, until its next launched handover or managed launch;
 the refusal says so. Stopping ends that agent's session and any work in progress:

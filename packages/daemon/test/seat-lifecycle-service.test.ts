@@ -447,7 +447,7 @@ describe("SeatLifecycleService", () => {
     // the refusal names the supported route, rig unclaim, and says rig down doesn't stop a session OpenRig didn't start,
     // even in a one-seat rig.
     expect(claimedResult.guidance).toBe("To end this session, run rig unclaim 'dev-adopted@s5-rig' (it releases the session from OpenRig "
-      + "and leaves its process running), then end that process and close its terminal, so no session keeps the seat's name. rig down 's5-rig' leaves a session OpenRig didn't start running.");
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 's5-rig' leaves a session OpenRig didn't start running.");
 
     const probed = seatFixture("s5-rig", "dev.flaky");
     tmux.failProbeFor(probed.sessionName);
@@ -471,7 +471,7 @@ describe("SeatLifecycleService", () => {
     const shared = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
     if (shared.ok) throw new Error("expected refusal");
     expect(shared.guidance).toBe("To end this session, run rig unclaim 'dev-adopted@adopted-rig' (it releases the session from OpenRig "
-      + "and leaves its process running), then end that process and close its terminal, so no session keeps the seat's name. rig down 'adopted-rig' leaves a session OpenRig didn't start running.");
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 'adopted-rig' leaves a session OpenRig didn't start running.");
 
     sessionRegistry.updateBinding(claimed.node.id, { attachmentType: "external_cli", externalSessionName: claimed.sessionName });
     const external = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
@@ -485,7 +485,7 @@ describe("SeatLifecycleService", () => {
 
   it("claimedSessionRoutes routes a tmux session through rig unclaim, never rig down", () => {
     expect(claimedSessionRoutes("r", "a@r")).toBe("To end this session, run rig unclaim 'a@r' (it releases the session from OpenRig "
-      + "and leaves its process running), then end that process and close its terminal, so no session keeps the seat's name. rig down 'r' leaves a session OpenRig didn't start running.");
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 'r' leaves a session OpenRig didn't start running.");
   });
 
   // ---- P5 / P6 — clean ----

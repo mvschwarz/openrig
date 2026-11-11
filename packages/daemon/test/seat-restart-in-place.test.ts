@@ -636,10 +636,10 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     const claimed = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(claimed).toMatchObject({ ok: false, code: "claimed_session" });
-    // B5: the refusal's route is rig unclaim, then ending the process in its own terminal; rig down leaves a session
+    // B5: the refusal's route is rig unclaim, then ending the process and its tmux session; rig down leaves a session
     // OpenRig didn't start running, so it isn't offered as the way to end this one.
     const guidance = (claimed as { guidance?: string }).guidance ?? "";
-    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process and close its terminal, so no session keeps the seat's name\. /);
+    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name\. Closing only its viewing window leaves the tmux session running\. /);
     expect(guidance).toMatch(/rig down '[^']+' leaves a session OpenRig didn't start running\.$/);
     expect(guidance).not.toMatch(/run rig down/);
   });

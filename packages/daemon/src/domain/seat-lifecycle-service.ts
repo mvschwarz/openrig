@@ -73,7 +73,8 @@ const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 /**
  * The supported route for a session registered as adopted (origin=claimed): `rig unclaim` releases
- * it and leaves its process running, so ending that process in its own terminal ends only this seat.
+ * it and leaves its process running, so ending that process and its tmux session ends only this seat. Closing only
+ * a viewing window detaches from the tmux session and leaves it running.
  * `rig down` stops only a session carrying the seat's OpenRig marker, which OpenRig sets on the sessions
  * it starts and an adopted, bound or self-attached session lacks, so it isn't a route here and the
  * guidance says why. Only the guidance names the route; the refusal stands. A seat handed over before
@@ -85,8 +86,12 @@ export function claimedSessionRoutes(rigName: string, sessionName: string, exter
   const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
   if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
   return `To end this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
-    + `then end that process and close its terminal, so no session keeps the seat's name. ${rigDownLeavesIt(rigName)}`;
+    + `then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. `
+    + `${VIEWER_LEAVES_IT} ${rigDownLeavesIt(rigName)}`;
 }
+
+/** Closing a viewer detaches; the tmux session, its shell and the seat's name stay. */
+const VIEWER_LEAVES_IT = "Closing only its viewing window leaves the tmux session running.";
 
 /** Why `rig down <rig>` isn't the route for an adopted session. */
 function rigDownLeavesIt(rigName: string): string {
@@ -1381,7 +1386,8 @@ export class SeatLifecycleService {
         ok: false,
         code: "unmanaged_session_collision",
         message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
-        guidance: "If you released this session with rig unclaim, close it in its own terminal, then launch again.",
+        guidance: "If you released this session with rig unclaim, end that underlying tmux session, including any remaining shell, "
+          + "then launch again. Closing only its viewing window doesn't end the session.",
       };
     }
     if (!stop) {
@@ -1425,8 +1431,10 @@ export class SeatLifecycleService {
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process and close its terminal, then launch fresh.`
-          + (externalCli ? "" : ` ${rigDownLeavesIt(seat.rigName)}`),
+        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), `
+          + (externalCli
+            ? "end that process and close its terminal, then launch fresh."
+            : `end that process and the underlying tmux session, including any remaining shell, then launch fresh. ${VIEWER_LEAVES_IT} ${rigDownLeavesIt(seat.rigName)}`),
       };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);

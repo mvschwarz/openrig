@@ -499,7 +499,8 @@ describe("SeatLifecycleService.launchFresh", () => {
       code: "claimed_session",
       message: `Seat "${seat.sessionName}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
       // B5: rig unclaim releases it (the process keeps running); rig down leaves a session OpenRig didn't start.
-      guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process and close its terminal, then launch fresh. "
+      guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process and the underlying tmux session, "
+        + "including any remaining shell, then launch fresh. Closing only its viewing window leaves the tmux session running. "
         + "rig down 'fresh-rig' leaves a session OpenRig didn't start running.",
     };
     const before = db.serialize();
@@ -687,7 +688,10 @@ describe("SeatLifecycleService.launchFresh", () => {
     const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, stop: true, reason: "x" });
     expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
     // A session someone released with rig unclaim and left open is the usual cause: say how to clear it.
-    expect(result).toMatchObject({ guidance: "If you released this session with rig unclaim, close it in its own terminal, then launch again." });
+    expect(result).toMatchObject({
+      guidance: "If you released this session with rig unclaim, end that underlying tmux session, including any remaining shell, "
+        + "then launch again. Closing only its viewing window doesn't end the session.",
+    });
     expect(killed).toEqual([]);
     expect(alive.has(seat.sessionName)).toBe(true);
   });
