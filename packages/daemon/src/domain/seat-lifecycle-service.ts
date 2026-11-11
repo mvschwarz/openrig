@@ -85,7 +85,7 @@ export function claimedSessionRoutes(rigName: string, sessionName: string, exter
   const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
   if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
   return `To end this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
-    + `then end that process in its own terminal. ${rigDownLeavesIt(rigName)}`;
+    + `then end that process and close its terminal, so no session keeps the seat's name. ${rigDownLeavesIt(rigName)}`;
 }
 
 /** Why `rig down <rig>` isn't the route for an adopted session. */
@@ -1381,6 +1381,7 @@ export class SeatLifecycleService {
         ok: false,
         code: "unmanaged_session_collision",
         message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
+        guidance: "If you released this session with rig unclaim, close it in its own terminal, then launch again.",
       };
     }
     if (!stop) {
@@ -1424,7 +1425,7 @@ export class SeatLifecycleService {
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process yourself, then launch fresh.`
+        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process and close its terminal, then launch fresh.`
           + (externalCli ? "" : ` ${rigDownLeavesIt(seat.rigName)}`),
       };
     }

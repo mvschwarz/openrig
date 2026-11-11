@@ -639,7 +639,7 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     // B5: the refusal's route is rig unclaim, then ending the process in its own terminal; rig down leaves a session
     // OpenRig didn't start running, so it isn't offered as the way to end this one.
     const guidance = (claimed as { guidance?: string }).guidance ?? "";
-    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process in its own terminal\. /);
+    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process and close its terminal, so no session keeps the seat's name\. /);
     expect(guidance).toMatch(/rig down '[^']+' leaves a session OpenRig didn't start running\.$/);
     expect(guidance).not.toMatch(/run rig down/);
   });
