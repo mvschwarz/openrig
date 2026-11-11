@@ -725,8 +725,11 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     for (const verb of ["approve", "deny"] as const) {
       const g = fixture({ decider: null });
       const id = String((await g.submit()).body.askId);
-      expect(await g.act(id, verb)).toMatchObject({ status: 200 });
+      expect(await g.act(id, verb, { reason: `${verb}: only the test file` })).toMatchObject({ status: 200, body: { verb } });
       expect(await g.read(id)).toMatchObject({ body: { state: "pending" } });
+      // The audit keeps what the person did: their verb, and their reason.
+      expect(g.db.prepare("SELECT action_verb, reason FROM mission_control_actions WHERE qitem_id = ?").all(id))
+        .toEqual([{ action_verb: verb, reason: `${verb}: only the test file` }]);
     }
   });
 

@@ -771,6 +771,10 @@ export class MissionControlWriteContract {
     },
   ): MissionControlActionResult {
     const evaluatedAt = this.now().toISOString();
+    // A runner's permission ask approved or denied from the Feed or Steering goes through the answer path, and the
+    // audit keeps what the person did: their verb, and their reason when they gave one.
+    const actionVerb: MissionControlVerb = input.verb === "approve" || input.verb === "deny" ? input.verb : "answer";
+    const auditReason = actionVerb !== "answer" && input.reason ? input.reason : reason;
     let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
     try {
@@ -788,13 +792,13 @@ export class MissionControlWriteContract {
         }
         after = this.queueRepo.getById(input.qitemId);
         actionEntry = this.actionLog.record({
-          actionVerb: "answer",
+          actionVerb,
           qitemId: input.qitemId,
           actorSession: input.actorSession,
           actedAt: evaluatedAt,
           beforeState: before,
           afterState: after ? snapshotQitem(after) : null,
-          reason,
+          reason: auditReason,
           auditNotes: input.auditNotes ?? null,
           identityProvenance: input.identityProvenance ?? null,
         });
@@ -802,7 +806,7 @@ export class MissionControlWriteContract {
           this.eventBus.persistWithinTransaction({
             type: "mission_control.action_executed",
             actionId: actionEntry.actionId,
-            actionVerb: "answer",
+            actionVerb,
             qitemId: input.qitemId,
             actorSession: input.actorSession,
           }),
@@ -816,7 +820,7 @@ export class MissionControlWriteContract {
     }
     return {
       actionId: actionEntry!.actionId,
-      verb: "answer",
+      verb: actionVerb,
       qitemId: input.qitemId,
       closedQitem: after,
       createdQitemId,
