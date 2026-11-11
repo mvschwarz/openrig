@@ -187,9 +187,18 @@ describe("SystemPreflight", () => {
     const pf = createPreflight({
       daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", healthy: true },
     });
-    const result = await pf.run({ port: 7433, host: "127.0.0.1" });
-    const portCheck = result.checks.find((c) => c.name === "port_available");
-    expect(portCheck!.ok).toBe(true);
+    // A regressed skip would fail at construction before it could reach any socket.
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => {
+      throw new Error("same-endpoint preflight must not construct a probe socket");
+    });
+    try {
+      const result = await pf.run({ port: 7433, host: "127.0.0.1" });
+      const portCheck = result.checks.find((c) => c.name === "port_available");
+      expect(portCheck).toMatchObject({ ok: true });
+      expect(constructor).not.toHaveBeenCalled();
+    } finally {
+      constructor.mockRestore();
+    }
   });
 
   // Test 7
@@ -198,11 +207,26 @@ describe("SystemPreflight", () => {
     const pf = createPreflight({
       daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", healthy: true },
     });
-    // Use a port that's actually available, but the skip rule should not apply
-    const result = await pf.run({ port: 7433, host: "10.0.0.5" });
-    const portCheck = result.checks.find((c) => c.name === "port_available");
-    // Should have attempted the check (not skipped)
-    expect(portCheck).toBeDefined();
+    // A deterministic refusal proves the requested endpoint without dialing it.
+    const socket = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn(),
+      destroy: vi.fn(),
+      connect: vi.fn((_port: number, _host: string) => {
+        queueMicrotask(() => socket.emit("error", Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })));
+      }),
+    });
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    try {
+      const result = await pf.run({ port: 7433, host: "10.0.0.5" });
+      const portCheck = result.checks.find((c) => c.name === "port_available");
+      expect(portCheck).toMatchObject({ ok: true });
+      expect(constructor).toHaveBeenCalledTimes(1);
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(socket.connect).toHaveBeenCalledWith(7433, "10.0.0.5");
+      expect(socket.destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      constructor.mockRestore();
+    }
   });
 
   // Test 8
