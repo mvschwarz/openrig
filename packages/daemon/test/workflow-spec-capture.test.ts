@@ -67,6 +67,11 @@ const VALID_YAML = (id: string) => `workflow:
 const BROKEN_YAML = "workflow:\n  id: capture-repair\n  version: [unterminated\n";
 const CAPTURE_TIME = new Date("2035-01-02T03:04:05.100Z");
 const LATER_TIME = new Date("2035-01-02T03:04:06.100Z");
+const TOUCHED_STAT_TIME = new Date("2035-01-02T03:04:06.900Z").getTime();
+const P3_REFRESH_TIME = new Date("2035-01-02T03:04:07.100Z");
+const NEWER_VERIFIED_TIME = new Date("2035-01-02T03:04:08.100Z");
+const BACKWARDS_TIME = new Date("2035-01-02T03:04:07.100Z");
+const NEWER_SQLITE_TIMESTAMP = "2035-01-02 03:04:08.100Z";
 const OLDER_STAT_TIME = new Date("2035-01-02T03:00:00.000Z").getTime();
 const captureHash = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -241,5 +246,100 @@ describe("workflow spec persisted capture and Library reads", () => {
     expect(response.status).toBe(200);
     expect(entries.some((entry) => entry.name === "restart-list" && entry.sourcePath === file)).toBe(true);
     expect(readsOf(file)).toBe(0);
+  });
+
+  it("refreshes a touched unchanged user file once, then keeps warm and restarted Library lists content-free", async () => {
+    const dbFile = join(root, "workflow-specs-touch.sqlite");
+    db.close();
+    db = createDb(dbFile);
+    migrateSpecCache(db);
+    const file = join(folder, "touched-unchanged.yaml");
+    const contents = VALID_YAML("touched-unchanged");
+    fs.writeFileSync(file, contents);
+    let observedAt = CAPTURE_TIME;
+    const cache = new WorkflowSpecCache(db, () => observedAt);
+    cache.readThrough(file);
+
+    // Keep the bytes unchanged while advancing both stat observations into the next second.
+    statAt(file, TOUCHED_STAT_TIME);
+    observedAt = P3_REFRESH_TIME;
+    const app = makeLibraryApp({ db, cache, folder, root });
+    fileProbe.readPaths.length = 0;
+
+    const firstResponse = await app.request("/api/specs/library?kind=workflow");
+    const firstEntries = await firstResponse.json() as Array<{ name: string; sourcePath: string; sourceType: string }>;
+    const firstReads = readsOf(file);
+    const firstRow = db.prepare("SELECT cached_at, source_hash, status FROM workflow_specs WHERE source_path = ?").get(file) as {
+      cached_at: string; source_hash: string; status: string;
+    };
+    const readThroughCachedAt = cache.readThrough(file).cachedAt;
+
+    fileProbe.readPaths.length = 0;
+    const secondResponse = await app.request("/api/specs/library?kind=workflow");
+    const secondEntries = await secondResponse.json() as Array<{ name: string; sourcePath: string; sourceType: string }>;
+    const secondReads = readsOf(file);
+    const secondCachedAt = (db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as { cached_at: string }).cached_at;
+
+    db.close();
+    db = createDb(dbFile);
+    const freshCache = new WorkflowSpecCache(db);
+    const restartedRow = db.prepare("SELECT cached_at, source_hash, status FROM workflow_specs WHERE source_path = ?").get(file) as {
+      cached_at: string; source_hash: string; status: string;
+    };
+    const restartedApp = makeLibraryApp({ db, cache: freshCache, folder, root });
+    fileProbe.readPaths.length = 0;
+    const restartedResponse = await restartedApp.request("/api/specs/library?kind=workflow");
+    const restartedEntries = await restartedResponse.json() as Array<{ name: string; sourcePath: string; sourceType: string }>;
+    const restartedReads = readsOf(file);
+
+    const hasUserEntry = (entries: Array<{ name: string; sourcePath: string; sourceType: string }>) =>
+      entries.some((entry) => entry.name === "touched-unchanged" && entry.sourcePath === file && entry.sourceType === "user_file");
+    expect(firstResponse.status).toBe(200);
+    expect(hasUserEntry(firstEntries)).toBe(true);
+    expect(secondResponse.status).toBe(200);
+    expect(hasUserEntry(secondEntries)).toBe(true);
+    expect(restartedResponse.status).toBe(200);
+    expect(hasUserEntry(restartedEntries)).toBe(true);
+    expect({
+      firstReads,
+      firstCachedAt: firstRow.cached_at,
+      firstHash: firstRow.source_hash,
+      firstStatus: firstRow.status,
+      readThroughCachedAt,
+      secondReads,
+      secondCachedAt,
+      restartedReads,
+      restartedCachedAt: restartedRow.cached_at,
+      restartedHash: restartedRow.source_hash,
+      restartedStatus: restartedRow.status,
+    }).toEqual({
+      firstReads: 1,
+      firstCachedAt: P3_REFRESH_TIME.toISOString(),
+      firstHash: captureHash(contents),
+      firstStatus: "valid",
+      readThroughCachedAt: P3_REFRESH_TIME.toISOString(),
+      secondReads: 0,
+      secondCachedAt: P3_REFRESH_TIME.toISOString(),
+      restartedReads: 0,
+      restartedCachedAt: P3_REFRESH_TIME.toISOString(),
+      restartedHash: captureHash(contents),
+      restartedStatus: "valid",
+    });
+  });
+
+  it("does not regress a newer SQLite-style cache timestamp when the injected clock moves backwards", () => {
+    const file = join(folder, "backwards-clock.yaml");
+    fs.writeFileSync(file, VALID_YAML("backwards-clock"));
+    let observedAt = NEWER_VERIFIED_TIME;
+    const cache = new WorkflowSpecCache(db, () => observedAt);
+    cache.readThrough(file);
+    db.prepare("UPDATE workflow_specs SET cached_at = ? WHERE source_path = ?").run(NEWER_SQLITE_TIMESTAMP, file);
+
+    observedAt = BACKWARDS_TIME;
+    const row = cache.readThrough(file);
+    const stored = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as { cached_at: string };
+
+    expect(row.cachedAt).toBe(NEWER_SQLITE_TIMESTAMP);
+    expect(stored.cached_at).toBe(NEWER_SQLITE_TIMESTAMP);
   });
 });
