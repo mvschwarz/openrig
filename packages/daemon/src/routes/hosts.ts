@@ -335,7 +335,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // Where ssh would connect for this host, from `ssh -G` (reads ssh config, no connection); null when
   // ssh can't resolve it or a ProxyJump/ProxyCommand sits in between. Twin of the CLI's resolveSshEndpoint.
   function resolveSshEndpoint(host: SshHostEntry, timeoutMs: number): Promise<{ hostname: string; port: number } | null> {
-    const args = [...(host.user ? ["-l", host.user] : []), "-G", host.target];
+    // `--` before the target, the same separator the CLI twin and the executor pass: a
+    // destination that begins with `-` is read as the host, not as an option.
+    const args = [...(host.user ? ["-l", host.user] : []), "-G", "--", host.target];
     return new Promise((resolve) => {
       execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
         if (error) return resolve(null);
