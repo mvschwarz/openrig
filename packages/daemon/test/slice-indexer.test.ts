@@ -161,6 +161,31 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       );
     });
 
+    it("filters the requested mission before deduplicating a same-named slice", () => {
+      const missionsRoot = path.join(cleanup, "qualified-missions");
+      for (const mission of ["mission-one", "mission-two"]) {
+        writeSlice(path.join(missionsRoot, mission, "slices"), "same-name", {
+          "SPEC.md": `# ${mission}\n`,
+        });
+      }
+      const traversedMissions = fs.readdirSync(missionsRoot);
+      expect(traversedMissions).toHaveLength(2);
+      const requestedMission = traversedMissions[1]!;
+      const expectedPath = path.join(missionsRoot, requestedMission, "slices", "same-name");
+      const indexer = new SliceIndexer({
+        slicesRoot: missionsRoot,
+        dogfoodEvidenceRoot: null,
+        db,
+        missionId: requestedMission,
+      });
+
+      expect(indexer.list().map(({ name, missionId, slicePath }) => [name, missionId, slicePath])).toEqual([
+        ["same-name", requestedMission, expectedPath],
+      ]);
+      expect(indexer.get("same-name")?.slicePath).toBe(expectedPath);
+      expect(fs.readFileSync(path.join(expectedPath, "SPEC.md"), "utf8")).toBe(`# ${requestedMission}\n`);
+    });
+
     it("can index legacy flat slices and mission-aware slices from compatibility roots", () => {
       const missionsRoot = path.join(cleanup, "missions");
       writeSlice(slicesRoot, "legacy-flat-slice", {
