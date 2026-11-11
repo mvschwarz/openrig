@@ -72,6 +72,8 @@ import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
 import { lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
+import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
+export { TYPED_GATE_BLOCKER_PREFIXES, isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
@@ -180,22 +182,8 @@ const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
 /** The actor on the transition routeToFallback writes; the row's own history is how a later reroute finds the line it wrote. */
 const FALLBACK_ACTOR = "system:queue-fallback";
 
-/** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
- *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
- *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
-export const TYPED_GATE_BLOCKER_PREFIXES = ["fold:", "auth:", "external:"] as const;
-
 /** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
 export const UNATTRIBUTED_ACTOR = "human@host";
-export function typedGateBlockerPrefix(value: string): string | null {
-  return TYPED_GATE_BLOCKER_PREFIXES.find((p) => value.startsWith(p)) ?? null;
-}
-/** A well-formed typed gate blocker: a recognized prefix AND a non-empty gate body. */
-export function isTypedGateBlocker(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const p = typedGateBlockerPrefix(value);
-  return p != null && value.slice(p.length).trim().length > 0;
-}
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -5850,7 +5838,7 @@ export class QueueRepository {
    *  their qitem blockers' last meaningful transitions too. */
   private listingReads(rows: QueueItemRow[], includeWaiting: boolean): ListingReads {
     const ids = rows.map((r) => r.qitem_id);
-    if (includeWaiting) for (const r of rows) if (r.blocked_on?.startsWith("qitem-")) ids.push(r.blocked_on);
+    if (includeWaiting) for (const r of rows) if (r.blocked_on) ids.push(r.blocked_on);
     // Each owner's activity once per listing: a row and its waiting view (and every other row to that owner) read the
     // same seat state. ownerActivity reads a failure as null, so one session's failure stays that session's.
     const activities = new Map<string, ReturnType<WaitingActivityReader>>();
