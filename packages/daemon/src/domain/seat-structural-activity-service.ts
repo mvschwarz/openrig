@@ -130,7 +130,9 @@ export class SeatStructuralActivityService {
     }
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     const at = observedAt ?? this.now();
-    const previous = this.latestBySession.get(sessionName);
+    const latest = this.latestBySession.get(sessionName);
+    // A counter or proof read from another pane or process says nothing about this one, so compare only within one.
+    const previous = latest?.pane && pane && (latest.pane.id !== pane.id || latest.pane.pid !== pane.pid) ? undefined : latest;
     const seconds = runtime === "codex" && captureStartedAt && c.state !== "attention" ? codexWorkingElapsed(content) : null;
     const previousAge = previous ? at.getTime() - Date.parse(previous.observedAt) : NaN;
     const advanced = seconds !== null && previous?.codexWorkingClock && seconds > previous.codexWorkingClock.seconds
@@ -157,7 +159,7 @@ export class SeatStructuralActivityService {
         ? { idleFrame: { sessionName, runtime, captureStartedAt: captureStartedAt.toISOString() } } : {}),
     };
     this.latestBySession.set(sessionName, obs);
-    if (previous?.state !== obs.state || previous?.reason !== obs.reason) this.activityChanged?.(sessionName);
+    if (latest?.state !== obs.state || latest?.reason !== obs.reason) this.activityChanged?.(sessionName);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
     // transition only (the recorder skips an already-reported banner). A poll
