@@ -78,6 +78,9 @@ interface SeatStatusResponse {
     ignored?: { source: string; value: string };
   };
   claude_token?: { kind?: "api-key"; label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
+  /** A running Claude or Codex seat: when OpenRig wrote each block in its guidance file, before or after a recorded session
+   *  moment (its startup finish, or when a claimed session was recorded). Chronology only, never what the agent read. */
+  guidance?: { file: string; detail: string; blocks: Array<{ id: string; writtenAt: string | null; written: "before" | "after" | "unknown"; reason?: string }> };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -247,6 +250,7 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Claude ${t.kind === "api-key" ? "API key" : "subscription token"}: ${t.label}, read from ${t.token_file} at each launch (${t.file === "readable" ? "readable now" : "won't apply at the next launch"})`);
     if (t.notice) console.log(`  ${t.notice}`);
   }
+  if (status.guidance) console.log(`Guidance: ${status.guidance.detail}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
     const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");

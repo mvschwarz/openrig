@@ -423,7 +423,27 @@ running seat only through the action in the last column.
 | Working directory | `rig seat set-cwd`, shown by `rig seat status` as **Working directory for future launches** | The directory it started in | `rig seat launch --fresh --stop` (a blank conversation) or `rig handover --source rebuild` (durable context); [details](#change-an-existing-seats-working-directory) |
 | Launch wrapper (`launch_wrapper`) | Member `launch_wrapper` in `rig.yaml` (`pi`, `codex` and `claude-code` only; `launch_wrapper: []` clears, omitting retains on existing-seat apply; surfaced as `launchWrapper` in `rig ps --nodes --json` when set; no live `rig seat` edit verb) | The literal wrapper argv that prefixes the resolved Codex entry or Claude executable (preserving TTY stdio) or the resolved Pi child executable inside OpenRig's host runner (preserving RPC pipes and runner lifecycle) when that session launched; a configured prefix is not proof of isolation, tooling, memory or governance | Supported spec create/recreate/apply flow, then the seat's next managed launch, resume, restore or handover (fails closed when wrapper support is unavailable; never falls back to bare child launch; [details](rig-spec.md#launch-wrapper-runtime-pi-and-codex)) |
 | Startup files and skills | The spec's startup files, skills and actions | What its conversation read when it started; editing a file afterwards doesn't reach it | A fresh launch or a handover delivers them again; for the running seat, send or walk the change (`rig walk <seat> --through <files>`) |
+| Guidance blocks (`CLAUDE.md`, `AGENTS.md`) | The seat's startup selection, which OpenRig merges into its guidance file as managed blocks at each start and restore | `rig seat status` **Guidance**: when OpenRig wrote each of its blocks, before or after the session's recorded startup finish (for a claimed session, when OpenRig recorded it). That's chronology, not what the agent has: the harness reads the file earlier in startup, Claude Code reloads it after `/compact` or `/clear`, Codex reads it at session start, and the agent can read it, or be sent it, at any time. OpenRig doesn't record what an agent read | Claude: its next compaction, `/clear` or restart. Codex: its next start. Without either, [tell it](#new-guidance-for-a-running-seat) |
 | Tools (MCP servers, plugins) | Selected fragments, merged into the harness's own config (`.mcp.json` for Claude, `config.toml` for Codex) | Unknown to OpenRig: registered isn't active, Claude asks before it uses a new server, and no OpenRig command reports which tools a running harness loaded | Check in the harness itself (Claude Code's `/mcp`); a running session may need a restart to pick up newly written config ([runtime config disclosure](#runtime-config-disclosure)) |
+
+### New guidance for a running seat
+
+These reach a running seat without a restart, in the order they reach the agent:
+
+1. **Tell it.** `rig send <seat> "Read <file>: <why>"`, or `rig walk <seat> --through <files>` for several. It's in the
+   conversation at the seat's next turn. The seat's reply is the only evidence that it read the file.
+2. **The refocus hook**, where the seat runs OpenRig's `openrig-core` hooks (**Refocus** in `rig seat status` shows whether
+   the hook has recorded it). The hook's content comes from `OPENRIG_REFOCUS_CONTENT_REF` (a `rig context get` address),
+   else `OPENRIG_REFOCUS_CONTENT_FILE`, else `refocus/REFOCUS.md` under `OPENRIG_HOME`, else the shipped default. It
+   reaches the agent at the next prompt after a compaction, and for Claude also once the conversation has grown past the
+   hook's size threshold.
+3. **Its guidance file, loaded again:** for Claude at its next compaction, `/clear` or start, for Codex at its next start.
+   **Guidance** in `rig seat status` shows which of OpenRig's blocks were written after the session's recorded startup finish.
+
+A pointer or a message names a file; the seat still reads it itself, under its own permission settings. A seat whose
+harness asks before reading a file outside its project (its own `LEARNED.md` under the topology root, a plugin's skill)
+waits at that prompt until someone answers it, even though a hook could deliver an excerpt of the same file. Finding a
+file, a hook picking up, and the agent reading and using it are separate facts.
 
 Per harness: Claude Code's and Codex's permission choices are in the setup reference
 ([Claude Code](getting-started.md#claude-code-a-different-launch-flag),
