@@ -81,10 +81,13 @@ export function permissionDeciderFor(
   db: Database.Database,
   requester: string,
   configured: () => string | null | { session: string | null; problem?: string } = readReceivingAgentSetting,
-): string | null {
+): DefaultReceiver | null {
   const receiver = resolveDefaultReceiver(db, configured);
-  if (receiver.session && receiver.session !== requester) return receiver.session;
+  // A seat this host doesn't have can't read anything: it isn't a decider (a stopped one is, and its delay is told).
+  if (receiver.session && receiver.session !== requester && receiver.state !== "missing") return receiver;
   if (requester === KERNEL_OPERATOR_SESSION) return null;
   const kernel = seatState(db, KERNEL_OPERATOR_SESSION);
-  return kernel.state === "missing" || (kernel.state === "unknown" && !kernel.recorded) ? null : KERNEL_OPERATOR_SESSION;
+  if (kernel.state === "missing" || (kernel.state === "unknown" && !kernel.recorded)) return null;
+  return { session: KERNEL_OPERATOR_SESSION, source: "kernel-operator", ...kernel,
+    note: receiver.session ? `${receiver.session}, the receiving agent, ${receiver.session === requester ? "is the seat asking" : "isn't on this host"}` : undefined };
 }

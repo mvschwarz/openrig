@@ -150,15 +150,18 @@ describe("the settings view", () => {
 describe("who decides a runner's answered permission request", () => {
   it("is the receiving agent, never the requesting seat itself; then the kernel operator when it isn't the requester; else nobody", () => {
     const both = db([[KERNEL_OPERATOR_SESSION, "running"], ["lead@team", "running"]]);
-    expect(permissionDeciderFor(both, "runner@team", () => "lead@team")).toBe("lead@team");
+    expect(permissionDeciderFor(both, "runner@team", () => "lead@team")?.session).toBe("lead@team");
     // The chosen agent is the blocked requester: the kernel operator decides instead.
-    expect(permissionDeciderFor(both, "lead@team", () => "lead@team")).toBe(KERNEL_OPERATOR_SESSION);
+    expect(permissionDeciderFor(both, "lead@team", () => "lead@team")?.session).toBe(KERNEL_OPERATOR_SESSION);
     // No agent chosen: the kernel operator, unless it's the requester.
-    expect(permissionDeciderFor(both, "runner@team", () => null)).toBe(KERNEL_OPERATOR_SESSION);
+    expect(permissionDeciderFor(both, "runner@team", () => null)?.session).toBe(KERNEL_OPERATOR_SESSION);
     expect(permissionDeciderFor(both, KERNEL_OPERATOR_SESSION, () => null)).toBeNull();
     // A stopped kernel operator stays responsible; a host without one has nobody, and OpenRig's default applies.
-    expect(permissionDeciderFor(db([[KERNEL_OPERATOR_SESSION, "exited"]]), "runner@team", () => null)).toBe(KERNEL_OPERATOR_SESSION);
+    expect(permissionDeciderFor(db([[KERNEL_OPERATOR_SESSION, "exited"]]), "runner@team", () => null)).toMatchObject({ session: KERNEL_OPERATOR_SESSION, state: "stopped" });
     expect(permissionDeciderFor(db([]), "runner@team", () => null)).toBeNull();
     expect(permissionDeciderFor(db([]), "lead@team", () => "lead@team")).toBeNull();
+    // A chosen seat this host doesn't have can't decide: the kernel operator, when here, else nobody.
+    expect(permissionDeciderFor(db([]), "runner@team", () => "ghost@team")).toBeNull();
+    expect(permissionDeciderFor(both, "runner@team", () => "ghost@team")).toMatchObject({ session: KERNEL_OPERATOR_SESSION, note: "ghost@team, the receiving agent, isn't on this host" });
   });
 });

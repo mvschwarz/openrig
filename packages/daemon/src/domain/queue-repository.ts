@@ -1102,7 +1102,7 @@ export class QueueRepository {
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
   /** Whether the rosters list an address as a hosted member, trigger or not. */
   private readonly hostedMemberFn: (destination: string) => boolean;
-  private readonly permissionDecider?: (ask: QueueItem) => string | null;
+  private readonly permissionDecider?: (ask: QueueItem, requester: string) => { session: string; describe?: string } | null;
   private readonly hostedWakeFetch: typeof fetch | undefined;
   /** When this process last wrote each session's inbox check-in, so a seat that polls often writes at most once a minute. */
   private readonly inboxCheckInWrittenAt = new Map<string, number>();
@@ -1159,7 +1159,7 @@ export class QueueRepository {
       /** Who decides a runner's permission ask after its person answers, while the runner waits (startup wires the
        *  receiving-agent order, `permissionDeciderFor`). Absent, or null for an ask: the ask closes with the answer, as
        *  before, and the runner reads it there. */
-      permissionDecider?: (ask: QueueItem) => string | null;
+      permissionDecider?: (ask: QueueItem, requester: string) => { session: string; describe?: string } | null;
     }
   ) {
     this.db = db;
@@ -4225,18 +4225,25 @@ export class QueueRepository {
     if (!this.permissionDecider || item?.state !== "pending" || !runnerPermissionOrigin(item) || item.humanIntent === "update"
       || (!this.answersAsk(item, input.actorSession) && !input.primaryUser) || !this.isPersonAddress(item.destinationSession)
       || this.committedAnswerFromAnother(item.qitemId, input.actorSession)) return null;
-    let decider: string | null;
-    try { decider = this.permissionDecider(item); } catch { decider = null; }
-    if (!decider || !this.validateRig(decider)) return null;
+    // The requester is the runner seat that asked: the first row of the request, whoever handed it on since.
+    let root: QueueItem = item;
+    for (let hops = 0; root.handedOffFrom && hops < 10; hops++) {
+      const before = this.getById(root.handedOffFrom);
+      if (!before || !runnerPermissionOrigin(before)) break;
+      root = before;
+    }
+    let chosen: { session: string; describe?: string } | null;
+    try { chosen = this.permissionDecider(item, root.sourceSession); } catch { chosen = null; }
+    const decider = chosen?.session ?? null;
+    if (!decider || !this.validateRig(decider)) return this.keepRunnerAnswer(item, input.actorSession, input.decision, root.sourceSession);
     this.db.transaction(() => { this.placeTypedReply(item, input.decision); })();
     const answered = this.getById(item.qitemId) ?? item;
     const question = (this.permissionQuestionsFor(answered) ?? [])[0];
     const answer = question ? answered.humanAnswers?.[question.id] : undefined;
     const said = typeof answer === "string" ? `chose "${question?.options.find((o) => o.id === answer)?.label ?? answer}" (option ${answer})`
-      : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).replace(/\s+/g, " ").trim().slice(0, 500)}"`
+      : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).trim()}"`
       : "answered without a choice or words";
     const person = input.actorSession;
-    // A handoff that can't be made leaves the ask to close with the person's answer, as where no agent can decide.
     try { this.handoffNow({
       qitemId: item.qitemId, fromSession: person, toSession: decider,
       summary: `Decide: ${item.summary ?? "a runner's permission request"} (${person} answered)`,
@@ -4248,14 +4255,26 @@ export class QueueRepository {
         "- **Options:**",
         ...(question?.options ?? []).map((o) => `  - ${o.label} (${o.id})`),
         "",
+        `Their whole answer is recorded on the request: rig queue show ${answered.qitemId} --full.`,
         `Decide with: rig seat decide-permission ${item.qitemId} --option <id> --reason "<why>"`,
         "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming this request, then decide.",
         "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
       ].join("\n"),
     }); } catch (error) {
-      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; it closes with the person's answer`, error);
-      return null;
+      // The answer is kept on the ask, which stays open: a failed handoff is never a default permit.
+      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; the request stays open`, error);
+      return false;
     }
+    // The person learns who decides and in what recorded state, so a delay is shown: one update per request.
+    const toldId = `qitem-runner-permission-passed-${item.qitemId.replace(/^qitem-runner-permission-/, "").replace(/^qitem-/, "")}`;
+    setImmediate(() => {
+      void this.create({ qitemId: toldId, sourceSession: root.sourceSession, destinationSession: person, humanIntent: "update",
+        summary: `Your answer went to ${decider} to decide; ${root.sourceSession} is waiting`,
+        body: [`Your answer to ${root.sourceSession}'s permission request ${root.qitemId} went to ${decider}, which decides it while ${root.sourceSession} waits. Nothing runs until it decides.`,
+          ...(chosen?.describe ? [`Receiving agent: ${chosen.describe}`] : []),
+          `To decide directly instead: rig seat decide-permission ${root.qitemId} --option <id>.`].join("\n") })
+        .catch((error) => console.error(`[queue] the update for ${item.qitemId}'s decider wasn't written`, error));
+    });
     return true;
   }
 
@@ -4264,8 +4283,16 @@ export class QueueRepository {
   recordPermissionDecision(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; transitionNote: string }): boolean {
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
-      if (!item || (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked")) return null;
+      if (!item) return null;
       const answers: HumanAnswers = { ...item.humanAnswers, [input.questionId]: input.optionId };
+      // A row its agent closed without deciding: the decision is recorded on it, with its own transition; the runner's
+      // next read takes it.
+      if (item.state === "done" && item.humanAnswers?.[input.questionId] == null) {
+        this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+        this.transitionLog.append({ qitemId: item.qitemId, state: "done", actorSession: input.actorSession, transitionNote: input.transitionNote });
+        return { persistedEvents: [] as PersistedEvent[] };
+      }
+      if (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked") return null;
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
       return this.updateInTransactionalContext({ qitemId: item.qitemId, actorSession: input.actorSession, state: "done",
         closureReason: "no-follow-on", transitionNote: input.transitionNote });
@@ -4274,6 +4301,25 @@ export class QueueRepository {
     for (const event of result.persistedEvents) {
       if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
     }
+    return true;
+  }
+
+  /** No agent here can read a runner permission answer before the tool runs (none is set, or the only one is the seat
+   *  asking): the person's answer, a click or words, is kept on the ask, the request stays pending, and the person is
+   *  told once that the tool hasn't run and how to decide directly. Never a default permit, never read as a refusal. */
+  private keepRunnerAnswer(item: QueueItem, person: string, decision: string, requester: string): boolean {
+    this.db.transaction(() => { this.placeTypedReply(item, decision); })();
+    const options = (this.permissionQuestionsFor(item) ?? [])[0]?.options ?? [];
+    const receiptId = `qitem-runner-permission-kept-${item.qitemId.replace(/^qitem-runner-permission-/, "")}`;
+    // After the answer's own write settles: one receipt per request (its id is the request's), told to who answered.
+    setImmediate(() => {
+      void this.create({ qitemId: receiptId, sourceSession: requester, destinationSession: person, humanIntent: "update",
+        summary: `Your answer to ${requester}'s permission request is kept; the tool hasn't run`,
+        body: [`Your answer to ${requester}'s permission request ${item.qitemId} is kept, and the request is still waiting: no receiving agent on this host can read it before the tool runs (none is set, or the only one is ${requester} itself). The tool hasn't run, and nothing was permitted or refused.`,
+          `To decide now: rig seat decide-permission ${item.qitemId} --option <id>${options.length ? ` (options: ${options.map((o) => `${o.id}, ${o.label}`).join("; ")})` : ""}. Or set up a receiving agent that isn't ${requester}: rig config set agents.operator_session <seat>@<rig>.`,
+          "If the agent's turn ends first, the tool call doesn't happen, and nothing is sent later."].join("\n") })
+        .catch((error) => console.error(`[queue] the kept-answer receipt for ${item.qitemId} wasn't written`, error));
+    });
     return true;
   }
 

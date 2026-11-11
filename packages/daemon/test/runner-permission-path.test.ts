@@ -1,7 +1,7 @@
 // A runner seat's answered permission path, through the real activity routes, queue, Mission Control answer route,
 // activity store and seat grant. The chosen person's one offered option reaches only that live request; nothing else
 // ever reads as an answer. No model, Slack or terminal is involved.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -18,6 +18,7 @@ import { activityRoutes, guestActivityRoutes } from "../src/routes/activity.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { describeDefaultReceiver, permissionDeciderFor } from "../src/domain/default-receiver.js";
 import { createGuestActivityApp, type AppDeps } from "../src/server.js";
 
 const PERSON = "mike@external", OTHER_PERSON = "dana@external", SEAT = "dev-runner@perm-rig", INSTALL = "install-token", DECIDER = "lead@perm-rig";
@@ -34,7 +35,7 @@ const OPTIONS = [
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[]; brokenStream?: boolean; decider?: string | null } = {}) {
+function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[]; brokenStream?: boolean; decider?: string | null; deciderOf?: (requester: string) => string | null; receiver?: string | null } = {}) {
   const people = options.people ? { ok: true as const, entities: options.people.map(person) } : registry;
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
@@ -53,12 +54,20 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   occupy(runner.id, SEAT);
   occupy(other.id, "dev-other@perm-rig");
   const nudges: string[] = [];
+  const requesters: string[] = [];
   const queueRepo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => people,
     transport: { send: async (session) => { nudges.push(session); return { ok: true, verified: true, sent: true }; } },
     // The receiving agent that decides an answered request; absent, the request closes with the person's answer.
-    ...(options.decider !== undefined ? { permissionDecider: () => options.decider ?? null } : {}) });
+    // The daemon's own order, as startup wires it, over this host's seats and the given agents.operator_session.
+    ...(options.receiver !== undefined ? { permissionDecider: (_ask: unknown, requester: string) => {
+      requesters.push(requester);
+      const decider = permissionDeciderFor(db, requester, () => options.receiver ?? null);
+      return decider?.session ? { session: decider.session, describe: describeDefaultReceiver(decider) } : null; } }
+      : options.deciderOf ? { permissionDecider: (_ask: unknown, requester: string) => {
+      requesters.push(requester); const session = options.deciderOf!(requester); return session ? { session } : null; } }
+      : options.decider !== undefined ? { permissionDecider: () => options.decider ? { session: options.decider } : null } : {}) });
   // A handoff stages its wake durably, as the daemon's queue does with its outbox attached.
-  if (options.decider !== undefined) queueRepo.attachOutbox(new OutboxHandler(db));
+  if (options.decider !== undefined || options.deciderOf || options.receiver !== undefined) queueRepo.attachOutbox(new OutboxHandler(db));
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo, actionLog: new MissionControlActionLog(db) });
   const store = new AgentActivityStore({ db, eventBus: bus,
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
@@ -107,6 +116,10 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
     json(await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor },
       body: JSON.stringify({ verb: "answer", qitemId: askId, actorSession: actor, ...(choice.optionId ? { questionId: "permission", optionId: choice.optionId } : {}),
         ...(choice.decision ? { decision: choice.decision } : {}) }) }));
+  /** Another Mission Control verb on a row, as a person in Steering: approve, deny, or handoff to someone. */
+  const act = async (qitemId: string, verb: string, extra: Record<string, unknown> = {}, actor = PERSON) =>
+    json(await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor },
+      body: JSON.stringify({ verb, qitemId, actorSession: actor, ...extra }) }));
   /** The receiving agent decides a request its person answered (`rig seat decide-permission`). */
   const decide = async (askId: string, optionId: string, decider = DECIDER, reason = "they said so") =>
     json(await app.request(`/api/activity/permission-requests/${askId}/decide`, { method: "POST",
@@ -116,7 +129,7 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   const grants = new ActivityGrantStore(db);
   /** OpenRig's pull-only records of the permits it decided by default. */
   const permits = () => stream.list({ hintTag: "runner-permission-permit", limit: 100 });
-  return { db, runner, other, sessions, queueRepo, contract, nudges, generation, submit, read, withdraw, answer, decide, waitsOnPerson, rowsToSeat, grants,
+  return { db, runner, other, sessions, queueRepo, contract, nudges, requesters, generation, submit, read, withdraw, answer, act, decide, waitsOnPerson, rowsToSeat, grants,
     permits, relaunch: () => occupy(runner.id, SEAT, "handover") };
 }
 
@@ -163,7 +176,7 @@ describe("a runner seat's answered permission path", () => {
     expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
     expect(ask.body).toContain("Edit src/app.ts");
     expect(ask.body).toMatch(/Always allow \(allow_always, always\): the agent's harness remembers this choice/);
-    expect(ask.body).toContain("Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, a choice goes to the request as given, a reply of just yes or no counts as the agent's allow or reject, and other words choose nothing, so OpenRig's default permits the request when the agent offered an allow option.");
+    expect(ask.body).toContain("Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, your answer is kept and the request waits, and nothing runs: decide directly with rig seat decide-permission, or set up a receiving agent.");
     expect(f.waitsOnPerson()).toBe(true);
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ status: 200, body: { state: "pending" } });
     expect(await f.answer(String(submitted.body.askId), { optionId: "always" })).toMatchObject({ status: 200 });
@@ -233,23 +246,24 @@ describe("a runner seat's answered permission path", () => {
   it.each([
     ["a typed yes", { decision: "Yes." }, "answered", "allow", undefined],
     ["a typed no", { decision: "no" }, "answered", "reject", undefined],
-    ["typed words that are neither", { decision: "what does this edit do?" }, "permitted", "allow", "what does this edit do?"],
-  ])("reads %s from the person as the offered option, and no answer as the default", async (_case, choice, state, optionId, said) => {
+    // Words that are neither are kept: nobody decided on them, so the request waits, never the default permit.
+    ["typed words that are neither", { decision: "what does this edit do?" }, "pending", undefined, undefined],
+  ])("reads %s from the person as the offered option, and keeps other words waiting", async (_case, choice, state, optionId, said) => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
     expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
     const read = await f.read(askId);
-    expect(read).toMatchObject({ body: { state, optionId } });
+    expect(read).toMatchObject({ body: { state, ...(optionId ? { optionId } : {}) } });
     // The person's own words reach the runner beside the default, never in place of an option.
     expect(read.body.said).toBe(said);
   });
 
-  it("carries the person's words with the refusal when the agent offered no allow option, never reading them as a no", async () => {
+  it("keeps the person's words waiting when the agent offered no allow option, never reading them as a no", async () => {
     const f = fixture();
     const askId = String((await f.submit({ options: [{ optionId: "reject", name: "Reject", kind: "reject_once" },
       { optionId: "never", name: "Never", kind: "reject_always" }] })).body.askId);
     expect(await f.answer(askId, { decision: "use the other file instead" })).toMatchObject({ status: 200 });
-    expect((await f.read(askId)).body).toEqual({ ok: true, state: "refused", reason: "no_allow_offered", said: "use the other file instead" });
+    expect((await f.read(askId)).body).toEqual({ ok: true, state: "pending" });
   });
 
   it("carries a colleague's words, whole, when the ask was routed to them", async () => {
@@ -259,9 +273,9 @@ describe("a runner seat's answered permission path", () => {
     const colleague = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === OTHER_PERSON && row.handedOffFrom === askId)!;
     const words = `only the tests folder; ${"and nothing else. ".repeat(200)}`;
     expect(await f.answer(colleague.qitemId, { decision: words }, OTHER_PERSON)).toMatchObject({ status: 200 });
-    const read = await f.read(askId, 1);
-    expect(read.body).toMatchObject({ state: "permitted", optionId: "allow" });
-    expect(read.body.said).toBe(words.trim());
+    // Nobody decided on the colleague's words: the request waits, and their words are kept whole on their row.
+    expect((await f.read(askId, 1)).body).toEqual({ ok: true, state: "pending" });
+    expect((f.queueRepo.getById(colleague.qitemId)!.humanAnswers?.permission as { text?: string })?.text).toBe(words.trim());
   });
 
   it.each([
@@ -678,11 +692,156 @@ describe("an answered request goes to the receiving agent, which decides while t
     }
   });
 
-  it("with no agent that can decide, the answer closes the request as before: a plain yes is the agent's allow", async () => {
-    const f = fixture({ decider: null });
+  it("with no agent that can decide, any answer is kept and the request waits; the person is told once; the direct decision decides", async () => {
+    for (const choice of [{ decision: "yes" }, { optionId: "allow" }, { decision: "only the test file" }] as const) {
+      const f = fixture({ decider: null });
+      const askId = String((await f.submit()).body.askId);
+      expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
+      expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+      expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+      await new Promise((resolve) => setImmediate(resolve));
+      const told = f.queueRepo.list({ limit: 100 }).filter((row) => row.destinationSession === PERSON && row.humanIntent === "update");
+      expect(told).toHaveLength(1);
+      expect(told[0]!.body).toContain(`The tool hasn't run, and nothing was permitted or refused.`);
+      expect(told[0]!.body).toContain(`rig seat decide-permission ${askId} --option <id>`);
+      expect(f.permits()).toHaveLength(0);
+      expect(await f.decide(askId, "reject", PERSON, "decided directly")).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+    }
+  });
+});
+
+describe("an answered request goes to the receiving agent: the pair's round-0 controls", () => {
+  const handedFrom = (f: ReturnType<typeof fixture>, id: string) => f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === id);
+
+  it("Steering's Approve or Deny on the request is the person's yes or no: it goes to the agent, or, with none, to the request as before", async () => {
+    const f = fixture({ decider: DECIDER });
     const askId = String((await f.submit()).body.askId);
-    await f.answer(askId, { decision: "yes" });
-    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "done" });
-    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    expect(await f.act(askId, "approve")).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: DECIDER });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(handedFrom(f, askId)!.body).toContain(`they wrote "yes"`);
+    // With no agent that can decide, the Approve or Deny is kept as context too: the request waits for a direct decision.
+    for (const verb of ["approve", "deny"] as const) {
+      const g = fixture({ decider: null });
+      const id = String((await g.submit()).body.askId);
+      expect(await g.act(id, verb)).toMatchObject({ status: 200 });
+      expect(await g.read(id)).toMatchObject({ body: { state: "pending" } });
+    }
+  });
+
+  it("the decider is chosen against the runner that asked, even after a person handed the request to another person", async () => {
+    // The runner seat itself is the receiving agent: it can't decide its own blocked turn, so nobody else here can either.
+    const f = fixture({ deciderOf: (requester) => requester === SEAT ? null : SEAT });
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.act(askId, "handoff", { destinationSession: OTHER_PERSON })).toMatchObject({ status: 200 });
+    const toDana = handedFrom(f, askId)!;
+    expect(await f.answer(toDana.qitemId, { optionId: "reject" }, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(f.requesters).toEqual([SEAT]);
+    expect(f.queueRepo.list({ limit: 100 }).some((row) => row.destinationSession === SEAT && row.handedOffFrom)).toBe(false);
+    // Nobody else here can decide: the answer is kept, the request waits, and a direct decision settles it.
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.decide(askId, "reject", OTHER_PERSON)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
+  it("a handoff to the agent that fails leaves the request open, never a default permit", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const spy = vi.spyOn(f.queueRepo as unknown as { handoffNow: () => unknown }, "handoffNow").mockImplementation(() => { throw new Error("staging failed"); });
+    try {
+      expect((await f.answer(askId, { decision: "only the test file" })).status).not.toBe(200);
+    } finally { spy.mockRestore(); }
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
+    // Answering again once it works passes the kept words on.
+    expect(await f.answer(askId, { decision: "only the test file" })).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: DECIDER });
+    expect(handedFrom(f, askId)!.body).toContain(`they wrote "only the test file"`);
+  });
+
+  it("a person's no on a row handed to them stands when the agent it went to closes without deciding (two handoffs)", async () => {
+    const f = fixture({ decider: "lead-two@perm-rig" });
+    const askId = String((await f.submit()).body.askId);
+    await f.act(askId, "handoff", { destinationSession: OTHER_PERSON });
+    const toDana = handedFrom(f, askId)!;
+    await f.answer(toDana.qitemId, { decision: "no" }, OTHER_PERSON);
+    const toAgent = handedFrom(f, toDana.qitemId)!;
+    expect(toAgent.destinationSession).toBe("lead-two@perm-rig");
+    await f.queueRepo.update({ qitemId: toAgent.qitemId, actorSession: "lead-two@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("the agent gets the person's whole words, with where they're recorded, however long", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const words = `${"go ahead with the edit, it is the release fix we discussed this morning; ".repeat(9)}but only if it touches the test file`;
+    expect(words.length).toBeGreaterThan(500);
+    await f.answer(askId, { decision: words });
+    const handed = handedFrom(f, askId)!;
+    expect(handed.body).toContain(`they wrote "${words}"`);
+    expect(handed.body).toContain(`rig queue show ${askId} --full`);
+  });
+});
+
+describe("an answered request: the round-1 controls with the daemon's own decider order", () => {
+  const handedFrom = (f: ReturnType<typeof fixture>, id: string) => f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === id);
+  const updatesTo = (f: ReturnType<typeof fixture>, person: string) => f.queueRepo.list({ limit: 100 }).filter((row) => row.destinationSession === person && row.humanIntent === "update");
+
+  it("a forwarded request is never decided by the runner that asked, when that runner is the receiving agent: the answer is kept", async () => {
+    const f = fixture({ receiver: SEAT });
+    const askId = String((await f.submit()).body.askId);
+    await f.act(askId, "handoff", { destinationSession: OTHER_PERSON });
+    const toDana = handedFrom(f, askId)!;
+    expect(await f.answer(toDana.qitemId, { decision: "yes" }, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(f.requesters).toEqual([SEAT]);
+    expect(handedFrom(f, toDana.qitemId)).toBeUndefined();
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(updatesTo(f, OTHER_PERSON)[0]!.body).toContain(`or the only one is ${SEAT} itself`);
+  });
+
+  it("a chosen receiving agent this host doesn't have can't decide: the answer is kept, and the person is told", async () => {
+    const f = fixture({ receiver: "ghost@perm-rig" });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { optionId: "allow" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(updatesTo(f, PERSON)).toHaveLength(1);
+  });
+
+  it("when the answer goes to an agent, the person is told once who decides and its recorded state", async () => {
+    const f = fixture({ receiver: "dev-other@perm-rig" });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { decision: "only the test file" });
+    expect(handedFrom(f, askId)).toMatchObject({ destinationSession: "dev-other@perm-rig" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const told = updatesTo(f, PERSON);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toContain(`went to dev-other@perm-rig, which decides it while ${SEAT} waits. Nothing runs until it decides.`);
+    expect(told[0]!.body).toContain("Receiving agent: dev-other@perm-rig, chosen in agents.operator_session; its session is recorded as running.");
+    expect(told[0]!.body).toContain(`rig seat decide-permission ${askId} --option <id>`);
+  });
+
+  it("a Reject click on a row handed to a colleague stands when the agent it went to closes without deciding (two handoffs)", async () => {
+    const f = fixture({ decider: "lead-two@perm-rig" });
+    const askId = String((await f.submit()).body.askId);
+    await f.act(askId, "handoff", { destinationSession: OTHER_PERSON });
+    const toDana = handedFrom(f, askId)!;
+    await f.answer(toDana.qitemId, { optionId: "reject" }, OTHER_PERSON);
+    const toAgent = handedFrom(f, toDana.qitemId)!;
+    await f.queueRepo.update({ qitemId: toAgent.qitemId, actorSession: "lead-two@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
+  it("qualified words the agent closed without deciding stay waiting; a direct decision still settles them", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { decision: "only the test file" });
+    const toAgent = handedFrom(f, askId)!;
+    await f.queueRepo.update({ qitemId: toAgent.qitemId, actorSession: DECIDER, state: "done", closureReason: "no-follow-on" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(f.permits()).toHaveLength(0);
+    expect(await f.decide(askId, "allow", PERSON, "the test file only")).toMatchObject({ body: { state: "answered", optionId: "allow" } });
   });
 });
