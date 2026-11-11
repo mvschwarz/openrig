@@ -145,6 +145,21 @@ person needs in their project or home folder and name that path.
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
   A declared name is a claim, not a seat's own identity: for a team that acts only on seat identity, the attached
   shell above is the route.
+- **Who answers OpenRig's questions:** read `rig gateway participants` (its `default:` line) before the handoff.
+  - A default person is there: say requests and asks go to them, and don't offer again.
+  - Several people with no default: ask which should get requests nobody is named for (`rig gateway default <id>`),
+    or leave it. Never pick one yourself.
+  - Nobody is registered: offer it in a sentence or two. OpenRig's questions, such as another machine asking to pair,
+    need a person to reach. Ask the name to use (their login name is only a suggestion). On yes, run
+    `rig gateway human add <id> --display-name "<name>" --delivery-class B --default`: they're reached in the TUI's Feed
+    and Steering, and Slack can be added later. On no or not now, register nothing and say that questions to a person
+    can't reach anyone until someone is registered, with that command for later.
+  - Never pass `--default` over an existing default, or `--replace`, unless they ask. Their own words decide: a
+    different name, Slack now, or not now.
+  - An agent reads their answers: the kernel operator, or the agent chosen in `agents.operator_session`. If the kernel
+    isn't running here and no agent is chosen, offer to choose the team's lead (`rig config set agents.operator_session
+    <seat>@<rig>`), on their yes only.
+  - A machine they'll pair with needs its own person: registering here doesn't give that machine one.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
