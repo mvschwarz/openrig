@@ -11,6 +11,7 @@ import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { managedBlockBodyHash } from "../src/domain/managed-block-records.js";
 
 describe("SeatStatusService", () => {
   let db: Database.Database;
@@ -317,7 +318,7 @@ describe("SeatStatusService", () => {
 
   // A running Claude or Codex seat gets what OpenRig wrote into its guidance file, set against when the running agent
   // loaded it; a Pi seat and a stopped seat get no guidance field.
-  it("reports which of OpenRig's guidance blocks were written after the running agent loaded the file", () => {
+  it("reports when OpenRig wrote each guidance block, set against the session's recorded startup finish", () => {
     const cwd = mkdtempSync(path.join(tmpdir(), "seat-guidance-"));
     try {
       const rig = rigRepo.createRig("guidance-rig");
@@ -328,15 +329,15 @@ describe("SeatStatusService", () => {
       const file = path.join(cwd, "CLAUDE.md");
       writeFileSync(file, "<!-- BEGIN OpenRig MANAGED BLOCK: openrig-start.md -->\nIdentity.\n<!-- END OpenRig MANAGED BLOCK: openrig-start.md -->\n"
         + "<!-- BEGIN OpenRig MANAGED BLOCK: openrig-context-entry.md -->\nWhere things are.\n<!-- END OpenRig MANAGED BLOCK: openrig-context-entry.md -->\n");
-      const record = db.prepare("INSERT INTO managed_block_writes (path_key, block_id, body_sha256, written_at) VALUES (?, ?, 'x', ?)");
-      record.run(realpathSync.native(file), "openrig-start.md", "2026-11-10T09:59:30.000Z");
-      record.run(realpathSync.native(file), "openrig-context-entry.md", "2026-11-10T12:00:00.000Z");
+      const record = db.prepare("INSERT INTO managed_block_writes (path_key, block_id, body_sha256, written_at) VALUES (?, ?, ?, ?)");
+      record.run(realpathSync.native(file), "openrig-start.md", managedBlockBodyHash("Identity."), "2026-11-10T09:59:30.000Z");
+      record.run(realpathSync.native(file), "openrig-context-entry.md", managedBlockBodyHash("Where things are."), "2026-11-10T12:00:00.000Z");
 
       const status = service.getStatus("lead@guidance-rig");
       expect(status.ok && status.status.guidance).toMatchObject({
         file,
-        loadedAt: { at: "2026-11-10T10:00:00.000Z", basis: "startup_completed" },
-        blocks: [{ id: "openrig-start.md", loaded: "before" }, { id: "openrig-context-entry.md", loaded: "after" }],
+        mark: { at: "2026-11-10T10:00:00.000Z", kind: "startup_finished" },
+        blocks: [{ id: "openrig-start.md", written: "before" }, { id: "openrig-context-entry.md", written: "after" }],
       });
       expect(status.ok && status.status.guidance?.detail).toContain("OpenRig doesn't record what an agent read.");
 

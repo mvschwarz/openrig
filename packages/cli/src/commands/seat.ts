@@ -78,8 +78,9 @@ interface SeatStatusResponse {
     ignored?: { source: string; value: string };
   };
   claude_token?: { kind?: "api-key"; label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
-  /** A running Claude or Codex seat: OpenRig's blocks in its guidance file, set against when the running agent loaded it. */
-  guidance?: { file: string; detail: string; blocks: Array<{ id: string; writtenAt: string | null; loaded: "before" | "after" | "unknown" }> };
+  /** A running Claude or Codex seat: when OpenRig wrote each block in its guidance file, before or after a recorded session
+   *  moment (its startup finish, or when a claimed session was recorded). Chronology only, never what the agent read. */
+  guidance?: { file: string; detail: string; blocks: Array<{ id: string; writtenAt: string | null; written: "before" | "after" | "unknown"; reason?: string }> };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
