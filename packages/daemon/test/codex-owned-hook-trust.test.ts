@@ -48,7 +48,7 @@ it("a fresh install has all six exact plugin hooks trusted before the first seat
   const expected = {
   "openrig-core@openrig:hooks/codex.json:session_start:0:0": "sha256:a746b5abb568d50725b08bf39660bbf08d15fa3d3a5961208862e7beaadba43d",
   "openrig-core@openrig:hooks/codex.json:user_prompt_submit:0:0": "sha256:f56dfb2a70982d6a7ae4a6c4ace58b943e16dcb08fe3bc87d3c8803477f4a5c1",
-  "openrig-core@openrig:hooks/codex.json:user_prompt_submit:1:0": "sha256:c648714b3a02675ba4ea029b8e62dbcd77569afc317ad4f1bc3e8cbfbe7b34ee",
+  "openrig-core@openrig:hooks/codex.json:user_prompt_submit:1:0": "sha256:da9ea84dcd3291a5d4963dda819f48beb505d79d93ffe313014f3650e906d609",
   "openrig-core@openrig:hooks/codex.json:stop:0:0": "sha256:bb444b151db38aff570d0ceadc2cc84b21afb021f00b15b326aef55a27d87d40",
   "openrig-core@openrig:hooks/codex.json:post_compact:0:0": "sha256:f4dd49518599c67ac23c80daef3537bb03b02e23a1e8c1da1210534766afefae",
   "openrig-core@openrig:hooks/codex.json:permission_request:0:0": "sha256:75c66b08f505a22f84def73ecf6d61e98dd1b24ed8ecdcc05306eba3013e64d4"
@@ -195,8 +195,34 @@ async function legacyUpgrade() {
   return { ...f, baseline };
 }
 
-it("an already-installed owned upgrade renews all six content approvals without changing other choices or the native baseline", async () => {
+// Content-only renewal needs a prior owned bundle with the SAME reviewed declaration. The published legacy bundle
+// predates additionalContextLimit, so keep legacyUpgrade() for that unreviewed declaration-change control below.
+async function contentOnlyUpgrade() {
   const f = await legacyUpgrade();
+  const previous = path.join(f.home, "previous-owned-bundle");
+  fs.cpSync(shipped, previous, { recursive: true });
+  fs.appendFileSync(path.join(previous, "README.md"), "\nPrevious owned content fixture.\n");
+  const contentHash = codexPluginContentHash(previous);
+  const declarations = Object.fromEntries(Object.entries(f.read().hooks.state).map(([key, state]: [string, any]) => [key, state.trusted_hash]));
+  fs.writeFileSync(f.baseline, contentHash);
+  fs.writeFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), JSON.stringify({ schema: 1, plugin: "openrig-core@openrig", contentHash, declarations }));
+  return f;
+}
+
+it("a legacy native approval does not approve the new refocus context-limit declaration", async () => {
+  const f = await legacyUpgrade();
+  fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8").replace(
+    "sha256:da9ea84dcd3291a5d4963dda819f48beb505d79d93ffe313014f3650e906d609",
+    "sha256:c648714b3a02675ba4ea029b8e62dbcd77569afc317ad4f1bc3e8cbfbe7b34ee"));
+  const before = fs.readFileSync(f.file, "utf8"), baseline = fs.readFileSync(f.baseline, "utf8");
+  await f.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+  expect(fs.readFileSync(f.baseline, "utf8")).toBe(baseline);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+
+it("an already-installed owned upgrade renews all six content approvals without changing other choices or the native baseline", async () => {
+  const f = await contentOnlyUpgrade();
   fs.appendFileSync(f.file, '\n[hooks.state."outside:stop:0:0"]\nenabled = false\ntrusted_hash = "outside-choice"\n\n\n');
   const before = fs.readFileSync(f.file, "utf8"), baseline = fs.readFileSync(f.baseline, "utf8"), calls = f.calls.length;
   const expectedContent = codexPluginContentHash(shipped);
@@ -219,7 +245,7 @@ it("an already-installed owned upgrade renews all six content approvals without 
 
 // #2029: Codex re-saves its own trust tables with literal-quoted keys and values; the renewal still finds them.
 it("an owned upgrade renews content approval on tables Codex saved single-quoted, in place", async () => {
-  const f = await legacyUpgrade();
+  const f = await contentOnlyUpgrade();
   fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8")
     .replace(/^\[hooks\.state\."(openrig-core@openrig:[^"]*)"\]$/gm, "[hooks.state.'$1']")
     .replace(/^trusted_hash = "([^"]*)"$/gm, "trusted_hash = '$1'"));
@@ -278,18 +304,20 @@ it("records an already-approved current legacy bundle for subsequent upgrades", 
 });
 
 it("renews only the selected Codex home when the daemon has a different default home", async () => {
-  const f = await legacyUpgrade(), selected = path.join(f.home, "selected-home"), file = path.join(selected, "config.toml");
+  const f = await contentOnlyUpgrade(), selected = path.join(f.home, "selected-home"), file = path.join(selected, "config.toml");
   const before = fs.readFileSync(f.file, "utf8");
   fs.mkdirSync(selected); fs.writeFileSync(file, before);
   const version = path.basename(f.cache);
   fs.cpSync(f.cache, path.join(selected, "plugins/cache/openrig/openrig-core", version), { recursive: true });
   const baseline = codexLegacyPluginTrustPath(file);
   fs.mkdirSync(path.dirname(baseline), { recursive: true }); fs.copyFileSync(f.baseline, baseline);
+  const priorApproval = fs.readFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), "utf8");
+  fs.writeFileSync(path.join(selected, ".openrig-core-hook-trust.json"), priorApproval);
   await f.adapter().ensureCodexCorePlugin(selected);
   const states = (parse(fs.readFileSync(file, "utf8")) as any).hooks.state;
   expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
   expect(fs.readFileSync(f.file, "utf8")).toBe(before);
-  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  expect(fs.readFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), "utf8")).toBe(priorApproval);
   expect(fs.existsSync(path.join(selected, ".openrig-core-hook-trust.json"))).toBe(true);
 });
 
@@ -318,7 +346,7 @@ it("R2 preserves a quoted content-approval key without invalidating TOML", async
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
 });
 it("R2 keeps an unrelated multiline instruction containing table examples exact", async () => {
-  const f = await legacyUpgrade();
+  const f = await contentOnlyUpgrade();
   const sample = Object.keys(f.read().hooks.state).map(key => `[hooks.state.${JSON.stringify(key)}]`).join("\n");
   fs.writeFileSync(f.file, `developer_instructions = '''\n${sample}\n'''\n` + fs.readFileSync(f.file, "utf8"));
   const before = f.read().developer_instructions;
