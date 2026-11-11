@@ -122,7 +122,12 @@ export interface StuckSweepStatusSnapshot {
   lastOutcome: "clean" | "findings" | "failed" | null;
   lastError: string | null;
   consecutiveFailures: number;
+  /** Findings newly created (routed to a seat) since the daemon started. An open finding a later pass finds again
+   *  is not routed again, so it is not counted again (#2939). */
   findingsRouted: number;
+  /** Finding rows still open after the last pass that finished (found again, suppressed or newly created): a gauge,
+   *  replaced every pass, never accumulated. A pass that throws keeps the previous value. */
+  findingsOpen: number;
   /** Start of the pass in flight, or null between passes: a pass that never ends shows here, not only as a stale
    *  lastSweepAt. */
   runningSince: string | null;
@@ -131,7 +136,7 @@ export interface StuckSweepStatusSnapshot {
 }
 
 export interface StuckSweepStatus {
-  record(outcome: "clean" | "findings" | "failed", detail?: { error?: string; findings?: number }): void;
+  record(outcome: "clean" | "findings" | "failed", detail?: { error?: string; created?: number; open?: number }): void;
   /** The scheduler's one-pass-at-a-time state, mirrored for /healthz. */
   pass(state: { runningSince: string | null; skippedTicks: number }): void;
   snapshot(): StuckSweepStatusSnapshot;
@@ -146,6 +151,7 @@ export function createStuckSweepStatus(): StuckSweepStatus {
     lastError: null,
     consecutiveFailures: 0,
     findingsRouted: 0,
+    findingsOpen: 0,
     runningSince: null,
     skippedTicks: 0,
   };
@@ -155,7 +161,8 @@ export function createStuckSweepStatus(): StuckSweepStatus {
       state.lastOutcome = outcome;
       state.lastError = outcome === "failed" ? (detail?.error ?? "unknown error") : null;
       state.consecutiveFailures = outcome === "failed" ? state.consecutiveFailures + 1 : 0;
-      if (detail?.findings) state.findingsRouted += detail.findings;
+      if (detail?.created) state.findingsRouted += detail.created;
+      if (detail?.open !== undefined) state.findingsOpen = detail.open;
     },
     pass(pass) {
       state.runningSince = pass.runningSince;
@@ -638,6 +645,15 @@ function backlogRowsOf(body: string): Set<string> | null {
   } catch {
     return null;
   }
+}
+
+/** What a pass hands the status: the findings it created (the routed total grows only by these), and the finding
+ *  rows still open after it. Open is read from the queue, not from the pass's actions: a finding kept open without an
+ *  action (a live ladder suppresses its reporting, a grace holds it) is still open. */
+function findingCounts(db: Database.Database, findings: StuckSweepFindingAction[]): { created: number; open: number } {
+  const open = db.prepare(`SELECT COUNT(*) AS n FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
+    AND tags LIKE ?`).get(`%"${STUCK_SWEEP_FINDING_TAG}"%`) as { n: number };
+  return { created: findings.filter((f) => f.action === "created").length, open: open.n };
 }
 
 /**
@@ -1601,11 +1617,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     if (failedCreates.length > 0) {
       // Not a clean or complete pass: say so, while keeping the findings that were made.
       const error = failedCreates.join("; ");
-      status?.record("failed", { error, findings: findings.filter((f) => f.action !== "closed").length });
+      status?.record("failed", { error, ...findingCounts(deps.db, findings) });
       return { outcome: "failed", findings, error };
     }
     const outcome = findings.length > 0 ? "findings" : "clean";
-    status?.record(outcome, { findings: findings.filter((f) => f.action !== "closed").length });
+    status?.record(outcome, findingCounts(deps.db, findings));
     return { outcome, findings };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
