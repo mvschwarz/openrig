@@ -48,6 +48,10 @@ function paintExplorerBody(text: string, s: Style): string {
     const at = text.indexOf("(unreachable)");
     return text.slice(0, at) + s.paint("error", "(unreachable)") + text.slice(at + "(unreachable)".length);
   }
+  if (text.includes("(unknown)")) {
+    const at = text.indexOf("(unknown)");
+    return text.slice(0, at) + s.paint("dim", "(unknown)") + text.slice(at + "(unknown)".length);
+  }
   if (/\((recoverable|degraded|stopped|attention_required)\)/.test(text)) {
     return text.replace(/\((recoverable|degraded|stopped|attention_required)\)/, (m) => s.paint("warn", m));
   }
