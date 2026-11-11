@@ -79,9 +79,8 @@ int main(int argc, char **argv) {
   }
   const char *explicitId = flag(argc, argv, "--resume", flag(argc, argv, "--session-id", NULL));
   const char *id = explicitId ? explicitId : "missing";
-  const char *envName = getenv("OPENRIG_SESSION_NAME");
   const char *argName = flag(argc, argv, "--name", NULL);
-  const char *seatName = (argName && argName[0]) ? argName : ((envName && envName[0]) ? envName : NULL);
+  const char *seatName = (argName && argName[0]) ? argName : NULL;
   const char *model = flag(argc, argv, "--model", "default");
   const char *permission = flag(argc, argv, "--permission-mode", "default");
   const char *home = getenv("CLAUDE_CONFIG_DIR"), *rig = getenv("OPENRIG_HOME");
