@@ -665,6 +665,19 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)?.humanAnswers?.permission).toBeUndefined();
   });
 
+  it("an agent that closes the handed row without deciding leaves the person's own answer standing: their no is a reject, never a permit", async () => {
+    for (const choice of [{ decision: "no" }, { optionId: "reject" }] as const) {
+      const f = fixture({ decider: DECIDER });
+      const askId = String((await f.submit()).body.askId);
+      await f.answer(askId, choice);
+      const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
+      // The agent's usual close, not decide-permission.
+      await f.queueRepo.update({ qitemId: handed.qitemId, actorSession: DECIDER, state: "done", closureReason: "no-follow-on" });
+      expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+      expect(f.permits()).toHaveLength(0);
+    }
+  });
+
   it("with no agent that can decide, the answer closes the request as before: a plain yes is the agent's allow", async () => {
     const f = fixture({ decider: null });
     const askId = String((await f.submit()).body.askId);

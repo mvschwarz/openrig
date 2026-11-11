@@ -266,7 +266,9 @@ export class RunnerPermissions {
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
-    const answer = item.humanAnswers?.[QUESTION_ID];
+    // A row handed on to decide that closed without a decision of its own (an agent's ordinary close) leaves the person's
+    // own answer on the ask they answered: it stands, by the same rules, so their no is never turned into a permit.
+    const answer = item.humanAnswers?.[QUESTION_ID] ?? (item.qitemId !== asked.qitemId ? asked.humanAnswers?.[QUESTION_ID] : undefined);
     // The options travel with the ask: a row handed to an agent to decide carries none of its own.
     const offered = this.deps.queueRepo.permissionQuestionsFor(item)?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
     if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
@@ -372,7 +374,8 @@ export class RunnerPermissions {
   private withWords(askId: string, result: ReadResult): ReadResult {
     if (!result.ok || !(result.state === "permitted" || (result.state === "refused" && result.reason === "no_allow_offered"))) return result;
     const asked = this.deps.queueRepo.getById(askId);
-    const said = typedWords((asked ? this.liveEnd(asked) : null)?.humanAnswers?.[QUESTION_ID]);
+    const live = asked ? this.liveEnd(asked) : null;
+    const said = typedWords(live?.humanAnswers?.[QUESTION_ID] ?? asked?.humanAnswers?.[QUESTION_ID]);
     return said ? { ...result, said } : result;
   }
 
