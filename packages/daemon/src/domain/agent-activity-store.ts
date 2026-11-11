@@ -28,6 +28,9 @@ export interface HookActivityInput {
   livenessSeconds?: number | null;
   /** #99: the reset instant a Claude usage limit stated; kept only on that typed failure. */
   resetsAt?: string | null;
+  /** The provider's own session id the hook reports (Claude's session_id). A stated reset is kept only when this is
+   *  the seat's own Claude session (its resume token), so a helper on another login can't park the seat's pool. */
+  sessionId?: string | null;
 }
 
 export type RecordHookActivityResult =
@@ -115,6 +118,16 @@ export class AgentActivityStore {
     } catch { return unavailablePermissionStop(); }
   }
 
+  /** #99: whether a hook's Claude session id is the seat's own Claude session (its current resume token). A helper
+   *  Claude started from the seat's shell posts as the seat but runs its own session, possibly on another login. */
+  private isSeatOwnClaudeSession(nodeId: string, hookSessionId: string | null | undefined): boolean {
+    const token = typeof hookSessionId === "string" ? hookSessionId.trim() : "";
+    if (!token) return false;
+    const row = this.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+      .get(nodeId) as { resume_type: string | null; resume_token: string | null } | undefined;
+    return row?.resume_type === "claude_id" && row.resume_token?.trim() === token;
+  }
+
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {
     if (!input.sessionName && !input.nodeId) {
       return {
@@ -161,7 +174,8 @@ export class AgentActivityStore {
     if (input.hookAgentId !== undefined) activity.hookAgentId = input.hookAgentId;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
     if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
-    if (input.resetsAt && isClaudeRateLimitHook(activity.runtime, input.hookEvent, input.subtype)) {
+    if (input.resetsAt && isClaudeRateLimitHook(activity.runtime, input.hookEvent, input.subtype)
+      && this.isSeatOwnClaudeSession(session.node_id, input.sessionId)) {
       activity.resetsAt = input.resetsAt;
     }
 

@@ -151,8 +151,11 @@ function limitResetField(runtime, hookEvent, subtype, providerPayload, now) {
 const RESET_MAX_MS = 8 * 24 * 3600 * 1000;
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const RESET_EPOCH_RE = /usage limit reached\|(\d{10})\b/i;
-const RESET_IN_RE = /\bresets?\s+in\s+(?:(\d+)\s*d(?:ays?)?\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\s*)?(?:(\d+)\s*m(?:in(?:utes?)?)?)?/i;
-const RESET_AT_RE = /\bresets?\s+(?:at\s+|on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(([^)\n]{1,64})\))?/i;
+// Each unit must be a whole word ("2 months" is not "2 m"), and a "resets in" fragment is read only this way.
+const RESET_IN_LEAD_RE = /\bresets?\s+in\b/i;
+const RESET_IN_RE = /\bresets?\s+in\s+(?:(\d+)\s*(?:d|days?)\b\s*)?(?:(\d+)\s*(?:h|hrs?|hours?)\b\s*)?(?:(\d+)\s*(?:m|mins?|minutes?)\b)?/i;
+// A zone, when the text opens one, must be closed: "4pm (Not/AZone" is truncated, not local time.
+const RESET_AT_RE = /\bresets?\s+(?:at\s+|on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*(\()([^)\n]{0,64})(\))?)?/i;
 
 /** The reset instant a Claude usage-limit message states, as an ISO string, or null when it states none
  *  this can read. A wall-clock time without a zone is the seat's local time, which is what Claude renders. */
@@ -161,21 +164,25 @@ function claudeLimitResetAt(text, nowDate) {
   if (!Number.isFinite(nowMs) || typeof text !== "string") return null;
   let resetMs = null;
   const epoch = RESET_EPOCH_RE.exec(text);
-  const relative = RESET_IN_RE.exec(text);
-  const wall = RESET_AT_RE.exec(text);
   if (epoch) {
     resetMs = Number(epoch[1]) * 1000;
-  } else if (relative && (relative[1] || relative[2] || relative[3])) {
+  } else if (RESET_IN_LEAD_RE.test(text)) {
+    const relative = RESET_IN_RE.exec(text);
+    // The whole fragment must be read: nothing numeric may follow what was ("in 2h 30x" is not two hours).
+    if (!relative || !(relative[1] || relative[2] || relative[3])
+      || /^\s*\d/.test(text.slice(relative.index + relative[0].length))) return null;
     resetMs = nowMs + ((Number(relative[1] || 0) * 24 + Number(relative[2] || 0)) * 60 + Number(relative[3] || 0)) * 60_000;
-  } else if (wall) {
-    resetMs = wallClockReset(wall, nowMs);
+  } else {
+    const wall = RESET_AT_RE.exec(text);
+    if (wall) resetMs = wallClockReset(wall, nowMs);
   }
   if (resetMs === null || !Number.isFinite(resetMs) || resetMs <= nowMs || resetMs > nowMs + RESET_MAX_MS) return null;
   return new Date(resetMs).toISOString();
 }
 
 function wallClockReset(match, nowMs) {
-  const [, monthName, day, hourText, minuteText, meridiem, zoneText] = match;
+  const [, monthName, day, hourText, minuteText, meridiem, zoneOpen, zoneText, zoneClose] = match;
+  if (zoneOpen && (!zoneClose || !zoneText.trim())) return null; // a truncated or empty zone: no reset
   const hour12 = Number(hourText);
   const minute = Number(minuteText || 0);
   if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
@@ -192,20 +199,27 @@ function wallClockReset(match, nowMs) {
     const month = MONTHS.indexOf(monthName.toLowerCase());
     if (month < 0) return null;
     for (const year of [today.year, today.year + 1]) {
+      if (!isCalendarDay(year, month, Number(day))) continue; // "Feb 30" names no day; never roll it into March
       const at = toUtc.instant(year, month, Number(day), hour, minute);
+      if (Number.isNaN(at)) return null;
       if (at > nowMs) return at;
     }
     return null;
   }
   const at = toUtc.instant(today.year, today.month, today.day, hour, minute);
+  if (Number.isNaN(at)) return null; // ambiguous today: never advance a day on a guess
   return at > nowMs ? at : toUtc.instant(today.year, today.month, today.day + 1, hour, minute);
 }
 
+function isCalendarDay(year, month, day) {
+  return Number.isInteger(day) && day >= 1 && day <= new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
 function localClock() {
-  return {
-    partsAt: (ms) => { const d = new Date(ms); return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate() }; },
-    instant: (year, month, day, hour, minute) => new Date(year, month, day, hour, minute).getTime(),
-  };
+  return wallClock(
+    (ms) => { const d = new Date(ms); return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate(), hour: d.getHours(), minute: d.getMinutes() }; },
+    (ms) => -new Date(ms).getTimezoneOffset() * 60_000,
+  );
 }
 
 function zonedClock(timeZone) {
@@ -219,12 +233,25 @@ function zonedClock(timeZone) {
     const p = partsAt(ms);
     return Date.UTC(p.year, p.month, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000;
   };
+  return wallClock(partsAt, offsetAt);
+}
+
+/** A clock whose instant() is the one moment a wall time names, or NaN when it names none (skipped by a DST jump) or
+ *  two (repeated by a DST fall-back): the message doesn't say which, so no reset rather than a guess a day off. */
+function wallClock(partsAt, offsetAt) {
   return {
     partsAt,
     instant: (year, month, day, hour, minute) => {
       const asUtc = Date.UTC(year, month, day, hour, minute);
-      const first = asUtc - offsetAt(asUtc);
-      return asUtc - offsetAt(first);
+      const want = new Date(asUtc); // normalizes a day past the month's end (tomorrow)
+      const matches = new Set();
+      for (const probe of [asUtc - 14 * 3600_000, asUtc, asUtc + 14 * 3600_000]) {
+        const candidate = asUtc - offsetAt(probe);
+        const p = partsAt(candidate);
+        if (p.year === want.getUTCFullYear() && p.month === want.getUTCMonth() && p.day === want.getUTCDate()
+          && p.hour === want.getUTCHours() && p.minute === want.getUTCMinutes()) matches.add(candidate);
+      }
+      return matches.size === 1 ? [...matches][0] : NaN;
     },
   };
 }
