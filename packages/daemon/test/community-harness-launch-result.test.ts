@@ -187,3 +187,11 @@ describe("community run authority", () => {
     expect(finish).toHaveBeenCalledWith(false);
   });
 });
+
+it("finalizes its exact community grant when post-dispatch standing refuses", async () => {
+  const finish = vi.fn(async (_ok: boolean) => {});
+  const f = seat(good, `${PRESET}runner: true\n`, async () => ({ grantId: "refused", generation: "generation", wrap: command => command,
+    dispatched: () => { throw new Error("binding changed"); }, finish }));
+  await expect(f.app.launchHarness(binding, { name: "w@r" })).rejects.toThrow("binding changed");
+  expect(finish).toHaveBeenCalledWith(false);
+});

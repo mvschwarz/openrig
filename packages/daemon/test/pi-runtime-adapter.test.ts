@@ -1200,3 +1200,21 @@ describe("direct Pi resume run authority", () => {
     expect(finish).toHaveBeenCalledWith(ready);
   });
 });
+
+describe("refused dispatch cleans up each actual Pi owner", () => {
+  it.each(["launch", "resume"] as const)("%s finalizes its exact authority when dispatch standing refuses", async owner => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const finish = vi.fn(async (_ok: boolean) => {});
+    const begin = async () => ({ grantId: "refused", generation: "generation", wrap: (command: string) => command,
+      dispatched: () => { throw new Error("binding changed"); }, finish });
+    const tmux = mockTmux();
+    if (owner === "launch") {
+      const adapter = new PiRuntimeAdapter({ tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, runnerGrants: begin });
+      await expect(adapter.launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION })).rejects.toThrow("binding changed");
+    } else {
+      const adapter = new PiResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: begin });
+      await expect(adapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work")).rejects.toThrow("binding changed");
+    }
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+});

@@ -110,11 +110,16 @@ export class ActivityGrantStore {
   activate(grantId: string): boolean {
     return this.db.transaction(() => {
       const grant = this.get(grantId);
-      if (!grant?.runId || grant.revokedAt || !this.matchesBinding(grant, false)) return false;
+      if (!grant?.runId || grant.revokedAt || !this.matchesBinding(grant, false, !grant.activatedAt)) return false;
       if (grant.activatedAt) return true;
       const active = this.activeForNode(grant.nodeId);
-      if (active && active.grantId > grant.grantId) return false;
+      if (active?.runId && active.grantId > grant.grantId && this.matchesBinding(active, true)) return false;
       const session = this.currentSession(grant.nodeId)!;
+      // Only this pending, Core-selected launch may fill an empty declaration; never overwrite a conflicting record.
+      if (grant.binding!.runtime !== "pi" && session.agent_app == null && session.agent_runner == null) {
+        this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
+          .run(grant.binding!.runtime, grant.binding!.runner, session.id);
+      }
       const at = this.now().toISOString();
       this.db.prepare("UPDATE activity_grants SET revoked_at = ?, revoke_reason = 'run_replaced' WHERE node_id = ? AND grant_id <> ? AND revoked_at IS NULL AND (run_id IS NULL OR activated_at IS NOT NULL)")
         .run(at, grant.nodeId, grantId);
@@ -170,7 +175,7 @@ export class ActivityGrantStore {
       .all(row.node_id) as Row[]).map(toGrant);
     for (const grant of grants) {
       if ((grant.sessionId === sessionId && (current?.id === sessionId || !this.matchesBinding(grant, true)))
-        || (grant.activatedAt && current?.id === sessionId && this.matchesBinding(grant, true))) {
+        || (grant.activatedAt && current?.id === sessionId)) {
         this.revoke({ grantId: grant.grantId }, reason);
       }
     }
@@ -195,11 +200,12 @@ export class ActivityGrantStore {
         AND s.status NOT IN ('exited','detached','superseded')`).get(nodeId, nodeId) as ReturnType<ActivityGrantStore["currentSession"]>;
   }
 
-  private matchesBinding(grant: ActivityGrant, allowAdoption: boolean): boolean {
+  private matchesBinding(grant: ActivityGrant, allowAdoption: boolean, allowUnrecorded = false): boolean {
     try {
       const anchor = grant.binding, session = this.currentSession(grant.nodeId);
       if (!anchor || !session || session.tmux_pane !== anchor.pane || session.runtime !== anchor.runtime
-        || (anchor.runtime !== "pi" && (session.agent_app !== anchor.runtime || session.agent_runner !== anchor.runner))) return false;
+        || (anchor.runtime !== "pi" && (session.agent_app !== anchor.runtime || session.agent_runner !== anchor.runner)
+          && !(allowUnrecorded && session.agent_app == null && session.agent_runner == null && [1, 2].includes(anchor.runner)))) return false;
       const registry = new SessionRegistry(this.db);
       const current = registry.currentOccupantTenure(grant.nodeId)?.generationUuid;
       const adoption = current !== grant.generation;

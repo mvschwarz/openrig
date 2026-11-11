@@ -5967,7 +5967,17 @@ describe("RestoreOrchestrator", () => {
 
       const piResume = {
         canResume: vi.fn((type: string | null, token: string | null) => type === "pi_session_file" && !!token),
-        resume: vi.fn(async () => ({ ok: true as const })),
+        resume: vi.fn(async (session: string) => {
+          // The production Pi grant resolver must see the newly committed restore row, not the exited snapshot row.
+          const owners = db.prepare(`SELECT b.node_id AS nodeId, s.id AS sessionId, s.status FROM bindings b JOIN nodes n ON n.id=b.node_id
+            JOIN sessions s ON s.node_id=n.id AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
+            WHERE b.tmux_session=? AND s.session_name=? AND n.runtime='pi' AND s.status NOT IN ('superseded','detached','exited')`)
+            .all(session, session) as Array<{ nodeId: string; sessionId: string; status: string }>;
+          expect(owners).toHaveLength(1);
+          expect(owners[0]).toMatchObject({ nodeId: piNode.id, status: "running" });
+          expect(owners[0]!.sessionId).not.toBe(piSess.id);
+          return { ok: true as const };
+        }),
       } as unknown as PiResumeAdapter;
       const codexResume = mockCodexResume({ ok: true as const });
 

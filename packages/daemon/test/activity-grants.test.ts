@@ -161,6 +161,42 @@ describe("actual run grants", () => {
     expect(f.grants.standing(first.grantId)).toBe("stale");
   });
 
+  it("revokes an adopted run on current-session stop after its concrete anchors are lost", () => {
+    const f = run(); const first = f.issue("first"); f.grants.activate(first.grantId);
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: null,
+      sessionName: "dev-guest@guest-rig", observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPid: 101,
+        observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    const adopted = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
+    expect(f.grants.get(first.grantId)?.sessionId).toBe(f.session.id); // immutable origin evidence
+    f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id = ?").run(f.node.id);
+    f.sessions.markIntentionallyStopped(adopted.id);
+    expect(f.grants.standing(first.grantId)).toBe("revoked");
+  });
+
+  it("records a Core-selected runner declaration on a previously registered empty launch row", async () => {
+    const f = run();
+    f.db.prepare("UPDATE sessions SET agent_app = NULL, agent_runner = NULL WHERE id = ?").run(f.session.id);
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101, setSessionEnv: async () => {}, unsetSessionEnv: async () => {} });
+    const launch = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never, "synth", "registered-first", 1);
+    expect(() => launch.dispatched()).not.toThrow();
+    expect(f.grants.standing(launch.grantId)).toBe("current");
+    expect(f.db.prepare("SELECT agent_app, agent_runner FROM sessions WHERE id = ?").get(f.session.id)).toEqual({ agent_app: "synth", agent_runner: 1 });
+    await launch.finish(true);
+  });
+
+  it("activates an earlier staged grant after a later predecessor rotation becomes stale at cutover", () => {
+    const f = run(); const first = f.issue("first"); f.grants.activate(first.grantId);
+    const generation = f.sessions.reserveOccupantGeneration()!;
+    const staged = f.grants.issue({ nodeId: f.node.id, generation, issuedBy: "launch", run: { runId: "staged",
+      binding: { ...f.anchor, pane: "%2", panePid: 202 } } });
+    const rotation = f.issue("predecessor-rotation");
+    expect(f.grants.activate(rotation.grantId)).toBe(true);
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
+    f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "handover", generation);
+    expect(f.grants.standing(staged.grantId)).toBe("current");
+    expect(f.grants.standing(rotation.grantId)).toBe("revoked");
+  });
+
   it("revokes the current run on an explicit stop or observed exit", () => {
     const f = run();
     const first = f.issue("first");
