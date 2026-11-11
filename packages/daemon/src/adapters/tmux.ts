@@ -544,7 +544,7 @@ export class TmuxAdapter {
     }
   }
 
-  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
+  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void, nodeId?: string) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
     const guard = this.deliveryGuard;
     if (!guard) return write(target, () => {});
     try {
@@ -594,7 +594,7 @@ export class TmuxAdapter {
         }
         // Revalidate registry/occupant after the asynchronous observation. Write
         // to the immutable pane ID, not a session name which could be recycled.
-        return guard.input(identity, () => write(pane, () => guard.checkInput(identity)));
+        return guard.input(identity, () => write(pane, () => guard.checkInput(identity), bound.nodeId));
       });
     } catch (error) {
       return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
@@ -1308,16 +1308,26 @@ export class TmuxAdapter {
     }
   }
 
-  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill. */
+  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.
+   *  A seat's session is stopped only when it carries that seat's OpenRig marker, and each effect runs only while that
+   *  id still names a session on the server it was read from: a replaced server reuses ids for other terminals. */
   async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {
     let stopPhase: StopPhase = "none";
     if (this.deliveryGuard) {
-      const result = await this.guardedInput(name, async (pane, beforeWrite) => {
-        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
-        const sessionId = stdout.trim();
-        if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+      const result = await this.guardedInput(name, async (pane, beforeWrite, nodeId) => {
+        // The session id and its server (pid and start time) in one read, so the effects below can be held to both.
+        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
+          `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
+        const [sessionId = "", pid = "", start = ""] = stdout.trim().split("|");
+        if (!/^\$\d+$/.test(sessionId) || !/^\d+$/.test(pid) || !/^\d+$/.test(start)) {
+          return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+        }
+        if (nodeId) {
+          const unproven = await this.unprovenSeatSession(name, sessionId, nodeId);
+          if (unproven) return unproven;
+        }
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
+          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -1330,16 +1340,46 @@ export class TmuxAdapter {
     return this.killSessionUnchecked(name);
   }
 
+  /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
+   *  OPENRIG_NODE_ID. One without it (adopted, bound or discovered from outside), or with another seat's, is left
+   *  running and named; nothing is detached or killed. */
+  private async unprovenSeatSession(name: string, sessionId: string, nodeId: string): Promise<TmuxResult | null> {
+    let marker: string | null = null;
+    try {
+      const out = (await this.run(["tmux", "show-environment", "-t", sessionId, "OPENRIG_NODE_ID"])).trim();
+      if (out.startsWith("OPENRIG_NODE_ID=")) marker = out.slice("OPENRIG_NODE_ID=".length);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/unknown variable/i.test(message)) {
+        return { ok: false, code: "guard_target_unknown", message: `'${name}' was left running: its OpenRig marker couldn't be read (${message.trim()}), so nothing was detached or killed.` };
+      }
+    }
+    if (marker === nodeId) return null;
+    const why = marker === null ? "doesn't carry this seat's OpenRig marker (OPENRIG_NODE_ID)" : `carries another seat's OpenRig marker (OPENRIG_NODE_ID=${marker})`;
+    return { ok: false, code: "seat_target_unproven", message: `'${name}' was left running: its tmux session ${sessionId} ${why}, so it can't be shown `
+      + "to be this seat's terminal, and nothing was detached or killed. A session OpenRig didn't create, such as an adopted one, has no marker. "
+      + `If it is this seat's, stop it in tmux yourself and run the command again.` };
+  }
+
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
-  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void): Promise<TmuxResult> {
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void,
+    server?: { pid: string; start: string }): Promise<TmuxResult> {
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
+    // With its server, an effect runs only while this id is that session on that server: tmux checks and acts in one
+    // command, so a server replaced since the read (whose ids name other terminals) is left alone.
+    const changed = "openrig-stop-target-changed";
+    const effect = (verb: string, flag: string): string[] => server
+      ? ["tmux", "if-shell", "-F", "-t", session,
+        `#{&&:#{==:#{session_id},${session}},#{&&:#{==:#{pid},${server.pid}},#{==:#{start_time},${server.start}}}}`,
+        `${verb} ${flag} '${session}'`, `display-message -p ${changed}`]
+      : ["tmux", verb, flag, session];
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
     beforeEffect?.();
     phase?.("detach_attempted");
     try {
-      await this.run(["tmux", "detach-client", "-s", session],
-        `tmux detach-client -s ${shellQuote(session)}`);
+      const out = await this.run(effect("detach-client", "-s"), server ? undefined : `tmux detach-client -s ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); nothing was detached or killed.` };
     } catch (err) {
       // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
       const message = err instanceof Error ? err.message : String(err);
@@ -1349,8 +1389,8 @@ export class TmuxAdapter {
     beforeEffect?.();
     phase?.("kill_attempted");
     try {
-      await this.run(["tmux", "kill-session", "-t", session],
-        `tmux kill-session -t ${shellQuote(session)}`);
+      const out = await this.run(effect("kill-session", "-t"), server ? undefined : `tmux kill-session -t ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); it was detached, but nothing was killed.` };
       const pane = this.freshProbes.get(name);
       this.freshProbes.delete(name);
       if (pane) this.freshProbes.delete(pane);
