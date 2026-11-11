@@ -213,6 +213,15 @@ describe("waiting face names the next action the existing ladder can actually ta
     expect(queue.getByIdOrThrow(row.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
   });
 
+  it.each(["external:vendor", "auth:vendor", "fold:vendor"])("keeps %s as a typed gate when an item has the same ID", async (gate) => {
+    await queue.create({ qitemId: gate, sourceSession: "owner@rig", destinationSession: "healthy@rig", body: "Unrelated item", nudge: false });
+    const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "Wait for gate", nudge: false });
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: gate });
+    expect(view(row.qitemId).blocker).toEqual({ ref: gate, owner: null, state: null });
+    expect(view(row.qitemId).liveness.subject).toBe(gate);
+    expect(view(row.qitemId).nextBackstop).toMatchObject({ mechanism: "UNVERIFIED: no timed backstop", dueAt: null });
+  });
+
   it("does not promise a transition wake for a custom blocker that already finished", async () => {
     const blocker = await queue.create({ qitemId: "finished-blocker", sourceSession: "owner@rig", destinationSession: "healthy@rig", body: "Finished dependency", nudge: false });
     await queue.update({ qitemId: blocker.qitemId, actorSession: "healthy@rig", state: "done", closureReason: "no-follow-on" });

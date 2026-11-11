@@ -1,4 +1,5 @@
 import { resolveEscalationOwner, hasConsumedEscalationHop } from "./escalation-owner.js";
+import { isTypedGateBlocker } from "./queue-blocker.js";
 import type Database from "better-sqlite3";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -142,7 +143,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const row = held && held.qitem_id === id ? held : statements.statement(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at, tags
     FROM queue_items WHERE qitem_id = ?`).get(id) as WaitingRow | undefined;
   if (!row) return null;
-  const blocker = row.blocked_on ? statements.statement(
+  const blocker = row.blocked_on && !isTypedGateBlocker(row.blocked_on) ? statements.statement(
     "SELECT destination_session, state FROM queue_items WHERE qitem_id = ?",
   ).get(row.blocked_on) as { destination_session: string; state: string } | undefined : undefined;
   let recoveryOwner: string | null = null;
