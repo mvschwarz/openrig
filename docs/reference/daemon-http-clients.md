@@ -220,6 +220,7 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
   mission never counts. Several `slice:` or `mission:` tags on one row count only when they all name the same
   physical slice or mission (a slice's folder name and its frontmatter `id:`, say); a row that names two distinct
-  slices, missions or projects counts nowhere, while `qitemCount` lists it under every slice it tags. Counts are
-  recomputed on every list request. `?refresh=1|true` invalidates the separate listing cache, not a stored
-  queue-count snapshot. This resolution does not change the returned slice list or filters.
+  slices, missions or projects counts nowhere, while `qitemCount` can include it under several tagged slices,
+  subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
+  request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
+  resolution does not change the returned slice list or filters.
