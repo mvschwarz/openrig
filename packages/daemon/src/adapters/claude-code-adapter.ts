@@ -757,7 +757,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         // Enter goes once, and only with the focus read on "Yes, I trust this folder" of the plain prompt's two options.
         // On "No, exit" the selection moves down once (the two options wrap: a second Down would go back) and the next
         // polls wait to see the focus on "Yes". A screen with no key to send (another option set, no cursor, a focus
-        // that never reaches "Yes") gets no input; in the longer wait it ends at once, as without the auto-drive.
+        // that never reaches "Yes") gets no confirmation; in the longer wait it ends at once, as without the auto-drive.
         const focus = claudeTrustPromptFocus(paneContent);
         const key = focus === "yes" && !trustEntered ? "Enter" : focus === "no" && !trustMoved ? "Down" : null;
         if (!key) {

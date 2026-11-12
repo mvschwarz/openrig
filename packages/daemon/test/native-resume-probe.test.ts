@@ -1485,6 +1485,16 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(probe(partial)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
   });
 
+  it("is the same gate in 40 columns when a long permission list scrolled the whole warning out", () => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const to = rows.findIndex(row => row.includes("configuration."));
+    const scrolled = [...rows.slice(0, from), ...rows.slice(to + 1)].join("\n");
+    expect(scrolled).not.toMatch(/pre-approves/);
+    expect(probe(scrolled)).toMatchObject(gate);
+  });
+
   it("is the same gate drawn with numbered options", () => {
     const numbered = screen.replace("❯ No, continue without these permissions", "❯ 1. No, continue without these permissions")
       .replace("  Yes, I trust this folder", "  2. Yes, I trust this folder");
@@ -1497,6 +1507,25 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     const earlier = ["⏺ It reads \"This folder pre-approves 2 tool permissions\" and \"No, continue without these permissions\".",
       "", "────────────────", "❯ ", "────────────────", ""].join("\n");
     expect(probe(earlier + plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("a draft in Claude's input box that reads like the backstop's option is never the gate", () => {
+    const started = [" ▐▛███▜▌   Claude Code v2.1.322", "", "⏺ Done.", "", "────────────────────────────────",
+      "❯ No, continue without the tests", "────────────────────────────────", "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+    expect(probe(started)).toMatchObject({ status: "resumed" });
+  });
+
+  it("nor is that draft while the input frame's closing rule is not captured yet", () => {
+    const drawing = [" ▐▛███▜▌   Claude Code v2.1.322", "", "⏺ Done.", "", "────────────────────────────────",
+      "❯ No, continue without the tests"].join("\n");
+    expect(probe(drawing)).toMatchObject({ status: "resumed" });
+  });
+
+  it("names the focused choice in the gate's detail", () => {
+    expect(probe(screen).detail).toContain("\"No, continue without these permissions\"");
+    const yes = screen.replace("❯ No, continue without these permissions", "  No, continue without these permissions")
+      .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+    expect(probe(yes).detail).toContain("\"Yes, I trust this folder\"");
   });
 
   it("the plain workspace trust prompt is still trust_gate (it stays auto-drivable)", () => {

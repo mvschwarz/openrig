@@ -45,7 +45,7 @@ declines those permissions (or exits) and approving them is your call. With that
 the plain workspace trust prompt is answered only when its options are exactly "No, exit" and
 "Yes, I trust this folder": Claude Code 2.1.322 opens it on "No, exit", so OpenRig moves the
 selection down once and presses Enter only after it reads the focus on "Yes". Any other option
-set, a prompt drawn without a cursor or a focus that does not reach "Yes" gets no input.
+set, a prompt drawn without a cursor or a focus that does not reach "Yes" gets no confirmation.
 
 ## Continue a Codex fork whose child ID arrived late
 

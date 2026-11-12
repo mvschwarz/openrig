@@ -1565,6 +1565,16 @@ describe("Claude gated grants backstop is never auto-driven (#2820 item 2)", () 
     expect(keys(tmux)).toEqual(["Enter", "Down", "Enter"]);
   });
 
+  it("sends nothing to the 40-column backstop whose warning a long permission list scrolled out", async () => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const to = rows.findIndex(row => row.includes("configuration."));
+    const { tmux, result } = await launch([[...rows.slice(0, from), ...rows.slice(to + 1)].join("\n")]);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(keys(tmux)).toEqual(["Enter"]);
+  });
+
   it("sends nothing to a trust prompt drawn without a cursor: the label cannot be checked", async () => {
     const cursorless = plainCapture.replace("❯ No, exit", "  No, exit");
     const { tmux, result } = await launch([cursorless]);

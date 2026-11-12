@@ -144,7 +144,7 @@ export function assessNativeResumeProbe(
       return {
         status: "attention_required",
         code: "claude_gated_grants_gate",
-        detail: "Claude is at its workspace trust check that warns \"This folder pre-approves N tool permissions\" (from the folder's .claude/settings.json), and the highlighted choice declines them or exits. Review and choose in the seat's pane. OpenRig does not approve or bypass this review. No input was sent.",
+        detail: `Claude is at its workspace trust check that warns "This folder pre-approves N tool permissions" (from the folder's .claude/settings.json)${focusedChoice(paneContent)}. Review and choose in the seat's pane. OpenRig does not approve or bypass this review. No input was sent.`,
       };
     }
     if (gatedGrants === "partial") {
@@ -397,13 +397,33 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
 }
 
 /** The rows Claude drew after its last own element (input frame, header or reply): the screen a prompt is on now.
- *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current. */
+ *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current,
+ *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
   const rows = paneContent.trimEnd().split(/\r?\n/);
+  let current = rows;
   for (let at = rows.length - 1; at >= 0; at--) {
-    if (claudeDrawnAfter(rows.slice(at))) return rows.slice(at + 1);
+    if (!claudeDrawnAfter(rows.slice(at))) continue;
+    const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
+    const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
+    current = rows.slice((closing >= 0 ? closing : at) + 1);
+    break;
   }
-  return rows;
+  // An input frame still being drawn (its opening rule and the ❯ row, no closing rule yet) holds a draft, not a dialog.
+  const opening = current.findIndex((row, index) => CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(current[index + 1] ?? ""));
+  return opening >= 0 ? current.slice(0, opening) : current;
+}
+
+/** ", with \"<label>\" highlighted" for the detail of the gated-grants gate, or nothing when no option is focused. */
+function focusedChoice(paneContent: string): string {
+  const label = claudeFocusedOption(paneContent);
+  return label ? `, with "${label}" highlighted` : "";
+}
+
+/** The label of the focused option on Claude's current screen (the row with ❯ or ›), if one is drawn. */
+function claudeFocusedOption(paneContent: string): string | null {
+  const focused = claudeCurrentRows(paneContent).map(row => CLAUDE_TRUST_OPTION_ROW.exec(row)).filter(match => match?.[1]);
+  return focused.at(-1)?.[2] ?? null;
 }
 
 /** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from its last 12 drawn rows. An allowlist:
