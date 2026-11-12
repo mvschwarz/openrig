@@ -102,8 +102,34 @@ async function answer({ res, body, rule, marker, stream, sleep }) {
   res.end();
 }
 
+/** Codex names the conversation in client_metadata.thread_id; its side requests (a task title) carry none. */
+export function responsesDescribe(body) {
+  const thread = body?.client_metadata?.thread_id;
+  return { thread: typeof thread === "string" ? thread : null, tools: Array.isArray(body?.tools) ? body.tools.length : 0,
+    structuredOutput: body?.text?.format?.type === "json_schema" };
+}
+
+/** A value of the schema's shape: strings "stand-in", numbers 0, booleans false, every required property present. */
+export function sampleOf(schema) {
+  if (schema?.type === "object") {
+    return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([key, value]) => [key, sampleOf(value)]));
+  }
+  if (schema?.type === "array") return [];
+  if (schema?.type === "number" || schema?.type === "integer") return 0;
+  if (schema?.type === "boolean") return false;
+  return "stand-in";
+}
+
+/** With no rule for it, a request for a JSON-schema answer (Codex's task title) gets one of that shape, so the program
+ *  isn't shown an answer it can't parse. */
+function responsesFallback(_turn, body) {
+  if (body?.text?.format?.type !== "json_schema") return null;
+  return { index: null, rule: { say: JSON.stringify(sampleOf(body.text.format.schema)) } };
+}
+
 /** The main path is <base_url>/responses; a base_url ending in /v1 is the common form. */
-export const responsesProtocol = { path: "/v1/responses", turnOf: responsesTurnOf, userTurns: responsesUserTurns, answer };
+export const responsesProtocol = { path: "/v1/responses", turnOf: responsesTurnOf, userTurns: responsesUserTurns, describe: responsesDescribe,
+  fallback: responsesFallback, answer };
 
 /** Start the Codex stand-in; see core.mjs for the options and the script format. */
 export function startResponsesStandIn(options) {

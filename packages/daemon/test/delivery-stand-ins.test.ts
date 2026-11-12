@@ -371,6 +371,38 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect(() => loadScript({ rules: [{ say: "a", on: "assistant" }] })).toThrow(/on must be/);
   });
 
+  it("finds the turn before a trailing system message, as Claude Code 2.1.322 sends its environment", () => {
+    // The shape recorded from a real Claude Code 2.1.322 seat on the stand-in: the turn, then a system message.
+    const body = { model: "m", stream: true, messages: [
+      { role: "user", content: [{ type: "text", text: "<system-reminder>context</system-reminder>" }, { type: "text", text: "start DLV-start-1" }] },
+      { role: "system", content: [{ type: "text", text: "# Environment\nPrimary working directory: /w" }] },
+    ] };
+    expect(messagesTurnOf(body)).toMatchObject({ kind: "user", parts: [{ source: "text" }, { text: "start DLV-start-1", source: "text" }] });
+    expect(messagesTurnOf({ messages: [{ role: "system", content: "only" }] })).toMatchObject({ kind: "other", parts: [] });
+  });
+
+  it("logs which conversation each request belongs to, so a side request quoting a delivery isn't counted as one", async () => {
+    // Shapes recorded from real seats on the stand-ins: Codex 0.167.2's turn and its task-title side request, and
+    // Claude Code 2.1.322's session in metadata.user_id.
+    const codex = await start("responses", { script: { rules: [] } });
+    const turn = { ...codexTurn("please DLV-T1"), tools: [{ type: "function", name: "exec" }], client_metadata: { thread_id: "thread-1", session_id: "thread-1" } };
+    const title = { ...codexTurn("Generate a concise title for: please DLV-T1"), tools: [], client_metadata: { "x-codex-window-id": "w:0" },
+      text: { format: { type: "json_schema", strict: true, name: "title", schema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } } } };
+    await post(`${codex.url}/v1/responses`, turn, { "x-stainless-retry-count": "0", "thread-id": "thread-1" });
+    const titled = events((await post(`${codex.url}/v1/responses`, title)).text);
+    expect(JSON.parse(titled.filter((e) => e.event === "response.output_text.delta").map((e) => e.data.delta).join(""))).toEqual({ title: "stand-in" });
+    expect(codex.requests().map((r) => [r.marker, r.request])).toEqual([
+      ["DLV-T1", { thread: "thread-1", tools: 1, structuredOutput: false }],
+      ["DLV-T1", { thread: null, tools: 0, structuredOutput: true }],
+    ]);
+    expect(codex.requests()[0].headers).toMatchObject({ "x-stainless-retry-count": "0", "thread-id": "thread-1" });
+
+    const claude = await start("messages", { script: { rules: [] } });
+    await post(`${claude.url}/v1/messages`, { ...userTurn("DLV-T2"), tools: [{ name: "Bash" }],
+      metadata: { user_id: JSON.stringify({ device_id: "d", account_uuid: "", session_id: "sess-1" }) } }, { "x-stainless-retry-count": "1" });
+    expect(claude.requests()[0]).toMatchObject({ request: { thread: "sess-1", tools: 1, structuredOutput: false }, headers: { "x-stainless-retry-count": "1" } });
+  });
+
   it("refuses a script whose rules aren't a list, or whose patterns don't compile, at load", () => {
     expect(() => loadScript({ rules: { say: "a" } })).toThrow(/rules must be a list/);
     expect(() => loadScript({ rules: "say a" })).toThrow(/rules must be a list/);

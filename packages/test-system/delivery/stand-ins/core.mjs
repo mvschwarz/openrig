@@ -89,7 +89,10 @@ export function splitChunks(text, n = 1) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Header and query values the log may keep. Every other value, which may be a credential a provider is configured to
 // send under any name (Codex's http_headers, env_http_headers, query_params), is logged as "(present)".
-const SAFE_HEADER_VALUES = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta"]);
+// Ids and a retry count are kept too: they tell a case which conversation a request belongs to and whether it's a retry,
+// and none of them is a credential.
+const SAFE_HEADER_VALUES = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta",
+  "x-stainless-retry-count", "x-claude-code-session-id", "session-id", "thread-id"]);
 const SAFE_QUERY_VALUES = new Set(["beta"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -110,6 +113,10 @@ function loggedQuery(params) {
  *   userTurns(body) -> number   how many user turns the request's history holds, tool results aside
  *   answer(ctx) -> Promise<void>   writes the response for the chosen rule
  *   other(req, res, body) -> boolean   serves a path the protocol knows besides its main one (count_tokens, a probe)
+ *   describe(body) -> { thread, tools, structuredOutput }   which conversation the request belongs to (null when it
+ *     names none), how many tools it offers, and whether it asks for a JSON-schema answer. A program's side requests
+ *     (Codex's task title, for one) quote the delivered text too, so a case counts a delivery only in the seat's thread.
+ *   fallback(turn, body) -> rule | null   the protocol's own answer when no rule fits, before the generic one
  *   path: the main POST path, e.g. "/v1/messages"
  * Control routes for the harness, under /_stand-in/: GET requests (the log so far), GET errors (what failed inside the
  * stand-in, such as a log write), POST release/<gate>.
@@ -193,9 +200,9 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     }
 
     const turn = protocol.turnOf(body);
-    const picked = selectRule(loaded, used, turn) ?? fallbackRule(turn);
+    const picked = selectRule(loaded, used, turn) ?? protocol.fallback?.(turn, body) ?? fallbackRule(turn);
     const marker = turn.text.match(loaded.marker)?.[0] ?? null;
-    log({ ...entry, body, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
+    log({ ...entry, body, request: protocol.describe?.(body) ?? null, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
       action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });
     if (picked.rule.gate) await waitGate(picked.rule.gate);
     if (picked.rule.delayMs) await sleep(picked.rule.delayMs);

@@ -60,13 +60,16 @@ A script is checked when it loads: `rules` must be a list (an absent one means t
 Each request is one JSON line in the log, also available at `GET /_stand-in/requests`. The request is logged when it arrives, before any gate or delay. A request to the main path whose body isn't JSON is logged as `served: "malformed"` and answered with a 400, never a scripted reply. If the stand-in can't write its log, it answers 500 and records the failure at `GET /_stand-in/errors`, so a request missing from the log reads as the stand-in's failure, not the program's. A line holds:
 
 - the method and path.
-- every header name and every query name. A value is kept only for a short list of safe names: the headers `content-type`, `accept`, `user-agent`, `anthropic-version`, `anthropic-beta` and `openai-beta`, and the query `beta`. Every other value is recorded as `(present)`, since a provider can be set up to send a credential under any name.
+- every header name and every query name. A value is kept only for a short list of safe names: the headers `content-type`, `accept`, `user-agent`, `anthropic-version`, `anthropic-beta` and `openai-beta`, the retry count `x-stainless-retry-count`, and the conversation ids `x-claude-code-session-id`, `session-id` and `thread-id`; and the query `beta`. Every other value is recorded as `(present)`, since a provider can be set up to send a credential under any name.
 - the body as parsed, plus `rawBytes` and `rawSha256` of the body as received.
 - the turn: its `kind` and its `parts`, the separate pieces of the last turn. A tool result whose content is a list of text blocks gives one part per block. Each part has its `source` (`text` or `tool_result`), its decoded text exactly, its UTF-8 `bytes`, its `sha256` and the markers it holds.
 - `userTurns`: how many user turns the request's history holds.
+- `request`: the conversation it belongs to (`thread`: Claude Code's session id from `metadata.user_id`, Codex's `client_metadata.thread_id`; null when it names none), how many `tools` it offers, and whether it asks for a JSON-schema answer (`structuredOutput`). A program's side requests quote the delivered text too: Codex 0.167.2 asks for a task title with the typed message in its prompt. So a case counts a delivery only in the seat's own thread.
 - the rule that answered.
 
-A turn holding a tool result is kind `tool_result`, and any text in it is kept beside the result. A message typed while a tool ran can arrive there.
+A turn holding a tool result is kind `tool_result`, and any text in it is kept beside the result. A message typed while a tool ran can arrive there. Claude Code 2.1.322 sends its environment as a `system` message after the turn; the turn is the last message before any trailing `system` ones.
+
+With no rule for it, a request for a JSON-schema answer gets an object of the schema's shape (strings `stand-in`), so the program isn't shown an answer it can't parse.
 
 A case joins this log to OpenRig's own record of a send by the correlation marker in the delivered text. So every message a case sends carries a distinct marker.
 
