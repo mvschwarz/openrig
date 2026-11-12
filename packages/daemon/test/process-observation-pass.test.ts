@@ -77,6 +77,16 @@ describe("ObservationPass", () => {
     expect(await pass.lister(base)()).toEqual(table(4));
   });
 
+  it("after a failed shared listing each agent reads through its own fallback lister, not the shared one", async () => {
+    const shared = vi.fn(async (): Promise<Row[]> => { throw new Error("ps ENOMEM"); });
+    const own = vi.fn(async () => table(7));
+    const pass = new ObservationPass({ now: () => 0 });
+    expect(await pass.lister(shared, own)()).toEqual(table(7));
+    expect(await pass.lister(shared, own)()).toEqual(table(7));
+    expect(shared).toHaveBeenCalledTimes(2);
+    expect(own).toHaveBeenCalledTimes(2);
+  });
+
   it("an agent whose own fallback read also fails fails: the failure is not turned into a table", async () => {
     const base = vi.fn(async (): Promise<Row[]> => { throw new Error("ps ENOMEM"); });
     const list = new ObservationPass({ now: () => 0 }).lister(base);

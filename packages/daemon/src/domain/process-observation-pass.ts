@@ -8,7 +8,9 @@
 //     samples are two observations, never one table read twice.
 //   - FRESHNESS: a listing older than `freshnessMs` is never reused (the same limit ProcessCensus uses).
 //   - HONEST FAILURE: a failed listing is never reused and never counts as success. Each agent that was
-//     waiting on it falls back to its own read, and that read's failure is the agent's failure.
+//     waiting on it falls back to its own read, and that read's failure is the agent's failure. "Failed" means
+//     the shared lister REJECTED: an empty array is a legitimate success and is never read as a failure, so the
+//     shared lister must reject on a failed enumeration (the lenient listers that return [] cannot be shared).
 //   - SCOPE: a pass belongs to one poll. The next poll builds a new pass, so it starts with a fresh listing.
 // Listings are kept per underlying lister, because different listers return different rows.
 
@@ -41,8 +43,10 @@ export class ObservationPass {
   }
 
   /** A lister for ONE agent's checks in this pass. Create one per agent, never share it between agents: it
-   *  remembers when that agent's last listing finished. */
-  lister<Row>(base: Lister<Row>): Lister<Row> {
+   *  remembers when that agent's last listing finished. `base` is the shared listing and must reject when it fails;
+   *  `fallback` is the agent's own read after a failed shared listing (default: `base`), so an agent keeps the
+   *  failure behavior it has without a pass. */
+  lister<Row>(base: Lister<Row>, fallback: Lister<Row> = base): Lister<Row> {
     let lastDoneSeq = 0;
     return async () => {
       const listing = this.listingFor(base, lastDoneSeq);
@@ -53,7 +57,7 @@ export class ObservationPass {
       } catch {
         // The shared listing failed: this agent reads for itself, and that read's own failure stands.
         try {
-          return await base();
+          return await fallback();
         } finally {
           lastDoneSeq = ++this.seq;
         }
