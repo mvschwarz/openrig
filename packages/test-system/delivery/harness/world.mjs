@@ -55,6 +55,7 @@ function cellEnv({ root, home, sockets, binDirs, realTmux, arm, tmuxLog }) {
     DELIVERY_REAL_TMUX: realTmux,
     DELIVERY_TMUX_LOG: tmuxLog,
     DELIVERY_ARM: arm,
+    DELIVERY_INJECT_DIR: join(root, "inject"),
   };
 }
 
@@ -124,7 +125,7 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
   const bin = join(root, "bin");
   const work = join(root, "work");
   const logs = join(root, "logs");
-  for (const d of [home, bin, work, logs, join(root, "tmp"), join(root, "rig", "agents", "worker"), join(home, ".openrig"), join(home, ".claude"), join(home, ".codex")]) {
+  for (const d of [home, bin, work, logs, join(root, "tmp"), join(root, "inject"), join(root, "rig", "agents", "worker"), join(home, ".openrig"), join(home, ".claude"), join(home, ".codex")]) {
     mkdirSync(d, { recursive: true, mode: 0o700 });
   }
   // A unix socket's path is limited to about 108 bytes, and a cell's own directory can be deep, so its tmux socket

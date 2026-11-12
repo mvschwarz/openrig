@@ -74,7 +74,7 @@ function hostPins() {
 }
 
 async function runSuite(opts) {
-  const { CASES } = await import("./cases/s2.mjs");
+  const { CASES } = await import("./cases/index.mjs");
   if (!opts.out) throw new Error("run needs --out <dir>");
   const out = resolve(opts.out);
   mkdirSync(out, { recursive: true });
@@ -137,7 +137,7 @@ function runCell({ cellId, out, caseId, kind, programEntry, openrigEntry, realTm
 /** Inside the namespace: open the world, run the case, bank everything, stop everything. */
 async function cellMain(specPath) {
   const spec = JSON.parse(readFileSync(specPath, "utf8"));
-  const { CASES } = await import("./cases/s2.mjs");
+  const { CASES } = await import("./cases/index.mjs");
   const { openCell, closeCell } = await import("./harness/world.mjs");
   const { caseContext } = await import("./harness/case-context.mjs");
   const { bankCell } = await import("./harness/evidence.mjs");

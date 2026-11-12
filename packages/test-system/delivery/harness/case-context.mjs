@@ -2,7 +2,7 @@
 // got. Each action is recorded in the cell's steps before and after, and a timeout is recorded as an unknown effect,
 // never retried: a case doesn't blindly resend what may have landed.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { deliveriesOf, Verdict } from "./oracle.mjs";
@@ -87,6 +87,7 @@ export function caseContext(cell, { caseId, kind }) {
     },
 
     composer: () => composerText(kind, screen.last()?.screen ?? ""),
+    composerOf: (text) => composerText(kind, text ?? ""),
 
     /** Type as a person at the keyboard would, through the seat's tmux pane, with no Enter. */
     async typeDraft(text) {
@@ -101,6 +102,37 @@ export function caseContext(cell, { caseId, kind }) {
     async enterCopyMode() { cell.record({ step: "person-copy-mode", caseId }); await cell.tmux(["copy-mode", "-t", cell.session]); },
     async leaveCopyMode() { cell.record({ step: "person-leaves-copy-mode", caseId }); await cell.tmux(["send-keys", "-t", cell.session, "-X", "cancel"]); },
     async inMode() { return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{pane_in_mode}"])).trim() === "1"; },
+
+    /** Arm the logging tmux to type `text` as a person into the seat's pane between OpenRig's last read of the input
+     *  box and its next paste there (once). */
+    armDraftInjection(text) {
+      const spec = { pane: cell.paneId, text, bufferPrefix: "openrig_" };
+      writeFileSync(join(cell.env.DELIVERY_INJECT_DIR, "arm.json"), JSON.stringify(spec));
+      cell.record({ step: "arm-injection", caseId, ...spec });
+    },
+    /** What the injection did, or null if no paste came to fire it. */
+    injection() {
+      const path = join(cell.env.DELIVERY_INJECT_DIR, "fired.json");
+      return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+    },
+    async waitInjection({ timeoutMs = 90_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (!ctx.injection() && Date.now() < deadline) await sleep(250);
+      return ctx.injection();
+    },
+
+    /** A watchdog periodic reminder aimed at the seat: OpenRig's own automatic notice, from its scheduler. */
+    async registerReminder(message, intervalSeconds) {
+      const specPath = join(cell.root, `reminder-${randomBytes(3).toString("hex")}.yaml`);
+      writeFileSync(specPath, `message: ${JSON.stringify(message)}\n`);
+      const out = await cell.rig(["watchdog", "register", "--policy", "periodic-reminder", "--target-session", cell.session,
+        "--interval-seconds", String(intervalSeconds), "--spec", specPath, "--registered-by", "delivery-suite@harness", "--json"]);
+      const json = JSON.parse(out.stdout);
+      const jobId = json.jobId ?? json.job?.jobId ?? json.id;
+      verdict.info("watchdog reminder registered", { jobId, intervalSeconds });
+      return jobId;
+    },
+    async stopWatchdog(jobId) { await cell.rig(["watchdog", "stop", jobId, "--json"], { allowFail: true }); },
 
     async setGuard(mode) {
       const out = await cell.rig(["seat", "set-typing-guard", cell.session, "--mode", mode, "--reason", `delivery suite ${caseId}`, "--json"]);

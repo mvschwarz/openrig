@@ -3,7 +3,7 @@
 // cells run from packages/test-system/delivery/run.mjs; these tests keep the parts they rely on honest.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -132,6 +132,43 @@ describe("delivery harness: the cell's surroundings", () => {
       // A relative path is refused rather than guessed.
       expect(spawnSync(join(HARNESS, "tmux"), ["-V"], { env: { PATH: "/usr/bin:/bin", DELIVERY_REAL_TMUX: "tmux", DELIVERY_TMUX_LOG: log, DELIVERY_ARM: "t" } }).status).not.toBe(0);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("types an armed draft into exactly the armed pane, once, and shows it before letting the paste run", () => {
+    const real = spawnSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).stdout.trim();
+    if (!real) return; // no tmux on this host
+    const sockets = mkdtempSync("/tmp/dlv-test-");
+    const dir = mkdtempSync(join(tmpdir(), "delivery-inject-"));
+    const env = { PATH: "/usr/bin:/bin", TMUX_TMPDIR: sockets, DELIVERY_REAL_TMUX: real, DELIVERY_TMUX_LOG: join(dir, "argv.jsonl"), DELIVERY_ARM: "t", DELIVERY_INJECT_DIR: dir };
+    const tmux = (...args: string[]) => spawnSync(real, args, { encoding: "utf8", env });
+    const wrapped = (...args: string[]) => spawnSync(join(HARNESS, "tmux"), args, { encoding: "utf8", env });
+    try {
+      tmux("new-session", "-d", "-s", "s", "-x", "80", "-y", "10", "cat");
+      const pane = tmux("display-message", "-p", "-t", "s", "#{pane_id}").stdout.trim();
+      tmux("set-buffer", "-b", "openrig_t_1", "NOTICE-TEXT");
+      tmux("set-buffer", "-b", "other_1", "OTHER");
+      writeFileSync(join(dir, "arm.json"), JSON.stringify({ pane, text: "DRAFT-TEXT", bufferPrefix: "openrig_" }));
+      // A paste from another buffer leaves the arm in place.
+      expect(wrapped("paste-buffer", "-t", pane, "-b", "other_1").status).toBe(0);
+      expect(existsSync(join(dir, "fired.json"))).toBe(false);
+      expect(existsSync(join(dir, "arm.json"))).toBe(true);
+      expect(wrapped("paste-buffer", "-t", pane, "-b", "openrig_t_1").status).toBe(0);
+      const fired = JSON.parse(readFileSync(join(dir, "fired.json"), "utf8"));
+      expect(fired).toMatchObject({ target: pane, buffer: "openrig_t_1", text: "DRAFT-TEXT", visible: true });
+      expect(fired.screenBeforePaste).toContain("DRAFT-TEXT");
+      expect(fired.screenBeforePaste).not.toContain("NOTICE-TEXT");
+      expect(existsSync(join(dir, "arm.json"))).toBe(false);
+      // Once: a second paste types nothing more.
+      tmux("set-buffer", "-b", "openrig_t_2", "SECOND");
+      expect(wrapped("paste-buffer", "-t", pane, "-b", "openrig_t_2").status).toBe(0);
+      const screen = tmux("capture-pane", "-p", "-t", pane).stdout;
+      expect(screen.match(/DRAFT-TEXT/g)).toHaveLength(1);
+      expect(screen).toContain("NOTICE-TEXT");
+    } finally {
+      tmux("kill-server");
+      rmSync(sockets, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("banks the daemon's tables without credential-like columns, and flags credential-shaped text", () => {

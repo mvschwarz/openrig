@@ -49,6 +49,16 @@ Each cell's bank keeps everything a reader needs to check the verdict without tr
 
 Every banked file is scanned for credential-shaped text.
 
+### Issue #3076's late gap
+
+`cases/r3076.mjs` makes a race deterministic. A person types into an empty input box after OpenRig's draft-aware read found it empty, but before OpenRig's paste. A case arms the logging tmux with a one-shot (`DELIVERY_INJECT_DIR`). On OpenRig's next `paste-buffer` to exactly that pane, from an `openrig_` buffer, the wrapper types the draft as keys, waits until a capture shows it, and only then lets the paste run. It records both screens and the timing in `fired.json`.
+
+There are two cells, each with its own verdict: an ordinary `rig send` (the send control) and an actual watchdog `periodic-reminder` (OpenRig's own automatic notice). The cells check two things separately:
+- **contamination:** anything but the draft in the input box, or the draft and OpenRig's text reaching the model together. It's FAIL even with no Enter, and a placeholder such as Claude Code's `[Pasted text #1 +6 lines]` counts.
+- **draft loss:** whether the draft's own bytes are lost or changed.
+
+This is the real TUI with timing injected at the wrapper boundary, after the guard's final check and before `paste-buffer`. Broker input on either side of the guard's final check, text already present before the read, and a real plain `tmux attach` client are separate controls, not covered here.
+
 
 ## Stand-in model servers
 
