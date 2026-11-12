@@ -31,8 +31,8 @@ import {
   type CodexResumeDisplayInput,
 } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
-import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
-import { readRegularCustomPolicyFile, resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
+import { resolveLaunchOverrideFromFacts, type LaunchOverrideSelectionFact } from "./native-permission-store.js";
+import { readRegularCustomPolicyFile, resolveDisplayedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -133,8 +133,30 @@ interface BindingRow {
 
 // -- Helpers --
 
-function resolveBasePolicyPosture(row: InventoryRow): "floor" | "full_bypass" | "auto" {
-  return resolvePersistedRestorePosture(
+function readCustomPolicyCached(
+  target: string,
+  cache: Map<string, string | null>,
+): string {
+  if (cache.has(target)) {
+    const cached = cache.get(target)!;
+    if (cached === null) throw new Error(`Cached unreadable custom policy target: ${target}`);
+    return cached;
+  }
+  try {
+    const content = readRegularCustomPolicyFile(target);
+    cache.set(target, content);
+    return content;
+  } catch (error) {
+    cache.set(target, null);
+    throw error;
+  }
+}
+
+function resolveBasePolicyPosture(
+  row: InventoryRow,
+  customPolicyCache: Map<string, string | null>,
+): "floor" | "full_bypass" | "auto" {
+  return resolveDisplayedRestorePosture(
     {
       nodeOrigin: row.node_policy_origin,
       nodeLaunchPosture: row.node_policy_launch_posture,
@@ -147,9 +169,13 @@ function resolveBasePolicyPosture(row: InventoryRow): "floor" | "full_bypass" | 
       rigDeclaringDir: row.rig_policy_declaring_dir,
       rigRef: row.rig_permission_policy,
     },
-    { readFile: readRegularCustomPolicyFile },
+    { readFile: (target) => readCustomPolicyCached(target, customPolicyCache) },
   );
 }
+
+type PermissionSelectionsLookup =
+  | { state: "available"; byNodeId: Map<string, { runtime: string; mode: string }> }
+  | { state: "unavailable"; error: unknown };
 
 type CodexResumeResolution =
   | { ok: true; input: CodexResumeDisplayInput }
@@ -158,106 +184,62 @@ type CodexResumeResolution =
 function resolveCodexResumeResolution(
   row: InventoryRow,
   recordedLaunch: StoredAppliedLaunchObservation | undefined,
-  selection: { runtime: string; mode: string } | undefined,
+  permissionSelections: PermissionSelectionsLookup,
+  customPolicyCache: Map<string, string | null>,
   launchWrapper?: readonly string[] | null,
 ): CodexResumeResolution {
-  // Match NativePermissionStore.launchOverride + RestoreOrchestrator.attemptResume validation and precedence so
-  // display never fabricates a floor command when real resume refuses invalid or conflicting settings.
-  if (selection !== undefined) {
-    if (
-      (selection.runtime !== "codex" && selection.runtime !== "claude-code")
-      || !/^[A-Za-z][A-Za-z0-9_]*$/.test(selection.mode)
-      || (selection.runtime === "codex" && selection.mode !== "floor" && selection.mode !== "full_bypass")
-    ) {
-      return { ok: false, diagnostic: "Permission selection: Invalid persisted native permission selection; launch refused." };
-    }
-  }
-  let codexPermissions: CodexMemberPermissions | undefined;
-  if (row.codex_permissions_json != null) {
-    try {
-      codexPermissions = validateCodexMemberPermissions(JSON.parse(row.codex_permissions_json));
-    } catch (error) {
-      const seat = row.logical_id ? `${row.node_id} (${row.logical_id})` : row.node_id;
-      return {
-        ok: false,
-        diagnostic: `Permission selection: Seat ${seat}: cannot read codex_permissions (${(error as Error).message}). Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>, or choose a mode with --mode, before launching.`,
-      };
-    }
-  }
-  if (selection !== undefined && selection.runtime !== "codex") {
-    return {
-      ok: false,
-      diagnostic: "Permission selection: Seat runtime changed since permission selection; explicitly select again or inherit.",
-    };
-  }
-  if (codexPermissions !== undefined && selection !== undefined) {
-    return {
-      ok: false,
-      diagnostic: `Permission selection: Seat ${row.node_id} records both a Codex permission envelope and the ${selection.mode} mode; launch refused. Choose one with rig seat set-permissions <seat> --codex-permissions <file> or --mode <mode> --reason <reason>.`,
-    };
-  }
-
-  const nonInterruptive = row.rig_non_interruptive === 1;
-  const base: CodexResumeDisplayInput = {
-    codexConfigProfile: row.codex_config_profile,
-    codexDaemonOptOut: recordedLaunch?.daemonOptOut,
-    recordedLaunch: recordedLaunch ?? null,
-    nonInterruptive,
-    ...(launchWrapper && launchWrapper.length > 0 ? { launchWrapper } : {}),
-  };
-  if (selection !== undefined) {
-    return {
-      ok: true,
-      input: {
-        ...base,
-        resolvedPosture: selection.mode as "floor" | "full_bypass",
-        kernelAuthority: false,
-        teamPermissionDefault: false,
+  const selection: LaunchOverrideSelectionFact = permissionSelections.state === "unavailable"
+    ? permissionSelections
+    : { state: "available", value: permissionSelections.byNodeId.get(row.node_id) ?? null };
+  let override: ReturnType<typeof resolveLaunchOverrideFromFacts>;
+  try {
+    override = resolveLaunchOverrideFromFacts({
+      nodeId: row.node_id,
+      logicalId: row.logical_id,
+      runtime: "codex",
+      selection,
+      codexPermissionsJson: row.codex_permissions_json,
+      launchDefaultMetadata: {
+        rigName: row.rig_name,
+        memberPolicy: row.node_permission_policy,
+        rigPolicy: row.rig_permission_policy,
+        codexProfile: row.codex_config_profile,
       },
-    };
-  }
-  if (codexPermissions !== undefined) {
-    return {
-      ok: true,
-      input: {
-        ...base,
-        codexPermissions,
-        resolvedPosture: resolveBasePolicyPosture(row),
-        kernelAuthority: false,
-        teamPermissionDefault: false,
-      },
-    };
-  }
-  const hasPolicyOrProfile = row.node_permission_policy != null
-    || row.rig_permission_policy != null
-    || Boolean(row.codex_config_profile?.trim());
-  if (!hasPolicyOrProfile && row.rig_name === "kernel") {
-    return {
-      ok: true,
-      input: { ...base, resolvedPosture: "full_bypass", kernelAuthority: true, teamPermissionDefault: false },
-    };
+    });
+  } catch (error) {
+    return { ok: false, diagnostic: `Permission selection: ${(error as Error).message}` };
   }
   return {
     ok: true,
     input: {
-      ...base,
-      resolvedPosture: resolveBasePolicyPosture(row),
-      kernelAuthority: false,
-      teamPermissionDefault: !hasPolicyOrProfile,
+      codexConfigProfile: row.codex_config_profile,
+      codexDaemonOptOut: recordedLaunch?.daemonOptOut,
+      codexPermissions: override.codexPermissions,
+      resolvedPosture: override.codexPermissions
+        ? "floor"
+        : (override.launchPosture ?? resolveBasePolicyPosture(row, customPolicyCache)),
+      nonInterruptive: row.rig_non_interruptive === 1,
+      kernelAuthority: override.kernelAuthority === true,
+      teamPermissionDefault: override.teamPermissionDefault === true,
+      recordedLaunch: recordedLaunch ?? null,
+      ...(launchWrapper && launchWrapper.length > 0 ? { launchWrapper } : {}),
     },
   };
 }
 
-function readPermissionSelectionsMap(db: Database.Database): Map<string, { runtime: string; mode: string }> {
+function readPermissionSelectionsMap(db: Database.Database): PermissionSelectionsLookup {
   try {
     const rows = db.prepare("SELECT node_id, runtime, mode FROM node_permission_selections").all() as Array<{
       node_id: string;
       runtime: string;
       mode: string;
     }>;
-    return new Map(rows.map((row) => [row.node_id, { runtime: row.runtime, mode: row.mode }]));
-  } catch {
-    return new Map();
+    return {
+      state: "available",
+      byNodeId: new Map(rows.map((row) => [row.node_id, { runtime: row.runtime, mode: row.mode }])),
+    };
+  } catch (error) {
+    return { state: "unavailable", error };
   }
 }
 
@@ -772,6 +754,7 @@ function projectRigInventoryItems(db: Database.Database, rigId: string): Project
   const orienteds = buildOrientedMap(db, rigId);
   const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations();
   const permissionSelections = readPermissionSelectionsMap(db);
+  const customPolicyCache = new Map<string, string | null>();
 
   const rows = queryInventoryRows(db, rigId);
 
@@ -784,6 +767,7 @@ function projectRigInventoryItems(db: Database.Database, rigId: string): Project
       orienteds,
       currentLaunchObservations,
       permissionSelections,
+      customPolicyCache,
     }),
   );
 }
@@ -922,8 +906,10 @@ interface InventoryBuildContext {
   orienteds: Map<string, NodeOriented>;
   /** Each node's current recorded launch observation (one read per projection); absent = not recorded. */
   currentLaunchObservations: Map<string, StoredAppliedLaunchObservation>;
-  /** Explicit per-seat native permission selections (one read per projection); absent = none. */
-  permissionSelections: Map<string, { runtime: string; mode: string }>;
+  /** Explicit per-seat native permission selections (one read per projection), or table-unavailable state. */
+  permissionSelections: PermissionSelectionsLookup;
+  /** Per-inventory-build custom-policy target cache so shared targets are probed/read at most once per build. */
+  customPolicyCache: Map<string, string | null>;
 }
 
 interface ProjectedNodeInventoryItem {
@@ -950,6 +936,7 @@ function buildInventoryItem(
     orienteds,
     currentLaunchObservations,
     permissionSelections,
+    customPolicyCache,
   } = ctx;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
@@ -961,7 +948,8 @@ function buildInventoryItem(
     ? resolveCodexResumeResolution(
       row,
       recordedLaunch,
-      permissionSelections.get(row.node_id),
+      permissionSelections,
+      customPolicyCache,
       launchWrapper,
     )
     : undefined;
@@ -1164,6 +1152,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
   const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
   const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations(); // one launch-fact read
   const permissionSelections = readPermissionSelectionsMap(db);
+  const customPolicyCache = new Map<string, string | null>();
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -1174,6 +1163,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
       orienteds,
       currentLaunchObservations,
       permissionSelections,
+      customPolicyCache,
     });
     let list = out.get(row.rig_id);
     if (!list) { list = []; out.set(row.rig_id, list); }

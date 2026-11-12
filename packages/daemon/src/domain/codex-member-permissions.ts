@@ -68,17 +68,30 @@ export function observeCodexEnvelope(envelope: CodexPermissionEnvelope): Applied
     approvalPolicy: envelope.approvalPolicy, reason: "emitted_launch_arguments" };
 }
 
-/** Read the current seat, not its original spec or a snapshot. Minimal old fixtures have no column. */
-export function readCodexMemberPermissions(db: Database.Database, nodeId: string): CodexMemberPermissions | undefined {
-  let seat = nodeId;
+/** Parse and validate a seat's stored codex_permissions_json column with the canonical seat repair error. */
+export function parseStoredCodexMemberPermissions(
+  nodeId: string,
+  codexPermissionsJson: string | null | undefined,
+  logicalId?: string | null,
+): CodexMemberPermissions | undefined {
+  if (codexPermissionsJson == null) return undefined;
+  const seat = logicalId ? `${nodeId} (${logicalId})` : nodeId;
   try {
-    const row = db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as { logical_id?: string; codex_permissions_json?: string | null } | undefined;
-    if (row?.codex_permissions_json == null) return undefined;
-    if (row.logical_id) seat += ` (${row.logical_id})`;
-    return validateCodexMemberPermissions(JSON.parse(row.codex_permissions_json));
+    return validateCodexMemberPermissions(JSON.parse(codexPermissionsJson));
   } catch (error) {
     throw new Error(`Seat ${seat}: cannot read codex_permissions (${(error as Error).message}). Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>, or choose a mode with --mode, before launching.`);
   }
+}
+
+/** Read the current seat, not its original spec or a snapshot. Minimal old fixtures have no column. */
+export function readCodexMemberPermissions(db: Database.Database, nodeId: string): CodexMemberPermissions | undefined {
+  let row: { logical_id?: string | null; codex_permissions_json?: string | null } | undefined;
+  try {
+    row = db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as typeof row;
+  } catch (error) {
+    throw new Error(`Seat ${nodeId}: cannot read codex_permissions (${(error as Error).message}). Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>, or choose a mode with --mode, before launching.`);
+  }
+  return parseStoredCodexMemberPermissions(nodeId, row?.codex_permissions_json, row?.logical_id);
 }
 
 /** Clear a seat's envelope inside the caller's transaction, when an explicit mode replaces it; returns what it held, or

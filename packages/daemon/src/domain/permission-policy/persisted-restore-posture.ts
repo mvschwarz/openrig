@@ -2,6 +2,31 @@ import fs from "node:fs";
 import { resolvePermissionPolicyAttachment, type PolicyResolveDeps } from "./policy-ref.js";
 import type { LaunchPosture } from "./policy-spec.js";
 
+export interface PersistedNodeProvenance {
+  origin: string;
+  launchPosture: string;
+  resolvedTarget: string | null;
+  declaringDir: string | null;
+  nodeRef: string | null;
+}
+
+export interface PersistedRigProvenance {
+  origin: string;
+  launchPosture: string;
+  resolvedTarget: string | null;
+  declaringDir: string | null;
+  rigRef: string | null;
+}
+
+export interface PersistedRestorePostureReader {
+  getNodeProvenance: () => PersistedNodeProvenance | null;
+  getFallbackRigRef: () => string | null;
+  getRigProvenance: () => PersistedRigProvenance | null;
+  readFile?: (target: string) => string;
+  /** Display-only guard: reject non-custom refs when re-deriving a custom-origin provenance row. */
+  requireCustomOrigin?: boolean;
+}
+
 export interface PersistedPolicyProvenanceSnapshot {
   nodeOrigin: string | null;
   nodeLaunchPosture: string | null;
@@ -20,10 +45,10 @@ function asKnownLaunchPosture(value: string | null | undefined): LaunchPosture |
 }
 
 /**
- * Synchronous custom-policy reader shared by RestoreOrchestrator and node-inventory.
+ * Synchronous custom-policy reader used by display projections.
  * Rejects non-regular files (such as FIFOs, sockets, device nodes, or directories) via statSync
- * before opening the path so special files cannot block synchronous reads; callers catch any
- * stat/read failure and retain the persisted posture.
+ * before opening the path so special files cannot block synchronous display reads; callers catch
+ * any stat/read failure and retain the persisted posture.
  */
 export function readRegularCustomPolicyFile(target: string): string {
   if (!fs.statSync(target).isFile()) {
@@ -33,65 +58,104 @@ export function readRegularCustomPolicyFile(target: string): string {
 }
 
 /**
- * OPR.0.4.8.3 Seam B — shared persisted-provenance posture resolution used by both
- * RestoreOrchestrator.resolveRestorePosture and node-inventory resume command projection:
- *   1. Persisted node provenance (`nodeOrigin` + `nodeLaunchPosture` non-null) wins over rig
- *      provenance. Readable valid custom policies (`origin === "custom"`) reopen and re-derive
- *      their posture only when the resolved ref itself has `origin === "custom"`; non-regular,
- *      unreadable, invalid, or mismatched builtin/none refs retain the persisted posture.
- *   2. With no node provenance, persisted rig provenance (`rigOrigin` + `rigLaunchPosture`
- *      non-null) applies with the same custom re-derivation rule.
- *   3. No saved provenance (including legacy `permission_policy` rows with NULL provenance, or
- *      any unexpected error) resolves explicitly to `"floor"`, never raw `builtinLaunchPosture`
- *      or ambient environment delegation.
+ * OPR.0.4.8.3 Seam B — shared persisted-provenance posture resolution with main's exact lazy
+ * lookup order and raw posture pass-through:
+ *   1. Persisted node provenance wins over rig provenance. When `origin === "custom"` with both
+ *      `declaringDir` and `resolvedTarget`, lazily falls back to `getFallbackRigRef()` only when
+ *      `nodeRef` is null, and reopens + re-derives readable valid custom policies; unreadable or
+ *      malformed files retain the raw persisted `launchPosture`.
+ *   2. Only when node provenance is absent, `getRigProvenance()` is read with the same rule.
+ *   3. No saved provenance (or an unexpected outer lookup error) returns `"floor"`.
  */
-export function resolvePersistedRestorePosture(
-  snapshot: PersistedPolicyProvenanceSnapshot,
-  deps: PolicyResolveDeps,
-): LaunchPosture {
+export function resolvePersistedRestorePosture(reader: PersistedRestorePostureReader): string {
+  const readFile = reader.readFile ?? ((target: string) => fs.readFileSync(target, "utf-8"));
   try {
-    if (snapshot.nodeOrigin != null && snapshot.nodeLaunchPosture != null) {
-      if (snapshot.nodeOrigin === "custom" && snapshot.nodeDeclaringDir && snapshot.nodeResolvedTarget) {
-        const ref = snapshot.nodeRef ?? snapshot.rigRef;
+    const prov = reader.getNodeProvenance();
+    if (prov) {
+      if (prov.origin === "custom" && prov.declaringDir && prov.resolvedTarget) {
+        const ref = prov.nodeRef ?? reader.getFallbackRigRef();
         if (ref) {
           let content: string | null = null;
           try {
-            content = deps.readFile(snapshot.nodeResolvedTarget);
+            content = readFile(prov.resolvedTarget);
           } catch {
             content = null;
           }
           if (content !== null) {
             const body = content;
-            const rederived = resolvePermissionPolicyAttachment(ref, snapshot.nodeDeclaringDir, {
+            const rederived = resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
               readFile: () => body,
             });
-            if (rederived.contentResolved && rederived.origin === "custom") return rederived.launchPosture;
+            if (rederived.contentResolved && (!reader.requireCustomOrigin || rederived.origin === "custom")) {
+              return rederived.launchPosture;
+            }
           }
         }
       }
-      return asKnownLaunchPosture(snapshot.nodeLaunchPosture) ?? "floor";
+      return prov.launchPosture;
     }
 
-    if (snapshot.rigOrigin != null && snapshot.rigLaunchPosture != null) {
-      if (snapshot.rigOrigin === "custom" && snapshot.rigDeclaringDir && snapshot.rigResolvedTarget && snapshot.rigRef) {
+    const rigProv = reader.getRigProvenance();
+    if (rigProv) {
+      if (rigProv.origin === "custom" && rigProv.declaringDir && rigProv.resolvedTarget && rigProv.rigRef) {
         let content: string | null = null;
         try {
-          content = deps.readFile(snapshot.rigResolvedTarget);
+          content = readFile(rigProv.resolvedTarget);
         } catch {
           content = null;
         }
         if (content !== null) {
           const body = content;
-          const rederived = resolvePermissionPolicyAttachment(snapshot.rigRef, snapshot.rigDeclaringDir, {
+          const rederived = resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
             readFile: () => body,
           });
-          if (rederived.contentResolved && rederived.origin === "custom") return rederived.launchPosture;
+          if (rederived.contentResolved && (!reader.requireCustomOrigin || rederived.origin === "custom")) {
+            return rederived.launchPosture;
+          }
         }
       }
-      return asKnownLaunchPosture(snapshot.rigLaunchPosture) ?? "floor";
+      return rigProv.launchPosture;
     }
   } catch {
     // Posture resolution must never throw; fall through to the locked minimum floor.
   }
   return "floor";
+}
+
+/**
+ * Display-only posture resolution for batched node inventory and detail guidance:
+ * normalizes unrecognized or empty persisted posture strings to `"floor"` so ambient OPENRIG_YOLO
+ * never leaks into displayed commands, rejects mismatched builtin/none refs under custom provenance,
+ * and reads custom targets through `readRegularCustomPolicyFile` by default.
+ */
+export function resolveDisplayedRestorePosture(
+  snapshot: PersistedPolicyProvenanceSnapshot,
+  deps: PolicyResolveDeps = { readFile: readRegularCustomPolicyFile },
+): LaunchPosture {
+  const raw = resolvePersistedRestorePosture({
+    getNodeProvenance: () =>
+      snapshot.nodeOrigin != null && snapshot.nodeLaunchPosture != null
+        ? {
+            origin: snapshot.nodeOrigin,
+            launchPosture: snapshot.nodeLaunchPosture,
+            resolvedTarget: snapshot.nodeResolvedTarget,
+            declaringDir: snapshot.nodeDeclaringDir,
+            nodeRef: snapshot.nodeRef,
+          }
+        : null,
+    getFallbackRigRef: () => snapshot.rigRef,
+    getRigProvenance: () =>
+      snapshot.rigOrigin != null && snapshot.rigLaunchPosture != null
+        ? {
+            origin: snapshot.rigOrigin,
+            launchPosture: snapshot.rigLaunchPosture,
+            resolvedTarget: snapshot.rigResolvedTarget,
+            declaringDir: snapshot.rigDeclaringDir,
+            rigRef: snapshot.rigRef,
+          }
+        : null,
+    readFile: deps.readFile,
+    requireCustomOrigin: true,
+  });
+  return asKnownLaunchPosture(raw) ?? "floor";
 }

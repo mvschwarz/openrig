@@ -15,7 +15,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
-import { readRegularCustomPolicyFile, resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
@@ -2465,31 +2465,11 @@ export class RestoreOrchestrator {
    */
   /** Pure, read-only policy resolution shared with selected startup review and node-inventory display. */
   resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | "auto" {
-    try {
-      const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
-      const rigProv = prov ? null : this.rigRepo.getRigPolicyProvenance(rigId);
-      const rigRef = prov
-        ? (prov.origin === "custom" && prov.nodeRef == null ? this.rigRepo.getRigPermissionPolicy(rigId) : null)
-        : (rigProv?.rigRef ?? null);
-      return resolvePersistedRestorePosture(
-        {
-          nodeOrigin: prov?.origin ?? null,
-          nodeLaunchPosture: prov?.launchPosture ?? null,
-          nodeResolvedTarget: prov?.resolvedTarget ?? null,
-          nodeDeclaringDir: prov?.declaringDir ?? null,
-          nodeRef: prov?.nodeRef ?? null,
-          rigOrigin: rigProv?.origin ?? null,
-          rigLaunchPosture: rigProv?.launchPosture ?? null,
-          rigResolvedTarget: rigProv?.resolvedTarget ?? null,
-          rigDeclaringDir: rigProv?.declaringDir ?? null,
-          rigRef,
-        },
-        { readFile: readRegularCustomPolicyFile },
-      );
-    } catch { /* posture resolution must never block a restore */ }
-    // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked
-    // minimum floor, explicitly — never undefined (which would delegate to ambient YOLO).
-    return "floor";
+    return resolvePersistedRestorePosture({
+      getNodeProvenance: () => this.rigRepo.getNodePolicyProvenance(nodeId),
+      getFallbackRigRef: () => this.rigRepo.getRigPermissionPolicy(rigId),
+      getRigProvenance: () => this.rigRepo.getRigPolicyProvenance(rigId),
+    }) as "floor" | "full_bypass" | "auto";
   }
 
   /** The live seat's current model: `rig seat set-model` saves it on the live node after the snapshot, and every

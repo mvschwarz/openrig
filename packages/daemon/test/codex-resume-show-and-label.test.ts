@@ -9,6 +9,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import * as nativePermissionStoreModule from "../src/domain/native-permission-store.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
@@ -26,6 +27,7 @@ import {
   getNodeInventoryForAllRigs,
   getNodeInventoryForRigs,
 } from "../src/domain/node-inventory.js";
+import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -100,6 +102,39 @@ function inertFsOps(): CodexAdapterFsOps {
     mkdirp: () => {},
     listFiles: () => [],
   };
+}
+
+function makeMockClaudeTmux(capturedCommands?: string[]): TmuxAdapter {
+  const sendText = vi.fn(async (_target: string, text: string) => {
+    capturedCommands?.push(text);
+    return { ok: true as const };
+  });
+  return mockShellCommand({
+    sendText,
+    hasSession: vi.fn(async () => true),
+    getPaneCommand: vi.fn(async () => "claude"),
+    capturePaneContent: vi.fn(async () => "Claude Code v2.1.0\n❯ "),
+    sendKeys: vi.fn(async () => ({ ok: true as const })),
+    getPanePid: vi.fn(async () => null),
+    listSessions: vi.fn(async () => []),
+    listWindows: vi.fn(async () => []),
+    listPanes: vi.fn(async () => []),
+  } as unknown as TmuxAdapter);
+}
+
+function makeValidFlagPolicy(posture: "floor" | "full_bypass"): string {
+  return [
+    "---",
+    "source: custom",
+    "name: synthetic-flag-policy",
+    "surface: flag",
+    `launch_posture: ${posture}`,
+    "policy_schema_version: 1",
+    "description: Synthetic test flag policy",
+    "---",
+    "Policy prose body.",
+    "",
+  ].join("\n");
 }
 
 describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () => {
@@ -322,19 +357,103 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     vi.unstubAllEnvs();
   });
 
-  it("matches real CodexResumeAdapter flags across floor, full_bypass+nonInterruptive, kernel default, and member envelopes while ignoring ambient OPENRIG_YOLO", async () => {
+  function createRestoreOrchestrator(overrides: Partial<RestoreOrchestratorDeps> = {}): RestoreOrchestrator {
+    return new RestoreOrchestrator({
+      db,
+      rigRepo,
+      sessionRegistry: registry,
+      eventBus: new EventBus(db),
+      snapshotRepo: { db },
+      checkpointStore: { db },
+      snapshotCapture: { db },
+      nodeLauncher: { db },
+      ...overrides,
+    } as unknown as RestoreOrchestratorDeps);
+  }
+
+  async function runRealRestoreResolvedResume(
+    restoreOrchestrator: RestoreOrchestrator,
+    nodeId: string,
+    rigId: string,
+    token: string,
+    opts?: { daemonSupported?: boolean },
+  ): Promise<string> {
+    const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
+    const override = permStore.launchOverride(nodeId, "codex");
+    const effectivePosture = override.launchPosture ?? resolvedPosture;
+    const profileRow = db
+      .prepare("SELECT codex_config_profile FROM nodes WHERE id = ?")
+      .get(nodeId) as { codex_config_profile: string | null } | undefined;
+    const sent: string[] = [];
+    const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
+      sleep: async () => {},
+      maxWaitMs: 0,
+      exec: async () => "",
+      ...(opts?.daemonSupported ? { detectDaemonSupport: async () => ({ kind: "supported" as const }) } : {}),
+    });
+    const res = await adapter.resume(
+      "pane-1",
+      "codex_id",
+      token,
+      "/work",
+      profileRow?.codex_config_profile ?? null,
+      effectivePosture,
+      undefined,
+      undefined,
+      rigRepo.getRigNonInterruptive(rigId),
+      override.kernelAuthority === true,
+      override.teamPermissionDefault === true,
+      undefined,
+      override.codexPermissions,
+    );
+    expect(res.ok).toBe(true);
+    return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
+  }
+
+  it("M1: shares one pure resolveLaunchOverrideFromFacts decision between NativePermissionStore.launchOverride and batched inventory across selection, envelope, kernel, team, runtime-switch target, and refusal cases", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
 
+    const resolveFromFacts = (nativePermissionStoreModule as Record<string, unknown>).resolveLaunchOverrideFromFacts as
+      | ((facts: Record<string, unknown>) => Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "codexPermissions">)
+      | undefined;
+    expect(typeof resolveFromFacts).toBe("function");
+
+    // Direct pure-facts coverage: runtime-switch target mode replaces even broken envelope JSON, and invalid selection
+    // refuses before broken envelope JSON just as NativePermissionStore.launchOverride does.
+    expect(
+      resolveFromFacts!({
+        nodeId: "node-switch",
+        logicalId: "dev.switch",
+        runtime: "codex",
+        selection: { state: "unavailable", error: new Error("unused when target provided") },
+        codexPermissionsJson: "{broken",
+        target: { selection: { runtime: "codex", mode: "full_bypass" }, codexProfile: null },
+      }),
+    ).toEqual({ kernelAuthority: false, teamPermissionDefault: false, launchPosture: "full_bypass" });
+
+    expect(() =>
+      resolveFromFacts!({
+        nodeId: "node-order",
+        logicalId: "dev.order",
+        runtime: "codex",
+        selection: { state: "available", value: { runtime: "codex", mode: "auto" } },
+        codexPermissionsJson: "{broken",
+      }),
+    ).toThrow("Invalid persisted native permission selection; launch refused.");
+
+    const restoreOrchestrator = createRestoreOrchestrator();
     const teamRig = rigRepo.createRig("team-rig");
     db.prepare("UPDATE rigs SET non_interruptive = 1 WHERE id = ?").run(teamRig.id);
 
-    const floorNode = rigRepo.addNode(teamRig.id, "dev.floor", { runtime: "codex", cwd: "/work/floor" });
-    const sFloor = registry.registerSession(floorNode.id, "dev-floor@team-rig");
-    registry.updateResumeToken(sFloor.id, "codex_id", "tok-floor", "hook");
+    const teamNode = rigRepo.addNode(teamRig.id, "dev.floor", { runtime: "codex", cwd: "/work/floor" });
+    registry.updateResumeToken(registry.registerSession(teamNode.id, "dev-floor@team-rig").id, "codex_id", "tok-floor", "hook");
+
+    const floorSelNode = rigRepo.addNode(teamRig.id, "dev.floor-sel", { runtime: "codex", cwd: "/work/floor-sel" });
+    registry.updateResumeToken(registry.registerSession(floorSelNode.id, "dev-floor-sel@team-rig").id, "codex_id", "tok-floor-sel", "hook");
+    permStore.write(floorSelNode.id, { runtime: "codex", mode: "floor" }, "op@team-rig", "Explicit floor");
 
     const bypassNode = rigRepo.addNode(teamRig.id, "dev.bypass", { runtime: "codex", cwd: "/work/bypass" });
-    const sBypass = registry.registerSession(bypassNode.id, "dev-bypass@team-rig");
-    registry.updateResumeToken(sBypass.id, "codex_id", "tok-bypass", "hook");
+    registry.updateResumeToken(registry.registerSession(bypassNode.id, "dev-bypass@team-rig").id, "codex_id", "tok-bypass", "hook");
     permStore.write(bypassNode.id, { runtime: "codex", mode: "full_bypass" }, "op@team-rig", "Bypass");
 
     const envNode = rigRepo.addNode(teamRig.id, "dev.env", {
@@ -343,82 +462,98 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       codexConfigProfile: "lease-prof",
       codexPermissions: readOnlyOnRequestEnvelope,
     });
-    const sEnv = registry.registerSession(envNode.id, "dev-env@team-rig");
-    registry.updateResumeToken(sEnv.id, "codex_id", "tok-env", "hook");
+    registry.updateResumeToken(registry.registerSession(envNode.id, "dev-env@team-rig").id, "codex_id", "tok-env", "hook");
     observations.recordGeneration(registry.currentOccupantTenure(envNode.id)!.generationUuid, {
       ...observeCodexEnvelope(codexMemberEnvelope(readOnlyOnRequestEnvelope)),
       daemonOptOut: true,
     });
 
+    const policyFloorNode = rigRepo.addNode(teamRig.id, "dev.policy-floor", { runtime: "codex", cwd: "/work/pfloor" });
+    rigRepo.setNodePermissionPolicy(policyFloorNode.id, "builtin:locked");
+    rigRepo.setNodePolicyProvenance(policyFloorNode.id, {
+      origin: "builtin",
+      resolvedTarget: "policies/builtin/locked.policy.md",
+      declaringDir: null,
+      launchPosture: "floor",
+    });
+    registry.updateResumeToken(registry.registerSession(policyFloorNode.id, "dev-policy-floor@team-rig").id, "codex_id", "tok-pfloor", "hook");
+
+    const corruptNode = rigRepo.addNode(teamRig.id, "ops.corrupt", { runtime: "codex", cwd: "/work/c" });
+    registry.updateResumeToken(registry.registerSession(corruptNode.id, "ops-corrupt@team-rig").id, "codex_id", "tok-corrupt", "hook");
+    db.prepare("UPDATE nodes SET codex_permissions_json = '{bad json' WHERE id = ?").run(corruptNode.id);
+
+    const conflictNode = rigRepo.addNode(teamRig.id, "ops.conflict", {
+      runtime: "codex",
+      cwd: "/work/k",
+      codexPermissions: workspaceEnvelope,
+    });
+    registry.updateResumeToken(registry.registerSession(conflictNode.id, "ops-conflict@team-rig").id, "codex_id", "tok-conflict", "hook");
+    db.prepare(
+      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'codex', 'full_bypass', 'op', 'conflict', datetime('now'))",
+    ).run(conflictNode.id);
+
+    const mismatchNode = rigRepo.addNode(teamRig.id, "ops.mismatch", { runtime: "codex", cwd: "/work/m" });
+    registry.updateResumeToken(registry.registerSession(mismatchNode.id, "ops-mismatch@team-rig").id, "codex_id", "tok-mismatch", "hook");
+    db.prepare(
+      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'claude-code', 'acceptEdits', 'op', 'old-runtime', datetime('now'))",
+    ).run(mismatchNode.id);
+
     const kernelRig = rigRepo.createRig("kernel");
     const kernelNode = rigRepo.addNode(kernelRig.id, "ops.root", { runtime: "codex", cwd: "/work/root" });
-    const sKernel = registry.registerSession(kernelNode.id, "ops-root@demo-rig");
-    registry.updateResumeToken(sKernel.id, "codex_id", "tok-root", "hook");
+    registry.updateResumeToken(registry.registerSession(kernelNode.id, "ops-root@demo-rig").id, "codex_id", "tok-root", "hook");
 
-    // Compare each seat's displayed resumeCommand against a real CodexResumeAdapter dispatch (stripping only the
-    // launch-time allow_login_shell override that CodexResumeAdapter appends on live pane dispatch).
-    const runRealResume = async (
-      token: string,
-      opts: {
-        profile?: string | null;
-        posture?: "floor" | "full_bypass" | "auto";
-        nonInterruptive?: boolean;
-        kernelAuthority?: boolean;
-        teamPermissionDefault?: boolean;
-        codexPermissions?: CodexMemberPermissions;
-        daemonSupported?: boolean;
-      },
-    ): Promise<string> => {
-      const sent: string[] = [];
-      const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
-        sleep: async () => {},
-        maxWaitMs: 0,
-        exec: async () => "",
-        ...(opts.daemonSupported ? { detectDaemonSupport: async () => ({ kind: "supported" as const }) } : {}),
-      });
-      const res = await adapter.resume(
-        "pane-1",
-        "codex_id",
-        token,
-        "/work",
-        opts.profile ?? null,
-        opts.posture ?? "floor",
-        undefined,
-        undefined,
-        opts.nonInterruptive,
-        opts.kernelAuthority,
-        opts.teamPermissionDefault,
-        undefined,
-        opts.codexPermissions,
-      );
-      expect(res.ok).toBe(true);
-      return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
-    };
+    const kernelProfiledNode = rigRepo.addNode(kernelRig.id, "ops.profiled", {
+      runtime: "codex",
+      cwd: "/work/root-prof",
+      codexConfigProfile: "ops-profile",
+    });
+    registry.updateResumeToken(registry.registerSession(kernelProfiledNode.id, "ops-profiled@demo-rig").id, "codex_id", "tok-root-prof", "hook");
 
+    const allByRig = getNodeInventoryForAllRigs(db);
+    expect(getNodeInventoryForRigs(db, new Set([teamRig.id, kernelRig.id]))).toEqual(allByRig);
     const teamEntries = new Map(getNodeInventory(db, teamRig.id).map((e) => [e.logicalId, e]));
-    expect(teamEntries.get("dev.floor")?.resumeCommand).toBe(
-      await runRealResume("tok-floor", { posture: "floor", nonInterruptive: true, teamPermissionDefault: true }),
-    );
+    const kernelEntries = new Map(getNodeInventory(db, kernelRig.id).map((e) => [e.logicalId, e]));
+    expect(allByRig.get(teamRig.id)).toEqual([...teamEntries.values()]);
+    expect(allByRig.get(kernelRig.id)).toEqual([...kernelEntries.values()]);
+
+    // Positive matrix: every seat's displayed command agrees with real permStore.launchOverride + CodexResumeAdapter.
+    for (const [entries, rigId, logicalId, nodeId, token, daemonSupported] of [
+      [teamEntries, teamRig.id, "dev.floor", teamNode.id, "tok-floor", false],
+      [teamEntries, teamRig.id, "dev.floor-sel", floorSelNode.id, "tok-floor-sel", false],
+      [teamEntries, teamRig.id, "dev.bypass", bypassNode.id, "tok-bypass", false],
+      [teamEntries, teamRig.id, "dev.env", envNode.id, "tok-env", true],
+      [teamEntries, teamRig.id, "dev.policy-floor", policyFloorNode.id, "tok-pfloor", false],
+      [kernelEntries, kernelRig.id, "ops.root", kernelNode.id, "tok-root", false],
+      [kernelEntries, kernelRig.id, "ops.profiled", kernelProfiledNode.id, "tok-root-prof", false],
+    ] as const) {
+      const expected = await runRealRestoreResolvedResume(restoreOrchestrator, nodeId, rigId, token, { daemonSupported });
+      expect(entries.get(logicalId)?.resumeCommand).toBe(expected);
+      expect(getNodeDetail(db, rigId, logicalId)?.recoveryGuidance?.commands[0]).toBe(expected);
+    }
     expect(teamEntries.get("dev.floor")?.resumeCommand).not.toContain("danger-full-access");
+    expect(kernelEntries.get("ops.profiled")?.resumeCommand).not.toContain("danger-full-access");
 
-    expect(teamEntries.get("dev.bypass")?.resumeCommand).toBe(
-      await runRealResume("tok-bypass", { posture: "full_bypass", nonInterruptive: true }),
-    );
-
-    expect(teamEntries.get("dev.env")?.resumeCommand).toBe(
-      await runRealResume("tok-env", {
-        profile: "lease-prof",
-        posture: "floor",
-        nonInterruptive: true,
-        codexPermissions: readOnlyOnRequestEnvelope,
-        daemonSupported: true,
-      }),
-    );
-
-    const kernelEntry = getNodeInventory(db, kernelRig.id)[0]!;
-    expect(kernelEntry.resumeCommand).toBe(
-      await runRealResume("tok-root", { posture: "full_bypass", kernelAuthority: true }),
-    );
+    // Refusal matrix: every refused seat surfaces the exact error thrown by real permStore.launchOverride.
+    for (const [logicalId, nodeId] of [
+      ["ops.corrupt", corruptNode.id],
+      ["ops.conflict", conflictNode.id],
+      ["ops.mismatch", mismatchNode.id],
+    ] as const) {
+      let realRefusal = "";
+      try {
+        permStore.launchOverride(nodeId, "codex");
+      } catch (err) {
+        realRefusal = `Permission selection: ${(err as Error).message}`;
+      }
+      expect(realRefusal.length).toBeGreaterThan(0);
+      expect(teamEntries.get(logicalId)?.resumeCommand).toBeNull();
+      expect(teamEntries.get(logicalId)?.resumeCommandLabel).toBe(realRefusal);
+      const detail = getNodeDetail(db, teamRig.id, logicalId)!;
+      expect(detail.resumeCommand).toBeNull();
+      expect(detail.resumeCommandLabel).toBe(realRefusal);
+      expect(detail.recoveryGuidance?.commands).toEqual([]);
+      expect(detail.recoveryGuidance?.notes).toEqual([realRefusal]);
+    }
   });
 
   it("surfaces all three label cases in BOTH getNodeInventory (resumeCommandLabel) and getNodeDetail (recoveryGuidance.notes), including adapter-recorded approval values and generation rollover", async () => {
@@ -569,48 +704,47 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     );
   });
 
-  it("exposes exact NativePermissionStore diagnostics without fabricating a floor command when real resume rejects invalid or conflicting settings", () => {
+  it("M3: distinguishes an unavailable node_permission_selections table from an empty table beside invalid-value checks, keeping inventory readable without guessing kernel or team defaults", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
-    const rig = rigRepo.createRig("demo-rig");
+    const teamRig = rigRepo.createRig("demo-rig");
+    const kernelRig = rigRepo.createRig("kernel");
 
-    const corruptNode = rigRepo.addNode(rig.id, "ops.corrupt", { runtime: "codex", cwd: "/work/c" });
-    const sCorrupt = registry.registerSession(corruptNode.id, "ops-corrupt@demo-rig");
-    registry.updateResumeToken(sCorrupt.id, "codex_id", "tok-corrupt", "hook");
-    db.prepare("UPDATE nodes SET codex_permissions_json = '{bad json' WHERE id = ?").run(corruptNode.id);
-
-    const conflictNode = rigRepo.addNode(rig.id, "ops.conflict", {
-      runtime: "codex",
-      cwd: "/work/k",
-      codexPermissions: workspaceEnvelope,
-    });
-    const sConflict = registry.registerSession(conflictNode.id, "ops-conflict@demo-rig");
-    registry.updateResumeToken(sConflict.id, "codex_id", "tok-conflict", "hook");
+    const invalidModeNode = rigRepo.addNode(teamRig.id, "ops.badmode", { runtime: "codex", cwd: "/work/bm" });
+    registry.updateResumeToken(registry.registerSession(invalidModeNode.id, "ops-badmode@demo-rig").id, "codex_id", "tok-badmode", "hook");
     db.prepare(
-      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'codex', 'full_bypass', 'op', 'conflict', datetime('now'))",
-    ).run(conflictNode.id);
+      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'codex', 'auto', 'op', 'invalid-codex-mode', datetime('now'))",
+    ).run(invalidModeNode.id);
 
-    const mismatchNode = rigRepo.addNode(rig.id, "ops.mismatch", { runtime: "codex", cwd: "/work/m" });
-    const sMismatch = registry.registerSession(mismatchNode.id, "ops-mismatch@demo-rig");
-    registry.updateResumeToken(sMismatch.id, "codex_id", "tok-mismatch", "hook");
+    const invalidSyntaxNode = rigRepo.addNode(teamRig.id, "ops.badsyntax", { runtime: "codex", cwd: "/work/bs" });
+    registry.updateResumeToken(registry.registerSession(invalidSyntaxNode.id, "ops-badsyntax@demo-rig").id, "codex_id", "tok-badsyntax", "hook");
     db.prepare(
-      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'claude-code', 'acceptEdits', 'op', 'old-runtime', datetime('now'))",
-    ).run(mismatchNode.id);
+      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'codex', 'bad-mode!', 'op', 'invalid-syntax', datetime('now'))",
+    ).run(invalidSyntaxNode.id);
 
-    const claudeNode = rigRepo.addNode(rig.id, "ops.claude", { runtime: "claude-code", cwd: "/work/cl" });
-    const sClaude = registry.registerSession(claudeNode.id, "ops-claude@demo-rig");
-    registry.updateResumeToken(sClaude.id, "claude_id", "tok-claude", "hook");
+    const invalidRuntimeNode = rigRepo.addNode(teamRig.id, "ops.badruntime", { runtime: "codex", cwd: "/work/br" });
+    registry.updateResumeToken(registry.registerSession(invalidRuntimeNode.id, "ops-badruntime@demo-rig").id, "codex_id", "tok-badruntime", "hook");
+    db.prepare(
+      "INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason, updated_at) VALUES (?, 'claude-code', 'acceptEdits', 'op', 'runtime-changed', datetime('now'))",
+    ).run(invalidRuntimeNode.id);
 
-    const single = getNodeInventory(db, rig.id);
-    const bySet = getNodeInventoryForRigs(db, new Set([rig.id])).get(rig.id);
-    const byAll = getNodeInventoryForAllRigs(db).get(rig.id);
+    const teamNode = rigRepo.addNode(teamRig.id, "dev.team", { runtime: "codex", cwd: "/work/team" });
+    registry.updateResumeToken(registry.registerSession(teamNode.id, "dev-team@demo-rig").id, "codex_id", "tok-team", "hook");
 
-    expect(bySet).toEqual(single);
-    expect(byAll).toEqual(single);
+    const tokenlessNode = rigRepo.addNode(teamRig.id, "dev.notoken", { runtime: "codex", cwd: "/work/notoken" });
+    registry.registerSession(tokenlessNode.id, "dev-notoken@demo-rig");
 
-    for (const [logicalId, nodeId] of [
-      ["ops.corrupt", corruptNode.id],
-      ["ops.conflict", conflictNode.id],
-      ["ops.mismatch", mismatchNode.id],
+    const claudeNode = rigRepo.addNode(teamRig.id, "ops.claude", { runtime: "claude-code", cwd: "/work/cl" });
+    registry.updateResumeToken(registry.registerSession(claudeNode.id, "ops-claude@demo-rig").id, "claude_id", "tok-claude", "hook");
+
+    const kernelNode = rigRepo.addNode(kernelRig.id, "ops.root", { runtime: "codex", cwd: "/work/root" });
+    registry.updateResumeToken(registry.registerSession(kernelNode.id, "ops-root@demo-rig").id, "codex_id", "tok-root", "hook");
+
+    // 1. Invalid-value checks: invalid persisted selection rows fail only their own seats with the exact launchOverride message.
+    const initialTeam = new Map(getNodeInventory(db, teamRig.id).map((e) => [e.logicalId, e]));
+    for (const [logicalId, nodeId, expectedMsg] of [
+      ["ops.badmode", invalidModeNode.id, "Permission selection: Invalid persisted native permission selection; launch refused."],
+      ["ops.badsyntax", invalidSyntaxNode.id, "Permission selection: Invalid persisted native permission selection; launch refused."],
+      ["ops.badruntime", invalidRuntimeNode.id, "Permission selection: Seat runtime changed since permission selection; explicitly select again or inherit."],
     ] as const) {
       let realRefusal = "";
       try {
@@ -618,69 +752,88 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       } catch (err) {
         realRefusal = `Permission selection: ${(err as Error).message}`;
       }
-      expect(realRefusal.length).toBeGreaterThan(0);
-
-      const entry = single.find((e) => e.logicalId === logicalId)!;
-      expect(entry.resumeCommand).toBeNull();
-      expect(entry.resumeCommandLabel).toBe(realRefusal);
-
-      const detail = getNodeDetail(db, rig.id, logicalId)!;
-      expect(detail.resumeCommand).toBeNull();
-      expect(detail.resumeCommandLabel).toBe(realRefusal);
-      expect(detail.recoveryGuidance?.commands).toEqual([]);
-      expect(detail.recoveryGuidance?.notes).toEqual([realRefusal]);
+      expect(realRefusal).toBe(expectedMsg);
+      expect(initialTeam.get(logicalId)?.resumeCommand).toBeNull();
+      expect(initialTeam.get(logicalId)?.resumeCommandLabel).toBe(realRefusal);
+      expect(getNodeDetail(db, teamRig.id, logicalId)?.recoveryGuidance?.commands).toEqual([]);
+      expect(getNodeDetail(db, teamRig.id, logicalId)?.recoveryGuidance?.notes).toEqual([realRefusal]);
     }
 
-    const claudeEntry = single.find((e) => e.logicalId === "ops.claude")!;
+    // 2. Empty table (readable with 0 rows): kernel and team Codex seats display their normal defaults.
+    db.prepare("DELETE FROM node_permission_selections").run();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM node_permission_selections").get()).toEqual({ n: 0 });
+    expect(getNodeInventory(db, kernelRig.id)[0]?.resumeCommand).toBe(
+      `codex -s danger-full-access -a never ${UPDATE_OFF} ${HIDE_NOTICES} resume 'tok-root'`,
+    );
+    expect(new Map(getNodeInventory(db, teamRig.id).map((e) => [e.logicalId, e])).get("dev.team")?.resumeCommand).toBe(
+      `codex -s workspace-write ${UPDATE_OFF} resume 'tok-team'`,
+    );
+    expect(getNodeDetail(db, teamRig.id, "dev.notoken")?.recoveryGuidance?.commands).toEqual([
+      "cd /work/notoken",
+      `codex -s workspace-write ${UPDATE_OFF} resume --last`,
+    ]);
+
+    // 3. Unavailable table (failed SQLite read): inventory & detail stay readable without throwing, real launchOverride /
+    //    attemptResume keeps its existing SQLite error, and Codex entries show unknown/null instead of guessing defaults.
+    db.exec("DROP TABLE node_permission_selections");
+    let launchError = "";
+    try {
+      permStore.launchOverride(kernelNode.id, "codex");
+    } catch (err) {
+      launchError = (err as Error).message;
+    }
+    expect(launchError).toContain("no such table: node_permission_selections");
+    const expectedDiagnostic = `Permission selection: ${launchError}`;
+
+    const restoreOrchestrator = createRestoreOrchestrator({
+      claudeResume: new ClaudeResumeAdapter(makeMockClaudeTmux(), { sleep: async () => {}, maxWaitMs: 0 }),
+      codexResume: new CodexResumeAdapter(makeMockTmux(), { sleep: async () => {}, maxWaitMs: 0, exec: async () => "" }),
+    });
+    const realAttempt = await (restoreOrchestrator as unknown as {
+      attemptResume: (...args: unknown[]) => Promise<{ kind: string; message?: string }>;
+    }).attemptResume(kernelNode.id, "ops-root@demo-rig", "codex_id", "tok-root", "/work/root", null, null, "full_bypass");
+    expect(realAttempt).toEqual({ kind: "failed", message: expectedDiagnostic });
+
+    const singleTeam = getNodeInventory(db, teamRig.id);
+    const singleKernel = getNodeInventory(db, kernelRig.id);
+    const bySet = getNodeInventoryForRigs(db, new Set([teamRig.id, kernelRig.id]));
+    const byAll = getNodeInventoryForAllRigs(db);
+    expect(bySet.get(teamRig.id)).toEqual(singleTeam);
+    expect(bySet.get(kernelRig.id)).toEqual(singleKernel);
+    expect(byAll.get(teamRig.id)).toEqual(singleTeam);
+    expect(byAll.get(kernelRig.id)).toEqual(singleKernel);
+
+    // Kernel Codex must NOT display -s danger-full-access when selection table is unavailable.
+    expect(singleKernel[0]?.resumeCommand).toBeNull();
+    expect(singleKernel[0]?.resumeCommandLabel).toBe(expectedDiagnostic);
+    const kernelDetail = getNodeDetail(db, kernelRig.id, "ops.root")!;
+    expect(kernelDetail.resumeCommand).toBeNull();
+    expect(kernelDetail.resumeCommandLabel).toBe(expectedDiagnostic);
+    expect(kernelDetail.recoveryGuidance?.commands).toEqual([]);
+    expect(kernelDetail.recoveryGuidance?.notes).toEqual([expectedDiagnostic]);
+
+    // Team Codex (both token-bearing and tokenless) must NOT display -s workspace-write when selection table is unavailable.
+    const unavailableTeamByLogical = new Map(singleTeam.map((e) => [e.logicalId, e]));
+    expect(unavailableTeamByLogical.get("dev.team")?.resumeCommand).toBeNull();
+    expect(unavailableTeamByLogical.get("dev.team")?.resumeCommandLabel).toBe(expectedDiagnostic);
+
+    expect(unavailableTeamByLogical.get("dev.notoken")?.resumeCommand).toBeNull();
+    expect(unavailableTeamByLogical.get("dev.notoken")?.resumeCommandLabel).toBeNull();
+    const tokenlessDetail = getNodeDetail(db, teamRig.id, "dev.notoken")!;
+    expect(tokenlessDetail.recoveryGuidance?.commands).toEqual([]);
+    expect(tokenlessDetail.recoveryGuidance?.notes).toEqual([expectedDiagnostic]);
+    expect(tokenlessDetail.recoveryGuidance?.summary).toBe(`Cannot derive Codex resume command — ${expectedDiagnostic}`);
+
+    // Non-Codex inventory entries remain unaffected (Claude resume display still uses process.env OPENRIG_YOLO=1).
+    const claudeEntry = unavailableTeamByLogical.get("ops.claude")!;
+    expect(claudeEntry.resumeCommand).toBe("claude --dangerously-skip-permissions --resume 'tok-claude'");
     expect(claudeEntry.resumeCommandLabel).toBeNull();
   });
 
   it("QA-001 & QA-002: resolves display posture through real RestoreOrchestrator rules (legacy policy-without-provenance floor, node-over-rig provenance precedence, and kernel legacy policy suppression)", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
 
-    const restoreOrchestrator = new RestoreOrchestrator({
-      db,
-      rigRepo,
-      sessionRegistry: registry,
-      eventBus: new EventBus(db),
-      snapshotRepo: { db },
-      checkpointStore: { db },
-      snapshotCapture: { db },
-      nodeLauncher: { db },
-    } as unknown as RestoreOrchestratorDeps);
-
-    const runRealRestoreResolvedResume = async (nodeId: string, rigId: string, token: string): Promise<string> => {
-      const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
-      const override = permStore.launchOverride(nodeId, "codex");
-      const effectivePosture = override.launchPosture ?? resolvedPosture;
-      const nonInterruptive = rigRepo.getRigNonInterruptive(rigId);
-      const profileRow = db
-        .prepare("SELECT codex_config_profile FROM nodes WHERE id = ?")
-        .get(nodeId) as { codex_config_profile: string | null } | undefined;
-      const sent: string[] = [];
-      const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
-        sleep: async () => {},
-        maxWaitMs: 0,
-        exec: async () => "",
-      });
-      const res = await adapter.resume(
-        "pane-1",
-        "codex_id",
-        token,
-        "/work",
-        profileRow?.codex_config_profile ?? null,
-        effectivePosture,
-        undefined,
-        undefined,
-        nonInterruptive,
-        override.kernelAuthority === true,
-        override.teamPermissionDefault === true,
-        undefined,
-        override.codexPermissions,
-      );
-      expect(res.ok).toBe(true);
-      return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
-    };
+    const restoreOrchestrator = createRestoreOrchestrator();
 
     // 1. Legacy node permission_policy = 'builtin:yolo' WITHOUT saved provenance (NULL origin/posture):
     //    real restore resolves "floor" (-s workspace-write), never raw builtinLaunchPosture('builtin:yolo').
@@ -700,7 +853,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     const legacyNodeDetail = getNodeDetail(db, legacyNodeRig.id, "dev.legacy")!;
     expect(legacyNodeEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-legacy-node'`);
     expect(legacyNodeEntry.resumeCommand).toBe(
-      await runRealRestoreResolvedResume(legacyNode.id, legacyNodeRig.id, "tok-legacy-node"),
+      await runRealRestoreResolvedResume(restoreOrchestrator, legacyNode.id, legacyNodeRig.id, "tok-legacy-node"),
     );
     expect(legacyNodeEntry.resumeCommandLabel).toBe(
       "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
@@ -726,7 +879,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     const legacyRigEntry = getNodeInventory(db, legacyRig.id)[0]!;
     expect(legacyRigEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-legacy-rig'`);
     expect(legacyRigEntry.resumeCommand).toBe(
-      await runRealRestoreResolvedResume(legacyRigNode.id, legacyRig.id, "tok-legacy-rig"),
+      await runRealRestoreResolvedResume(restoreOrchestrator, legacyRigNode.id, legacyRig.id, "tok-legacy-rig"),
     );
     expect(legacyRigEntry.resumeCommandLabel).toBe("flags from current settings");
 
@@ -754,13 +907,13 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       `codex -s workspace-write ${UPDATE_OFF} resume 'tok-locked'`,
     );
     expect(precEntries.get("dev.locked")?.resumeCommand).toBe(
-      await runRealRestoreResolvedResume(floorOverYolo.id, precRig.id, "tok-locked"),
+      await runRealRestoreResolvedResume(restoreOrchestrator, floorOverYolo.id, precRig.id, "tok-locked"),
     );
     expect(precEntries.get("dev.inherit")?.resumeCommand).toBe(
       `codex -s danger-full-access -a never ${UPDATE_OFF} ${HIDE_NOTICES} resume 'tok-inherit'`,
     );
     expect(precEntries.get("dev.inherit")?.resumeCommand).toBe(
-      await runRealRestoreResolvedResume(inheritRigYolo.id, precRig.id, "tok-inherit"),
+      await runRealRestoreResolvedResume(restoreOrchestrator, inheritRigYolo.id, precRig.id, "tok-inherit"),
     );
 
     // 4. Kernel rig with legacy raw member permission_policy = 'builtin:yolo' and NULL provenance:
@@ -776,7 +929,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     const klEntry = getNodeInventory(db, kernelLegacyRig.id)[0]!;
     expect(klEntry.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-kl'`);
     expect(klEntry.resumeCommand).toBe(
-      await runRealRestoreResolvedResume(kernelLegacyNode.id, kernelLegacyRig.id, "tok-kl"),
+      await runRealRestoreResolvedResume(restoreOrchestrator, kernelLegacyNode.id, kernelLegacyRig.id, "tok-kl"),
     );
   });
 
@@ -789,59 +942,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const nodePolicyPath = path.join(policiesDir, "seat-flag.policy.md");
       const rigPolicyPath = path.join(policiesDir, "rig-flag.policy.md");
 
-      const makeValidFlagPolicy = (posture: "floor" | "full_bypass"): string =>
-        [
-          "---",
-          "source: custom",
-          "name: synthetic-flag-policy",
-          "surface: flag",
-          `launch_posture: ${posture}`,
-          "policy_schema_version: 1",
-          "description: Synthetic test flag policy",
-          "---",
-          "Policy prose body.",
-          "",
-        ].join("\n");
-
-      const restoreOrchestrator = new RestoreOrchestrator({
-        db,
-        rigRepo,
-        sessionRegistry: registry,
-        eventBus: new EventBus(db),
-        snapshotRepo: { db },
-        checkpointStore: { db },
-        snapshotCapture: { db },
-        nodeLauncher: { db },
-      } as unknown as RestoreOrchestratorDeps);
-
-      const runRealRestoreResolvedResume = async (nodeId: string, rigId: string, token: string): Promise<string> => {
-        const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
-        const override = permStore.launchOverride(nodeId, "codex");
-        const effectivePosture = override.launchPosture ?? resolvedPosture;
-        const sent: string[] = [];
-        const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
-          sleep: async () => {},
-          maxWaitMs: 0,
-          exec: async () => "",
-        });
-        const res = await adapter.resume(
-          "pane-1",
-          "codex_id",
-          token,
-          "/work",
-          null,
-          effectivePosture,
-          undefined,
-          undefined,
-          rigRepo.getRigNonInterruptive(rigId),
-          override.kernelAuthority === true,
-          override.teamPermissionDefault === true,
-          undefined,
-          override.codexPermissions,
-        );
-        expect(res.ok).toBe(true);
-        return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
-      };
+      const restoreOrchestrator = createRestoreOrchestrator();
 
       const rig = rigRepo.createRig("custom-rig");
       // Rig-level custom policy initially persisted as full_bypass, file later edited to floor.
@@ -877,7 +978,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-node-custom'`,
       );
       expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(nodeCustom.id, rig.id, "tok-node-custom"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, nodeCustom.id, rig.id, "tok-node-custom"),
       );
       expect(entries.get("dev.nodecustom")?.resumeCommandLabel).toBe(
         "launched with -s workspace-write (approval unrecorded); a resume now uses -s danger-full-access -a never",
@@ -892,7 +993,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-rig-custom'`,
       );
       expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, rigCustomNode.id, rig.id, "tok-rig-custom"),
       );
 
       // Step B: Malformed custom policy file on disk retains persisted posture (full_bypass on rigCustomNode).
@@ -902,7 +1003,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-rig-custom'`,
       );
       expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, rigCustomNode.id, rig.id, "tok-rig-custom"),
       );
 
       // Step C: Deleted/unreadable custom policy file retains persisted posture (full_bypass on rigCustomNode, floor on nodeCustom).
@@ -913,13 +1014,13 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-rig-custom'`,
       );
       expect(entries.get("dev.rigcustom")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(rigCustomNode.id, rig.id, "tok-rig-custom"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, rigCustomNode.id, rig.id, "tok-rig-custom"),
       );
       expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-node-custom'`,
       );
       expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(nodeCustom.id, rig.id, "tok-node-custom"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, nodeCustom.id, rig.id, "tok-node-custom"),
       );
       expect(entries.get("dev.nodecustom")?.resumeCommandLabel).toBe(
         "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
@@ -1129,66 +1230,185 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     expect(matchDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
   });
 
-  it("F01: rejects mismatched builtin and deliberate_none refs when saved custom provenance re-derives posture on both node and rig branches while preserving genuine custom policies", async () => {
+  it("M2: preserves public main RestoreOrchestrator.resolveRestorePosture pass-through and lazy lookup order across unknown strings, empty strings, and custom-node fallback while normalizing only for display", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-3043-m2-restore-main-"));
+    try {
+      vi.stubEnv("OPENRIG_HOME", tmpDir);
+      vi.stubEnv("OPENRIG_YOLO", "1");
+
+      const claudeSent: string[] = [];
+      const codexSent: string[] = [];
+      const restoreOrchestrator = createRestoreOrchestrator({
+        claudeResume: new ClaudeResumeAdapter(makeMockClaudeTmux(claudeSent), {
+          openrigHome: tmpDir,
+          sleep: async () => {},
+          maxWaitMs: 0,
+        }),
+        codexResume: new CodexResumeAdapter(makeMockTmux(codexSent), {
+          sleep: async () => {},
+          maxWaitMs: 0,
+          exec: async () => "",
+        }),
+      });
+      const callAttemptResume = (
+        nodeId: string,
+        sessionName: string,
+        resumeType: string,
+        resumeToken: string,
+        cwd: string,
+        posture: string,
+      ) =>
+        (restoreOrchestrator as unknown as {
+          attemptResume: (
+            nId: string,
+            sName: string,
+            rType: string,
+            rToken: string,
+            dir: string,
+            profile: string | null,
+            model: string | null,
+            resolvedPosture: string,
+          ) => Promise<{ kind: string; message?: string }>;
+        }).attemptResume(nodeId, sessionName, resumeType, resumeToken, cwd, null, null, posture);
+
+      const rig = rigRepo.createRig("m2-main-parity-rig");
+
+      // 1. Unrecognized stored posture string ("legacy_custom_posture") with NO node/rig policy:
+      //    main passes "legacy_custom_posture" through raw, so Claude restore skips teamPermissionDefault
+      //    --settings (no Bash(rig:*) / claude-team-permissions.cjs), whereas display normalizes to floor.
+      const unknownClaude = rigRepo.addNode(rig.id, "dev.unknown-claude", { runtime: "claude-code", cwd: "/work/m2-uc" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = NULL, policy_origin = 'builtin', policy_launch_posture = 'legacy_custom_posture' WHERE id = ?",
+      ).run(unknownClaude.id);
+      registry.updateResumeToken(registry.registerSession(unknownClaude.id, "dev-unknown-claude@m2").id, "claude_id", "tok-m2-uc", "hook");
+
+      const unknownClaudePosture = restoreOrchestrator.resolveRestorePosture(unknownClaude.id, rig.id) as string;
+      expect(unknownClaudePosture).toBe("legacy_custom_posture");
+      claudeSent.length = 0;
+      const ucRes = await callAttemptResume(
+        unknownClaude.id,
+        "dev-unknown-claude@m2",
+        "claude_id",
+        "tok-m2-uc",
+        "/work/m2-uc",
+        unknownClaudePosture,
+      );
+      expect(ucRes.kind).toBe("resumed");
+      expect(claudeSent[0]).toContain("--permission-mode acceptEdits");
+      expect(claudeSent[0]).not.toContain("Bash(rig:*)");
+      expect(claudeSent[0]).not.toContain("claude-team-permissions.cjs");
+
+      const unknownCodex = rigRepo.addNode(rig.id, "dev.unknown-codex", { runtime: "codex", cwd: "/work/m2-ux" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = NULL, policy_origin = 'builtin', policy_launch_posture = 'legacy_custom_posture' WHERE id = ?",
+      ).run(unknownCodex.id);
+      registry.updateResumeToken(registry.registerSession(unknownCodex.id, "dev-unknown-codex@m2").id, "codex_id", "tok-m2-ux", "hook");
+
+      expect(restoreOrchestrator.resolveRestorePosture(unknownCodex.id, rig.id) as string).toBe("legacy_custom_posture");
+      expect(new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.unknown-codex")?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ux'`,
+      );
+
+      // 2. Empty-string stored posture ("") under OPENRIG_YOLO=1:
+      //    main passes "" through raw so yoloEnabled(env, "") delegates to ambient OPENRIG_YOLO=1 on restore
+      //    (both Claude and Codex), while Codex display normalizes "" to explicit floor (-s workspace-write).
+      const emptyClaude = rigRepo.addNode(rig.id, "dev.empty-claude", { runtime: "claude-code", cwd: "/work/m2-ec" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = '' WHERE id = ?",
+      ).run(emptyClaude.id);
+      registry.updateResumeToken(registry.registerSession(emptyClaude.id, "dev-empty-claude@m2").id, "claude_id", "tok-m2-ec", "hook");
+
+      const emptyClaudePosture = restoreOrchestrator.resolveRestorePosture(emptyClaude.id, rig.id) as string;
+      expect(emptyClaudePosture).toBe("");
+      claudeSent.length = 0;
+      const ecRes = await callAttemptResume(
+        emptyClaude.id,
+        "dev-empty-claude@m2",
+        "claude_id",
+        "tok-m2-ec",
+        "/work/m2-ec",
+        emptyClaudePosture,
+      );
+      expect(ecRes.kind).toBe("resumed");
+      expect(claudeSent[0]).toContain("--dangerously-skip-permissions");
+
+      const emptyCodex = rigRepo.addNode(rig.id, "dev.empty-codex", { runtime: "codex", cwd: "/work/m2-ex" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = '' WHERE id = ?",
+      ).run(emptyCodex.id);
+      registry.updateResumeToken(registry.registerSession(emptyCodex.id, "dev-empty-codex@m2").id, "codex_id", "tok-m2-ex", "hook");
+
+      const emptyCodexPosture = restoreOrchestrator.resolveRestorePosture(emptyCodex.id, rig.id) as string;
+      expect(emptyCodexPosture).toBe("");
+      codexSent.length = 0;
+      const exRes = await callAttemptResume(
+        emptyCodex.id,
+        "dev-empty-codex@m2",
+        "codex_id",
+        "tok-m2-ex",
+        "/work/m2-ex",
+        emptyCodexPosture,
+      );
+      expect(exRes.kind).toBe("resumed");
+      expect(codexSent[0]).toContain("codex -s danger-full-access ");
+      expect(codexSent[0]).not.toContain("-a never");
+      expect(new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-codex")?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ex'`,
+      );
+
+      // 3. Rig-level unknown stored posture when node provenance is absent also passes through raw on restore.
+      const unknownRig = rigRepo.createRig("m2-unknown-rig");
+      db.prepare(
+        "UPDATE rigs SET permission_policy = NULL, rig_policy_origin = 'builtin', rig_policy_launch_posture = 'rig_custom_raw' WHERE id = ?",
+      ).run(unknownRig.id);
+      const rigSeat = rigRepo.addNode(unknownRig.id, "dev.rig-raw", { runtime: "codex", cwd: "/work/m2-rr" });
+      registry.updateResumeToken(registry.registerSession(rigSeat.id, "dev-rig-raw@m2").id, "codex_id", "tok-m2-rr", "hook");
+      expect(restoreOrchestrator.resolveRestorePosture(rigSeat.id, unknownRig.id) as string).toBe("rig_custom_raw");
+      expect(getNodeInventory(db, unknownRig.id)[0]?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-rr'`,
+      );
+
+      // 4. Lazy lookup order: when custom node provenance lacks declaringDir or resolvedTarget, main does NOT eagerly
+      //    call rigRepo.getRigPermissionPolicy(rigId) (nor getRigPolicyProvenance when node provenance exists), so a
+      //    throwing fallback read never clobbers saved launchPosture ("full_bypass") to "floor".
+      const lazySeatNoDir = rigRepo.addNode(rig.id, "dev.lazy-nodir", { runtime: "codex", cwd: "/work/m2-l1" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = NULL, policy_origin = 'custom', policy_resolved_target = '/tmp/unused.policy.md', policy_declaring_dir = NULL, policy_launch_posture = 'full_bypass' WHERE id = ?",
+      ).run(lazySeatNoDir.id);
+
+      const lazySeatNoTarget = rigRepo.addNode(rig.id, "dev.lazy-notarget", { runtime: "codex", cwd: "/work/m2-l2" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = NULL, policy_origin = 'custom', policy_resolved_target = NULL, policy_declaring_dir = '/tmp', policy_launch_posture = 'full_bypass' WHERE id = ?",
+      ).run(lazySeatNoTarget.id);
+
+      const getRigPolicySpy = vi.spyOn(rigRepo, "getRigPermissionPolicy").mockImplementation(() => {
+        throw new Error("eager getRigPermissionPolicy must not run when declaringDir/resolvedTarget is missing");
+      });
+      const getRigProvSpy = vi.spyOn(rigRepo, "getRigPolicyProvenance").mockImplementation(() => {
+        throw new Error("eager getRigPolicyProvenance must not run when node provenance exists");
+      });
+      try {
+        expect(restoreOrchestrator.resolveRestorePosture(lazySeatNoDir.id, rig.id)).toBe("full_bypass");
+        expect(restoreOrchestrator.resolveRestorePosture(lazySeatNoTarget.id, rig.id)).toBe("full_bypass");
+        expect(getRigPolicySpy).not.toHaveBeenCalled();
+        expect(getRigProvSpy).not.toHaveBeenCalled();
+      } finally {
+        getRigPolicySpy.mockRestore();
+        getRigProvSpy.mockRestore();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("F01: rejects mismatched builtin and deliberate_none refs in display when saved custom provenance re-derives posture while keeping RestoreOrchestrator unchanged from main", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-3043-f01-provenance-"));
     try {
       const policiesDir = path.join(tmpDir, "policies");
       fs.mkdirSync(policiesDir, { recursive: true });
 
-      const makeValidFlagPolicy = (posture: "floor" | "full_bypass"): string =>
-        [
-          "---",
-          "source: custom",
-          "name: synthetic-flag-policy",
-          "surface: flag",
-          `launch_posture: ${posture}`,
-          "policy_schema_version: 1",
-          "description: Synthetic test flag policy",
-          "---",
-          "Policy prose body.",
-          "",
-        ].join("\n");
-
-      const restoreOrchestrator = new RestoreOrchestrator({
-        db,
-        rigRepo,
-        sessionRegistry: registry,
-        eventBus: new EventBus(db),
-        snapshotRepo: { db },
-        checkpointStore: { db },
-        snapshotCapture: { db },
-        nodeLauncher: { db },
-      } as unknown as RestoreOrchestratorDeps);
-
-      const runRealRestoreResolvedResume = async (nodeId: string, rigId: string, token: string): Promise<string> => {
-        const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
-        const override = permStore.launchOverride(nodeId, "codex");
-        const effectivePosture = override.launchPosture ?? resolvedPosture;
-        const sent: string[] = [];
-        const adapter = new CodexResumeAdapter(makeMockTmux(sent), {
-          sleep: async () => {},
-          maxWaitMs: 0,
-          exec: async () => "",
-        });
-        const res = await adapter.resume(
-          "pane-1",
-          "codex_id",
-          token,
-          "/work",
-          null,
-          effectivePosture,
-          undefined,
-          undefined,
-          rigRepo.getRigNonInterruptive(rigId),
-          override.kernelAuthority === true,
-          override.teamPermissionDefault === true,
-          undefined,
-          override.codexPermissions,
-        );
-        expect(res.ok).toBe(true);
-        return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
-      };
+      const restoreOrchestrator = createRestoreOrchestrator();
 
       const seatFloorPath = path.join(policiesDir, "seat-floor.policy.md");
       const seatBypassPath = path.join(policiesDir, "seat-bypass.policy.md");
@@ -1211,7 +1431,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
 
       const staleNodeYolo = rigRepo.addNode(nodeRig.id, "dev.stale-node-yolo", { runtime: "codex", cwd: "/work/f01-a" });
       rigRepo.setNodePermissionPolicy(staleNodeYolo.id, "builtin:yolo");
-      // Refreshing custom provenance without rewriting permission_policy leaves the stale builtin:yolo ref alongside custom floor provenance.
       rigRepo.setNodePolicyProvenance(staleNodeYolo.id, {
         origin: "custom",
         resolvedTarget: seatFloorPath,
@@ -1253,36 +1472,32 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const sGenuineSeat = registry.registerSession(genuineSeatNode.id, "dev-genuine-seat@f01-node-rig");
       registry.updateResumeToken(sGenuineSeat.id, "codex_id", "tok-f01-genuine-seat", "hook");
 
+      // Display rejects mismatched builtin/none refs under custom provenance, while RestoreOrchestrator preserves main's unhardened behavior.
       const nodeEntries = new Map(getNodeInventory(db, nodeRig.id).map((e) => [e.logicalId, e]));
       expect(nodeEntries.get("dev.stale-node-yolo")?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
       );
-      expect(nodeEntries.get("dev.stale-node-yolo")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(staleNodeYolo.id, nodeRig.id, "tok-f01-node-yolo"),
-      );
       expect(getNodeDetail(db, nodeRig.id, "dev.stale-node-yolo")?.recoveryGuidance?.commands[0]).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
       );
+      expect(restoreOrchestrator.resolveRestorePosture(staleNodeYolo.id, nodeRig.id)).toBe("full_bypass");
 
       expect(nodeEntries.get("dev.stale-inh-yolo")?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-inh-yolo'`,
       );
-      expect(nodeEntries.get("dev.stale-inh-yolo")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(staleInheritedYolo.id, nodeRig.id, "tok-f01-inh-yolo"),
-      );
+      expect(restoreOrchestrator.resolveRestorePosture(staleInheritedYolo.id, nodeRig.id)).toBe("full_bypass");
 
       expect(nodeEntries.get("dev.stale-node-none")?.resumeCommand).toBe(
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-node-none'`,
       );
-      expect(nodeEntries.get("dev.stale-node-none")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(staleNodeNone.id, nodeRig.id, "tok-f01-node-none"),
-      );
+      expect(restoreOrchestrator.resolveRestorePosture(staleNodeNone.id, nodeRig.id)).toBe("floor");
 
+      // Genuine custom seat policy agrees between display and real RestoreOrchestrator.
       expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-genuine-seat'`,
       );
       expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(genuineSeatNode.id, nodeRig.id, "tok-f01-genuine-seat"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, genuineSeatNode.id, nodeRig.id, "tok-f01-genuine-seat"),
       );
 
       // 2. Rig custom provenance persisted as floor over stale builtin:yolo, persisted as full_bypass over stale 'none',
@@ -1298,9 +1513,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(getNodeInventory(db, staleRigYolo.id)[0]?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-rig-yolo'`,
       );
-      expect(getNodeInventory(db, staleRigYolo.id)[0]?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(rigYoloSeat.id, staleRigYolo.id, "tok-f01-rig-yolo"),
-      );
+      expect(restoreOrchestrator.resolveRestorePosture(rigYoloSeat.id, staleRigYolo.id)).toBe("full_bypass");
 
       const staleRigNone = rigRepo.createRig("f01-rig-none");
       db.prepare(
@@ -1313,9 +1526,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(getNodeInventory(db, staleRigNone.id)[0]?.resumeCommand).toBe(
         `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-rig-none'`,
       );
-      expect(getNodeInventory(db, staleRigNone.id)[0]?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(rigNoneSeat.id, staleRigNone.id, "tok-f01-rig-none"),
-      );
+      expect(restoreOrchestrator.resolveRestorePosture(rigNoneSeat.id, staleRigNone.id)).toBe("floor");
 
       const genuineRig = rigRepo.createRig("f01-genuine-rig");
       db.prepare(
@@ -1329,14 +1540,14 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-genuine-rig'`,
       );
       expect(getNodeInventory(db, genuineRig.id)[0]?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(genuineRigSeat.id, genuineRig.id, "tok-f01-genuine-rig"),
+        await runRealRestoreResolvedResume(restoreOrchestrator, genuineRigSeat.id, genuineRig.id, "tok-f01-genuine-rig"),
       );
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("F02: guards custom policy reads against non-regular files such as FIFOs and directories across inventory, detail, and RestoreOrchestrator while keeping regular-file re-derivation", async () => {
+  it("F02: guards display custom policy reads against non-regular files such as FIFOs and directories while keeping RestoreOrchestrator on main's direct readFileSync path", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-3043-f02-fifo-guard-"));
     const origStatSync = fs.statSync.bind(fs);
@@ -1344,20 +1555,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     try {
       const policiesDir = path.join(tmpDir, "policies");
       fs.mkdirSync(policiesDir, { recursive: true });
-
-      const makeValidFlagPolicy = (posture: "floor" | "full_bypass"): string =>
-        [
-          "---",
-          "source: custom",
-          "name: synthetic-flag-policy",
-          "surface: flag",
-          `launch_posture: ${posture}`,
-          "policy_schema_version: 1",
-          "description: Synthetic test flag policy",
-          "---",
-          "Policy prose body.",
-          "",
-        ].join("\n");
 
       // Backing files carry opposite postures from persisted provenance so any unguarded read changes the posture
       // deterministically without ever opening a real blocking writerless FIFO.
@@ -1371,16 +1568,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       fs.mkdirSync(dirPolicyPath);
       fs.writeFileSync(regularPolicyPath, makeValidFlagPolicy("full_bypass"), "utf8");
 
-      const restoreOrchestrator = new RestoreOrchestrator({
-        db,
-        rigRepo,
-        sessionRegistry: registry,
-        eventBus: new EventBus(db),
-        snapshotRepo: { db },
-        checkpointStore: { db },
-        snapshotCapture: { db },
-        nodeLauncher: { db },
-      } as unknown as RestoreOrchestratorDeps);
+      const restoreOrchestrator = createRestoreOrchestrator();
 
       const rig = rigRepo.createRig("f02-fifo-rig");
       db.prepare(
@@ -1424,14 +1612,14 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const sRegularNode = registry.registerSession(regularNodeSeat.id, "dev-regular-node@f02-fifo-rig");
       registry.updateResumeToken(sRegularNode.id, "codex_id", "tok-f02-reg-node", "hook");
 
-      const statCheckedFifoPaths: string[] = [];
+      const statCheckedPaths: string[] = [];
       const readAttemptedFifoPaths: string[] = [];
 
       const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, options?: unknown) => {
         const realStats = origStatSync(target, options as never);
         const asStr = String(target);
+        statCheckedPaths.push(asStr);
         if (asStr === fifoNodePath || asStr === fifoRigPath) {
-          statCheckedFifoPaths.push(asStr);
           return Object.assign(Object.create(Object.getPrototypeOf(realStats)), realStats, {
             isFile: () => false,
             isFIFO: () => true,
@@ -1453,39 +1641,36 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
         const fifoNodeDetail = getNodeDetail(db, rig.id, "dev.fifo-node")!;
         const fifoRigDetail = getNodeDetail(db, rig.id, "dev.fifo-rig")!;
 
-        // FIFO node target must NOT be read; persisted floor stands in inventory, detail, and RestoreOrchestrator.
+        // Display checks statSync().isFile() and NEVER calls readFileSync on FIFO paths.
         expect(entries.get("dev.fifo-node")?.resumeCommand).toBe(
           `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f02-fifo-node'`,
         );
         expect(fifoNodeDetail.recoveryGuidance?.commands[0]).toBe(
           `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f02-fifo-node'`,
         );
-        expect(restoreOrchestrator.resolveRestorePosture(fifoNodeSeat.id, rig.id)).toBe("floor");
-
-        // FIFO rig target must NOT be read; persisted full_bypass stands in inventory, detail, and RestoreOrchestrator.
         expect(entries.get("dev.fifo-rig")?.resumeCommand).toBe(
           `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f02-fifo-rig'`,
         );
         expect(fifoRigDetail.recoveryGuidance?.commands[0]).toBe(
           `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f02-fifo-rig'`,
         );
-        expect(restoreOrchestrator.resolveRestorePosture(fifoRigSeat.id, rig.id)).toBe("full_bypass");
-
-        // Real OS directory target fails isFile() and retains persisted full_bypass.
         expect(entries.get("dev.dir-node")?.resumeCommand).toBe(
           `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f02-dir-node'`,
         );
-        expect(restoreOrchestrator.resolveRestorePosture(dirNodeSeat.id, rig.id)).toBe("full_bypass");
-
-        // Valid regular custom file still re-derives from persisted floor to full_bypass.
         expect(entries.get("dev.regular-node")?.resumeCommand).toBe(
           `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f02-reg-node'`,
         );
-        expect(restoreOrchestrator.resolveRestorePosture(regularNodeSeat.id, rig.id)).toBe("full_bypass");
-
-        expect(statCheckedFifoPaths).toContain(fifoNodePath);
-        expect(statCheckedFifoPaths).toContain(fifoRigPath);
+        expect(statCheckedPaths).toContain(fifoNodePath);
+        expect(statCheckedPaths).toContain(fifoRigPath);
         expect(readAttemptedFifoPaths).toEqual([]);
+
+        // RestoreOrchestrator stays on main's direct readFileSync path (no statSync guard on restore).
+        statCheckedPaths.length = 0;
+        expect(restoreOrchestrator.resolveRestorePosture(dirNodeSeat.id, rig.id)).toBe("full_bypass");
+        expect(restoreOrchestrator.resolveRestorePosture(regularNodeSeat.id, rig.id)).toBe("full_bypass");
+        expect(restoreOrchestrator.resolveRestorePosture(fifoNodeSeat.id, rig.id)).toBe("full_bypass");
+        expect(statCheckedPaths).toEqual([]);
+        expect(readAttemptedFifoPaths).toEqual([fifoNodePath]);
       } finally {
         readSpy.mockRestore();
         statSpy.mockRestore();
@@ -1503,20 +1688,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       fs.mkdirSync(policiesDir, { recursive: true });
       const seatPolicyPath = path.join(policiesDir, "single-seat.policy.md");
       const tokenlessPolicyPath = path.join(policiesDir, "single-last.policy.md");
-
-      const makeValidFlagPolicy = (posture: "floor" | "full_bypass"): string =>
-        [
-          "---",
-          "source: custom",
-          "name: synthetic-flag-policy",
-          "surface: flag",
-          `launch_posture: ${posture}`,
-          "policy_schema_version: 1",
-          "description: Synthetic test flag policy",
-          "---",
-          "Policy prose body.",
-          "",
-        ].join("\n");
 
       fs.writeFileSync(seatPolicyPath, makeValidFlagPolicy("full_bypass"), "utf8");
       fs.writeFileSync(tokenlessPolicyPath, makeValidFlagPolicy("full_bypass"), "utf8");
@@ -1751,5 +1922,141 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     expect(refusedDetail.recoveryGuidance?.commands).toEqual([]);
     expect(refusedDetail.recoveryGuidance?.notes[0]).toContain("Permission selection:");
     expect(refusedDetail.recoveryGuidance?.notes.some((n) => n.includes(expectedOmission))).toBe(false);
+  });
+
+  it("M4: reads each distinct custom-policy resolvedTarget at most once per inventory build while keeping per-seat fallback postures honest and avoiding persistent cross-call cache", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-3043-m4-policy-cache-"));
+    const origStatSync = fs.statSync.bind(fs);
+    const origReadFileSync = fs.readFileSync.bind(fs);
+    try {
+      const policiesDir = path.join(tmpDir, "policies");
+      fs.mkdirSync(policiesDir, { recursive: true });
+      const sharedNodePath = path.join(policiesDir, "shared-node.policy.md");
+      const sharedRigPath = path.join(policiesDir, "shared-rig.policy.md");
+      const modeOnlyPath = path.join(policiesDir, "mode-only.policy.md");
+
+      fs.writeFileSync(sharedNodePath, makeValidFlagPolicy("full_bypass"), "utf8");
+      fs.writeFileSync(sharedRigPath, makeValidFlagPolicy("floor"), "utf8");
+      fs.writeFileSync(modeOnlyPath, makeValidFlagPolicy("floor"), "utf8");
+
+      const rigA = rigRepo.createRig("m4-cache-rig-a");
+      db.prepare(
+        "UPDATE rigs SET permission_policy = 'policies/shared-rig.policy.md', rig_policy_origin = 'custom', rig_policy_resolved_target = ?, rig_policy_declaring_dir = ?, rig_policy_launch_posture = 'full_bypass' WHERE id = ?",
+      ).run(sharedRigPath, tmpDir, rigA.id);
+
+      const sharedA = rigRepo.addNode(rigA.id, "dev.shared-a", { runtime: "codex", cwd: "/work/m4-a" });
+      rigRepo.setNodePermissionPolicy(sharedA.id, "policies/shared-node.policy.md");
+      rigRepo.setNodePolicyProvenance(sharedA.id, {
+        origin: "custom",
+        resolvedTarget: sharedNodePath,
+        declaringDir: tmpDir,
+        launchPosture: "floor",
+      });
+      registry.updateResumeToken(registry.registerSession(sharedA.id, "dev-shared-a@m4").id, "codex_id", "tok-m4-a", "hook");
+
+      const sharedB = rigRepo.addNode(rigA.id, "dev.shared-b", { runtime: "codex", cwd: "/work/m4-b" });
+      rigRepo.setNodePermissionPolicy(sharedB.id, "policies/shared-node.policy.md");
+      rigRepo.setNodePolicyProvenance(sharedB.id, {
+        origin: "custom",
+        resolvedTarget: sharedNodePath,
+        declaringDir: tmpDir,
+        launchPosture: "full_bypass",
+      });
+      registry.updateResumeToken(registry.registerSession(sharedB.id, "dev-shared-b@m4").id, "codex_id", "tok-m4-b", "hook");
+
+      const rigInherit1 = rigRepo.addNode(rigA.id, "dev.rig-inh-1", { runtime: "codex", cwd: "/work/m4-r1" });
+      registry.updateResumeToken(registry.registerSession(rigInherit1.id, "dev-rig-inh-1@m4").id, "codex_id", "tok-m4-r1", "hook");
+
+      const rigInherit2 = rigRepo.addNode(rigA.id, "dev.rig-inh-2", { runtime: "codex", cwd: "/work/m4-r2" });
+      registry.updateResumeToken(registry.registerSession(rigInherit2.id, "dev-rig-inh-2@m4").id, "codex_id", "tok-m4-r2", "hook");
+
+      // Explicit permission selection overrides posture, so modeOnlyPath does not need to be read at all.
+      const modeSeat = rigRepo.addNode(rigA.id, "dev.mode-override", { runtime: "codex", cwd: "/work/m4-mode" });
+      rigRepo.setNodePermissionPolicy(modeSeat.id, "policies/mode-only.policy.md");
+      rigRepo.setNodePolicyProvenance(modeSeat.id, {
+        origin: "custom",
+        resolvedTarget: modeOnlyPath,
+        declaringDir: tmpDir,
+        launchPosture: "floor",
+      });
+      registry.updateResumeToken(registry.registerSession(modeSeat.id, "dev-mode-override@m4").id, "codex_id", "tok-m4-mode", "hook");
+      permStore.write(modeSeat.id, { runtime: "codex", mode: "full_bypass" }, "op@m4", "override");
+
+      // Second rig sharing sharedNodePath so getNodeInventoryForAllRigs exercises cross-rig per-build caching.
+      const rigB = rigRepo.createRig("m4-cache-rig-b");
+      const sharedCrossRig = rigRepo.addNode(rigB.id, "dev.shared-cross", { runtime: "codex", cwd: "/work/m4-cross" });
+      rigRepo.setNodePermissionPolicy(sharedCrossRig.id, "policies/shared-node.policy.md");
+      rigRepo.setNodePolicyProvenance(sharedCrossRig.id, {
+        origin: "custom",
+        resolvedTarget: sharedNodePath,
+        declaringDir: tmpDir,
+        launchPosture: "floor",
+      });
+      registry.updateResumeToken(registry.registerSession(sharedCrossRig.id, "dev-shared-cross@m4b").id, "codex_id", "tok-m4-cross", "hook");
+
+      const statCounts = new Map<string, number>();
+      const readCounts = new Map<string, number>();
+      const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, options?: unknown) => {
+        const key = String(target);
+        statCounts.set(key, (statCounts.get(key) ?? 0) + 1);
+        return origStatSync(target, options as never);
+      }) as typeof fs.statSync);
+      const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((target: fs.PathOrFileDescriptor, options?: unknown) => {
+        const key = String(target);
+        readCounts.set(key, (readCounts.get(key) ?? 0) + 1);
+        return origReadFileSync(target, options as never);
+      }) as typeof fs.readFileSync);
+
+      try {
+        // 1. Single-rig inventory build reads each distinct target once across multiple seats and skips modeOnlyPath.
+        const invA = new Map(getNodeInventory(db, rigA.id).map((e) => [e.logicalId, e]));
+        expect(readCounts.get(sharedNodePath)).toBe(1);
+        expect(statCounts.get(sharedNodePath)).toBe(1);
+        expect(readCounts.get(sharedRigPath)).toBe(1);
+        expect(statCounts.get(sharedRigPath)).toBe(1);
+        expect(readCounts.get(modeOnlyPath) ?? 0).toBe(0);
+        expect(statCounts.get(modeOnlyPath) ?? 0).toBe(0);
+        expect(invA.get("dev.shared-a")?.resumeCommand).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-m4-a'`);
+        expect(invA.get("dev.shared-b")?.resumeCommand).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-m4-b'`);
+        expect(invA.get("dev.rig-inh-1")?.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m4-r1'`);
+        expect(invA.get("dev.rig-inh-2")?.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m4-r2'`);
+        expect(invA.get("dev.mode-override")?.resumeCommand).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-m4-mode'`);
+
+        // 2. All-rigs inventory build reads sharedNodePath ONCE across rigA + rigB.
+        statCounts.clear();
+        readCounts.clear();
+        const allInv = getNodeInventoryForAllRigs(db);
+        expect(readCounts.get(sharedNodePath)).toBe(1);
+        expect(statCounts.get(sharedNodePath)).toBe(1);
+        expect(readCounts.get(sharedRigPath)).toBe(1);
+        expect(allInv.get(rigB.id)?.[0]?.resumeCommand).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-m4-cross'`);
+
+        // 3. No persistent cross-call cache: editing sharedNodePath on disk is observed on the next build, still in 1 read.
+        fs.writeFileSync(sharedNodePath, makeValidFlagPolicy("floor"), "utf8");
+        statCounts.clear();
+        readCounts.clear();
+        const invAfterEdit = new Map(getNodeInventory(db, rigA.id).map((e) => [e.logicalId, e]));
+        expect(readCounts.get(sharedNodePath)).toBe(1);
+        expect(invAfterEdit.get("dev.shared-a")?.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m4-a'`);
+        expect(invAfterEdit.get("dev.shared-b")?.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m4-b'`);
+
+        // 4. Unreadable shared target: probed ONCE per build, and each seat falls back to its OWN persisted posture.
+        fs.unlinkSync(sharedNodePath);
+        statCounts.clear();
+        readCounts.clear();
+        const invAfterUnlink = new Map(getNodeInventory(db, rigA.id).map((e) => [e.logicalId, e]));
+        expect(statCounts.get(sharedNodePath)).toBe(1);
+        expect(readCounts.get(sharedNodePath) ?? 0).toBe(0);
+        expect(invAfterUnlink.get("dev.shared-a")?.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m4-a'`);
+        expect(invAfterUnlink.get("dev.shared-b")?.resumeCommand).toBe(
+          `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-m4-b'`,
+        );
+      } finally {
+        readSpy.mockRestore();
+        statSpy.mockRestore();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
