@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./domain/windows-executables.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -65,7 +66,7 @@ export async function readWindowsFileHolders(file: string): Promise<WindowsFileH
   // The system TEMP root can resolve differently across their process boundary.
   const temp = mkdtempSync(join(tmpdir(), "openrig-file-query-"));
   try {
-    const { stdout } = await exec(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    const { stdout } = await exec(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(QUERY, "utf16le").toString("base64")],
       { encoding: "utf8", windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024, env: { ...process.env, TEMP: temp, TMP: temp, OPENRIG_FILE_HOLDER_PATH: file } });
     const rows: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ""));

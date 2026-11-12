@@ -51,11 +51,10 @@ does not deploy the new build or start a managed team.
 | Packaging/resources | Portable npm/build helpers, npm pack JSON parsing and Windows skill-directory naming retained with upstream additions. |
 | Optional Podman | Native owned-pipe/rootless-engine attribution retained alongside upstream positive compatibility-API volume inventory. This is observer coverage, not a live OpenShell deployment. |
 
-**Not all capabilities are native-equivalent.** Upstream's new `herdr-app`
-provider still constructs `/bin/sh` viewer/gate commands and a Unix-style
-`herdr-app.sock` endpoint (`herdr-app-provider.ts`, `herdr-app-transport.ts`).
-That provider needs a separate native client/attachment implementation and live
-evidence; protocol fixtures alone are not Windows GUI acceptance. The earlier
+The later shared-backend consolidation replaces the Windows Herdr App
+viewer/gate and endpoint paths described in the initial integration audit.
+Its external client still needs to expose the selected native terminal/pipe
+server; protocol fixtures alone are not Windows GUI acceptance. The earlier
 Herdr/psmux, Rex, remote OAuth and optional OpenShell limitations below remain.
 
 Validation for the integrated revision includes the workspace build/typecheck,
@@ -108,3 +107,12 @@ Keep function-level regression coverage and honest error reporting. Do not turn
 old failing suites, skipped optional checks or separate host-security exercises
 into new feature requirements. No paused team, deployed daemon or provider
 configuration is changed by this documentation cleanup.
+
+## Shared backend consolidation
+
+The command/npm resolver, helper PowerShell locator, process-parameter reader,
+local pipe endpoint and Herdr App native attachment now share their canonical
+Windows implementations. See [the backend contract](windows-dependency-backends.md).
+Herdr App no longer constructs POSIX viewer/gate commands on Windows. Its external
+client must still expose the selected native terminal and pipe server; no live GUI
+acceptance is claimed by this source refactor.

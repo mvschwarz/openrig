@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { closeSync, linkSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -44,7 +45,7 @@ export function createPrivateTextFile(file: string, content: string): void {
     writeFileSync(file, content, { mode: 0o600, flag: "wx" });
     return;
   }
-  try { execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  try { execFileSync(windowsPowerShell(),
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(CREATE_PRIVATE_FILE, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_PRIVATE_TEXT_FILE: file }, input: Buffer.from(content, "utf8").toString("base64"),
       windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] });
@@ -103,7 +104,7 @@ if(!$actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.Sec
 /** Create and verify a current-SID-only directory before staging any file. */
 export function createWindowsPrivateDirectory(parent: string): string {
   const directory = join(parent, `.openrig-private-${randomUUID()}`);
-  execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  execFileSync(windowsPowerShell(),
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(CREATE_PRIVATE_DIRECTORY, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_PRIVATE_TEXT_DIRECTORY: directory }, windowsHide: true, timeout: 10_000, stdio: "pipe" });
   return directory;
@@ -143,7 +144,7 @@ export function openPrivateTextFile(file: string): number {
 function runPrivateScript(script: string, values: NodeJS.ProcessEnv, input = ""): Promise<void> {
   return new Promise((resolveRun, reject) => {
     let inputError: Error | undefined;
-    const child = execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    const child = execFile(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
       { env: { ...process.env, ...values }, windowsHide: true, timeout: 10_000, maxBuffer: 64 * 1024 },
       (error, _stdout, stderr) => {

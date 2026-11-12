@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../domain/windows-executables.js";
 import { readNamedSessionCommand, readNamedSessionPid } from "./session-pane-lookup.js";
 import { listNamedSessionPanes } from "./session-pane-lookup.js";
 import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
@@ -1240,7 +1241,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A bare executable plus an encoded literal call works through either Git Bash
     // or PowerShell; a quoted executable alone is only an expression in PowerShell.
     const collectorCmd = process.platform === "win32"
-      ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from(
+      ? windowsPowerShell(process.env, "shell-bootstrap") + " -NoProfile -NonInteractive -EncodedCommand " + Buffer.from(
         "& " + [collectorArgs.executable, ...collectorArgs.args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
       : legacyCollectorCmd;
     const current = statusLine["command"];

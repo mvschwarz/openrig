@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import { renderWindowsLaunchArgv } from "@openrig/daemon/windows-launch";
 import type { SshHostEntry } from "./host-registry.js";
 
@@ -18,5 +19,5 @@ export function windowsSshCommand(host: SshHostEntry, argv: readonly string[], o
         + "$openrigStart.FileName=$openrigResolved.Source\n",
     })
     + "\nexit $global:LASTEXITCODE\n";
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+  return `${windowsPowerShell({}, "shell-bootstrap")} -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 }

@@ -1,3 +1,6 @@
+import { fileURLToPath } from "node:url";
+import { readWindowsTileAttachArgv, windowsTileAttachArgv, isWindowsTileAttachArgv } from "./windows-tile-attach.js";
+import { herdrAppSocketPath } from "./herdr-app-transport.js";
 // The herdr-app terminal provider: OpenRig views as Rig-layout views in a herdr-app client. One provider instance
 // serves one app home.
 //
@@ -75,6 +78,8 @@ export interface ViewerGate { path: string; until: number; expired: string }
  *  different shape (another script, flag or tag) gives null and nothing is built from a guess. Words after tmux are the
  *  tile's server arguments by its own positional contract, so both tiles get all of them. */
 export function readOnlyTile(attach: readonly string[]): string[] | null {
+  const native = readWindowsTileAttachArgv(attach);
+  if (native) return windowsTileAttachArgv(native.tmux, native.server, native.session, true, native.retrySeconds, native.attachOnly);
   const [, flag, , tag, session, tmux] = attach;
   if (attach.length < 6 || flag !== "-c" || tag !== "openrig-tile" || !session || !tmux) return null;
   const server = attach.slice(6);
@@ -89,7 +94,15 @@ const UNSHAPED_TILE = 'printf "\\r\\n%s\\r\\n" "OpenRig could not build a read-o
 /** A viewer's argv. A remote pane runs its ssh paneCommand as composed, and a read-only local pane its read-only tile;
  *  OpenRig rewrites neither. An interactive local pane shows the read-only tile until its gate opens and the view's
  *  writable tile after (`GATED_WRAPPER`); without a gate, or with a tile it can't read, it takes no input at all. */
-export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: ViewerGate): string[] {
+export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: ViewerGate, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === "win32") {
+    const native = pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv);
+    const argv = native && !pane.readOnly && gate
+      ? windowsTileAttachArgv(native.tmux, native.server, native.session, false, native.retrySeconds, native.attachOnly, gate)
+      : pane.attachArgv && isWindowsTileAttachArgv(pane.attachArgv) && (pane.readOnly || !native) ? [...pane.attachArgv] : null;
+    return [process.execPath, fileURLToPath(new URL("../../../assets/terminal/herdr-app-viewer.mjs", import.meta.url)), nonce,
+      Buffer.from(JSON.stringify({ argv, message: "This cell takes no input until its attachment and display gate are confirmed." }), "utf8").toString("base64")];
+  }
   if (!pane.attachArgv) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, "/bin/sh", "-c", pane.paneCommand];
   if (pane.readOnly) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
   const readOnly = readOnlyTile(pane.attachArgv);
@@ -99,6 +112,7 @@ export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand"
 }
 
 export interface HerdrAppProviderDeps {
+  platform?: NodeJS.Platform;
   files: HerdrAppClientFiles;
   app: HerdrAppClient;
   hc: HcRunner;
@@ -224,7 +238,7 @@ export class HerdrAppProvider implements TerminalProvider {
         layoutSwitch: names.includes("layout.switch"),
         paneFocus: names.includes("pane.focus"),
       },
-      launch: { socketPath: `${this.deps.files.appHome}/herdr-app.sock`, ...(core.session !== "default" ? { session: core.session } : process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
+      launch: { socketPath: herdrAppSocketPath(this.deps.files.appHome), ...(core.session !== "default" ? { session: core.session } : process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
       core,
       assumption: "viewers are started with hc in this core; herdr-app must be a client of it",
       pendingStarts,
@@ -361,7 +375,7 @@ export class HerdrAppProvider implements TerminalProvider {
           // Rounded up, so the cell never gives up before the daemon does.
           const gate = interactive ? { path: this.gatePath(nonce), until: Math.ceil(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
-            nonce, argv: viewerArgv(pane, nonce, gate), readOnly: pane.readOnly,
+            nonce, argv: viewerArgv(pane, nonce, gate, this.deps.platform), readOnly: pane.readOnly,
             attach: pane.attachArgv ? "local" as const : "remote" as const,
             ...(gated ? { gate: "pending" as const, gateUntil } : {}),
             terminal: null, state: "planned" as const };

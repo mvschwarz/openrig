@@ -1,8 +1,7 @@
+import { herdrAppSocketPath, resolveHerdrAppHome } from "@openrig/daemon/windows-launch";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { promisify } from "node:util";
 import { helperCwd } from "../helper-cwd.js";
 import type { TerminalOpenResult } from "../daemon-client.js";
@@ -21,18 +20,18 @@ export function terminalWindowNotice(view: string, result: TerminalOpenResult): 
 }
 
 // herdr-core marks each of its terminals with HC_TERMINAL_ID / HC_TERMINAL_SOCKET; herdr-app's home decides its socket.
-const HERDR_APP_KEYS = ["HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SESSION", "HC_SOCKET", "HERDR_APP_HOME", "XDG_CONFIG_HOME"];
+const HERDR_APP_KEYS = ["HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SESSION", "HC_SOCKET", "HERDR_APP_HOME", "HERDR_APP_SOCKET", "XDG_CONFIG_HOME"];
 const MARKER_KEYS = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR", ...HERDR_APP_KEYS];
 
 /** herdr-app's home, resolved the way herdr-app resolves it. */
 export function herdrAppHome(env: NodeJS.ProcessEnv): string {
-  return env["HERDR_APP_HOME"] || join(env["XDG_CONFIG_HOME"] || join(env["HOME"] || process.env["HOME"] || homedir(), ".config"), "herdr-app");
+  return resolveHerdrAppHome(env);
 }
 
 /** A terminal herdr-core runs, with a herdr-app window serving that home on this machine. The socket file is a hint
  *  only: the daemon opens nothing unless the window answers. */
 export function inHerdrApp(env: NodeJS.ProcessEnv, exists: (path: string) => boolean = existsSync): boolean {
-  return !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(herdrAppHome(env), "herdr-app.sock"));
+  return !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && (process.platform === "win32" ? !!env["HERDR_APP_SOCKET"] : exists(herdrAppSocketPath(herdrAppHome(env), env)));
 }
 
 /** Where a terminal view opens from this TUI, so a preview's plan matches the open. */
@@ -161,7 +160,10 @@ export async function windowTarget(viewer: () => Promise<NodeJS.ProcessEnv | und
 
 /** The provider the terminal action will use from this TUI, so a preview's plan matches the open. */
 export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv, platform: NodeJS.Platform = process.platform): Promise<WindowTarget["provider"]> {
-  if (platform === "win32") return "herdr";
+  if (platform === "win32") {
+    const target = await windowTarget(viewer);
+    return target.provider === "herdr-app" ? "herdr-app" : "herdr";
+  }
   return (await windowTarget(viewer)).provider;
 }
 

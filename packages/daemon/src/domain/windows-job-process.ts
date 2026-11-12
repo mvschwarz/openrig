@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { mkdtempSync, writeFileSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -200,7 +201,7 @@ export function prepareWindowsJobProcess(file: string, args: string[], options: 
   // or the source-only helper file. The child gets the explicit original block.
   const chunks = payload.match(/.{1,8192}/g)!;
   const metadata = Object.fromEntries(chunks.map((value, index) => [`OPENRIG_WINDOWS_PROBE_JOB_${index}`, value]));
-  const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const executable = windowsPowerShell();
   const argv = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script];
   const launchOptions = {
     // Windows PowerShell can exit without running -File under DETACHED_PROCESS.

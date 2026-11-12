@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../windows-executables.js";
 import { win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { powershellQuote, renderWindowsLaunchArgv } from '../../adapters/windows-launch.js';
@@ -8,7 +9,7 @@ export function windowsSshTileAttachArgv(destination: string, command: string, s
   if (!destination || destination.startsWith('-') || [destination, command, ssh].some(value => value.includes('\0'))) throw new Error('Invalid SSH tile target');
   const payload = Buffer.from(JSON.stringify({ destination, command, ssh }), 'utf8').toString('base64');
   const code = '# OpenRig SSH tile ' + payload + '\n' + renderWindowsLaunchArgv([ssh, '-t', destination, command]) + '\nexit $LASTEXITCODE';
-  return [win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+  return [windowsPowerShell(),
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')];
 }
 
@@ -26,17 +27,17 @@ export function isWindowsTileAttachArgv(argv: readonly string[]): boolean {
 }
 
 /** A short data-only tile command; the installed helper owns reattachment. */
-export function windowsTileAttachArgv(tmux: string, server: readonly string[], session: string, readOnly: boolean, retrySeconds = 30, attachOnly = false): string[] {
+export function windowsTileAttachArgv(tmux: string, server: readonly string[], session: string, readOnly: boolean, retrySeconds = 30, attachOnly = false, gate?: { path: string; until: number; expired: string }): string[] {
   const helper=fileURLToPath(new URL('../../../assets/terminal/windows-tile-attach.ps1',import.meta.url));
   const binding = bindNativeSessionName(session);
-  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds,...(attachOnly ? { attachOnly: true } : {}),
+  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds,...(gate ? { gate } : {}),...(attachOnly ? { attachOnly: true } : {}),
     ...(binding.marker ? { nativeBinding: { physical: binding.physical, marker: binding.marker, legacy: nativeSessionNameMayBeLegacy(session) } } : {})}), 'utf8').toString('base64');
   const code="& ([ScriptBlock]::Create([IO.File]::ReadAllText("+powershellQuote(helper)+"))) "+powershellQuote(payload);
-  return [win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),
+  return [windowsPowerShell(),
     '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(code,'utf16le').toString('base64')];
 }
 
-export interface WindowsTileTarget { tmux: string; server: string[]; session: string; readOnly: boolean; retrySeconds: number; attachOnly?: boolean }
+export interface WindowsTileTarget { tmux: string; server: string[]; session: string; readOnly: boolean; retrySeconds: number; attachOnly?: boolean; gate?: { path: string; until: number; expired: string } }
 /** Decode only this build's exact generated data wrapper, never arbitrary PowerShell. */
 export function readWindowsTileAttachArgv(argv: readonly string[]): WindowsTileTarget | null {
   try {
@@ -50,7 +51,8 @@ export function readWindowsTileAttachArgv(argv: readonly string[]): WindowsTileT
       || typeof value.session !== 'string' || !value.session || /[\x00-\x1f]/.test(value.session)
       || typeof value.readOnly !== 'boolean' || !Number.isSafeInteger(value.retrySeconds) || value.retrySeconds < 0
       || (value.attachOnly !== undefined && typeof value.attachOnly !== 'boolean')) return null;
-    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds, value.attachOnly)) === JSON.stringify(argv)
-      ? { tmux: value.tmux, server: value.server, session: value.session, readOnly: value.readOnly, retrySeconds: value.retrySeconds, ...(value.attachOnly ? { attachOnly: true } : {}) } : null;
+    if (value.gate && (typeof value.gate.path !== "string" || !win32.isAbsolute(value.gate.path) || value.gate.path.includes("\0") || !Number.isFinite(value.gate.until) || typeof value.gate.expired !== "string")) return null;
+    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds, value.attachOnly, value.gate)) === JSON.stringify(argv)
+      ? { tmux: value.tmux, server: value.server, session: value.session, readOnly: value.readOnly, retrySeconds: value.retrySeconds, ...(value.attachOnly ? { attachOnly: true } : {}), ...(value.gate ? { gate: value.gate } : {}) } : null;
   } catch { return null; }
 }

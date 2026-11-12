@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../domain/windows-executables.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1648,7 +1649,7 @@ export class TmuxAdapter {
         // ConPTY removes bracketed-paste delimiters on its pipe. Console input
         // records preserve the delimiters and raw LF for the receiving editor.
         const helper = pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1");
-        const powershell = pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+        const powershell = windowsPowerShell();
         try {
           await execFileAsync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
             "-TargetPid", String(pid), "-PayloadFile", path, "-Mode", windowsCodex ? "codex" : "bracketed"], { windowsHide: true, timeout: 15000 });
@@ -1832,7 +1833,7 @@ export class TmuxAdapter {
         const pid = await this.getPanePid(target);
         if (!pid) return { ok: false, code: "guard_target_unknown", message: "Native console process unavailable; no key sent." };
         try {
-          await execFileAsync(pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          await execFileAsync(windowsPowerShell(),
             ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1"), "-TargetPid", String(pid), "-Mode", "codex-clear"], { windowsHide: true, timeout: 15000 });
         } catch { return { ok: false, code: "native_key_unverified", message: "Native console key delivery unverified." }; }
         return { ok: true };

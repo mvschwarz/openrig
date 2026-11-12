@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../domain/windows-executables.js";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import { parseWindowsCommandLine, windowsArguments } from "./windows-argv.js";
@@ -52,5 +53,5 @@ export function windowsScopedLaunch(shell: string, command: string, selected: Re
   const root = process.env.SystemRoot;
   if (!root) throw new Error("Windows system root unavailable");
   const loader = scopedLoader(file,recoveryKey);
-  return { content, argv: [win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(loader, "utf16le").toString("base64")], ...(recovery?{recovery}:{}) };
+  return { content, argv: [windowsPowerShell({ SystemRoot: root }), "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(loader, "utf16le").toString("base64")], ...(recovery?{recovery}:{}) };
 }

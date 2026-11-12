@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -20,7 +21,7 @@ public static class OpenRigDaemonJobProbe {
 '@
 if([OpenRigDaemonJobProbe]::NeedsBreakaway()){[Console]::Write('yes')}else{[Console]::Write('no')}
 `;
-  const result = await promisify(execFile)(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+  const result = await promisify(execFile)(windowsPowerShell(),
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { encoding: "utf8", windowsHide: true, timeout: 15000 });
   if (!["yes", "no"].includes(result.stdout.trim())) throw new Error("Windows daemon job probe returned an unknown result");
@@ -105,7 +106,7 @@ export async function runWindowsBreakawayCommand(file: string, args: string[], c
     const script = path.join(scratch, "launch.ps1");
     await writeFile(script, HELPER);
     const payload = Buffer.from(JSON.stringify({ file, args, cwd, temp: process.env.TEMP ?? null, tmp: process.env.TMP ?? null })).toString("base64");
-    return await promisify(execFile)(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+    return await promisify(execFile)(windowsPowerShell(),
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
       { encoding: "utf8", windowsHide: true, timeout: 120000, maxBuffer: 1024 * 1024,
         env: { ...process.env, TEMP: scratch, TMP: scratch, OPENRIG_DAEMON_BREAKAWAY: "1", OPENRIG_DAEMON_DETACH_PAYLOAD: payload } });

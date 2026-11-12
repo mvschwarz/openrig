@@ -18,12 +18,12 @@ it.runIf(process.platform === "win32")("honors selected PATHEXT order and an exp
   writeFileSync(shim, '"%_prog%" "%dp0%\\node_modules\\@fixture\\agent\\main.js" %*\r\n');
   writeFileSync(native, "synthetic selection only, never executed");
   const env = { pAtH: `${bin};${dirname(process.execPath)}`, pAtHeXt: ".CMD;.EXE" };
-  expect(resolveAcpAgentCommand("agent", root, env)).toEqual({ command: realpathSync(process.execPath), prefix: [realpathSync(entry)] });
+  expect(resolveAcpAgentCommand("agent", root, env)).toEqual({ command: realpathSync.native(process.execPath), prefix: [realpathSync.native(entry)] });
   const selectedNative = resolveAcpAgentCommand("agent", root, { ...env, pAtHeXt: ".EXE;.CMD" });
   expect(selectedNative.command.toLowerCase()).toBe(realpathSync(native).toLowerCase());
   expect(selectedNative.prefix).toEqual([]);
   expect(resolveAcpAgentCommand("agent", root, { ...env, PATHEXT: "" })).toEqual({ command: "agent", prefix: [] });
-  expect(resolveAcpAgentCommand(shim, root, { ...env, PATHEXT: "" }).prefix).toEqual([realpathSync(entry)]);
+  expect(resolveAcpAgentCommand(shim, root, { ...env, PATHEXT: "" }).prefix).toEqual([realpathSync.native(entry)]);
 });
 
 it.runIf(process.platform === "win32")("launches a dotted npm agent name without a cmd.exe round trip", () => {
@@ -36,7 +36,7 @@ it.runIf(process.platform === "win32")("launches a dotted npm agent name without
   writeFileSync(join(bin, "owned.agent.cmd"), '"%_prog%" "%dp0%\\node_modules\\owned-agent\\main.js" %*\r\n');
   const env = { PATH: `${bin};${dirname(process.execPath)}`, PATHEXT: ".CMD;.EXE" };
   const selected = resolveAcpAgentCommand("owned.agent", root, env);
-  expect(selected).toEqual({ command: realpathSync(process.execPath), prefix: [realpathSync(entry)] });
+  expect(selected).toEqual({ command: realpathSync.native(process.execPath), prefix: [realpathSync.native(entry)] });
   const args = ["--protocol", "a & b", "$(owned)", "引号'\""];
   expect(JSON.parse(execFileSync(selected.command, [...selected.prefix, ...args], { encoding: "utf8", cwd: root }))).toEqual(args);
   expect(resolveAcpAgentCommand("owned.agent", root, { ...env, PATHEXT: "" })).toEqual({ command: "owned.agent", prefix: [] });

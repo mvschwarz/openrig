@@ -46,7 +46,7 @@ test("invalid arguments execute nothing", t => {
 });
 test("directory alias executes the preview and importing stays inert", t => {
   const f = fixture(t), home = path.join(f.root, "home"), alias = path.join(f.root, "alias");
-  fs.mkdirSync(home); fs.copyFileSync(installer, path.join(home, "install.mjs")); fs.symlinkSync(home, alias, "junction");
+  fs.mkdirSync(home); fs.copyFileSync(new URL("./npm-command.mjs", import.meta.url), path.join(home, "npm-command.mjs")); fs.copyFileSync(installer, path.join(home, "install.mjs")); fs.symlinkSync(home, alias, "junction");
   const result = f.run(["--dry-run"], {}, path.join(alias, "install.mjs"));
   assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /Experimental native Windows install plan/);
   const imported = spawnSync(process.execPath, ["--input-type=module", "-e", `import(${JSON.stringify(pathToFileURL(installer).href)})`], { cwd: f.root, encoding: "utf8", windowsHide: true, timeout: 10000 });

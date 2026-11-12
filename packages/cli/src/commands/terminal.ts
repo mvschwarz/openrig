@@ -1,3 +1,4 @@
+import { herdrAppSocketPath, resolveHerdrAppHome } from "@openrig/daemon/windows-launch";
 // OPR.0.4.6.02 C3 — the `rig terminal` command family (the TUI-1 opaque verb +
 // the operator's terminal-provider-ride entry). The subcommands read
 // the ONE canonical daemon composer (`/api/terminal/...`):
@@ -26,12 +27,11 @@ import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxAttachCommand, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 /** herdr-app's home, resolved the way herdr-app resolves it (as the TUI does). */
 function herdrAppHome(env: NodeJS.ProcessEnv): string {
-  return env["HERDR_APP_HOME"] || join(env["XDG_CONFIG_HOME"] || join(env["HOME"] || homedir(), ".config"), "herdr-app");
+  return resolveHerdrAppHome(env);
 }
 
 export interface TerminalDeps extends StatusDeps {
@@ -55,7 +55,7 @@ export function herdrAppClient(opts: { provider?: string; window?: boolean; appH
   const named = opts.provider?.trim();
   const exists = deps.socketExists ?? existsSync;
   const ambient = !named
-    && !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(herdrAppHome(env), "herdr-app.sock"));
+    && !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && (process.platform === "win32" ? !!env["HERDR_APP_SOCKET"] : exists(herdrAppSocketPath(herdrAppHome(env), env)));
   if (named !== "herdr-app" && !ambient) return null;
   return { appHome: opts.appHome ? resolve(opts.appHome) : herdrAppHome(env), ambient };
 }
@@ -222,12 +222,12 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           );
           const report = probe.data?.providers?.[0]?.status ?? probe.data;
           if (probe.status >= 400 || typeof report?.available !== "boolean") {
-            const socketPath = report?.launch?.socketPath ?? join(selectedHerdrApp.appHome, "herdr-app.sock");
+            const socketPath = report?.launch?.socketPath ?? herdrAppSocketPath(selectedHerdrApp.appHome);
             ambientFallbackNote = `herdr-app's socket exists at ${socketPath} but the daemon could not confirm whether it is answering (HTTP ${probe.status}); opening a desktop window instead. Use --provider herdr-app to require it.`;
             console.error(ambientFallbackNote);
             selectedHerdrApp = null;
           } else if (!report.available) {
-            const socketPath = report.launch?.socketPath ?? join(selectedHerdrApp.appHome, "herdr-app.sock");
+            const socketPath = report.launch?.socketPath ?? herdrAppSocketPath(selectedHerdrApp.appHome);
             ambientFallbackNote = `herdr-app's socket exists at ${socketPath} but it isn't answering; opening a desktop window instead. Use --provider herdr-app to require it.`;
             console.error(ambientFallbackNote);
             selectedHerdrApp = null;

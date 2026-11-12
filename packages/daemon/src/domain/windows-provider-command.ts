@@ -1,3 +1,4 @@
+import { resolveWindowsCommand } from "./windows-command.js";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { readPlatformEnv } from "./platform-env.js";
@@ -32,33 +33,8 @@ export function resolveCodexCommand(env: NodeJS.ProcessEnv, cwd = process.cwd())
 
 export function resolveWindowsProviderCommand(name: "codex" | "claude", env: NodeJS.ProcessEnv, cwd = process.cwd(), platform: NodeJS.Platform = process.platform): { command: string; prefix: string[] } {
   if (platform !== "win32") return { command: name, prefix: [] };
-  const packageName = name === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code";
-  const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
-  const extensions = (readPlatformEnv(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(value => value.toLowerCase());
-  for (const value of searchPath.split(path.delimiter)) {
-    const directory = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
-    for (const extension of extensions) {
-      const candidate = path.join(directory, `${name}${extension}`);
-      if (!existsSync(candidate) || !statSync(candidate).isFile()) continue;
-      if (extension === ".exe" || extension === ".com") return { command: realpathSync.native(candidate), prefix: [] };
-      const local = path.basename(directory).toLowerCase() === ".bin";
-      const modules = local ? path.dirname(directory) : path.join(directory, "node_modules");
-      const root = path.join(modules, ...packageName.split("/"));
-      const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-      const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[name];
-      if (extension !== ".cmd" || manifest.name !== packageName || typeof entry !== "string" || path.isAbsolute(entry)) {
-        throw new Error(`Windows ${name} requires a native executable or a recognized npm installation`);
-      }
-      const file = path.resolve(root, entry), relative = path.relative(root, file);
-      if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error(`${name} npm entry escapes its package`);
-      const needle = `%dp0%\\${local ? ".." : "node_modules"}\\${packageName.replaceAll("/", "\\")}\\${entry.replaceAll("/", "\\")}`;
-      if (!readFileSync(candidate, "utf8").includes(needle)) throw new Error(`Unrecognized Windows ${name} shim`);
-      const node = [path.join(directory, "node.exe"), ...searchPath.split(path.delimiter).map(dir => path.resolve(cwd, dir.replace(/^"(.*)"$/, "$1"), "node.exe"))].find(file => existsSync(file) && statSync(file).isFile());
-      if (!node) throw new Error(`${name} npm installation requires Node on its launch PATH`);
-      return { command: realpathSync.native(node), prefix: [realpathSync.native(file)] };
-    }
-  }
-  const error = new Error(`No ${name} executable on the Windows launch PATH`) as NodeJS.ErrnoException;
-  error.code = "ENOENT";
-  throw error;
+  const selected = resolveWindowsCommand([name], readPlatformEnv(env, "PATH", platform) ?? "", readPlatformEnv(env, "PATHEXT", platform), cwd,
+    { packageName: name === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code" });
+  if (selected[0] === name) throw Object.assign(new Error('No '+name+' executable on the Windows launch PATH'), { code: "ENOENT" });
+  return { command: selected[0]!, prefix: selected.slice(1) };
 }

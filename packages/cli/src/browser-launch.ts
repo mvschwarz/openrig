@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import path from "node:path";
 import { readPlatformEnv } from "@openrig/daemon/windows-launch";
 
@@ -7,7 +8,7 @@ export function browserLaunch(url: string, platform: NodeJS.Platform, env: NodeJ
     const literal = "'" + url.replaceAll("'", "''") + "'";
     const script = `$ErrorActionPreference = 'Stop'; Start-Process -FilePath ${literal}`;
     return {
-      command: path.win32.join(readPlatformEnv(env, "SystemRoot", "win32") || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      command: windowsPowerShell(env),
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     };
   }

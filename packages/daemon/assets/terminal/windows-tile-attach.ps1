@@ -35,6 +35,22 @@ function Invoke-Tmux([string]$line,[bool]$capture) {
     $info.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
     $info.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
   }
+  if(-not $capture -and $config.gate -and -not $script:openrigGateOpened){
+    $writable=$info.Arguments
+    $info.Arguments=$writable.Replace('"-f" "ignore-size"','"-r"')
+    $observer=[Diagnostics.Process]::Start($info)
+    try {
+      while(-not $observer.HasExited -and -not [IO.File]::Exists($config.gate.path) -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -lt $config.gate.until){Start-Sleep -Milliseconds 100}
+      if($observer.HasExited){$config | Add-Member -MemberType NoteProperty -Name attachOnly -Value $true -Force; return @{Code=$observer.ExitCode;Output='';Error=''}}
+      $opened=[IO.File]::Exists($config.gate.path)
+      $observer.Kill(); $observer.WaitForExit()
+      if(-not $opened){[Console]::WriteLine($config.gate.expired);$config | Add-Member -MemberType NoteProperty -Name attachOnly -Value $true -Force;return @{Code=0;Output='';Error=''}}
+      Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class OpenRigViewerInput { [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n); [DllImport("kernel32.dll", SetLastError=true)] static extern bool FlushConsoleInputBuffer(IntPtr h); public static void Flush(){if(!FlushConsoleInputBuffer(GetStdHandle(-10)))throw new System.ComponentModel.Win32Exception();} }'
+      [OpenRigViewerInput]::Flush()
+      $script:openrigGateOpened=$true
+      return Invoke-Tmux $writable $false
+    } finally {if(-not $observer.HasExited){$observer.Kill();$observer.WaitForExit()};$observer.Dispose()}
+  }
   $child=[Diagnostics.Process]::Start($info)
   try {
     if($capture){$out=$child.StandardOutput.ReadToEndAsync(); $err=$child.StandardError.ReadToEndAsync()}

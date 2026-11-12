@@ -1,3 +1,4 @@
+import { herdrAppSocketPath } from "@openrig/daemon/windows-launch";
 import type { DaemonClient } from "../daemon-client.js";
 import { windowTarget, type WindowTarget } from "./open-window.js";
 import type { ExplorerRow, FleetSnapshot, ViewState } from "../types.js";
@@ -151,7 +152,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
       // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
       lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
     } else {
-      const socketPath = preview.status.launch?.socketPath ?? (preview.herdrApp?.appHome ? `${preview.herdrApp.appHome}/herdr-app.sock` : "herdr-app.sock");
+      const socketPath = preview.status.launch?.socketPath ?? (preview.herdrApp?.appHome ? herdrAppSocketPath(preview.herdrApp.appHome) : "herdr-app.sock");
       lines.push({ text: `herdr-app is not answering at ${socketPath} (the socket file exists, but nothing replied). Nothing will open from here. Start herdr-app, or run \`rig terminal open ${preview.view} --window\` for a desktop window.` });
     }
   } else if (page.length) {

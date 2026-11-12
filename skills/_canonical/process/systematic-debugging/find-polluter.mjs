@@ -1,3 +1,4 @@
+import { npmCommand } from "./npm-command.mjs";
 import { lstat, readdir } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -45,10 +46,7 @@ export async function findPolluter(args, { cwd = process.cwd(), env = process.en
     if (!files.length) { log("No test files matched; no tests ran."); return 2; }
     if (await exists(pollution)) { log("Pollution already exists before testing; no tests ran."); return 2; }
     const execute = run ?? (file => new Promise(resolveRun => {
-      const cli = env.npm_execpath ?? join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
-      const child = process.platform === "win32"
-        ? spawn(process.execPath, [cli, "test", file], { cwd, env, stdio: "ignore", windowsHide: true })
-        : spawn("npm", ["test", file], { cwd, env, stdio: "ignore" });
+      const child = spawn(...npmCommand(["test", file], { env }), { cwd, env, stdio: "ignore", windowsHide: true });
       child.once("error", () => resolveRun(false));
       child.once("close", code => resolveRun(code === 0));
     }));

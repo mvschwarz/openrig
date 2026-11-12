@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import path from "node:path";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { powershellQuote } from "../adapters/windows-launch.js";
@@ -17,7 +18,7 @@ const loader = (script: string) => `iex([IO.File]::ReadAllText(${powershellQuote
 /** Payload stays in the private file; only a fixed encoded loader crosses cmd. */
 export function windowsCmdBridgeInvocation(script: string): string {
   if (!path.win32.isAbsolute(script) || !isStagedSendName(path.win32.basename(script))) throw new Error("Unrecognized native launch-script path");
-  const shell = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const shell = windowsPowerShell();
   if (/[\r\n"%!]/.test(shell)) throw new Error("Unsupported native PowerShell executable path");
   return `"${shell}" -NoProfile -EncodedCommand ${Buffer.from(loader(script), "utf16le").toString("base64")}`;
 }

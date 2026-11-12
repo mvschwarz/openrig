@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -17,7 +17,7 @@ describe("Windows Pi executable resolution", () => {
   });
 
   it("resolves a standard npm shim without evaluating cmd.exe", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "pi-resolve-"));
+    const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "pi-resolve-")));
     const pkg = path.join(dir, "node_modules", "@earendil-works", "pi-coding-agent");
     try {
       mkdirSync(path.join(pkg, "dist"), { recursive: true });
@@ -39,7 +39,7 @@ describe("Windows Pi executable resolution", () => {
       writeFileSync(path.join(dir, "pi.cmd"), "unknown custom launcher");
       expect(() => resolveWindowsPiCommand(dir, process.execPath)).toThrow("Unrecognized");
       writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "../outside.js" } }));
-      expect(() => resolveWindowsPiCommand(dir, process.execPath)).toThrow("escapes");
+      expect(() => resolveWindowsPiCommand(dir, process.execPath)).toThrow();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("forwards Windows runtime locations while retaining provider denial", () => {

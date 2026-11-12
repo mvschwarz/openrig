@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { resolveWindowsProviderCommand } from "../src/domain/windows-provider-command.js";
 import { resolveWindowsPiCommand } from "../src/adapters/windows-pi-command.js";
+import { windowsCommunityCommand } from "../src/domain/windows-community-command.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -22,12 +23,14 @@ it.runIf(process.platform === "win32").each((["codex", "claude", "pi"] as const)
   const select = () => name === "pi" ? resolveWindowsPiCommand(searchPath, process.execPath, root)
     : resolveWindowsProviderCommand(name, { PATH: searchPath }, root);
   const launch = select();
+  expect(windowsCommunityCommand([name, "literal&argument"], searchPath, undefined, root))
+    .toEqual([launch.command, ...launch.prefix, "literal&argument"]);
   const args = ["用户 space", 'quote"', "", "trailing\\", "%LITERAL%", "amp&word"];
   const child = spawnSync(launch.command, [...launch.prefix, ...args], { cwd: root, windowsHide: true, encoding: "utf8" });
   expect(child.status, child.stderr).toBe(0);
   expect(JSON.parse(child.stdout)).toEqual(args);
   writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "unrelated-package", bin: { [name]: "entry.cjs" } }));
-  expect(select).toThrow(/recognized npm installation/);
+  expect(select).toThrow(/does not match its package/);
   writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: packageName, bin: { [name]: "../outside.cjs" } }));
   expect(select).toThrow(/escapes its package/);
   writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: packageName, bin: { [name]: "entry.cjs" } }));

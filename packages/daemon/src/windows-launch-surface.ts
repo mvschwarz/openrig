@@ -7,3 +7,9 @@ export { readWindowsTileAttachArgv, windowsTileAttachArgv } from "./domain/termi
 export { bindNativeSessionName } from "./domain/terminal/native-session-name.js";
 export { execWindowsJobFile } from "./domain/windows-job-exec.js";
 export { spawnWindowsJobProcess } from "./domain/windows-job-process.js";
+
+export { resolveWindowsCommand } from "./domain/windows-command.js";
+export { windowsPowerShell } from "./domain/windows-executables.js";
+
+export { localControlEndpoint } from "./domain/local-control-endpoint.js";
+export { herdrAppSocketPath, resolveHerdrAppHome } from "./domain/terminal/herdr-app-transport.js";

@@ -10,7 +10,7 @@ import type { FleetSnapshot, ViewState } from "../src/types.js";
 // Every marker the target choice reads, cleared so the test host's own terminal can't decide.
 const KEYS = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER",
   "CMUX_SOCKET_PATH", "CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SESSION", "HC_SOCKET",
-  "HERDR_APP_HOME", "XDG_CONFIG_HOME", "TMUX", "TMUX_PANE"];
+  "HERDR_APP_HOME", "HERDR_APP_SOCKET", "XDG_CONFIG_HOME", "TMUX", "TMUX_PANE"];
 const roots: string[] = [];
 // Built before collection: the table below reads it.
 const appHome = mkdtempSync(join(tmpdir(), "tui-herdr-app-"));
@@ -20,7 +20,8 @@ function ownEnv(env: Record<string, string>) {
   for (const key of KEYS) { vi.stubEnv(key, ""); delete process.env[key]; }
   for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
 }
-const inApp = () => ({ HC_TERMINAL_ID: "t4", HC_TERMINAL_SOCKET: "/run/core.sock", HERDR_APP_HOME: appHome });
+const inApp = () => ({ HC_TERMINAL_ID: "t4", HC_TERMINAL_SOCKET: "/run/core.sock", HERDR_APP_HOME: appHome,
+  ...(process.platform === "win32" ? { HERDR_APP_SOCKET: "\\\\.\\pipe\\owned-herdr-app" } : {}) });
 
 afterEach(() => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 afterAll(() => rmSync(appHome, { recursive: true, force: true }));
@@ -41,7 +42,7 @@ describe("herdr-app as the TUI's terminal target", () => {
   it.each([
     ["in a herdr-app terminal", inApp(), undefined, { provider: "herdr-app" }],
     ["a shared TUI viewed from a herdr-app terminal", { TERM_PROGRAM: "tmux" }, inApp(), { provider: "herdr-app" }],
-    ["markers whose window socket is missing", { ...inApp(), HERDR_APP_HOME: join(appHome, "absent") }, undefined, { provider: "herdr" }],
+    ["markers whose window socket is missing", { ...inApp(), HERDR_APP_SOCKET: "", HERDR_APP_HOME: join(appHome, "absent") }, undefined, { provider: "herdr" }],
     ["an old Herdr pane, whatever else is set", { ...inApp(), HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" }, undefined, { provider: "herdr" }],
     ["inside Rex", { ...inApp(), TERM_PROGRAM: "rex" }, undefined, { provider: "rex" }],
     ["any other configuration", { TERM_PROGRAM: "tmux" }, undefined, { provider: "herdr" }],

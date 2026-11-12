@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import { Command } from "commander";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -182,7 +183,7 @@ export function processStart(pid: number): string | undefined {
   try {
     if (process.platform === "win32") {
       const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; (Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`;
-      const output = execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const output = execFileSync(windowsPowerShell(),
         ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
         { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 64 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
       return /^\d+$/.test(output) ? output : undefined;

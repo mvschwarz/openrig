@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -107,7 +108,7 @@ public static class OpenRigRunProcesses {
     }
     return false;
   }
-  public static object Facts(int pid) {
+  public static object Facts(int pid, bool terminal = false) {
     IntPtr handle=OwnProcess(pid);
     if(handle==IntPtr.Zero) return null;
     try {
@@ -115,7 +116,7 @@ public static class OpenRigRunProcesses {
       var executable=new StringBuilder(32768); int capacity=executable.Capacity;
       if(!QueryFullProcessImageName(handle,0,executable,ref capacity)) return null;
       var env=new Dictionary<string,string>();
-      ReadNamedEnvironment(handle,parameters,width,env);
+      ReadNamedEnvironment(handle,parameters,width,env,terminal);
       return new Dictionary<string,object> {
         {"cwd",Text(handle,IntPtr.Add(parameters,width==8?0x38:0x24),width)},
         {"exe",executable.ToString()},
@@ -124,7 +125,7 @@ public static class OpenRigRunProcesses {
     } catch { return null; }
     finally { CloseHandle(handle); }
   }
-  static void ReadNamedEnvironment(IntPtr process, IntPtr parameters, int width, Dictionary<string,string> env) {
+  static void ReadNamedEnvironment(IntPtr process, IntPtr parameters, int width, Dictionary<string,string> env, bool terminal) {
     var environment=Pointer(process,IntPtr.Add(parameters,width==8?0x80:0x48),width);
     var entry=new StringBuilder();
     for(int offset=0;offset<2*1024*1024;) {
@@ -139,7 +140,7 @@ public static class OpenRigRunProcesses {
         string value=entry.ToString(); int equals=value.IndexOf('=');
         if(equals>0) {
           string key=value.Substring(0,equals).ToUpperInvariant();
-          if(key=="HOME" || key=="USERPROFILE" || key=="CODEX_HOME" || key=="CLAUDE_CONFIG_DIR") env[key]=value.Substring(equals+1);
+          if(terminal ? new HashSet<string>(new string[]{"TERM_PROGRAM","HERDR_ENV","HERDR_PANE_ID","HERDR_SOCKET_PATH","HERDR_SESSION","REX_SESSION","REX_BLOCK","REX_SERVER","REX_BIN_DIR","HC_SESSION","HC_SOCKET","HC_SCOPE","HC_TERMINAL_ID","HC_TERMINAL_SOCKET","HERDR_APP_HOME","HERDR_APP_SOCKET","XDG_CONFIG_HOME"}).Contains(key) : key=="HOME" || key=="USERPROFILE" || key=="CODEX_HOME" || key=="CLAUDE_CONFIG_DIR") env[key]=value.Substring(equals+1);
         }
         entry.Length=0;
       }
@@ -204,7 +205,7 @@ if($env:OPENRIG_PROCESS_CONSOLE_PID) {
   })
   ConvertTo-Json -InputObject $rows -Depth 5 -Compress
 } elseif($env:OPENRIG_PROCESS_QUERY_PID) {
-  $facts=[OpenRigRunProcesses]::Facts([int]$env:OPENRIG_PROCESS_QUERY_PID)
+  $facts=[OpenRigRunProcesses]::Facts([int]$env:OPENRIG_PROCESS_QUERY_PID, ($env:OPENRIG_PROCESS_ENV_PROFILE -eq "terminal"))
   if($null -eq $facts) { 'null' } else { ConvertTo-Json -InputObject $facts -Depth 4 -Compress }
 } else {
   ConvertTo-Json -InputObject @([OpenRigRunProcesses]::Find($env:OPENRIG_MARKER_QUERY)) -Compress
@@ -214,10 +215,10 @@ if($env:OPENRIG_PROCESS_CONSOLE_PID) {
 async function query(values: Record<string, string>): Promise<unknown> {
   const temporary = await mkdtemp(join(tmpdir(), "openrig-run-query-"));
   try {
-    const { stdout } = await exec(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    const { stdout } = await exec(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(QUERY, "utf16le").toString("base64")],
       { windowsHide: true, encoding: "utf8", timeout: 15_000, maxBuffer: 8 * 1024 * 1024,
-        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_PROCESS_QUERY_PIDS: "", OPENRIG_PROCESS_CONSOLE_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
+        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_ENV_PROFILE: "", OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_PROCESS_QUERY_PIDS: "", OPENRIG_PROCESS_CONSOLE_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
     return JSON.parse(stdout.replace(/^\uFEFF/, ""));
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
@@ -280,4 +281,16 @@ export async function readWindowsConsoleProcesses(pid: number): Promise<number[]
   if (members === null) return null;
   if (!Array.isArray(members) || !members.every(value => Number.isSafeInteger(value) && value > 0) || !members.includes(pid)) throw new Error("Invalid native console membership");
   return [...new Set(members)].sort((a, b) => a - b);
+}
+
+/** The same owned-process reader, with a terminal-only projection. */
+export async function readWindowsTerminalEnvironment(pid: number): Promise<NodeJS.ProcessEnv | undefined> {
+  if (process.platform !== "win32" || !Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) return undefined;
+  try {
+    const row = await query({ OPENRIG_PROCESS_QUERY_PID: String(pid), OPENRIG_PROCESS_ENV_PROFILE: "terminal" }) as { env?: unknown } | null;
+    if (!row?.env || typeof row.env !== "object" || Array.isArray(row.env)) return undefined;
+    const allowed = new Set(["TERM_PROGRAM","HERDR_ENV","HERDR_PANE_ID","HERDR_SOCKET_PATH","HERDR_SESSION","REX_SESSION","REX_BLOCK","REX_SERVER","REX_BIN_DIR","HC_SESSION","HC_SOCKET","HC_SCOPE","HC_TERMINAL_ID","HC_TERMINAL_SOCKET","HERDR_APP_HOME","HERDR_APP_SOCKET","XDG_CONFIG_HOME"]);
+    if (Object.entries(row.env).some(([key,value]) => !allowed.has(key) || typeof value !== "string" || value.length > 8192)) return undefined;
+    return row.env as NodeJS.ProcessEnv;
+  } catch { return undefined; }
 }

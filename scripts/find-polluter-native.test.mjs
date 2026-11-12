@@ -67,6 +67,7 @@ test('native directory alias executes the entry while importing stays inert', { 
   await mkdir(home);
   const source = new URL('../packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs', import.meta.url);
   await copyFile(source, join(home, 'helper.mjs'));
+  await copyFile(new URL('./npm-command.mjs', source), join(home, 'npm-command.mjs'));
   await symlink(home, alias, 'junction');
   const direct = spawnSync(process.execPath, [join(alias, 'helper.mjs')], { cwd, encoding: 'utf8', timeout: 10000, windowsHide: true });
   assert.equal(direct.status, 2, direct.stderr); assert.match(direct.stdout, /Usage:/);

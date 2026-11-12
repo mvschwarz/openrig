@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { resolve, isAbsolute, basename } from "node:path";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { getOpenRigHome } from "../openrig-compat.js";
@@ -94,8 +95,8 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * Shell expansion/operators and wrappers remain user-owned, never managed commands. */
 export function parseManagedClaudeNodeCommand(command: string): { executable: string; args: string[] } | null {
   if (/[\r\n]/.test(command)) return null;
-  if (process.platform === "win32" && command.startsWith("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")) {
-    const encoded = command.slice("powershell.exe -NoProfile -NonInteractive -EncodedCommand ".length);
+  if (process.platform === "win32" && command.startsWith(windowsPowerShell(process.env, "shell-bootstrap") + " -NoProfile -NonInteractive -EncodedCommand ")) {
+    const encoded = command.slice((windowsPowerShell(process.env, "shell-bootstrap") + " -NoProfile -NonInteractive -EncodedCommand ").length);
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
     const bytes = Buffer.from(encoded, "base64");
     if (bytes.toString("base64") !== encoded || bytes.length % 2 !== 0) return null;

@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../windows-executables.js";
 import path from "node:path";
 import { powershellQuote, renderWindowsLaunchArgv } from "../../adapters/windows-launch.js";
 import { windowsArguments } from "../../adapters/windows-argv.js";
@@ -20,7 +21,7 @@ export function nativeViewerCommand(argv: readonly string[], shell: string, stag
         + Buffer.from(script, "utf16le").toString("base64") + "'))))";
     }
     // Keep data out of cmd's percent/delayed expansion and operator parser.
-    const launch = canonical ? argv : [path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+    const launch = canonical ? argv : [windowsPowerShell(),
       "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script + "\nexit $global:LASTEXITCODE", "utf16le").toString("base64")];
     if (/[\"%!\r\n]/.test(launch[0]!)) throw new Error("Viewer executable cannot be represented safely by cmd");
     const command = windowsArguments(launch);
@@ -33,7 +34,7 @@ export function nativeViewerCommand(argv: readonly string[], shell: string, stag
       const bootstrap = "$ErrorActionPreference = 'Stop'; $openrigViewerStagedScript = [IO.File]::ReadAllText(" + powershellQuote(file)
         + "); Remove-Item -LiteralPath " + powershellQuote(file)
         + " -ErrorAction Stop; & ([ScriptBlock]::Create($openrigViewerStagedScript)); exit $global:LASTEXITCODE";
-      const staged = windowsArguments([path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      const staged = windowsArguments([windowsPowerShell(),
         "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(bootstrap, "utf16le").toString("base64")]);
       if (staged.length > 8190) throw new Error("Viewer staging path exceeds cmd's input limit");
       ensureWindowsPrivateDirectory(stageDirectory);

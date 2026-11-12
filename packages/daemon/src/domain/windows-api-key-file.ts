@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -52,7 +53,7 @@ public static class OpenRigPrivateApiKeyV1 {
 export function windowsApiKeyFileProblem(file: string): string | null {
   const script = `$ErrorActionPreference='Stop'; $openrigKeyPath=$env:OPENRIG_API_KEY_FILE; ${OPEN_WINDOWS_PRIVATE_API_KEY}\n$openrigKeyStream.Dispose()`;
   try {
-    execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    execFileSync(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
       { env: { ...process.env, OPENRIG_API_KEY_FILE: file }, windowsHide: true, stdio: "pipe", timeout: 5000 });
     return null;

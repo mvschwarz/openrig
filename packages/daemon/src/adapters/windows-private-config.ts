@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "../domain/windows-executables.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { writeFile, unlink, rmdir } from "node:fs/promises";
@@ -31,7 +32,7 @@ if ($rules.Count -ne 1 -or $rules[0].IsInherited -or $rules[0].IdentityReference
  * POSIX mode bits alone do not establish an equivalent boundary on Windows. */
 export async function writeWindowsPrivateConfig(content: string): Promise<PrivateConfig> {
   const directory = join(tmpdir(), `openrig-private-config-${randomUUID()}`);
-  await exec(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", PROTECT_DIRECTORY], {
+  await exec(windowsPowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", PROTECT_DIRECTORY], {
     env: { ...process.env, OPENRIG_PRIVATE_CONFIG_DIRECTORY: directory }, windowsHide: true, timeout: 5000,
   });
   const file = join(directory, "environment.conf");

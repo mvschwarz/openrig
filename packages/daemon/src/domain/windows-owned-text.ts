@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -416,7 +417,7 @@ async function nativeHelperAsync(): Promise<string> {
     const file = join(directory, "owned-text.exe");
     const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication";
     await new Promise<void>((resolveRun, reject) => {
-      const compiler = execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const compiler = execFile(windowsPowerShell(),
         ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
         { env: { ...process.env, TEMP: directory, TMP: directory, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000 },
         error => error ? reject(error) : resolveRun());
@@ -456,7 +457,7 @@ function nativeHelper(): string {
   const file = join(directory, "owned-text.exe");
   const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication";
   try {
-    execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    execFileSync(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
       { env: { ...process.env, TEMP: directory, TMP: directory, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
   } catch (error) { retireFailedCompilation(file, directory, error); throw error; }

@@ -5,20 +5,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { locateNpmCli } from "./npm-command.mjs";
+
 const usage = "Usage: node install-windows.mjs [--dry-run] [--package <specifier-or-tarball>]";
 function within(root, file) {
   const relative = path.relative(root, file);
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-function npmCli() {
-  const candidates = [process.env.npm_execpath,
-    path.join(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"),
-    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map(dir => path.join(dir, "node_modules/npm/bin/npm-cli.js"))];
-  for (const file of candidates) {
-    if (!file || path.basename(file).toLowerCase() !== "npm-cli.js") continue;
-    try { if (fs.statSync(file).isFile()) return fs.realpathSync.native(file); } catch { /* Next standard npm location. */ }
-  }
-  throw Object.assign(Error("Missing prerequisite: npm. Install Node.js 22 or 24 with npm, then retry."), { status: 127 });
 }
 function run(step, args, capture = false) {
   console.log(`\n[${step}] node ${args.map(arg => JSON.stringify(arg)).join(" ")}`);
@@ -51,7 +43,7 @@ export function installWindows(args) {
   if (process.platform !== "win32") { console.error("Use scripts/install.sh on macOS/Linux; this entry is for native Windows."); return 2; }
   let step = "1/4", entry, abi = "SKIPPED (not checked; see above)";
   try {
-    const npm = npmCli();
+    const npm = locateNpmCli();
     run(step, ["--version"]); run(step, [npm, "--version"]);
     step = "2/4";
     run(step, [npm, "install", "-g", "--", specifier]);

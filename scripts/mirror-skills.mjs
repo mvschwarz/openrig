@@ -561,6 +561,15 @@ export function applyMode(exec = execFileSync) {
 }
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
+  if (Object.keys(dependencies).length === 0) {
+    const source = new URL("./npm-command.mjs", import.meta.url);
+    const target = new URL("../packages/daemon/specs/agents/shared/skills/process/systematic-debugging/npm-command.mjs", import.meta.url);
+    const expected = readFileSync(source, "utf8");
+    if (!existsSync(target) || readFileSync(target, "utf8") !== expected) {
+      if (argv.includes("--check")) throw new Error("Shipped npm locator differs from scripts/npm-command.mjs; run npm run mirror-skills");
+      writeFileSync(target, expected);
+    }
+  }
   const isCheck = argv.includes("--check");
 
   if (isCheck) {

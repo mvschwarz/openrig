@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -28,7 +29,7 @@ export async function assessWindowsLocalDaemonOwner(baseUrl: string, deps: {
         const remaining = Math.floor(deadline - performance.now());
         if (remaining <= 0 || controller.signal.aborted) throw Error("expired");
         const script = `$ErrorActionPreference='Stop';$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}';if(!$p){throw 'process unavailable'};$o=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid;if($o.ReturnValue -ne 0){throw 'owner unavailable'};[Console]::Write((ConvertTo-Json -Compress @{pid=[int]$p.ProcessId;sid=$o.Sid;callerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;start=$p.CreationDate.ToUniversalTime().Ticks.ToString()}))`;
-        const raw = await run(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+        const raw = await run(windowsPowerShell(),
           ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], remaining);
         const row = JSON.parse(raw.replace(/^\uFEFF/, ""));
         if (row?.pid !== pid || !/^S-1-\d+(?:-\d+)+$/.test(row.sid) || !/^S-1-\d+(?:-\d+)+$/.test(row.callerSid) || typeof row.start !== "string" || !/^\d+$/.test(row.start)) throw Error("invalid observation");

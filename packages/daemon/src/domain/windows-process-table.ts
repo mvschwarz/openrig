@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./windows-executables.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -35,7 +36,7 @@ export async function readWindowsProcessesStrict(run = exec): Promise<WindowsPro
   const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='StartedAt';e={if($_.CreationDate){$_.CreationDate.ToUniversalTime().ToString('o')}}}) | ConvertTo-Json -Compress";
   let stdout: string;
   try {
-    ({ stdout } = await run(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ({ stdout } = await run(windowsPowerShell(),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
       { encoding: "utf8", windowsHide: true, timeout: CENSUS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }));
   } catch (error) {

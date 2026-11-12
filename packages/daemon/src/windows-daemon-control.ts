@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "./domain/windows-executables.js";
 import { createConnection, createServer } from "node:net";
 import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -12,7 +13,7 @@ const read = (file: string): any => { try { return JSON.parse(readFileSync(file,
 /** Windows SIGTERM force-terminates Node. This instance capability requests the
  * same bounded drain used by POSIX signals, without accepting an HTTP command. */
 export async function startWindowsDaemonControl(home: string, shutdown: (requestId?: string) => void): Promise<() => Promise<void>> {
-  const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const powershell = windowsPowerShell();
   try {
     await promisify(execFile)(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
       path.join(import.meta.dirname, "../assets/windows-private-directory.ps1"), "-Path", path.join(home, "windows-control")], { windowsHide: true, timeout: 5000 });

@@ -1,3 +1,4 @@
+import { windowsPowerShell } from "@openrig/daemon/windows-launch";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -144,7 +145,7 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((comm
   if (deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]) return "This is an SSH session; no desktop window is opened over SSH.";
   if (deps.platform === "win32") {
     const system=path.win32.join(deps.env.SystemRoot ?? "C:\\Windows","System32");
-    const powershell=path.win32.join(system,"WindowsPowerShell/v1.0/powershell.exe");
+    const powershell=windowsPowerShell(deps.env);
     const desktop=(await deps.exec(powershell,["-NoProfile","-NonInteractive","-Command","[System.Diagnostics.Process]::GetCurrentProcess().SessionId"],1000).catch(()=>"")).trim();
     if (!/^\d+$/.test(desktop) || Number(desktop)===0) return "No interactive Windows desktop session could be confirmed.";
     const terminal=(await deps.exec(path.win32.join(system,"where.exe"),["wt.exe"]).catch(()=>"")).trim().split(/\r?\n/)[0];
@@ -245,7 +246,7 @@ async function openWindowsTerminalView(client: DaemonClient, view: string, reque
   if (ci && !["0", "false"].includes(ci)) return refused("This is a CI run.");
   if (nativeEnv("SSH_CONNECTION") || nativeEnv("SSH_CLIENT") || nativeEnv("SSH_TTY")) return refused("This is an SSH session; run the window command on the daemon's desktop.");
   const systemDirectory = path.win32.join(nativeEnv("SystemRoot") || "C:\\Windows", "System32");
-  const powershell = path.win32.join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+  const powershell = windowsPowerShell(deps.env);
   const desktop = (await deps.exec(powershell, ["-NoProfile", "-NonInteractive", "-Command", "[System.Diagnostics.Process]::GetCurrentProcess().SessionId"], 1000).catch(() => "")).trim();
   if (!/^\d+$/.test(desktop) || Number(desktop) === 0) return refused("No interactive Windows desktop session could be confirmed.");
   const binary = (await deps.exec(path.win32.join(systemDirectory, "where.exe"), ["wt.exe"]).catch(() => "")).trim().split(/\r?\n/)[0];
@@ -399,7 +400,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     for (const key of ["SystemRoot","HOME","APPDATA","USERPROFILE","XDG_CONFIG_HOME","HERDR_INSTALL_DIR","HERDR_SESSION","HERDR_SOCKET_PATH","HERDR_ENV","HERDR_PANE_ID","TERM_PROGRAM","CI","SSH_CONNECTION","SSH_CLIENT","SSH_TTY"]) {
       const value=readPlatformEnv(source.env,key,"win32"); if(value!==undefined)env[key]=value;
     }
-    deps={...source,env,exec:(file,args,timeout)=>file!=="/usr/bin/env"?source.exec(file,args,timeout):source.exec(path.win32.join(env.SystemRoot??"C:\\Windows","System32/WindowsPowerShell/v1.0/powershell.exe"),["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(windowsHerdrEnvironmentCommand(args),"utf16le").toString("base64")],timeout)};
+    deps={...source,env,exec:(file,args,timeout)=>file!=="/usr/bin/env"?source.exec(file,args,timeout):source.exec(windowsPowerShell(env),["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(windowsHerdrEnvironmentCommand(args),"utf16le").toString("base64")],timeout)};
   }
   const session = requestedSession?.trim();
   if (!following && session === undefined && (requestedProvider === "rex" || (deps.platform !== "win32" && requestedProvider === undefined && inRex(deps.env)))) {
