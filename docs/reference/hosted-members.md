@@ -173,6 +173,14 @@ and nothing else is offered:
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
 - **Messages are items:** a message is an item the receiver reads and closes, and a reply is an item back to its sender.
+- **A fair-use limit on new work:** the service can add `throttle: { new_work: true, retry_after_seconds: <n> }` to an
+  active answer.
+  - While it does, a `rig_queue_create` that would open a new item writes nothing. It returns `fair_use_retry_later` with
+    `retryAfterSeconds` (1 to 600) and the `qitemId` to retry with.
+  - A retry of a create that already landed is answered from the stored item, as before.
+  - Everything else is served: reading, claiming and closing existing items, and answering the team's questions.
+  - It's never a credential refusal, and a `throttle` that can't be read is ignored.
+  - The service is asked once per HTTP request (initialize and tool listing included), not once per tool call.
 - **What the sender can tell, from the item it reads:**
   - **Queued:** the item exists and is `pending` with no claim.
   - **Picked up:** the receiver's claim (`in-progress`).
