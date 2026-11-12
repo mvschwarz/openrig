@@ -390,6 +390,29 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  it("allows cold start after an operator repairs and runs a capped seat", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO seat_cold_starts (node_id,last_attempt_at,last_outcome,consecutive_failures) VALUES ('n1',?,'failed:test',3)")
+      .run(new Date(Date.now() - COLD_START_MIN_INTERVAL_MS * 2).toISOString());
+    f.setLiveSessions(["dev-impl@fleet", "dev-rev@fleet"]);
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.ledger()?.consecutive_failures).toBe(0);
+    f.setLiveSessions(["dev-rev@fleet"]);
+    f.starter.notify("dev.impl@fleet");
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    f.db.close();
+  });
+
+  it("expires a failure cap even if the operator's successful life was not observed", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO seat_cold_starts (node_id,last_attempt_at,last_outcome,consecutive_failures) VALUES ('n1',?,'failed:test',3)")
+      .run(new Date(Date.now() - 60 * 60_000).toISOString());
+    f.starter.notify("dev.impl@fleet");
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    f.db.close();
+  });
+
   it("ignores non-seat destinations", async () => {
     const f = fixture();
     f.starter.notify("someone@external");

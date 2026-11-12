@@ -41,6 +41,7 @@ import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
 /** After this many consecutive failed attempts the seat stops cold-starting until a launch succeeds. */
 export const COLD_START_MAX_CONSECUTIVE_FAILURES = 3;
+export const COLD_START_FAILURE_WINDOW_MS = 15 * 60_000;
 
 /**
  * The stops the daemon itself may undo on new work. A resource-reclaiming stop is not an
@@ -270,20 +271,22 @@ export class SeatColdStarter {
       this.log(`${seat.logicalId}: not cold-starting: ${why}`);
       return false;
     };
-    // Durable coalescing: a recent attempt stands, and a repeatedly-failing seat
-    // stops cold-starting until a successful launch resets the count.
-    const ledger = this.ledgerRefuses(seat.nodeId, now);
-    if (ledger === "interval") return refuse("an attempt was made recently");
-    if (ledger === "failures") return refuse("too many consecutive failed attempts");
-
     const selection = this.selectionRefusal(seat);
     if (selection) return refuse(selection);
 
     // The queue said no receiver; verify — a live session means someone is there.
     const physical = seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`;
     try {
-      if (await this.deps.hasSession(physical)) return refuse("seat's tmux session is live");
+      if (await this.deps.hasSession(physical)) {
+        this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0, last_success_at=?, last_outcome='observed_running' WHERE node_id=?")
+          .run(now.toISOString(), seat.nodeId);
+        return refuse("seat's tmux session is live");
+      }
     } catch { /* an unprobeable session is not positive liveness; continue */ }
+
+    const ledger = this.ledgerRefuses(seat.nodeId, now);
+    if (ledger === "interval") return refuse("an attempt was made recently");
+    if (ledger === "failures") return refuse("too many consecutive failed attempts");
 
     // The rig must be up: another seat of the same rig must be live in tmux. A down
     // rig keeps whole-rig restore semantics (the operator's/autoscaler's job).
@@ -341,6 +344,12 @@ export class SeatColdStarter {
   ledgerRefuses(nodeId: string, now: Date): "interval" | "failures" | null {
     const row = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     if (!row) return null;
+    // Queue wakes may miss an operator's successful run entirely. A bounded quiet
+    // window prevents that unobserved repair from leaving a permanent failure cap.
+    if (Date.parse(row.last_attempt_at) + COLD_START_FAILURE_WINDOW_MS <= now.getTime()) {
+      this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0 WHERE node_id=?").run(nodeId);
+      return null;
+    }
     if (row.consecutive_failures >= COLD_START_MAX_CONSECUTIVE_FAILURES) return "failures";
     if (Date.parse(row.last_attempt_at) + COLD_START_MIN_INTERVAL_MS > now.getTime()) return "interval";
     return null;
