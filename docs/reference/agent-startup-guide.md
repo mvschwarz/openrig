@@ -291,7 +291,9 @@ would end that successor. The recovery adopts the successor that is running ther
 first proves, reading only, that the attempt still replaces the seat's current occupant and that the pane is the seat
 session's only pane, with exactly one foreground Claude that names the session id OpenRig generated for that launch,
 the same process in two samples, proven as the launch's readiness proves it (a `#!` wrapper that starts Claude
-without exec included). A `/clear` in the successor before the recovery is followed: the conversation it adopts is
+without exec included, when the launch recorded its executable: a launch with a permission mode). A classic launch
+(no permission mode) records no executable, so a wrapper whose Claude runs as `node cli.js` or under another name is
+not proven; the refusal then says `--recover` can't prove it, instead of asking to run it again. A `/clear` in the successor before the recovery is followed: the conversation it adopts is
 the one Claude's own session file for that process names, when it is newer than the process. Then it commits
 the handover with the occupant generation the attempt reserved, so the successor's identity hooks are accepted from
 then on. It types nothing into the pane, and a packet the failed handover didn't deliver is not delivered: the result

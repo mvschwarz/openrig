@@ -440,7 +440,13 @@ function witnessedClaudeRow(row: NativeProcessRow): boolean {
  * intermediate stop only, never to recognise a child that refuses its launcher or
  * takes the proof. */
 function claudeRuntimeRow(row: NativeProcessRow): boolean {
-  return witnessedClaudeRow(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
+  return witnessedClaudeRow(row) || unwitnessedClaudeRow(row);
+}
+
+/** A native or Nix Claude (argv0 claude, a version or Nix OS name) whose executable witness is missing from this
+ * sample (unreadable, timed out or over budget). The proof does not count it, but a later sample may. */
+export function unwitnessedClaudeRow(row: NativeProcessRow): boolean {
+  return needsClaudeExecutablePath(row) && row.executablePath === undefined;
 }
 
 /** Verified Claude runtimes that `parent` starts directly (same process group,

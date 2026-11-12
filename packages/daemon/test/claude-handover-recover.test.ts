@@ -559,7 +559,49 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(result.message).toContain("recorded no executable");
     expect(result.guidance).toContain("--recover can't prove it");
     expect(result.guidance).not.toMatch(/run the recovery again/i);
+    expect(result.guidance).toContain(`--fresh --stop --reason "<why>"`);
     expect(state()).toEqual(before);
+  });
+
+  // A native Claude whose executable witness this sample missed (the macOS path read timed out) is not the never-provable
+  // shape: a later sample may read the path and prove it, so the refusal still says to run the recovery again.
+  it("a classic launch whose native Claude has no executable witness in this sample still says to run the recovery again", async () => {
+    const launched = `--session-id ${successorToken} --name ${SEAT}`;
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? [
+        { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `claude ${launched}`, executableName: "2.1.316", startedAt },
+      ] as NativeProcessRow[] : []),
+    ];
+    await failedHandover();
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: null });
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.guidance).toMatch(/run the recovery again in a moment/);
+    expect(result.guidance).not.toContain("--recover can't prove it");
+  });
+
+  // The not-provable refusal is for a classic launch only: a managed launch records its executable, so a foreground that
+  // is not yet the Claude it proves (a wrapper's node child) may still become it.
+  it("a managed launch whose foreground holds no provable Claude still says to run the recovery again", async () => {
+    managedLaunch = { executable: WRAPPER, executableIsScript: true };
+    new NativePermissionStore(db).write(nodeId, { runtime: "claude-code", mode: "auto" }, "fixture", "wrapper launch");
+    const launched = `--permission-mode auto --session-id ${successorToken} --name ${SEAT}`;
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? [
+        { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/bin/sh ${WRAPPER} ${launched}`, executableName: "sh", startedAt },
+        { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `node /home/user/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js ${launched}`, executableName: "node", startedAt },
+      ] as NativeProcessRow[] : []),
+    ];
+    await failedHandover();
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: WRAPPER, executableIsScript: true });
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.guidance).toMatch(/run the recovery again in a moment/);
+    expect(result.guidance).not.toContain("--recover can't prove it");
   });
 
   it("a classic launch whose pane runs nothing yet still says to run the recovery again in a moment", async () => {
