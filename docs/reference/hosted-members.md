@@ -109,7 +109,9 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 - **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
   - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
     `<OPENRIG_HOME>/mcp-http-presence.json`, beside the token file;
-  - `lastWake`: its latest ring and the result, among its 50 most recent rows.
+  - `lastWake`: its latest ring and the result, among its 50 most recent rows;
+  - `checkIn`: its check-in status, last check-in and stated cadence, as described in [Check-in status](#check-in-status)
+    (unknown, with the reason, when the daemon gives none).
 - `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
 
 ### Check-in status
@@ -135,7 +137,8 @@ A stated cadence is its person's statement: neither reading proves the assistant
 anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
 isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
 gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
-reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats.
+reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats, and `rig ps` (with or
+without `--nodes`) lists connected assistants after its table, one line each; its `--json` output is unchanged.
 When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
 line; when that notice is filed doesn't change.
 

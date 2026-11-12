@@ -150,7 +150,11 @@ type HostedMember = { session: string; roster: string; capabilities: string[]; u
 
 /** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
  *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
-type HostedPresence = { lastCallAt: string | null; lastWake: { at: string; result: string; qitemId: string } | null; lastWakeScope: string };
+type HostedPresence = { lastCallAt: string | null; lastWake: { at: string; result: string; qitemId: string } | null; lastWakeScope: string;
+  checkIn: HostedCheckIn };
+
+/** Whether it's checking its own queue, as the daemon's hosted-members read gives it: a status only, never pickup. */
+type HostedCheckIn = { status: string; lastCheckInAt: string | null; expectedMinutes: number | null; onRequest: boolean; reason?: string };
 
 /** The rows a hosted member's latest ring is read from. */
 const PRESENCE_ROWS = 50;
@@ -1744,6 +1748,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // A node is a seat whether or not it has a session yet: its address derives from its logical id (pod.member).
         const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName,
           typeof seat.logicalId === "string" ? `${seat.logicalId.replace(".", "-")}@${rigName}` : null]).filter((name): name is string => typeof name === "string"));
+        // One read of the daemon's check-ins serves every member in this answer.
+        let checkIns: Promise<Array<Record<string, unknown>> | null> | undefined;
+        const checkInOf = async (seat: string): Promise<HostedCheckIn> => {
+          checkIns ??= client.get<{ members?: unknown }>("/api/queue/hosted-members")
+            .then((res) => (res.status < 400 && Array.isArray(res.data?.members) ? res.data.members as Array<Record<string, unknown>> : null), () => null);
+          const list = await checkIns;
+          const row = list?.find((m) => m.seat === seat);
+          if (!row || typeof row.status !== "string") {
+            return { status: "unknown", lastCheckInAt: null, expectedMinutes: null, onRequest: false,
+              reason: list ? "this daemon gave no status for it" : "this daemon gave no check-in status" };
+          }
+          return { status: row.status, lastCheckInAt: typeof row.lastCheckInAt === "string" ? row.lastCheckInAt : null,
+            expectedMinutes: typeof row.expectedMinutes === "number" ? row.expectedMinutes : null, onRequest: row.onRequest === true,
+            ...(typeof row.reason === "string" ? { reason: row.reason } : {}) };
+        };
         const hosted = await hostedMembersOf(rostersFolder(), rigName, nodeSeats,
           async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
             ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
@@ -1753,7 +1772,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
             const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
             return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
-              lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows` };
+              lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
           });
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
       } catch (err) {
