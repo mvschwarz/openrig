@@ -834,14 +834,14 @@ export class RigRepository {
     }
   }
 
-  /** S5 (OPR.0.5.4.7) — the first supported nodes.model write (the inventory was insert-only;
-   *  KI-5.3-9). Every managed resume/successor launch reads node.model at call time, so this
-   *  UPDATE is the complete persistence half of set-model. Returns whether a row changed. */
   setNodeInputRoute(nodeId: string, route: "typed" | "native"): boolean {
     if (!["typed", "native"].includes(route)) throw new Error("Invalid input route.");
     return this.db.prepare("UPDATE nodes SET input_route=? WHERE id=?").run(route, nodeId).changes > 0;
   }
 
+  /** S5 (OPR.0.5.4.7) — the first supported nodes.model write (the inventory was insert-only;
+   *  KI-5.3-9). Every managed resume/successor launch reads node.model at call time, so this
+   *  UPDATE is the complete persistence half of set-model. Returns whether a row changed. */
   setNodeModel(nodeId: string, model: string): boolean {
     const result = this.db
       .prepare("UPDATE nodes SET model = ? WHERE id = ?")

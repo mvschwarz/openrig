@@ -124,6 +124,7 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 
 async function fakeOpenRig(permissions: Permissions) {
   const hooks: Hook[] = [];
+  const channelRequests: string[] = [];
   const submits: Array<{ auth: string | undefined; body: Record<string, unknown>; at: number }> = [];
   const withdraws: Array<{ askId: string; body: Record<string, unknown> }> = [];
   const server: Server = createServer((req, res) => {
@@ -133,6 +134,7 @@ async function fakeOpenRig(permissions: Permissions) {
       const json = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
       const url = new URL(req.url ?? "/", "http://openrig.test");
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      if (url.pathname === "/api/activity/runner-channel") channelRequests.push(req.method ?? "unknown");
       if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body, at: Date.now() }); return json(200, { ok: true }); }
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
@@ -183,7 +185,7 @@ async function fakeOpenRig(permissions: Permissions) {
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   cleanups.push(() => server.close());
   const address = server.address() as { port: number };
-  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws };
+  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws, channelRequests };
 }
 
 function start(openrig: { url: string }, env: Record<string, string> = {}, binVar = "OPENRIG_DSH") {
@@ -231,6 +233,16 @@ const requests = (log: Array<Record<string, unknown>>, method: string) => log.fi
 const responseTo = (log: Array<Record<string, unknown>>, id: string) => log.find((entry) => entry.id === id && entry.method === undefined);
 
 describe("the documented dsh example runner", () => {
+  it("keeps legacy install-token input independent of an inherited run claim", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RUN_ID: "inherited-predecessor" });
+    await waitFor(seat.launch, "the launch record");
+    seat.type("legacy input");
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "ordinary legacy input completion");
+    expect(requests(seat.log(), "session/prompt")).toHaveLength(1);
+    expect(openrig.channelRequests).toEqual([]);
+  });
+
   it("opens a conversation, writes the launch record, and only then reads ready, with uploads off and no hook token for dsh", async () => {
     const openrig = await fakeOpenRig("absent");
     // A DSH_HOME the person's shell exports (its startup files run after the seat's env:) isn't the seat's home.
@@ -762,7 +774,7 @@ async function nativeChannelFixture() {
 
 describe("the actual dsh runner native channel", () => {
   it("uses one native prompt per request, queues busy wakes, and returns only dedicated answers despite lost receipt replies", async () => {
-    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
     await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
     channel.push(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
     await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "LATER"), "all native results");
@@ -775,7 +787,7 @@ describe("the actual dsh runner native channel", () => {
     expect(runner.log()[0]).toMatchObject({ start: { token: false } });
   });
   it("structured slash text never invokes the person's global abort parser", async () => {
-    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
     await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
     channel.push(["WAKE:CONTROL"], "/abort");
     await waitFor(() => channel.posts.find(post => post.type === "result" && post.requestId === "WAKE:CONTROL"), "literal answer");
@@ -783,7 +795,7 @@ describe("the actual dsh runner native channel", () => {
     expect(requests(runner.log(), "session/prompt")[0]).toMatchObject({ params: { prompt: [{ type: "text", text: "/abort" }] } });
   });
   it.each([["CANCEL", "interrupted"], ["FAIL", "failed"], ["UNKNOWN", "unknown"], ["EMPTY", "unknown"]] as const)("terminal %s releases the wake barrier without an answer", async (suffix, completion) => {
-    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
     await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
     channel.push([`WAKE:${suffix}`, "WAKE:AFTER"]);
     await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");

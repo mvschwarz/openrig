@@ -281,7 +281,7 @@ async function main() {
     while (!channelStop.signal.aborted) {
       const result = await callOpenRig("POST", "/api/activity/runner-channel", body, POST_TIMEOUT_MS);
       if (result.status >= 200 && result.status < 300) return true;
-      if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending"].includes(result.body?.code)) return false;
+      if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(result.body?.code)) return false;
       await sleep(250);
     }
     return false;
@@ -319,7 +319,7 @@ async function main() {
   const connectChannel = async () => {
     let retained = false, cursor = 0;
     const endpoint = openrigEndpoint();
-    if (!endpoint || !env.OPENRIG_RUN_ID || !env.OPENRIG_ACTIVITY_HOOK_TOKEN) return;
+    if (!endpoint?.token.startsWith("oag_") || !env.OPENRIG_RUN_ID || !env.OPENRIG_ACTIVITY_HOOK_TOKEN) return;
     while (!channelStop.signal.aborted) {
       try {
         const hello = await callOpenRig("POST", "/api/activity/runner-channel", { type: "hello", version: 1, runId: env.OPENRIG_RUN_ID, retained,

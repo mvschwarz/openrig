@@ -2203,7 +2203,7 @@ async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string },
         signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
       if (response.ok) return true;
       const failure = await response.json().catch(() => null) as { code?: string } | null;
-      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending"].includes(failure?.code ?? "")) return false;
+      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) return false;
     } catch { /* A lost response retries the saved receipt, never the native operation. */ }
     if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
   }
@@ -2395,7 +2395,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
   child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
-    ...(runtime === "pi" && endpoint && process.env.OPENRIG_RUN_ID ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal) } : {}),
+    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal) } : {}),
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
@@ -2463,8 +2463,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
     requestedSessionFile: args.sessionFile, model: args.model, thinking: args.thinking });
 
-  if (runtime === "pi" && endpoint && process.env.OPENRIG_RUN_ID)
-    void connectPiRunnerChannel(core, endpoint, process.env.OPENRIG_RUN_ID, nativeStream.signal);
+  if (runtime === "pi" && endpoint && runId)
+    void connectPiRunnerChannel(core, endpoint, runId, nativeStream.signal);
 
   let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

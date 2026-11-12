@@ -135,6 +135,11 @@ if(cmd.type==='prompt') { console.error('Unknown option: --name'); console.error
         }
         expect(output).toContain("AFTER_RUNNING_WARNING");
         expect(output).not.toContain("rejects the managed");
+        if (credential === "absent") {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          expect(reports.filter(r => r.body.type === "hello")).toEqual([]);
+        }
+
       }
       else {
         expect(output).toContain("cannot load saved session");

@@ -3006,7 +3006,13 @@ export class SessionTransport {
         const currentIds = memberOpts?.committedOutboxIds ?? ids;
         const route = this.inputRoute(guard.target(sessionName).nodeId);
         checkRetainedRoutes(route, currentIds);
-        if (route === "native") return this.admitNative(sessionName, memberText, memberOpts, currentIds);
+        if (route === "native") {
+          if (memberOpts?.expectedIdentity) {
+            const original = await resolveExpectedConversation(memberOpts.expectedIdentity, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+            original.assertCurrent();
+          }
+          return this.admitNative(sessionName, memberText, memberOpts, currentIds);
+        }
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},

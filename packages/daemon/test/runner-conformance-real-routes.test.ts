@@ -396,6 +396,54 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     expect(h.entries().filter(entry => "childToken" in entry).every(entry => entry.childToken === false)).toBe(true);
   }, 40000);
 
+  it.each([
+    ["pi", "ack"], ["pi", "result"], ["dsh", "ack"], ["dsh", "result"],
+  ] as const)("%s retains custody while binding is unverified at %s and recovers without replay", async (kind, phase) => {
+    const h = await nativeProcess(kind);
+    const { SeatIdentityStore } = await import("../src/domain/seat-identity-store.js");
+    const identities = new SeatIdentityStore(h.f.db);
+    const evidence = { nodeId: h.f.node.id, verdict: "unconfirmed" as const, evidenceSource: "pane_process" as const, reason: null,
+      sessionName: "dev@channel", observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPid: 101,
+        observedPanePid: 101, observedCommand: "node", matchedLayer: null } };
+    identities.upsert(evidence);
+    new SessionRegistry(h.f.db).registerClaimedSession(h.f.node.id, "dev@channel", "adopt");
+    const loseEvidence = () => h.f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(h.f.node.id);
+    // Before an offer, unavailable binding evidence cannot authenticate hello or consume custody.
+    loseEvidence(); h.start();
+    expect(await waitFor(() => h.hellos >= 2), h.output).toBe(true);
+    expect(h.f.grants.standing(h.f.grant.grantId)).toBe("unverified");
+    expect(h.f.grants.get(h.f.grant.grantId)?.revokedAt).toBeNull();
+    expect(h.f.outbox.runnerReceipts(h.f.node.id, h.f.grant.runId!)).toEqual([]);
+    expect(h.prompts()).toEqual([]);
+    identities.upsert(evidence); await h.ready();
+    h.fault = { type: phase, commit: false, hits: 0 };
+    const id = `unverified-${phase}`;
+    await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
+    expect(await waitFor(() => h.fault!.hits > 0), h.output).toBe(true);
+    const saved = h.f.outbox.runnerReceipt(id)!;
+    expect(saved.stage).toBe(phase === "ack" ? "offered" : "submitted");
+    expect(h.prompts().filter(text => text === id)).toHaveLength(phase === "ack" ? 0 : 1);
+    // The same selected run becomes temporarily unverifiable, not replaced or map-lost.
+    loseEvidence(); h.fault = null; const hellos = h.hellos; h.server.closeAllConnections();
+    expect(await waitFor(() => h.hellos > hellos), h.output).toBe(true);
+    const refused = await fetch(`${h.url}/api/activity/runner-channel`, { method: "POST",
+      headers: { authorization: `Bearer ${h.f.grant.token}`, "content-type": "application/json" }, body: JSON.stringify(h.f.hello) });
+    expect(refused.status).toBe(409);
+    const refusedBody = await refused.json();
+    expect(refusedBody).toMatchObject({ code: "runner_grant_unverified" });
+    await sleep(500);
+    expect(h.f.outbox.runnerReceipt(id)).toEqual(saved);
+    expect(h.f.grants.get(h.f.grant.grantId)?.revokedAt).toBeNull();
+    expect(h.prompts().filter(text => text === id)).toHaveLength(phase === "ack" ? 0 : 1);
+    identities.upsert(evidence); await h.ready();
+    expect(await waitFor(() => h.f.outbox.runnerReceipt(id)?.stage === "completed"), h.output).toBe(true);
+    expect(h.f.outbox.runnerReceipt(id)?.result).toMatchObject({ completion: "completed", answer: `answer ${id}` });
+    await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
+    expect(h.prompts().filter(text => text === id)).toHaveLength(1);
+    expect(h.f.outbox.runnerReceipts(h.f.node.id, h.f.grant.runId!)).toHaveLength(1);
+    expect(refusedBody).toMatchObject({ retryable: true });
+  }, 40000);
+
   it.each(["pi", "dsh"] as const)("%s receiver replacement fences missing state and all cross-run/seat authority through actual routes", async kind => {
     const h = await nativeProcess(kind), original = h.start(); await h.ready();
     const post = (token: string, body: unknown) => fetch(`${h.url}/api/activity/runner-channel`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -491,6 +539,33 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     expect(requests.some(request => request.text === "ordinary native")).toBe(true);
     console.log(JSON.stringify({ nativeProgram: kind, version, executable, provider: "local fake Anthropic messages; no external network", prompts: requests.map(request => request.text) }));
   }, 45000);
+
+  it("refuses an unverified channel binding retryably without changing custody, then recovers", async () => {
+    const f = await fixture();
+    const { SeatIdentityStore } = await import("../src/domain/seat-identity-store.js");
+    const identities = new SeatIdentityStore(f.db);
+    const evidence = { nodeId: f.node.id, verdict: "unconfirmed" as const, evidenceSource: "pane_process" as const, reason: null,
+      sessionName: "dev@channel", observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPid: 101,
+        observedPanePid: 101, observedCommand: "node", matchedLayer: null } };
+    identities.upsert(evidence); new SessionRegistry(f.db).registerClaimedSession(f.node.id, "dev@channel", "adopt");
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.admit("unverified"); f.channel.frames(f.grant.token, 0);
+    const saved = f.outbox.runnerReceipt("unverified");
+    f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(f.node.id);
+    const headers = { authorization: `Bearer ${f.grant.token}`, "content-type": "application/json" };
+    const ack = { type: "ack", runId: f.grant.runId, requestId: "unverified", sequence: 1, state: "accepted" };
+    for (const body of [f.hello, ack, undefined]) {
+      const response = await f.app.request("/api/activity/runner-channel", body ? { method: "POST", headers, body: JSON.stringify(body) } : { headers });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "runner_grant_unverified", retryable: true });
+      expect(f.outbox.runnerReceipt("unverified")).toEqual(saved);
+      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+    }
+    identities.upsert(evidence);
+    expect(f.grants.standing(f.grant.grantId)).toBe("current");
+    expect((await f.app.request("/api/activity/runner-channel", { method: "POST", headers, body: JSON.stringify(ack) })).status).toBe(200);
+    expect(f.outbox.runnerReceipt("unverified")?.stage).toBe("accepted");
+  });
 
   it("pending and replacement grants cannot subscribe to or settle the retiring run's receipts", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("old");

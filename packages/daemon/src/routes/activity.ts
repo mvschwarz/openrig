@@ -157,7 +157,8 @@ function channelToken(c: Context): string | undefined {
   return auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.header("x-openrig-activity-token");
 }
 function channelFailure(c: Context, error: unknown): Response {
-  return error instanceof RunnerChannelError ? c.json({ error: error.message, code: error.code }, error.status)
+  return error instanceof RunnerChannelError ? c.json({ error: error.message, code: error.code,
+    ...(error.code === "runner_grant_unverified" ? { retryable: true } : {}) }, error.status)
     : c.json({ error: "Runner channel unavailable.", code: "runner_channel_unavailable" }, 503);
 }
 activityRoutes.post("/runner-channel", async c => {
