@@ -719,7 +719,7 @@ describe("an answered request goes to the receiving agent: the pair's round-0 co
     const askId = String((await f.submit()).body.askId);
     // The result says what became of the answer (the TUI prints it), never that the request closed.
     expect(await f.act(askId, "approve")).toMatchObject({ status: 200,
-      body: { answer: { message: `Your answer on ${askId} went to ${DECIDER}, the receiving agent, which decides. The runner waits until then; nothing has run.` } } });
+      body: { answer: { message: `Your answer on ${askId} went to ${DECIDER}, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.` } } });
     expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: DECIDER });
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(handedFrom(f, askId)!.body).toContain(`they wrote "yes"`);
@@ -1021,5 +1021,60 @@ describe("a direct answer with no notify envelope (the Slack fallback)", () => {
       { type: "queue.handed_off", qitemId: askId, to: DECIDER, inTransaction: false },
       { type: "queue.created", qitemId: successor.qitem_id, to: DECIDER, inTransaction: false },
     ]);
+  });
+});
+
+// A person answering from the TUI answers as the host's human seat, and a person-addressed row to a human seat must
+// carry an evidence ref (convention C3). Without one, both notes to the person were refused and never written.
+describe("the person's note about a runner answer is written under the queue's own conventions", () => {
+  const HUMAN_SEAT = "human@host";
+  const answerAsHost = (f: ReturnType<typeof fixture>, askId: string, choice: { optionId?: string; decision?: string }) =>
+    f.contract.act({ verb: "answer", qitemId: askId, actorSession: HUMAN_SEAT, authority: "primary-user",
+      ...(choice.optionId ? { questionId: "permission", optionId: choice.optionId } : {}), ...(choice.decision ? { decision: choice.decision } : {}) } as never);
+  const notesTo = (f: ReturnType<typeof fixture>) => f.queueRepo.list({ limit: 100 })
+    .filter((row) => row.destinationSession === HUMAN_SEAT && row.humanIntent === "update");
+
+  it("with no agent that can decide, the kept-answer note is written once, linked to the request, with the direct route", async () => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await answerAsHost(f, askId, { optionId: "allow" });
+    await vi.waitFor(() => expect(notesTo(f)).toHaveLength(1));
+    const [note] = notesTo(f);
+    expect(note).toMatchObject({ qitemId: `qitem-runner-permission-kept-${askId.replace(/^qitem-runner-permission-/, "")}`,
+      evidenceRef: `rig queue show ${askId}`, sourceSession: SEAT });
+    expect(note!.body).toContain("The tool hasn't run, and nothing was permitted or refused.");
+    expect(note!.body).toContain(`rig seat decide-permission ${askId} --option <id>`);
+    // The answer itself is kept on the request, and the request still waits.
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending", humanAnswers: { permission: "allow" } });
+    // Answering again keeps the new answer and writes no second note.
+    await answerAsHost(f, askId, { decision: "only the test file" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(notesTo(f)).toHaveLength(1);
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("when the answer goes to an agent, the who-decides note is written once, linked to the request, with the agent's state", async () => {
+    const f = fixture({ receiver: "dev-other@perm-rig" });
+    const askId = String((await f.submit()).body.askId);
+    await answerAsHost(f, askId, { decision: "only the test file" });
+    await vi.waitFor(() => expect(notesTo(f)).toHaveLength(1));
+    const [note] = notesTo(f);
+    expect(note).toMatchObject({ evidenceRef: `rig queue show ${askId}`, sourceSession: SEAT });
+    expect(note!.body).toContain(`went to dev-other@perm-rig, which decides it while ${SEAT} waits. Nothing runs until it decides.`);
+    expect(note!.body).toContain("Receiving agent: dev-other@perm-rig, chosen in agents.operator_session; its session is recorded as running.");
+    expect(note!.body).toContain(`rig seat decide-permission ${askId} --option <id>`);
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "handed-off", handedOffTo: "dev-other@perm-rig" });
+  });
+
+  it("a runner already waiting when the answer is handed to the agent reads the agent's decision at once, not at its read's end", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const started = Date.now();
+    const waiting = f.read(askId, 5);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await f.answer(askId, { optionId: "allow" })).toMatchObject({ status: 200 });
+    expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { state: "answered" } });
+    expect(await waiting).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    expect(Date.now() - started).toBeLessThan(2500);
   });
 });

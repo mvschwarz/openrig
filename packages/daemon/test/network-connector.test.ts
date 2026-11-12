@@ -16,7 +16,7 @@ import { NetworkBindingStore, networkCredentialFile } from "../src/domain/networ
 import { Hono } from "hono";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
-import { NetworkConnectorService, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
+import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
 const PARTICIPANT = "alex@team";
 
@@ -424,6 +424,16 @@ describe("network connector", () => {
     expect(repo.getById(local!.qitemId)!.resolution).toBe("Here it is.");
   });
 
+  it("closed-elsewhere conflicts are listed by when they settled, and ones that settled in the same millisecond by local item", () => {
+    const add = db.prepare(`INSERT INTO network_receipts (local_qitem_id, binding_id, hub_qitem_id, created_at, settled_at, outcome)
+      VALUES (?, 'netb-order', ?, '2026-11-11T19:00:00.000Z', ?, 'closed_on_hub')`);
+    // The latest has the first id, and the two that tie were recorded, and name hub items, out of local-item order.
+    add.run("qitem-net-a", "hub-1", "2026-11-11T19:00:00.001Z");
+    add.run("qitem-net-c", "hub-2", "2026-11-11T19:00:00.000Z");
+    add.run("qitem-net-b", "hub-3", "2026-11-11T19:00:00.000Z");
+    expect(networkClosedElsewhere(db, "netb-order").map((c) => c.localItem)).toEqual(["qitem-net-b", "qitem-net-c", "qitem-net-a"]);
+  });
+
   it("a hub item already failed elsewhere gets no write and isn't our result, and a close that loses a race is read back as closed elsewhere", async () => {
     const b = bind();
     hub.add("hub-f1");
@@ -451,10 +461,12 @@ describe("network connector", () => {
     // A later pass's ordinary contact doesn't clear it, and it's read from the receipts, so a restart keeps it.
     expect((await pass(b.id)).error).toBeUndefined();
     const listed = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ id: string; closedElsewhere: unknown[] }> };
-    expect(listed.bindings.find((x) => x.id === b.id)!.closedElsewhere).toEqual([
+    // Listed in the order they settled, which can fall in one millisecond or two, so compared by local item.
+    const byLocal = (x: { localItem: string }, y: { localItem: string }) => x.localItem.localeCompare(y.localItem);
+    expect([...listed.bindings.find((x) => x.id === b.id)!.closedElsewhere as Array<{ localItem: string }>].sort(byLocal)).toEqual([
       { hubItem: "hub-f1", localItem: f1!.qitemId, note: `The hub item was closed elsewhere (failed) before this result reached it. The result stays on ${f1!.qitemId}.` },
       { hubItem: "hub-f2", localItem: f2!.qitemId, note: `The hub item was closed elsewhere (done, no-follow-on) before this result reached it. The result stays on ${f2!.qitemId}.` },
-    ].sort((x, y) => x.localItem.localeCompare(y.localItem)));
+    ].sort(byLocal));
   });
 
   it("a close without a resolution sends only the closer's own closing note, never another note on the item", async () => {

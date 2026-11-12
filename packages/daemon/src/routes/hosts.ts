@@ -50,11 +50,10 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID, randomInt } from "node:crypto";
 import { connect } from "node:net";
-import { execFile } from "node:child_process";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
-import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry, type SshHostEntry } from "../domain/hosts/hosts-registry-reader.js";
+import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { UNATTRIBUTED_ACTOR, type QueueItem, type QueueRepository } from "../domain/queue-repository.js";
 import { KERNEL_OPERATOR_SESSION, resolveDefaultReceiver } from "../domain/default-receiver.js";
@@ -332,41 +331,16 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // POINTERS by construction) + `selected` + a bounded coarse `status`.
   // ---------------------------------------------------------------------
 
-  // Where ssh would connect for this host, from `ssh -G` (reads ssh config, no connection); null when
-  // ssh can't resolve it or a ProxyJump/ProxyCommand sits in between. Twin of the CLI's resolveSshEndpoint.
-  function resolveSshEndpoint(host: SshHostEntry, timeoutMs: number): Promise<{ hostname: string; port: number } | null> {
-    // `--` before the target, the same separator the CLI twin and the executor pass: a
-    // destination that begins with `-` is read as the host, not as an option.
-    const args = [...(host.user ? ["-l", host.user] : []), "-G", "--", host.target];
-    return new Promise((resolve) => {
-      execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
-        if (error) return resolve(null);
-        const conf = new Map(stdout.split("\n").map((line) => {
-          const i = line.indexOf(" ");
-          return [line.slice(0, i).toLowerCase(), line.slice(i + 1).trim()] as const;
-        }));
-        const proxied = ["proxyjump", "proxycommand"].some((k) => (conf.get(k) ?? "none") !== "none");
-        const hostname = conf.get("hostname");
-        const port = Number(conf.get("port"));
-        resolve(hostname && Number.isInteger(port) && !proxied ? { hostname, port } : null);
-      });
-    });
-  }
-
   async function probeHost(host: HostEntry, timeoutMs = 1500): Promise<"reachable" | "unreachable" | "unknown"> {
     try {
-      let target: string;
-      let port: number;
       if (host.transport === "ssh") {
-        const endpoint = await resolveSshEndpoint(host, timeoutMs);
-        if (!endpoint) return "unknown";
-        ({ hostname: target, port } = endpoint);
-      } else {
-        const u = new URL(host.url);
-        // WHATWG keeps the brackets on an IPv6 hostname; net.connect wants the bare address.
-        target = u.hostname.replace(/^\[(.*)\]$/, "$1");
-        port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
+        // Passive SSH rows have no authority to read SSH config or probe sshd.
+        return "unknown";
       }
+      const u = new URL(host.url);
+      // WHATWG keeps the brackets on an IPv6 hostname; net.connect wants the bare address.
+      const target = u.hostname.replace(/^\[(.*)\]$/, "$1");
+      const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
       return new Promise((resolve) => {
         const sock = connect({ host: target, port, timeout: timeoutMs });
         sock.on("connect", () => { sock.destroy(); resolve("reachable"); });

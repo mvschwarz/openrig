@@ -4286,7 +4286,9 @@ export class QueueRepository {
     // The person learns who decides and in what recorded state, so a delay is shown: one update per request.
     const toldId = `qitem-runner-permission-passed-${item.qitemId.replace(/^qitem-runner-permission-/, "").replace(/^qitem-/, "")}`;
     setImmediate(() => {
+      // The request the person answered is what they'd judge (convention C3: a note to a person names its evidence).
       void this.create({ qitemId: toldId, sourceSession: root.sourceSession, destinationSession: person, humanIntent: "update",
+        evidenceRef: `rig queue show ${root.qitemId}`,
         summary: `Your answer went to ${decider} to decide; ${root.sourceSession} is waiting`,
         body: [`Your answer to ${root.sourceSession}'s permission request ${root.qitemId} went to ${decider}, which decides it while ${root.sourceSession} waits. Nothing runs until it decides.`,
           ...(chosen?.describe ? [`Receiving agent: ${chosen.describe}`] : []),
@@ -4337,6 +4339,7 @@ export class QueueRepository {
     // After the answer's own write settles: one receipt per request (its id is the request's), told to who answered.
     setImmediate(() => {
       void this.create({ qitemId: receiptId, sourceSession: requester, destinationSession: person, humanIntent: "update",
+        evidenceRef: `rig queue show ${item.qitemId}`,
         summary: `Your answer to ${requester}'s permission request is kept; the tool hasn't run`,
         body: [`Your answer to ${requester}'s permission request ${item.qitemId} is kept, and the request is still waiting: ${unreachable ? `it couldn't be passed to ${unreachable}, the receiving agent, just now (answer again to retry)` : `no receiving agent on this host can read it before the tool runs (none is set, or the only one is ${requester} itself)`}. The tool hasn't run, and nothing was permitted or refused.`,
           `To decide now: rig seat decide-permission ${item.qitemId} --option <id>${options.length ? ` (options: ${options.map((o) => `${o.id}, ${o.label}`).join("; ")})` : ""}. Or set up a receiving agent that isn't ${requester}: rig config set agents.operator_session <seat>@<rig>.`,

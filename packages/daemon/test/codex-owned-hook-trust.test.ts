@@ -57,6 +57,15 @@ it("a fresh install has all six exact plugin hooks trusted before the first seat
   expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
   expect(f.calls.map(a=>a.slice(0,2))).toEqual([["plugin","marketplace"],["plugin","add"]]);
 });
+it("refocus keeps Codex's default budget and main's declaration hash", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(shipped, "hooks/codex.json"), "utf8"));
+  const handler = manifest.hooks.UserPromptSubmit[1].hooks[0];
+  const { computeCodexHookTrust } = createRequire(import.meta.url)(path.join(shipped, "hooks/scripts/codex-hook-trust.cjs"));
+  const identity = computeCodexHookTrust("UserPromptSubmit", { ...handler, timeoutSec: handler.timeout,
+    keySource: "openrig-core@openrig:hooks/codex.json", groupIndex: 1, handlerIndex: 0 });
+  expect(identity.hash).toBe("sha256:c648714b3a02675ba4ea029b8e62dbcd77569afc317ad4f1bc3e8cbfbe7b34ee");
+  expect(handler.additionalContextLimit).toBeUndefined();
+});
 it.each(['[plugins."openrig-core@openrig"]\nenabled = false\n','[plugins._default]\nenabled = false\n'])("a disabled plugin stays disabled on restart and upgrade: %s", async config => {
   const f = fixture(config); await f.adapter().ensureCodexCorePlugin(); await f.adapter().ensureCodexCorePlugin();
   expect(fs.readFileSync(f.file,"utf8")).toBe(config); expect(f.calls).toEqual([]);

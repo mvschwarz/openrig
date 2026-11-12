@@ -18,7 +18,7 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 // avoid `/proof-asset` being parsed as a slice-name.
 
 import { Hono, type Context } from "hono";
-import { readSliceReadiness, readProjectReadiness } from "../domain/proof/judgments.js";
+import { readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
@@ -37,7 +37,7 @@ export function slicesRoutes(): Hono {
 
   // 1) Static literal `/` BEFORE dynamic `/:name` so the list isn't
   //    shadowed by a slice named "list" or similar.
-  app.get("/", (c) => {
+  app.get("/", async (c) => {
     const deps = getDeps(c);
     if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
     if (!deps.indexer.isReady()) {
@@ -61,7 +61,7 @@ export function slicesRoutes(): Hono {
     // operation: the list rebuild, the boundToWorkflow per-slice get loop,
     // and the mission sidecar share ONE membership batch (pre-scope, each
     // uncached get built its own 2-scan batch: 2+2N total queue scans).
-    return deps.indexer.withMembershipBatch(() => {
+    const listing = deps.indexer.withMembershipBatch(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
       // Workflows in Spec Library v0: optional lens filter — narrow to
@@ -102,7 +102,7 @@ export function slicesRoutes(): Hono {
         complete: projectLookup.complete,
       });
       const authored = deps.indexer.missionAuthoredStatuses();
-      return c.json({
+      return {
         slices: filtered.map((s) => ({
           ...s,
           queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
@@ -114,13 +114,17 @@ export function slicesRoutes(): Hono {
         // VM-005 (release-0.4.7): additive authored mission-status sidecar so
         // chip surfaces can honor authored-wins precedence without a second
         // round-trip. The `slices` array itself is byte-untouched.
-        missions: { ...authored, ...Object.fromEntries(readProjectReadiness(deps.indexer.slicesRoot).missions.map(m => [m.name, {
-          ...authored[m.name],
-          authoredStatus: m.historicalStatus ?? authored[m.name]?.authoredStatus ?? null,
-          readiness: m,
-        }])) },
-      });
+        missions: authored,
+      };
     });
+    if (listing instanceof Response) return listing;
+    // The membership batch is synchronous and request-local; finish it before yielding to other requests.
+    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot);
+    return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
+      ...listing.missions[m.name],
+      authoredStatus: m.historicalStatus ?? listing.missions[m.name]?.authoredStatus ?? null,
+      readiness: m,
+    }])) } });
   });
 
   // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 8 — Explorer auto-show): explicit cache invalidation surface.

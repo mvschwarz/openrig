@@ -14,11 +14,13 @@ import { configCommand } from "../src/commands/config.js";
 describe("rig host add/list", () => {
   let dir: string;
   let savedHome: string | undefined;
+  let tcpProbeCalls: Array<{ target: string; port: number; timeoutMs: number }> = [];
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "hostcmd-"));
     savedHome = process.env.OPENRIG_HOME;
     process.env.OPENRIG_HOME = dir;
+    tcpProbeCalls = [];
   });
   afterEach(() => {
     if (savedHome === undefined) delete process.env.OPENRIG_HOME;
@@ -43,7 +45,15 @@ describe("rig host add/list", () => {
   function run(argv: string[]) {
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(hostCommand());
+    prog.addCommand(hostCommand({
+      run: async () => { throw new Error("unexpected cross-host command in add/list test"); },
+      httpGet: async () => { throw new Error("unexpected HTTP GET in add/list test"); },
+      httpPost: async () => { throw new Error("unexpected HTTP POST in add/list test"); },
+      tcpProbe: async (target, port, timeoutMs) => {
+        tcpProbeCalls.push({ target, port, timeoutMs });
+        return "unknown";
+      },
+    }));
     return prog.parseAsync(["node", "rig", "host", ...argv]);
   }
 
@@ -97,11 +107,17 @@ describe("rig host add/list", () => {
     const added = await capture(() => run(["add", "--id", "f1", "--transport", "http", "--url", "http://100.64.0.9:7433", "--bearer-env", "FACTORY_TOKEN", "--json"]));
     expect(JSON.parse(added.out.join("\n"))).toMatchObject({ ok: true, entry: { id: "f1" } });
     expect(added.err).toEqual([]);
+    const beforeTextList = tcpProbeCalls.length;
     const { out } = await capture(() => run(["list"]));
+    expect(tcpProbeCalls.length - beforeTextList).toBe(1);
     const text = out.join("\n");
     expect(text).toContain("env:FACTORY_TOKEN");
+    expect(text).toContain("unknown");
     expect(text).not.toContain("super-secret-bearer-value");
+    const beforeJsonList = tcpProbeCalls.length;
     const { out: jsonOut } = await capture(() => run(["list", "--json"]));
+    expect(tcpProbeCalls.length - beforeJsonList).toBe(1);
+    expect(JSON.parse(jsonOut.join(""))).toMatchObject([{ id: "f1", status: "unknown" }]);
     expect(jsonOut.join("")).toContain("FACTORY_TOKEN");
     expect(jsonOut.join("")).not.toContain("super-secret-bearer-value");
   });
