@@ -308,7 +308,7 @@ cited here by number with the code that carries them):
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
 - **Seat handover recovery** (#2985, #2861) — a handover that fails after
   the in-place respawn with its Claude successor launched records the attempt
-  in `seat_handover_attempts` (migration 163; `seat-handover-attempts.ts`):
+  in `seat_handover_attempts` (migration 165; `seat-handover-attempts.ts`):
   the generation it reserved, the pane, the session id it generated for
   the launch and its frozen executable (a `#!` script or not, #2341).
   `rig seat handover <seat> --recover --reason <reason>` calls
@@ -320,7 +320,11 @@ cited here by number with the code that carries them):
   takes the conversation that process holds now from Claude's
   `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
   does; a `/clear` rotates it), then commits through the same `commit()` with
-  the reserved generation (rolled back if it doesn't register). The result and
+  the reserved generation (rolled back if it doesn't register). A classic
+  launch (no permission mode) records no executable, so a Claude a `#!`
+  wrapper starts without exec, or a renamed binary, is not proven: the
+  refusal says `--recover` can't prove it instead of asking to run it again.
+  The result and
   `seat.handover_completed` carry `recoveredFrom`. Codes: 404
   `no_handover_to_recover`, 409 `handover_attempt_superseded` and
   `successor_identity_unproven`, 501 `recover_runtime_unsupported`.

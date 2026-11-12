@@ -40,7 +40,7 @@ import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./s
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste, STARTUP_UNCONFIRMED_REASON } from "./startup-submission-evidence.js";
 import { abandonOpenHandoverAttempt, closeHandoverAttempt, openHandoverAttempt, recordFailedHandoverAttempt, type SeatHandoverAttempt } from "./seat-handover-attempts.js";
-import { explainNativeRejection, listNativeProcesses, observeClaudePaneProcess, verifyClaudePaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { explainNativeRejection, listNativeProcesses, nativeCandidateCount, observeClaudePaneProcess, verifyClaudePaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { readClaudePidSessionId } from "./resume-metadata-refresher.js";
 import { claudeConfigRootFor } from "./seat-runtime-home.js";
 import nodePath from "node:path";
@@ -893,7 +893,9 @@ export class SeatHandoverService {
     const proof = await this.proveAttemptSuccessor(attempt, node.cwd ?? null);
     if (!proof.ok) {
       return { ok: false, code: "successor_identity_unproven", message: proof.message,
-        guidance: `Nothing was changed. Look at the pane: rig capture ${quotedSeat}. If the successor is still starting, run the recovery again in a moment; another handover ends whatever runs there.` };
+        guidance: "unprovable" in proof && proof.unprovable
+          ? `Nothing was changed. The successor runs in the pane (rig capture ${quotedSeat}), but --recover can't prove it, and running it again will not change that; the seat keeps its previous occupant. Another handover, or rig seat launch ${quotedSeat} --fresh --stop, ends the running successor.`
+          : `Nothing was changed. Look at the pane: rig capture ${quotedSeat}. If the successor is still starting, run the recovery again in a moment; another handover ends whatever runs there.` };
     }
 
     // Proven: the pane's process is the attempt's launch. It is committed through the same path as any handover, with
@@ -959,7 +961,7 @@ export class SeatHandoverService {
    *  generated for it, the same process in two samples, in the seat session's only pane, with an unchanged PID (as
    *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
    *  process. Reads only. */
-  private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string } | { ok: false; message: string }> {
+  private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string } | { ok: false; message: string; unprovable?: true }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
     const onlyPane = async () => {
@@ -980,7 +982,18 @@ export class SeatHandoverService {
       const native = await verifyClaudePaneProcess(proofInput);
       if (!native) {
         const panePid = await this.tmuxAdapter.getPanePid(attempt.pane);
-        const why = panePid ? explainNativeRejection(await list(), panePid, "claude-code", token, false, null, selectedExecutable, scriptLaunch) : null;
+        const rows = panePid ? await list() : [];
+        const why = panePid ? explainNativeRejection(rows, panePid, "claude-code", token, false, null, selectedExecutable, scriptLaunch) : null;
+        // #3044 delta review SR1: a classic launch (no permission mode: the floor posture) records no executable, so a
+        // Claude that a #! wrapper starts without exec, or a renamed binary, is never proven here. When the pane's
+        // foreground runs the launch's conversation and none of it is a Claude the proof accepts, that is this case:
+        // running the recovery again never changes it. Two recognized Claudes are not this case: one may exit.
+        const root = rows.find(row => row.pid === panePid);
+        if (why?.kind === "no_single_process" && !selectedExecutable && root?.tpgid && root.tpgid > 0
+          && nativeCandidateCount(rows, panePid!, "claude-code", selectedExecutable, scriptLaunch) === 0
+          && rows.some(row => row.pid !== panePid && row.pgid === root.tpgid && row.command.includes(token))) {
+          return { ok: false, unprovable: true, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} runs the failed handover's conversation, but not as a process the recovery can prove: the launch recorded no executable (a classic launch), so a Claude started by a #! wrapper without exec, or under another name, is not recognized.` };
+        }
         const detail = why?.kind === "other_conversation" ? "its Claude runs another conversation, not the one the failed handover launched"
           : why?.kind === "names_no_conversation" ? "its Claude names no conversation"
           : why?.kind === "no_single_process" ? "it does not hold exactly one Claude in the foreground (none yet, or more than one)"

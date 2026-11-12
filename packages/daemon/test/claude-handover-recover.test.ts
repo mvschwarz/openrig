@@ -252,7 +252,13 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       { pid: 100, ppid: 1, pgid: 100, tpgid: 102, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       claudeIn(successorToken, 102), claudeIn(successorToken, 103, 102), // two in the pane's foreground group
     ];
-    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    const two = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(two).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    // SR1 (Sol nit): two recognized Claudes on a classic launch are not "unprovable": one may exit, so the recovery
+    // still says to run it again, not that --recover can't prove it.
+    if (two.ok) throw new Error("expected a refusal");
+    expect(two.message).not.toContain("recorded no executable");
+    expect(two.guidance).toMatch(/run the recovery again in a moment/);
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 102, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       claudeIn(successorToken),
@@ -524,5 +530,46 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     const result = await service().recover({ seatRef: SEAT, reason: "adopt the wrapper's successor" });
     expect(result).toMatchObject({ ok: true });
     expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation, kind: "handover" });
+  });
+
+  // SR1 of the review of the #3044 delta: a CLASSIC launch (no permission mode, the floor posture) records no
+  // executable, so a Claude that a #! wrapper starts without exec, or a renamed binary, is never proven. The refusal
+  // says so, instead of "run the recovery again in a moment", which never changes the result.
+  it.each([
+    ["a #! wrapper named claude that runs node cli.js", (launched: string) => [
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/bin/sh /home/user/.local/bin/claude ${launched}`, executableName: "claude", startedAt },
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `node /home/user/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js ${launched}`, executableName: "node", startedAt },
+    ]],
+    ["a wrapper that runs a renamed binary", (launched: string) => [
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `bash /home/user/bin/claude ${launched}`, executableName: "claude", startedAt },
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `/opt/claude-real ${launched}`, executableName: "claude-real", startedAt },
+    ]],
+  ] as Array<[string, (launched: string) => NativeProcessRow[]]>)("a classic launch through %s is refused as not provable, without 'run it again'", async (_name, fg) => {
+    const launched = `--session-id ${successorToken} --name ${SEAT}`;
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? fg(launched) : []),
+    ];
+    await failedHandover();
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: null, executableIsScript: false });
+    const before = state();
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt the classic wrapper's successor" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("recorded no executable");
+    expect(result.guidance).toContain("--recover can't prove it");
+    expect(result.guidance).not.toMatch(/run the recovery again/i);
+    expect(state()).toEqual(before);
+  });
+
+  it("a classic launch whose pane runs nothing yet still says to run the recovery again in a moment", async () => {
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+    ];
+    await failedHandover();
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.guidance).toMatch(/run the recovery again in a moment/);
   });
 });

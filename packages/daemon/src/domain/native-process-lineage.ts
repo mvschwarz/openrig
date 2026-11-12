@@ -752,6 +752,13 @@ export type NativeRejection =
   | { kind: "conflicting_conversations" }
   | { kind: "rotation_process_mismatch"; conversation: string };
 
+/** #3044 delta review SR1: how many foreground processes of the pane the proof would take as the runtime (0, 1 or more),
+ *  with the same rules as explainNativeRejection. */
+export function nativeCandidateCount(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string,
+  scriptLaunch?: boolean): number {
+  return nativeProcessCandidates(rows, panePid, runtime, selectedExecutable, scriptLaunch).length;
+}
+
 export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
   expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string,
   scriptLaunch?: boolean): NativeRejection {
