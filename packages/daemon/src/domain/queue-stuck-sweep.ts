@@ -128,17 +128,24 @@ export const UNCLAIMED_BACKLOG_LISTED_ROWS = 20;
 /** #2988: the key of a notice sent to a seat's delegation parent is `<child seat>=><parent>`; a seat's own notice is keyed
  *  by the seat alone. */
 const PARENT_BACKLOG_SEPARATOR = "=>";
-/** Review of #3049: a polling member's notice the sweep filed to the one creator of every row it listed. Only this mark
- *  establishes that the notice shows that creator's rows alone; an old recipient the sweep doesn't recognize proves
- *  nothing (the operator setting may have changed). */
-const BACKLOG_TO_CREATOR_TAG = "stuck-sweep-backlog-to-creator";
-/** Whether a notice's stored tags carry the creator mark; tags that don't read as a JSON array carry none. */
-function marcadoAoCriador(tags: string | null): boolean {
+/** Review of #3049: a polling member's notice the sweep filed to the one creator of every row it listed carries this
+ *  prefix followed by that creator. Only this mark establishes that the notice shows that creator's rows alone; an old
+ *  recipient the sweep doesn't recognize proves nothing (the operator setting may have changed). It names the creator
+ *  rather than trusting the notice's destination: a queue handoff copies the tags to a successor elsewhere, and a
+ *  fallback changes the destination in place. */
+const BACKLOG_TO_CREATOR_PREFIX = "stuck-sweep-backlog-to-creator:";
+const creatorMark = (creator: string): string => `${BACKLOG_TO_CREATOR_PREFIX}${creator}`;
+/** The creator a notice's stored tags name in its mark, or null: no mark, more than one, or tags that don't read as a JSON
+ *  array name none. */
+function markedCreator(tags: string | null): string | null {
   try {
-    const lidas: unknown = JSON.parse(tags ?? "[]");
-    return Array.isArray(lidas) && lidas.includes(BACKLOG_TO_CREATOR_TAG);
+    const parsed: unknown = JSON.parse(tags ?? "[]");
+    if (!Array.isArray(parsed)) return null;
+    const marks = parsed.filter((t): t is string => typeof t === "string" && t.startsWith(BACKLOG_TO_CREATOR_PREFIX)
+      && t.length > BACKLOG_TO_CREATOR_PREFIX.length);
+    return marks.length === 1 ? marks[0]!.slice(BACKLOG_TO_CREATOR_PREFIX.length) : null;
   } catch {
-    return false;
+    return null;
   }
 }
 /** Idempotency key of the standing unclaimed-backlog notice a delegation parent gets for one child seat's rows: one open
@@ -1644,14 +1651,20 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const row = deps.queueRepo.getById(id, { waiting: false });
         if (!row || row.state !== "pending" || row.claimedAt || row.destinationSession !== seat) continue;
         if (deps.resolveOrchestrator || hasConsumedEscalationHop(deps.db, id)) continue;
+        // The whole rule that made the row's finding, on the row as it is now (a wake that failed meanwhile, a person's
+        // ask, a live ladder), not only its state.
+        if (!unclaimedCandidate(id, false)) continue;
         const route = resolveEscalationOwner(deps.db, seat, target => deps.queueRepo.acceptsDestination(target));
         if (route.outcome !== "parent" || route.owner !== parent) continue;
         const finding = deps.db.prepare("SELECT state, claimed_at, destination_session FROM queue_items WHERE qitem_id = ?").get(findingId) as
           { state: string; claimed_at: string | null; destination_session: string } | undefined;
         if (!finding || finding.state !== "pending" || finding.claimed_at || finding.destination_session !== parent) continue;
         if (findQueueRecovery(deps.db, id)?.qitemId !== findingId) continue;
-        const notice = deps.db.prepare("SELECT state, body FROM queue_items WHERE qitem_id = ?").get(noticeId) as { state: string; body: string } | undefined;
-        if (!notice || !["pending", "in-progress", "blocked"].includes(notice.state) || backlogRowsOf(notice.body)?.has(id) !== true) continue;
+        // The notice still reaches the parent: one that changed hands (a handoff, a fallback) isn't the parent's signal.
+        const notice = deps.db.prepare("SELECT state, body, destination_session FROM queue_items WHERE qitem_id = ?").get(noticeId) as
+          { state: string; body: string; destination_session: string } | undefined;
+        if (!notice || !["pending", "in-progress", "blocked"].includes(notice.state) || notice.destination_session !== parent
+          || backlogRowsOf(notice.body)?.has(id) !== true) continue;
         try {
           // The mark and the close together: a close that fails leaves the finding open and unmarked, as it was.
           deps.db.transaction(() => {
@@ -1710,7 +1723,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             evidenceRef: `rig queue list --destination ${seat} --state pending`,
             tags: [STUCK_SWEEP_FINDING_TAG, tag,
               ...(polled && recipient !== seat && creators.length > 0 && creators.every((c) => c === recipient)
-                ? [BACKLOG_TO_CREATOR_TAG] : [])],
+                ? [creatorMark(recipient)] : [])],
             wakeTrigger: "openrig" as const,
           });
           othersMayHaveRun();
@@ -1742,14 +1755,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         // nothing has resolved yet, and maybe more, never just the rows that qualify on this pass (review of #3049). From
         // there the notice follows its rows as any other: it lets go of each one only as it's resolved or covered elsewhere.
         // A member's notice the sweep marked as filed to the one creator of its rows only ever listed that creator's rows:
-        // the mark alone proves it (any rewrite that brings in another creator's row drops it). Without the mark (an
-        // operator that is no longer recognized, an older notice, unreadable tags), it carries every unresolved row.
-        const legivel = backlogRowsOf(last.body);
-        const soDoCriador = marcadoAoCriador(last.tags) ? last.destination_session : null;
-        const stoodFor = legivel ?? new Set((deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE destination_session = ?
+        // the mark alone proves it, and it names that creator, whoever holds the notice now (any rewrite that brings in
+        // another creator's row drops it). Without the mark (an operator that is no longer recognized, an older notice,
+        // unreadable tags), it carries every unresolved row.
+        const readable = backlogRowsOf(last.body);
+        const onlyFrom = markedCreator(last.tags);
+        const stoodFor = readable ?? new Set((deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE destination_session = ?
             AND state = 'pending' AND claimed_at IS NULL AND (? IS NULL OR source_session = ?)
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`)
-          .all(seat, soDoCriador, soDoCriador, STUCK_SWEEP_FINDING_TAG) as Array<{ qitem_id: string }>).map((r) => r.qitem_id));
+          .all(seat, onlyFrom, onlyFrom, STUCK_SWEEP_FINDING_TAG) as Array<{ qitem_id: string }>).map((r) => r.qitem_id));
         // #2988: rows this notice lets go of only because something else stands for them now (a finding of their own,
         // another parent's or the seat's own notice, or this pass's route for them). Nothing resolved them, so a notice the
         // sweep closes doesn't hold them back: they leave its list before it closes.
@@ -1784,18 +1798,18 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           still.push({ qitemId: id, since: pendingSince(deps.db, id) ?? row.tsCreated, from: row.sourceSession, summary: row.summary });
         }
         if (yielded) {
-          const agora = deps.db.prepare("SELECT state, body FROM queue_items WHERE qitem_id = ?").get(last.qitem_id) as { state: string; body: string } | undefined;
-          if (!agora || !["pending", "in-progress", "blocked"].includes(agora.state) || agora.body !== last.body) {
+          const noticeNow = deps.db.prepare("SELECT state, body FROM queue_items WHERE qitem_id = ?").get(last.qitem_id) as { state: string; body: string } | undefined;
+          if (!noticeNow || !["pending", "in-progress", "blocked"].includes(noticeNow.state) || noticeNow.body !== last.body) {
             findings.push({ kind: "unclaimed-backlog", qitemId: key, findingQitemId: last.qitem_id, action: "refreshed" });
             continue;
           }
         }
         const standsFor = [...rows.map(backlogRow), ...still];
         if (standsFor.length === 0) {
-          if (routedAway.size > 0 || !legivel) {
+          if (routedAway.size > 0 || !readable) {
             // Only the rows something resolved stay in the list the closed notice holds back. A notice whose list was
             // unreadable never knew its rows, so it holds none back.
-            const kept = legivel ? [...legivel].filter((id) => !routedAway.has(id)) : [];
+            const kept = readable ? [...readable].filter((id) => !routedAway.has(id)) : [];
             const body = last.body.split("\n").filter((l) => !l.startsWith(BACKLOG_ROWS_PREFIX)).join("\n")
               + `\n${BACKLOG_ROWS_PREFIX}${JSON.stringify(kept)}`;
             deps.db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ? AND body = ? AND state IN ('pending', 'in-progress', 'blocked')")
@@ -1835,9 +1849,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           continue;
         }
         // A creator's notice that now stands for another creator's row (its recipient sees any row) is no longer creator-only.
-        if (marcadoAoCriador(last.tags) && standsFor.some((r) => r.from !== last.destination_session)) {
-          deps.db.prepare(`UPDATE queue_items SET tags = (SELECT json_group_array(value) FROM json_each(tags) WHERE value != ?)
-            WHERE qitem_id = ? AND json_valid(tags)`).run(BACKLOG_TO_CREATOR_TAG, last.qitem_id);
+        if (onlyFrom !== null && standsFor.some((r) => r.from !== onlyFrom)) {
+          deps.db.prepare(`UPDATE queue_items SET tags = (SELECT json_group_array(value) FROM json_each(tags)
+              WHERE NOT (type = 'text' AND substr(value, 1, length(?)) = ?))
+            WHERE qitem_id = ? AND json_valid(tags)`).run(BACKLOG_TO_CREATOR_PREFIX, BACKLOG_TO_CREATOR_PREFIX, last.qitem_id);
         }
         const text = backlogText(standsFor);
         let written = text.summary === last.summary && text.body === last.body;

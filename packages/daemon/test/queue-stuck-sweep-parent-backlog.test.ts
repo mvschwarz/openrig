@@ -285,6 +285,48 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     expect(after.tags).not.toContain("stuck-sweep-folded-into-backlog");
   });
 
+  // Review of #3049: a fold rechecks the whole rule that made the row's finding, on the row as it is now: a row whose wake
+  // fails while the notice is written keeps its finding, open and unmarked.
+  it("a fold rechecks the row's eligibility: one whose wake fails while the notice is written isn't folded", async () => {
+    lane("dev1");
+    const row = await work("dev1@lane");
+    const perRow = await perRowFinding(row);
+    const create = queue.create.bind(queue);
+    queue.create = (async (input: Parameters<typeof queue.create>[0]) => {
+      const made = await create(input);
+      if ((input.tags ?? []).includes(parentBacklogTag("owner@lane", "dev1@lane"))) {
+        db.prepare("UPDATE queue_items SET last_nudge_result = 'failed: pane gone' WHERE qitem_id = ?").run(row.qitemId);
+      }
+      return made;
+    }) as typeof queue.create;
+    await sweep();
+    const after = queue.getById(perRow.qitemId)!;
+    expect(after.state).toBe("pending");
+    expect(after.tags).not.toContain("stuck-sweep-folded-into-backlog");
+  });
+
+  // Review of #3049: a parent's notice that changed hands (a handoff, a fallback) no longer reaches the parent, so a
+  // per-row finding at the parent is never folded into it: the parent keeps its own signal for that row.
+  it.each(["handoff", "fallback"] as const)("a fold needs the notice still at the parent: one that changed hands by %s takes no finding", async (how) => {
+    lane("dev1");
+    seat("lane", "coord.other", "other@lane");
+    await work("dev1@lane");
+    await sweep();
+    const [notice] = findingsTo("owner@lane").filter(isOpen);
+    expect(notice!.tags).toContain(parentBacklogTag("owner@lane", "dev1@lane"));
+    if (how === "handoff") {
+      await queue.handoff({ qitemId: notice!.qitemId, fromSession: "owner@lane", toSession: "other@lane", nudge: false });
+    } else {
+      queue.routeToFallback(notice!.qitemId, "other@lane", "owner@lane stopped");
+    }
+    const row = await work("dev1@lane");
+    const perRow = await perRowFinding(row);
+    await sweep();
+    const after = queue.getById(perRow.qitemId)!;
+    expect(after.state).toBe("pending");
+    expect(after.tags).not.toContain("stuck-sweep-folded-into-backlog");
+  });
+
   it("a closed notice whose list is unreadable doesn't file again for the same rows", async () => {
     lane("dev1");
     await work("dev1@lane", 90);
