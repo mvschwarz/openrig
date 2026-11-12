@@ -58,9 +58,13 @@ waits for any other change to this enrollment to finish, within the same 30 seco
 waiting says so and doesn't send the code. The account makes a new installation, with a new key, for the new code. Here,
 that key takes the old one's place and the bindings made through the old installation end, in one step:
 
-- If that step fails after the account accepted the code, nothing here changes, and the error says so. The old
-  enrollment keeps working only while the account keeps the old installation, and the account now has a new
-  installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.
+- If that step fails after the account accepted the code, the enrollment's record here doesn't change, and the error
+  says so. The key is put back too, but moving key files happens outside that record's rollback. If putting it back also
+  fails (on a full or read-only disk, for example), the old key is left as `key.json.prev` beside `key.json` in the
+  installation's folder under `network-secrets/` in the OpenRig home: move it back to `key.json` before you go on. A
+  `key.json.next` there is a staged new key, and the next replace removes it. The old enrollment keeps working only
+  while the account keeps the old installation, and the account now has a new installation whose key nothing here
+  holds: remove it on the account page, then enroll again with a new code.
 - Once the step is done, `enroll` names the bindings it ended. The old installation may still list their names, and the
   new key can't drop them, so remove them on the account page. `rig network status` marks each of them as possibly still
   listed under the old installation, as it does a binding that ended earlier without the account confirming the drop:
