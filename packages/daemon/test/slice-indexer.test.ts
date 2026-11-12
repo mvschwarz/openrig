@@ -33,7 +33,7 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
-import { SliceIndexer, parseFrontmatter } from "../src/domain/slices/slice-indexer.js";
+import { SliceIndexer, parseFrontmatter, sliceStatusBucket } from "../src/domain/slices/slice-indexer.js";
 
 function makeTempDirs(): { slicesRoot: string; dogfoodRoot: string } {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-test-"));
@@ -1581,5 +1581,54 @@ describe("qitem-18110994 — membership build integrity + scoping", () => {
     expect(standalone, "narrowing reads must not move the eligibility verdict").toEqual(fullScope);
     expect(standalone.sort(), "own-name + explicit-rail retained; mission/default rail excluded")
       .toEqual(["q-by-name", "q-by-rail"]);
+  });
+});
+
+describe("#2727 in-place slice closure bucketing", () => {
+  let db: Database.Database;
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-2727-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("maps non-delivery closure words to closed while keeping done/shipped/promoted/bare-closed in done", () => {
+    for (const word of [
+      "closed-deferred",
+      "closed-superseded",
+      "closed-wontfix",
+      "closed-stale",
+      "deferred",
+      "superseded",
+      "wontfix",
+      "stale",
+    ]) {
+      expect(sliceStatusBucket(word), word).toBe("closed");
+    }
+    for (const word of ["done", "shipped", "shipped-to-release-0.7", "promoted", "closed", "phase-a-closed-locally-promoted"]) {
+      expect(sliceStatusBucket(word), word).toBe("done");
+    }
+  });
+
+  it("indexes in-place non-delivery closed slices as closed rather than done or active", () => {
+    const slicesDir = path.join(tmpRoot, "missions", "m1", "slices");
+    writeSlice(slicesDir, "01-delivered", { "SPEC.md": "---\nstatus: done\n---\n# Delivered\n" });
+    writeSlice(slicesDir, "02-deferred", { "SPEC.md": "---\nstatus: closed-deferred\n---\n# Deferred\n" });
+    writeSlice(slicesDir, "03-superseded", { "SPEC.md": "---\nstatus: closed-superseded\n---\n# Superseded\n" });
+    writeSlice(slicesDir, "04-active", { "SPEC.md": "---\nstatus: active\n---\n# Active\n" });
+
+    const indexer = new SliceIndexer({ slicesRoot: path.join(tmpRoot, "missions"), dogfoodEvidenceRoot: null, db });
+    const byName = new Map(indexer.list().map((s) => [s.name, s]));
+    expect(byName.get("01-delivered")?.status).toBe("done");
+    expect(byName.get("02-deferred")?.status).toBe("closed");
+    expect(byName.get("03-superseded")?.status).toBe("closed");
+    expect(byName.get("04-active")?.status).toBe("active");
   });
 });

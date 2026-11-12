@@ -20,7 +20,7 @@ import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
-export type SliceStatus = "active" | "done" | "blocked" | "draft";
+export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
 const QUEUE_COUNT_STATES = [
   "pending",
@@ -344,6 +344,14 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
   shipped: "done",
   promoted: "done",
   closed: "done",
+  wontfix: "closed",
+  deferred: "closed",
+  superseded: "closed",
+  stale: "closed",
+  "closed-wontfix": "closed",
+  "closed-deferred": "closed",
+  "closed-superseded": "closed",
+  "closed-stale": "closed",
   blocked: "blocked",
   "parked-with-evidence": "blocked",
 };

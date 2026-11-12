@@ -266,6 +266,33 @@ function outcomeComplete(slice: SliceFacts): boolean {
   const r = slice.readiness;
   return !!r?.configured && r.state === "ready" && r.items.length > 0 && r.items.every(i => i.state === "accepted");
 }
+const NON_DELIVERY_DECLARED_WORDS = new Set([
+  "wontfix",
+  "deferred",
+  "superseded",
+  "stale",
+  "closed-wontfix",
+  "closed-deferred",
+  "closed-superseded",
+  "closed-stale",
+]);
+function nonDeliveryClosedWord(slice: SliceFacts): string | null {
+  const stage = stageText(slice);
+  const declared = declaredText(slice);
+  if (stage === "retired" || declared === "retired") return "retired";
+  if (declared === "deferred" || declared === "closed-deferred") return "deferred";
+  if (stage === "superseded" || declared === "superseded" || declared === "closed-superseded") return "superseded";
+  if (
+    declared === "wontfix"
+    || declared === "closed-wontfix"
+    || declared === "stale"
+    || declared === "closed-stale"
+    || record(slice.ladder["recorded_status"])["bucket"] === "closed"
+  ) {
+    return "closed";
+  }
+  return null;
+}
 function stateWord(slice: SliceFacts): string {
   const problem = problemText(slice);
   if (problem) return problem.startsWith("needs input") ? "needs input" : problem.startsWith("waits on") ? "blocked" : "waiting";
@@ -273,9 +300,9 @@ function stateWord(slice: SliceFacts): string {
   if (slice.work.length) return slice.work.some(w => w["state"] === "blocked") ? "waiting" : "assigned";
   if (outcomeComplete(slice)) return "outcome complete";
   if (slice.readiness?.items.some(i => i.state === "withdrawn" || i.state === "rejected")) return "reopened";
+  const nonDelivery = nonDeliveryClosedWord(slice);
+  if (nonDelivery) return nonDelivery;
   if (slice.readiness?.configured) return "outcomes pending";
-  if (stageText(slice) === "retired" || declaredText(slice) === "retired") return "retired";
-  if (declaredText(slice) === "deferred" || declaredText(slice) === "closed-deferred") return "deferred";
   return declaredDone(slice.ladder, declaredText(slice)) ? "declared done" : "planned";
 }
 
@@ -518,7 +545,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const provenanceAction = attributed || unknown > 0 ? open("evidence") : open("sources");
   const provenance: SemanticSeg[] = [
     { text: "  provenance · ", token: "dim" },
-    { text: attributed ? `proof judgments · ${done}/${slices.length} ready${unknown ? ` · ${unknown} legacy unknown` : ""}` : unknown > 0 ? `evidence gap ${unknown}/${slices.length} unknown` : `daemon build ${build}`, token: unknown > 0 || (attributed && execution.readiness!.state === "unknown") ? "warn" : "dim" },
+    { text: attributed ? `proof judgments · ${done}/${slices.length} ready${unknown ? ` · ${unknown} legacy unknown` : ""}` : unknown > 0 ? `evidence gap ${unknown}/${slices.length} unknown` : `daemon build ${build}`, token: unknown > 0 || (attributed && execution.readiness?.state === "unknown") ? "warn" : "dim" },
   ];
   const localTime = displayTime(execution.derived_at, timeZone);
   if (provenance.reduce((n, s) => n + s.text.length, 0) + localTime.length + 3 <= width) {
@@ -856,7 +883,12 @@ export function executionSliceStripLines(
   const evidence = `${evidenceText(slice.cells, slice.rank)}${unconfirmed.length ? ` · ${unconfirmed.join(" / ")} unconfirmed (${slice.cells[RUNGS.find((rung) => slice.cells[rung].state === "undetermined")!].basis})` : ""}`;
   const liveWord = slice.lane ? (waitingOn(slice.lane) ? "waiting" : str(activity["activity"], "claimed")) : "no claimed lane";
   const declaredWord = declared?.trim().toLowerCase() || "no declared status";
-  const next = (declaredWord === "retired" || declaredWord === "deferred" || declaredWord === "closed-deferred" || declaredDone(slice.ladder, declaredWord)) && !slice.lane
+  const isTerminalDeclared =
+    declaredWord === "retired"
+    || NON_DELIVERY_DECLARED_WORDS.has(declaredWord)
+    || record(slice.ladder["recorded_status"])["bucket"] === "closed"
+    || declaredDone(slice.ladder, declaredWord);
+  const next = isTerminalDeclared && !slice.lane
     ? `none — declared ${declaredWord}`
     : nextText(slice) ?? (slice.lane ? (waitingOn(slice.lane) ? `waiting on ${waitingOn(slice.lane)}, see the waiting row above` : "in progress on the lane above") : "nothing the projection can sequence");
   return [

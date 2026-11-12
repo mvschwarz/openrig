@@ -13,6 +13,7 @@ import {
 } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { NOTES_FILE_PRECEDENCE, resolveNodeFile, resolveNotesFile } from "../domain/scope/node-file.js";
+import { NON_DELIVERY_CLOSE_REASONS } from "../domain/scope/types.js";
 import { isPathInsideRoot } from "../domain/cwd-resolution.js";
 
 function extractFrontmatterRaw(content: string): string | null {
@@ -71,11 +72,18 @@ function buildAuditDependencyGraph(missionName: string, missionDir: string): Mis
       if (!match) continue;
       const frontmatter = readNodeFrontmatter(path.join(root, entry.name));
       const status = typeof frontmatter.status === "string" ? frontmatter.status.toLowerCase() : "";
+      const stage = typeof frontmatter.stage === "string" ? frontmatter.stage.toLowerCase() : "";
+      const isExitedOrDelivered = status === "done"
+        || status.startsWith("shipped")
+        || status.startsWith("closed")
+        || (NON_DELIVERY_CLOSE_REASONS as readonly string[]).includes(status)
+        || stage === "superseded"
+        || stage === "retired";
       slices.push({
         id: nodeId(frontmatter),
         name: entry.name,
         dependsOn: frontmatter.depends_on,
-        active: bucket === "slices" && !status.startsWith("closed") && !status.startsWith("shipped"),
+        active: bucket === "slices" && !isExitedOrDelivered,
         ordinal: Number(match[1]),
       });
     }

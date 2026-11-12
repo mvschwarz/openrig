@@ -14,7 +14,7 @@ import type {
   SliceInfo,
   SliceState,
 } from "./types.js";
-import { ScopeCliError } from "./types.js";
+import { NON_DELIVERY_CLOSE_REASONS, ScopeCliError } from "./types.js";
 import {
   DEFAULT_PROJECT_PREFIX,
   inferMissionDotId,
@@ -441,7 +441,14 @@ export function sliceStanding(slice: SliceInfo, inClosedFolder: boolean): Exclud
   const status = (slice.status ?? "").toLowerCase();
   const stage = typeof slice.frontmatter.stage === "string" ? slice.frontmatter.stage.toLowerCase() : "";
   if (status === "done" || status.startsWith("shipped")) return "shipped";
-  if (status.startsWith("closed") || status === "superseded" || stage === "superseded" || stage === "retired") return "closed";
+  if (
+    status.startsWith("closed")
+    || (NON_DELIVERY_CLOSE_REASONS as readonly string[]).includes(status)
+    || stage === "superseded"
+    || stage === "retired"
+  ) {
+    return "closed";
+  }
   return "active";
 }
 

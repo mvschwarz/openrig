@@ -30,7 +30,7 @@ export interface SlicesRoutesDeps {
   projector: SliceDetailProjector;
 }
 
-const VALID_FILTERS = new Set<SliceStatus | "all">(["all", "active", "done", "blocked"]);
+const VALID_FILTERS = new Set<SliceStatus | "all">(["all", "active", "done", "closed", "blocked"]);
 
 export function slicesRoutes(): Hono {
   const app = new Hono();

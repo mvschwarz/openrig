@@ -19,6 +19,7 @@ import { realDeps } from "./daemon.js";
 import {
   CLOSE_REASONS,
   MISSION_TEMPLATE_KINDS,
+  NON_DELIVERY_CLOSE_REASONS,
   SLICE_TEMPLATE_KINDS,
   STAGE_VALUES,
   ScopeCliError,
@@ -86,6 +87,7 @@ import {
   nextMissionMembershipOrder,
   planMissionMembershipAdd,
   planMissionMembershipRemove,
+  planMissionMembershipSetActive,
   type MissionCompositionEdit,
 } from "../lib/scope/mission-composition.js";
 
@@ -547,11 +549,24 @@ function buildSliceShipCommand(): Command {
 // rig scope slice close
 // ---------------------------------------------------------------------
 
+function countRecordedSliceJudgments(sliceAbsPath: string): number {
+  const judgmentsDir = path.join(sliceAbsPath, "proof", "judgments");
+  if (!fs.existsSync(judgmentsDir)) return 0;
+  try {
+    return fs.readdirSync(judgmentsDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+      .length;
+  } catch {
+    return 0;
+  }
+}
+
 function buildSliceCloseCommand(): Command {
   return new Command("close")
-    .description("Close a slice (move to <mission>/closed/, update status)")
+    .description("Close a slice (move to <mission>/closed/ by default, or update status in place with --in-place)")
     .argument("<slice-path>", "Slice path (absolute, relative, or NN-slug)")
     .requiredOption("--reason <reason>", `Closure reason: ${CLOSE_REASONS.join(" | ")}`)
+    .option("--in-place", "Keep the slice under <mission>/slices/ instead of moving to <mission>/closed/")
     .option("--note <text>", "Optional closure note")
     .option("--mission <name>", "Hint mission when slice-path is just NN-slug")
     .option("--json", "Machine-readable output")
@@ -559,6 +574,7 @@ function buildSliceCloseCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
+        const inPlace = Boolean(opts.inPlace);
         const reason = opts.reason as CloseReason;
         if (!CLOSE_REASONS.includes(reason)) {
           throw new ScopeCliError({
@@ -567,10 +583,86 @@ function buildSliceCloseCommand(): Command {
             action: `Pick one of: ${CLOSE_REASONS.join(", ")}.`,
           });
         }
+        if (!inPlace && reason === "delivered") {
+          throw new ScopeCliError({
+            fact: `--reason "delivered" requires --in-place.`,
+            consequence: "Slice not closed; moving to closed/ is reserved for non-delivery closures.",
+            action: `Pass --in-place with --reason delivered, or use rig scope slice ship, or pick a non-delivery reason (${NON_DELIVERY_CLOSE_REASONS.join(", ")}).`,
+          });
+        }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const mission = findMission(missionsRoot, slice.missionName);
         const closedDir = path.join(mission.absPath, "closed");
+        const judgmentCount = countRecordedSliceJudgments(slice.absPath);
+
+        if (inPlace) {
+          const resolvedSliceAbs = path.resolve(slice.absPath);
+          const resolvedClosedDir = path.resolve(closedDir);
+          if (resolvedSliceAbs === resolvedClosedDir || resolvedSliceAbs.startsWith(`${resolvedClosedDir}${path.sep}`)) {
+            throw new ScopeCliError({
+              fact: `Slice "${slice.name}" is already under ${slice.missionName}/closed/.`,
+              consequence: "Slice not closed in place.",
+              action: "Inspect the slice under closed/, or move it back under slices/ before updating in place.",
+            });
+          }
+          if (!slice.readmePath) {
+            throw new ScopeCliError({
+              fact: `Slice "${slice.name}" at ${slice.absPath} has no SPEC.md or README.md.`,
+              consequence: "Cannot record in-place closure status without a slice node file.",
+              action: "Repair or add SPEC.md before closing --in-place.",
+            });
+          }
+          const targetStatus = reason === "delivered" ? "done" : `closed-${reason}`;
+          const compositionEdit = planMissionMembershipSetActive(
+            mission.absPath,
+            sliceManifestRef(mission.absPath, slice.absPath),
+            reason === "delivered",
+          );
+          const edits = compositionEdit ? [compositionEdit] : [];
+          const originalNode = fs.readFileSync(slice.readmePath, "utf8");
+          applyMissionCompositionEdits(edits);
+          try {
+            const updates: Record<string, unknown> = {
+              status: targetStatus,
+              "closed-on": todayDateISO(),
+            };
+            if (opts.note) updates["closure-note"] = opts.note;
+            updateFrontmatter(slice.readmePath, updates);
+          } catch (error) {
+            fs.writeFileSync(slice.readmePath, originalNode, "utf8");
+            rollbackComposition(edits);
+            throw error;
+          }
+          emit(out, {
+            ok: true,
+            closed: {
+              mission: slice.missionName,
+              name: slice.name,
+              id: slice.id,
+              reason,
+              status: targetStatus,
+              inPlace: true,
+              note: opts.note ?? null,
+              path: slice.absPath,
+              git: { usedGit: false, repoRoot: null },
+              proofApplicability: {
+                changed: false,
+                judgmentCount,
+              },
+            },
+          }, json, [
+            `Closed ${slice.missionName}/${slice.name} in place (${targetStatus})`,
+            `  reason: ${reason}`,
+            `  status: ${targetStatus}`,
+            `  path: ${slice.absPath}`,
+            ...(judgmentCount > 0
+              ? [`  proof: ${judgmentCount} recorded judgment(s) preserved in place`]
+              : []),
+          ]);
+          return;
+        }
+
         const destName = slice.name;
         const destAbs = path.join(closedDir, destName);
         const compositionEdit = planMissionMembershipRemove(
@@ -589,10 +681,11 @@ function buildSliceCloseCommand(): Command {
         }
         const { usedGit, repoRoot } = moveResult;
         const newReadme = resolveNodeFile(destAbs);
+        const targetStatus = `closed-${reason}`;
         try {
           if (newReadme) {
             const updates: Record<string, unknown> = {
-              status: `closed-${reason}`,
+              status: targetStatus,
               "closed-on": todayDateISO(),
             };
             if (opts.note) updates["closure-note"] = opts.note;
@@ -611,14 +704,23 @@ function buildSliceCloseCommand(): Command {
             name: destName,
             id: slice.id,
             reason,
+            status: targetStatus,
+            inPlace: false,
             note: opts.note ?? null,
             path: destAbs,
             git: { usedGit, repoRoot },
+            proofApplicability: {
+              changed: judgmentCount > 0,
+              judgmentCount,
+            },
           },
         }, json, [
           `Closed ${slice.missionName}/${slice.name} → ${slice.missionName}/closed/${destName}`,
           `  reason: ${reason}`,
           `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
+          ...(judgmentCount > 0
+            ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep accepted proof applicable in place)`]
+            : []),
         ]);
       } catch (err) {
         fail(err, json, out);
