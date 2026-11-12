@@ -360,6 +360,15 @@ not the destination's file contents.)
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or
 - `rig handover <seat> --source rebuild --reason <text>`, which carries durable context.
 
+A rebuild lists the current recap, lineage lessons and restore packet as required
+priming. Superseded recaps are optional history, newest first. The briefing shows
+the newest `output.rebuild_recaps` paths (default 3) and their shared
+`recap-superseded/` folder when that pointer covers the complete history. Other
+layouts retain the full list. Set `rig config set output.rebuild_recaps 0` to
+always list every path; `OPENRIG_OUTPUT_REBUILD_RECAPS` overrides the setting.
+This changes only the briefing: the handover result still records every resolved
+artifact, and no recap file is removed.
+
 For Codex rebuilds, OpenRig also carries a complete supported native permission policy read from the live
 predecessor's own conversation and process, without adding fresh-launch grants. A later recorded seat permission
 or policy choice, or a differing declared successor profile, takes precedence. Missing, stale or unsupported observations keep the existing launch
