@@ -48,6 +48,19 @@ import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
 const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
 
+/** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
+ *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
+ *  /healthz, a queue read) waited for all of them; now it waits for one step. Steps that await I/O run outside. */
+let inventoryTurn: Promise<unknown> = Promise.resolve();
+function inventoryStep<T>(work: () => T): Promise<Awaited<T>> {
+  const run = inventoryTurn.then(async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return work();
+  });
+  inventoryTurn = run.catch(() => {});
+  return run;
+}
+
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {
     const token = (c.get("terminalBearerToken" as never) as string | null | undefined) ?? null;
@@ -130,9 +143,9 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
 
   const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
-  const inventory = contextUsageStore
+  const inventory = await inventoryStep(() => contextUsageStore
     ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore, transcriptStore)
-    : getNodeInventory(deps.rigRepo.db, rigId);
+    : getNodeInventory(deps.rigRepo.db, rigId));
   // Slice 15 — enrich with the two new orthogonal primitives. Order is
   // independent (each enrichment reads its own source), so the chain
   // composes cleanly with attachAgentActivity. The non-inference
@@ -142,7 +155,8 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // capture). Opt into the per-node fallback with ?full=true / ?refresh=true — the
   // latter already implies a fresh sweep above.
   const full = c.req.query("full") === "true" || refresh;
-  const withActivity = await attachAgentActivity(inventory, {
+  // The default path reads no pane, so it is one more synchronous step; a full read awaits pane captures, outside.
+  const attachActivity = () => attachAgentActivity(inventory, {
     ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture),
     tmuxAdapter: deps.tmuxAdapter,
     activityStore: deps.agentActivityStore,
@@ -163,11 +177,12 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
     seatActivity: deps.seatActivityService,
     captureFallback: full,
   });
-  const withTerminalAndWork = attachTerminalActivityAndWork(withActivity, {
+  const withActivity = full ? await attachActivity() : await inventoryStep(attachActivity);
+  const withTerminalAndWork = await inventoryStep(() => attachTerminalActivityAndWork(withActivity, {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
     agentActivity: deps.agentActivityStore,
-  });
+  }));
   // Slice 13 fix 2 — HOST ATTRIBUTION AT THE SOURCE. A daemon only inventories its own seats, so
   // every row it serves lives on THIS host; stamping the boot-reconciled self-id here means a
   // merged multi-host roster stays attributable row-by-row (a roster missing a host is legible as
