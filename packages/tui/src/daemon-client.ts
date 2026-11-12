@@ -421,8 +421,11 @@ export class DaemonClient {
   }
   /** Connected assistants (roster members outside any terminal) and their check-in. Optional: an older daemon has no
    *  such route. */
-  hostedMembers() {
-    return this.get("/api/queue/hosted-members", this.optionalFetchImpl);
+  /** This daemon's connected assistants, as the status and body it answered; an older daemon answers 404. A failed read
+   *  isn't an empty list, so the caller is given the status to tell them apart. */
+  async hostedMembers(): Promise<{ status: number; body: unknown }> {
+    const res = await this.optionalFetchImpl(`${this.baseUrl}/api/queue/hosted-members`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    return { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
   }
   queueItem(qitemId: string, options: { optional?: boolean } = {}) {
     return this.get(`/api/queue/${encodeURIComponent(qitemId)}`, options.optional ? this.optionalFetchImpl : this.fetchImpl);

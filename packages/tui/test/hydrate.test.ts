@@ -175,6 +175,8 @@ function fixtureClient(
     const route = String(url).replace("http://x", "");
     calls?.push(route);
     const failure = overrides[route];
+    // Status 0 stands for a read that never got an answer, such as a dropped connection.
+    if (failure?.status === 0) throw new Error("fetch failed");
     if (failure) return { ok: false, status: failure.status, json: async () => failure.body ?? null } as Response;
     if (route in responses) return { ok: true, json: async () => responses[route] } as Response;
     if (!(route in FIXTURES)) throw new Error(`unexpected route in test: ${route}`);
@@ -780,13 +782,37 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(instanceLines).not.toContain("not shown");
   });
 
-  it("lists no connected assistants, and reports no failed read, when the daemon doesn't serve them", async () => {
-    const snap = await hydrateSnapshot(fixtureClient({ "/api/queue/hosted-members": { status: 404 } }));
-    expect(snap.hosts[0]!.connectedAssistants).toBeUndefined();
-    expect(snap.readErrors).toEqual([]);
+  it("a known-empty list of connected assistants stays quiet", async () => {
+    const snap = await hydrateSnapshot(fixtureClient());
+    expect(snap.hosts[0]!.connectedAssistants).toEqual([]);
+    expect(snap.hosts[0]!.connectedAssistantsUnavailable).toBeUndefined();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
     expect(renderScreen(view.get(), snap, { cols: 160, rows: 60 }).lines.join("\n")).not.toContain("Connected assistants");
+  });
+
+  it.each([
+    ["an older daemon without the route", { overrides: { "/api/queue/hosted-members": { status: 404 } } }, "this daemon doesn't serve it"],
+    ["a failed read", { overrides: { "/api/queue/hosted-members": { status: 500 } } }, "the read failed: HTTP 500"],
+    ["a dropped connection", { overrides: { "/api/queue/hosted-members": { status: 0 } } }, "the read failed: fetch failed"],
+    ["an answer without a members list", { responses: { "/api/queue/hosted-members": { hostId: "mm2-openrig1" } } }, "the daemon's answer couldn't be read"],
+  ])("%s says check-in is unavailable, not that there are none", async (_case, setup, reason) => {
+    const snap = await hydrateSnapshot(fixtureClient("overrides" in setup ? setup.overrides : {}, "responses" in setup ? setup.responses : {}));
+    expect(snap.hosts[0]!.connectedAssistants).toBeUndefined();
+    expect(snap.hosts[0]!.connectedAssistantsUnavailable).toBe(reason);
+    // Optional, like the other enrichment: the page itself still reads as whole.
+    expect(snap.readErrors).toEqual([]);
+    const line = `Connected assistants: check-in unavailable (${reason})`;
+
+    const rigView = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    rigView.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const rigLines = renderScreen(rigView.get(), snap, { cols: 160, rows: 60 }).lines.join("\n");
+    expect(rigLines).toContain(line);
+    expect(rigLines).not.toContain("each checks its own queue");
+
+    const instanceView = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    instanceView.dispatch({ type: "drill", resource: "host", name: snap.hosts[0]!.name });
+    expect(renderScreen(instanceView.get(), snap, { cols: 160, rows: 60 }).lines.join("\n")).toContain(line);
   });
 
   it("shows confirmed missing sessions as detached unless lifecycle still requires attention", async () => {

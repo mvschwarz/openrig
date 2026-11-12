@@ -98,8 +98,11 @@ export interface HostNode {
   reachable: boolean | null;
   rigs: RigNode[];
   /** Roster members outside any terminal (assistants reaching the team over MCP) and their check-in, read from this
-   *  daemon only. Absent when not read or the daemon doesn't serve them. */
+   *  daemon only. Absent when not read, or when the read failed. */
   connectedAssistants?: ConnectedAssistant[];
+  /** Why the connected assistants couldn't be read (an older daemon, a failed read, an unusable answer); absent when
+   *  they were read or not asked for. */
+  connectedAssistantsUnavailable?: string;
 }
 
 /** A connected assistant's check-in as this daemon reports it. */

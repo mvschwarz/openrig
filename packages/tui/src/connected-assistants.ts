@@ -21,10 +21,21 @@ export function toConnectedAssistants(body: unknown): ConnectedAssistant[] | nul
   });
 }
 
+/** The hosted-members read as the list, or why it couldn't be read, in `rig ps`'s words: an older daemon's 404, a failed
+ *  read, or an answer that isn't one. A failed read isn't an empty list. */
+export function connectedAssistantsOf(answer: { status: number; body: unknown }): { assistants: ConnectedAssistant[] } | { unavailable: string } {
+  if (answer.status === 404) return { unavailable: "this daemon doesn't serve it" };
+  if (answer.status >= 400) return { unavailable: `the read failed: HTTP ${answer.status}` };
+  const assistants = toConnectedAssistants(answer.body);
+  return assistants ? { assistants } : { unavailable: "the daemon's answer couldn't be read" };
+}
+
 /** The connected assistants under a seat table, each with its check-in line in the daemon's words and the time in the
- *  viewer's zone; only one rig's when `rig` is given. Nothing when there are none. */
-export function connectedAssistantLines(assistants: ConnectedAssistant[] | undefined, rig: string | null, filter: string | null,
-  width: number, timeZone?: string): ContentLine[] {
+ *  viewer's zone; only one rig's when `rig` is given. Nothing when there are none; one line saying check-in is
+ *  unavailable, with the reason, when the list couldn't be read. */
+export function connectedAssistantLines(assistants: ConnectedAssistant[] | undefined, unavailable: string | undefined, rig: string | null,
+  filter: string | null, width: number, timeZone?: string): ContentLine[] {
+  if (unavailable) return [{ text: "" }, ...wrapDetailLines([{ text: `Connected assistants: check-in unavailable (${unavailable})` }], width)];
   const shown = (assistants ?? [])
     .filter((a) => !rig || a.seat.endsWith(`@${rig}`))
     .filter((a) => !filter || a.seat.includes(filter));
