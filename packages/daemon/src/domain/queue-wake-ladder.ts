@@ -13,6 +13,7 @@ import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PRE
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 import { readWakeOutcome } from "./connection-contract.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
 // silently park: today one failed nudge is recorded and nothing follows (the measured
 // dominant 0.5.3 failure class — a perfect surviving packet, a recipient never woken).
@@ -1081,9 +1082,10 @@ export const PROMPT_REFUSAL_CANDIDATES_SQL = `WITH scored AS MATERIALIZED (
     ) c JOIN queue_items q ON q.qitem_id = c.qitem_id)
   SELECT qitem_id, destination_session FROM scored WHERE first_refusal IS NOT NULL ORDER BY first_refusal`;
 
+/** Named in the slow-operation log, so a stall during it is attributed to this read: one begin and one end record per tick. */
 export function readPromptRefusalCandidates(db: Database.Database): Array<{ qitem_id: string; destination_session: string }> {
-  return db.prepare(PROMPT_REFUSAL_CANDIDATES_SQL)
-    .all({ refused: `${REFUSED_PREFIX}%`, alertTag: PROMPT_ALERT_TAG }) as Array<{ qitem_id: string; destination_session: string }>;
+  return runSyncSite("queue.wake_ladder.prompt_candidates", () => db.prepare(PROMPT_REFUSAL_CANDIDATES_SQL)
+    .all({ refused: `${REFUSED_PREFIX}%`, alertTag: PROMPT_ALERT_TAG }) as Array<{ qitem_id: string; destination_session: string }>);
 }
 
 /** Active watchdog jobs whose latest attempt was refused at a target's prompt. A run of refusals starts

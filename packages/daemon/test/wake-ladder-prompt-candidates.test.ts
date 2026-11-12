@@ -4,6 +4,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import { PROMPT_ALERT_TAG, PROMPT_REFUSAL_CANDIDATES_SQL, readPromptRefusalCandidates } from "../src/domain/queue-wake-ladder.js";
+import { configureSyncSiteRecorder } from "../src/domain/sync-site-wrap.js";
 
 // The candidate read the wake ladder used before it read from the open rows: every transition's note matched against
 // the refusal prefix. Kept here as the oracle the new read must agree with, row for row and in the same order.
@@ -72,6 +73,13 @@ describe("the wake ladder's prompt-refusal candidates", () => {
     note("q-open", "an ordinary note");
     expect(readPromptRefusalCandidates(db)).toEqual([]);
     expect(wholeLog()).toEqual([]);
+  });
+
+  it("names its read in the slow-operation log, so a stall during it is attributed", () => {
+    const sites: string[] = [];
+    configureSyncSiteRecorder({ runSync<T>(site: string, fn: () => T): T { sites.push(site); return fn(); } });
+    try { readPromptRefusalCandidates(db); } finally { configureSyncSiteRecorder(undefined); }
+    expect(sites).toEqual(["queue.wake_ladder.prompt_candidates"]);
   });
 
   it("reads each candidate's own transitions through the qitem index, never the whole transition log", () => {
