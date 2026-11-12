@@ -182,12 +182,13 @@ export class ActivityGrantStore {
     }
   }
 
-  standing(grantId: string): "current" | "pending" | "stale" | "revoked" {
+  standing(grantId: string): "current" | "pending" | "stale" | "unverified" | "revoked" {
     const grant = this.get(grantId);
     if (!grant || grant.revokedAt) return "revoked";
     if (!grant.runId || !this.hasRunColumns()) return "stale";
     if (!grant.activatedAt) return "pending";
-    return this.matchesBinding(grant, true) ? "current" : "stale";
+    const binding = this.bindingMatch(grant, true);
+    return binding === null ? "unverified" : binding ? "current" : "stale";
   }
 
   private hasRunColumns(): boolean {

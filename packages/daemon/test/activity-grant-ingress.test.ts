@@ -4,7 +4,7 @@ import { piUsageChargesSchema } from "../src/db/migrations/108_pi_usage_charges.
 // A seat activity grant on the existing hook ingress, through the real route, store, occupant ledger and oracle. The
 // grant is resolved first; only then is the seat and generation a post claims accepted. A refused post records nothing,
 // so the seat's activity stays unknown. The install-wide token keeps today's behaviour.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -142,6 +142,28 @@ describe("a seat activity grant on the hook ingress", () => {
     expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 200 });
     f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.guest.id);
     expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 409 });
+    expect(f.recorded()).toBe(1);
+  });
+
+  it("refuses unverified run activity without recording or revoking, then recovers", async () => {
+    const f = fixture();
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.guest.id, GUEST);
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "launch", run: {
+      runId: "temporarily-unverified", sessionId: row.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const read = vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("observation unavailable"); });
+    try {
+      expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId })))
+        .toMatchObject({ status: 409, body: { code: "activity_grant_unverified", retryable: true } });
+      expect(f.recorded()).toBe(0);
+      expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+    } finally { read.mockRestore(); }
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId }))).toMatchObject({ status: 200 });
+    expect(f.recorded()).toBe(1);
+    f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.guest.id);
+    expect(await f.post(grant.token, f.event("Stop", "end_turn", { runId: grant.runId })))
+      .toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
     expect(f.recorded()).toBe(1);
   });
 

@@ -144,6 +144,8 @@ Unreadable observations cannot revoke a grant. Confirmed exit/replacement or int
 
 Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
 successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
+An unreadable binding is `activity_grant_unverified` (409, retryable): it could not be verified now, not proven stale.
+Nothing is recorded and the grant is retained; retry when its binding can be checked again.
 Failed launches revoke their own credential. Relaunch replaces the active run; an explicit no-launch adoption can
 retain it only with the original concrete pane/process evidence and an adoption-only tenure continuation. These
 checks bind a runner's reports to its launch; they do not independently verify its claimed native identity. Existing
@@ -424,6 +426,7 @@ answer. Only the seat's opt-in refuses and holds attention.
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
 | `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
 | `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
+| `activity_grant_unverified` | 409 | The binding could not be verified now; this is retryable, not evidence of replacement or cancellation. | permits under the existing unavailable-answer policy |
 | `activity_grant_revoked` | 401 | The grant was revoked while its launch generation still occupies the seat, or before it has registered, so this may still be the live request; a replaced occupant's grant reads `activity_grant_stale` instead, even once revoked. | permits |
 | `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
 | `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |

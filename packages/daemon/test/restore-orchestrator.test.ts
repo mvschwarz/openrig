@@ -5932,6 +5932,30 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each([
+    "Run-bound reporting unavailable; using existing unbound install-token reporting.",
+    "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed.",
+  ])("surfaces direct Pi restore limitation warnings without repeating resume: %s", async warning => {
+    const rig = rigRepo.createRig("pi-warning");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi", cwd: "/repo/pi" });
+    const session = sessionRegistry.registerSession(node.id, "r99-pi-warning");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("pi_session_file", "/tmp/pi-warning.jsonl", "resume_if_possible", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const resume = vi.fn(async (_session: string) => ({ ok: true as const, warnings: [warning] }));
+    const orch = createOrchestrator({ pi: {
+      canResume: vi.fn((type: string | null) => type === "pi_session_file"), resume,
+    } as unknown as PiResumeAdapter });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(result.result.warnings).toContain(`${resume.mock.calls[0]![0]}: ${warning}`);
+  });
+
   describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
     it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
       const rig = rigRepo.createRig("r99");

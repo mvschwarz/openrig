@@ -195,7 +195,7 @@ describe("actual run grants", () => {
     try {
       f.grants.reconcileBinding(f.node.id);
       expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
-      expect(f.grants.standing(grant.grantId)).toBe("stale"); // refusal is not revocation
+      expect(f.grants.standing(grant.grantId)).toBe("unverified"); // refusal is not revocation
     } finally { spy.mockRestore(); }
     expect(f.grants.standing(grant.grantId)).toBe("current");
   });
@@ -236,7 +236,7 @@ describe("actual run grants", () => {
     f.grants.reconcileBinding(f.node.id);
     f.grants.revokeForSession(f.session.id, "old_session_stopped");
     expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
-    expect(f.grants.standing(grant.grantId)).toBe("stale");
+    expect(f.grants.standing(grant.grantId)).toBe("unverified");
     new SeatIdentityStore(f.db).upsert(evidence);
     expect(f.grants.standing(grant.grantId)).toBe("current");
   });
@@ -280,7 +280,7 @@ describe("actual run grants", () => {
     f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id = ?").run(f.node.id);
     f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
     expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
-    expect(f.grants.standing(grant.grantId)).toBe("stale");
+    expect(f.grants.standing(grant.grantId)).toBe("unverified");
     if (replaced) {
       f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
       f.grants.reconcileBinding(f.node.id);
@@ -300,7 +300,7 @@ describe("actual run grants", () => {
     try {
       f.grants.reconcileBinding(f.node.id);
       expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
-      expect(f.grants.standing(grant.grantId)).toBe("stale");
+      expect(f.grants.standing(grant.grantId)).toBe("unverified");
     } finally { spy.mockRestore(); }
     expect(f.grants.standing(grant.grantId)).toBe("current");
   });

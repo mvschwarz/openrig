@@ -2627,6 +2627,7 @@ export class RestoreOrchestrator {
         ...(launchWrapper?.length ? ([launchWrapper] as const) : []),
       );
       if (result.ok) {
+        for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }

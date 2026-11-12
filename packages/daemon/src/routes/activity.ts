@@ -189,6 +189,10 @@ function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: Acti
   if (grant.runId) {
     const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
     if (standing === "current") return null;
+    if (standing === "unverified") {
+      return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
+        error: `This runner grant couldn't be verified now; retry verification; ${outcome}` }, 409);
+    }
     return c.json({ ok: false, code: `activity_grant_${standing}`, error: `This runner grant is ${standing}; ${outcome}` }, standing === "revoked" ? 401 : 409);
   }
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
