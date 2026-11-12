@@ -761,8 +761,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const clientFactory = options.clientFactory ?? ((url: string) => new DaemonClient(url));
   const hostRegistryLoader = options.hostRegistryLoader ?? loadHostRegistry;
   const hostBindingsLoader = options.hostBindingsLoader ?? loadHostBindings;
+  // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
+  const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
-   *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one. */
+   *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
+   *  The remote client is bound to this server's seat, so a write it makes there names the calling agent as its sender
+   *  (principal headers stay local: only this host's daemon trusts them). */
   const hostTarget = (host: string | undefined): { client: DaemonClient; headers: Record<string, string>; remote: boolean } | TextResult => {
     const name = host?.trim();
     if (host !== undefined && !name) {
@@ -790,7 +794,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     }
     const bearer = resolveRemoteBearer(match.host);
     if (!bearer.ok) return errorResult(bearer.error, "host_bearer_unavailable", bearer.error);
-    return { client: remoteDaemonClient(clientFactory, match.host.url), headers: bearerAuthHeaders(bearer.token), remote: true };
+    return { client: remoteDaemonClient(clientFactory, match.host.url, undefined, seatOf()), headers: bearerAuthHeaders(bearer.token), remote: true };
   };
   /** Request options for a host target: a remote call carries that host's bearer; a local one keeps the terminal token. */
   const hostOptions = (target: { headers: Record<string, string>; remote: boolean }, timeout?: { timeoutMs: number }) =>
@@ -808,8 +812,6 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   };
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
-  // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
-  const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   // With no seat (none configured, or one an app left unfilled), messages, new tasks and chat still go through, as an
   // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
   // delegated decision compares authors). Its note says only what is known: why there's no seat, and how the client
@@ -933,7 +935,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "List rigs and their status. host reads a registered remote host instead of this daemon; it needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: READ_ONLY,
     },
@@ -1211,7 +1213,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
         force: z.boolean().optional().describe("Send even if target appears mid-task"),
         waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending. If the seat is still busy or its activity is unknown when the wait ends, nothing is sent and nothing is kept; separate work belongs in a queue row"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: DESTRUCTIVE,
     },
@@ -1251,7 +1253,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         rig: z.string().optional().describe("Capture all sessions in a rig"),
         pod: z.string().optional().describe("Capture all sessions in a pod"),
         lines: z.number().optional().describe("Number of lines to capture (default: 20)"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: READ_ONLY,
     },
@@ -1405,7 +1407,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: ADDITIVE,
     },
@@ -1497,7 +1499,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       description: "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: READ_ONLY,
     },
@@ -1542,7 +1544,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         since: z.string().optional().describe("Only items updated at or after this ISO-8601 time, e.g. done work since Monday: state done, since 2026-10-19"),
         handedOffFrom: z.string().optional().describe("The items handed on from this qitemId, in any state and any rig"),
         limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: READ_ONLY,
     },
@@ -1634,7 +1636,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: DESTRUCTIVE,
     },
@@ -2282,7 +2284,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tags: z.array(z.string()).optional().describe("Tags for the new item (default: the item's own)"),
         priority: z.string().optional().describe("Priority for the new item (default: the item's own)"),
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, which a new item for a person needs"),
-        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: DESTRUCTIVE,
     },

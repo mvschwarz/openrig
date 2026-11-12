@@ -1541,6 +1541,18 @@ describe("MCP host routing", () => {
     return remote;
   }
 
+  /** A remote client whose real request pipeline runs, recording each call's path and headers. */
+  function recordingRemote(url = "http://127.0.0.1:17433"): { client: DaemonClient; calls: Array<{ path: string; headers: Record<string, string> }> } {
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const client = new DaemonClient(url, {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        calls.push({ path: new URL(String(input)).pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    return { client, calls };
+  }
+
   async function run(local: DaemonClient, options: Parameters<typeof createMcpServer>[1], name: string, args: Record<string, unknown>) {
     const server = createMcpServer(local, options);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1610,5 +1622,53 @@ describe("MCP host routing", () => {
     }, "rig_ps", {});
     expect(result.isError).toBeFalsy();
     expect(local.get).toHaveBeenCalledWith("/api/ps");
+  });
+
+  // The maintainer's narrowed ask: the remote client is bound to the calling agent, so a row written on the other host
+  // names that agent as its sender. The daemon derives it from X-OpenRig-Session, exactly as a local write's.
+  it("a remote queue_create names the calling seat as the item's sender", async () => {
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Review the diff." });
+
+    expect(result.isError).toBeFalsy();
+    const create = box.calls.find((call) => call.path === "/api/queue/create");
+    // The origin may qualify the seat; the agent it names is the caller's either way.
+    expect(create?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("a remote send names the calling seat as the sender", async () => {
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_send", { host: "unipc", session: "qa@team", text: "Build is green." });
+
+    expect(result.isError).toBeFalsy();
+    const send = box.calls.find((call) => call.path === "/api/transport/send");
+    expect(send?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("a remote write from a server with no seat carries no sender, as a local one doesn't", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    dropUnfilledSeat();
+    onTestFinished(() => { vi.unstubAllEnvs(); });
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_send", { host: "unipc", session: "qa@team", text: "Build is green." });
+
+    expect(result.isError).toBeFalsy();
+    const send = box.calls.find((call) => call.path === "/api/transport/send");
+    expect(send?.headers["X-OpenRig-Session"]).toBeUndefined();
   });
 });
