@@ -1025,6 +1025,26 @@ describe("live seat runtime switch", () => {
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", committed: false, attention: expect.stringMatching(/neither the predecessor's nor the successor's/) });
     });
+
+    it("#3103: past its deadline with the staging session gone, a seat restored on a new pane settles the switch as abandoned", async () => {
+      record("preparing");
+      panes.set(SEAT, "%9"); // a host reboot renumbered the restored seat's pane; the staged successor ended with tmux
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recoverAll()).toEqual([]);
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+      expect(panes.get(SEAT)).toBe("%9");
+      expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
+      expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
+      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: "No runtime switch needs recovery." });
+    });
+
+    it("#3103: with the successor's pane still at the seat, an expired switch isn't settled by the deadline alone", async () => {
+      record("preparing");
+      panes.set(SEAT, "%5");
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
+      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: expect.stringMatching(/neither the predecessor's nor the successor's/) });
+    });
   });
 
   // review-r2's controls on #1895: a process a switch names stays fenced until it's known gone, on every route that acts

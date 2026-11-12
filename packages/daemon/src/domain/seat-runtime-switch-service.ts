@@ -140,7 +140,7 @@ interface SwitchRow {
   predecessor_pane: string; successor_pane: string | null; predecessor_generation: string; successor_generation: string;
   from_runtime: string; to_runtime: string; phase: string; reason: string; requested_by: string | null; plan_json: string;
   confirmation_note: string | null; confirmed_at: string | null; successor_resume_type: string | null; successor_resume_token: string | null;
-  committed_at: string | null; outcome: string | null; attention: string | null; created_at: string;
+  committed_at: string | null; outcome: string | null; attention: string | null; deadline_at: string; created_at: string;
 }
 
 /** What to do about a seat with no pane to switch. */
@@ -751,11 +751,15 @@ export class SeatRuntimeSwitchService {
     if (!row.committed_at) {
       // Before commit: the predecessor holds the seat.
       const exchanged = canonicalPane !== null && canonicalPane === row.successor_pane && stagingPane === row.predecessor_pane;
+      // Past its deadline with no staging session and the successor's pane not at the seat, the staged successor is gone
+      // (a host reboot or tmux server restart renumbers every pane), so the seat's pane can't be matched to the record.
+      const successorGone = staging.state === "absent" && canonicalPane !== row.successor_pane
+        && this.now().getTime() >= Date.parse(row.deadline_at);
       if (exchanged) {
         const back = await tmux.swapRuntimeSwitchPanes({ nodeId, stagingSession: row.staging_session, canonicalSession: row.canonical_session,
           canonicalPane: row.successor_pane!, stagedPane: row.predecessor_pane });
         if (!back.ok) return stuck(`The panes couldn't be exchanged back: ${back.message}`);
-      } else if (canonicalPane !== row.predecessor_pane) {
+      } else if (canonicalPane !== row.predecessor_pane && !successorGone) {
         return stuck(`The seat's pane (${canonicalPane ?? "none"}) is neither the predecessor's nor the successor's; nothing was touched.`);
       }
       const retired = await this.retireStaging(row.staging_session, nodeId, "Uncommitted successor");
@@ -763,7 +767,7 @@ export class SeatRuntimeSwitchService {
       tmux.finishLaunchBinding(row.staging_session);
       // An abandoned switch keeps why it stopped; recovery only settles the successor it couldn't retire then.
       const outcome = row.phase === "abandoned" ? `${row.outcome ?? "abandoned before commit"} The staged ${row.to_runtime} successor was retired at recovery.`
-        : `interrupted before commit: the ${row.from_runtime} occupant holds the seat; the staged ${row.to_runtime} successor was retired`;
+        : `interrupted before commit: the ${row.from_runtime} occupant holds the seat; the staged ${row.to_runtime} successor ${successorGone ? "was already gone" : "was retired"}`;
       db.prepare("UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = NULL, updated_at = ? WHERE id = ?").run(outcome, at(), row.id);
       return { ok: true, outcome, switchId: row.id };
     }
