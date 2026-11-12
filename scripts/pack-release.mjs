@@ -29,9 +29,11 @@ export function launcherMismatches(root) {
 }
 
 // The pages a newcomer copies install commands from. Each links the rigs skill, and the README and getting started
-// also link the install script, at a release tag, so a copied command installs that release: never a placeholder,
-// a stale tag or main's unreleased skill.
-const INSTALL_PAGES = ['README.md', 'docs/reference/getting-started.md', 'docs/reference/quickstart.md'];
+// also link the install script, at a release tag, so a copied command fetches that release's skill or install script
+// (the script itself installs the latest published CLI): never a placeholder, a stale tag or main's unreleased skill.
+// build:package copies docs/reference into the assembled CLI, and npm packs that copy, so both copies are checked.
+const INSTALL_PAGES = ['README.md', 'docs/reference/getting-started.md', 'docs/reference/quickstart.md',
+  'packages/cli/daemon/docs/reference/getting-started.md', 'packages/cli/daemon/docs/reference/quickstart.md'];
 const INSTALL_LINK = /github(?:usercontent)?\.com\/mvschwarz\/openrig\/(?:tree\/)?([^/\s"'`]+)\/(skills\/rigs|scripts\/install\.sh)/g;
 
 /** Where an install page links the rigs skill or the install script at anything but this release's tag, each named by
@@ -92,10 +94,10 @@ export function packRelease(root, dest) {
   const version = readJson(root, 'packages/cli/package.json').version;
   const mismatches = launcherMismatches(root);
   if (mismatches.length > 0) throw new Error(`The launcher must match @openrig/cli ${version}:\n- ${mismatches.join('\n- ')}`);
-  const links = installTagMismatches(root, version);
-  if (links.length > 0) throw new Error(`The install pages must link this release's tag, v${version}; set them in the release preparation:\n- ${links.join('\n- ')}`);
   // This catches a build that never ran, not a partial one: a successful build:package is the precondition.
   if (!existsSync(join(root, 'packages/cli/daemon/dist'))) throw new Error('packages/cli has no daemon/dist, so build:package hasn\'t run: run npm run build:package first');
+  const links = installTagMismatches(root, version);
+  if (links.length > 0) throw new Error(`The install pages must link this release's tag, v${version}, in source and in the assembled CLI; set them in the release preparation, then run npm run build:package again:\n- ${links.join('\n- ')}`);
   const stamp = openrigPluginMismatches(root, version);
   if (stamp.length > 0) throw new Error(`The openrig plugin's four manifests must carry @openrig/cli ${version}, in source and in the assembled CLI; set them in the release preparation, then run npm run build:package again:\n- ${stamp.join('\n- ')}`);
   // The assembled CLI's plugins are what's packed: changed plugin bytes need a greater version than the last release's.
