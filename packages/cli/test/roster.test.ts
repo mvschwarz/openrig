@@ -160,9 +160,9 @@ it("shows a hosted member's check-in status from this host's daemon; another hos
   expect(formatCheckIn({ status: "unknown", lastCheckInAt: null, expectedMinutes: null, reason: "its check-ins couldn't be read" }))
     .toBe("unknown (its check-ins couldn't be read)");
   // Never seen and no schedule declared: both facts stay visible.
-  expect(formatCheckIn({ status: "never-checked-in", lastCheckInAt: null, expectedMinutes: null })).toBe("never checked in (none recorded); no schedule declared");
-  expect(formatCheckIn({ status: "never-checked-in", lastCheckInAt: null, expectedMinutes: 60 })).toBe("never checked in (none recorded); expected every 60 min");
-  expect(formatCheckIn({ status: "prompted-only", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: null })).toBe("prompted only; last check-in 2026-11-12T09:00:00.000Z");
+  expect(formatCheckIn({ status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: null })).toBe("no check-in yet; no schedule declared");
+  expect(formatCheckIn({ status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: 60 })).toBe("no check-in yet; expected every 60 min");
+  expect(formatCheckIn({ status: "on-request", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: null })).toBe("on request; last check-in 2026-11-12T09:00:00.000Z");
   expect(enrichRosterMember(member, here).live).not.toHaveProperty("checkIn");
 });
 it("a team with no terminal seat still shows its members' check-ins: the daemon names its own host with them", () => {

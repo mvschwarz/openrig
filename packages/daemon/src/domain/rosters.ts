@@ -74,7 +74,7 @@ export function parseRoster(value: unknown): Roster {
     // A cadence that can't be used never stops the roster loading: the member's check-in status reads unknown instead.
     const cadence = m.check_in_minutes;
     const cadenceProblem = cadence === undefined ? null
-      : m.hosted !== true ? "check_in_minutes is for a hosted member"
+      : m.hosted !== true ? "check_in_minutes is for a connected assistant (a member marked hosted: true)"
         : !Number.isInteger(cadence) || (cadence as number) <= 0 ? `check_in_minutes ${JSON.stringify(cadence)} isn't a positive whole number of minutes`
           : null;
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,

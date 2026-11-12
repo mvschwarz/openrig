@@ -51,9 +51,9 @@ export type CheckInStatus =
   /** Its last check-in is older than twice its stated cadence: its schedule may be off or waiting for an approval. */
   | "check-in-overdue"
   /** No check-in recorded for it. */
-  | "never-checked-in"
+  | "no-check-in-yet"
   /** No cadence stated: it checks its queue when a person prompts it. */
-  | "prompted-only"
+  | "on-request"
   /** Its connection was revoked or removed, as recorded. Never inferred from silence. Nothing records a revocation yet,
    *  so nothing emits it: a revoked member stops checking in and reads overdue. */
   | "disconnected"
@@ -64,8 +64,8 @@ export type CheckInStatus =
 export const CHECK_IN_DISPLAY: Readonly<Record<CheckInStatus, string>> = {
   "checking-in": "checking in",
   "check-in-overdue": "overdue",
-  "never-checked-in": "never checked in (none recorded)",
-  "prompted-only": "prompted only",
+  "no-check-in-yet": "no check-in yet",
+  "on-request": "on request",
   "disconnected": "disconnected",
   "unknown": "unknown",
 };
@@ -87,7 +87,7 @@ export interface MemberCheckIn {
 }
 
 /** A hosted member's check-in status from its stated cadence and its last observed check-in (`seen`, `never`, or
- *  `unknown` when the record can't be read). First match wins: disconnected, unknown, never checked in, prompted only,
+ *  `unknown` when the record can't be read). First match wins: disconnected, unknown, no check-in yet, on request,
  *  then checking in or overdue. Nothing passes `revokedAt` yet, so nothing reads disconnected. */
 export function memberCheckInStatus(input: {
   checkInMinutes: number | null | undefined;
@@ -104,8 +104,8 @@ export function memberCheckInStatus(input: {
   if (input.revokedAt) return known("disconnected");
   if (input.cadenceProblem) return unknown(input.cadenceProblem);
   if (input.checkIn.state === "unknown") return unknown("its check-ins couldn't be read");
-  if (input.checkIn.state === "never") return known("never-checked-in");
-  if (expectedMinutes === null) return known("prompted-only");
+  if (input.checkIn.state === "never") return known("no-check-in-yet");
+  if (expectedMinutes === null) return known("on-request");
   const age = input.now.getTime() - Date.parse(input.checkIn.at);
   if (!Number.isFinite(age)) return unknown("its last check-in's time couldn't be read");
   return known(age <= expectedMinutes * CHECK_IN_OVERDUE_CADENCES * 60_000 ? "checking-in" : "check-in-overdue");

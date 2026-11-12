@@ -114,7 +114,7 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 
 ### Check-in status
 
-A hosted member checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
+A connected assistant (a roster member marked `hosted: true`) checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
 when it lists the member's own work). Its status compares its last check-in with the cadence its roster entry states
 (`check_in_minutes`):
 
@@ -122,8 +122,8 @@ when it lists the member's own work). Its status compares its last check-in with
 |---|---|
 | `checking-in` | its last check-in is no older than twice its stated cadence |
 | `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
-| `never-checked-in` | no check-in recorded for it on this daemon, whether or not it states a cadence |
-| `prompted-only` | no cadence stated: it checks in when a person prompts it |
+| `no-check-in-yet` | no check-in recorded for it on this daemon, whether or not it states a cadence |
+| `on-request` | no cadence stated: it checks in when a person prompts it |
 | `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so no member shows it |
 | `unknown` | its check-ins couldn't be read, or its stated cadence can't be used; the reason says which |
 

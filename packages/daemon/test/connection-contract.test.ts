@@ -73,15 +73,15 @@ describe("memberCheckInStatus: a hosted member's check-in status", () => {
     expect(memberCheckInStatus({ checkInMinutes: 60, checkIn: { state: "unknown" }, now })).toMatchObject({ status: "unknown", reason: "its check-ins couldn't be read" });
   });
 
-  it("with no stated cadence it is prompted only, whatever its last check-in's age, and keeps that check-in", () => {
-    expect(status(null, seenAgo(5))).toBe("prompted-only");
-    expect(status(null, seenAgo(10_000))).toBe("prompted-only");
+  it("with no stated cadence it is on request, whatever its last check-in's age, and keeps that check-in", () => {
+    expect(status(null, seenAgo(5))).toBe("on-request");
+    expect(status(null, seenAgo(10_000))).toBe("on-request");
     expect(memberCheckInStatus({ checkInMinutes: undefined, checkIn: seenAgo(5), now })).toMatchObject({ lastCheckInAt: seenAgo(5).at, expectedMinutes: null });
   });
 
   it("no recorded check-in reads never, with or without a cadence; an unreadable record reads unknown, never idle or overdue", () => {
-    expect(status(60, { state: "never" })).toBe("never-checked-in");
-    expect(memberCheckInStatus({ checkInMinutes: null, checkIn: { state: "never" }, now })).toMatchObject({ status: "never-checked-in", expectedMinutes: null });
+    expect(status(60, { state: "never" })).toBe("no-check-in-yet");
+    expect(memberCheckInStatus({ checkInMinutes: null, checkIn: { state: "never" }, now })).toMatchObject({ status: "no-check-in-yet", expectedMinutes: null });
     expect(status(60, { state: "unknown" })).toBe("unknown");
     expect(status(60, { state: "seen", at: "not a time" })).toBe("unknown");
   });

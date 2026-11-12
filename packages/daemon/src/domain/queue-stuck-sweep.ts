@@ -628,16 +628,16 @@ function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes:
   const at = checkIn.lastCheckInAt;
   const cadence = checkIn.expectedMinutes;
   const lately = at !== null && now.getTime() - Date.parse(at) <= thresholdMinutes * 60_000;
-  const recent = checkIn.status === "checking-in" || (checkIn.status === "prompted-only" && lately);
+  const recent = checkIn.status === "checking-in" || (checkIn.status === "on-request" && lately);
   const checkIns = ((): string => {
     switch (checkIn.status) {
       case "checking-in": return `checking in: its last check-in is within twice its expected ${cadence} min`;
       case "check-in-overdue":
         return `overdue: no check-in since ${at}; expected every ${cadence} min, so its schedule may be off or waiting for an approval`;
-      case "prompted-only": return `prompted only (no schedule declared): ${lately
+      case "on-request": return `on request (no schedule declared): ${lately
         ? `it read its own inbox within the last ${thresholdMinutes} min` : `no check-in since ${at}`}`;
-      case "never-checked-in":
-        return `never checked in: no check-in recorded; ${cadence !== null ? `expected every ${cadence} min` : "no schedule declared"}`;
+      case "no-check-in-yet":
+        return `no check-in yet; ${cadence !== null ? `expected every ${cadence} min` : "no schedule declared"}`;
       case "disconnected": return "disconnected: its connection was revoked or removed";
       case "unknown": return `unknown: ${checkIn.reason ?? "its check-in status couldn't be read"}`;
     }

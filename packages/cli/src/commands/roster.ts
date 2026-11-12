@@ -89,8 +89,8 @@ export function formatCheckIn(checkIn: Row): string {
   const words = [CHECK_IN_DISPLAY[status] + (status === "unknown" && typeof checkIn.reason === "string" ? ` (${checkIn.reason})` : "")];
   if (typeof checkIn.lastCheckInAt === "string") words.push(`last check-in ${checkIn.lastCheckInAt}`);
   if (typeof checkIn.expectedMinutes === "number") words.push(`expected every ${checkIn.expectedMinutes} min`);
-  // "prompted only" already says it; for a member never seen, both facts stay visible.
-  else if (status === "never-checked-in" || status === "disconnected") words.push("no schedule declared");
+  // "on request" already says it; for a member never seen, both facts stay visible.
+  else if (status === "no-check-in-yet" || status === "disconnected") words.push("no schedule declared");
   return words.join("; ");
 }
 
