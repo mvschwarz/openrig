@@ -120,7 +120,14 @@ export class TmuxOptionDefaultsApplier {
       warnings.push(`tmux "set-clipboard" server option not set: ${clip.message}`);
     }
 
-    const copyCommand = await resolveCopyCommand(this.platform, this.hasCommand);
+    let copyCommand: string | null;
+    try {
+      copyCommand = await resolveCopyCommand(this.platform, this.hasCommand);
+    } catch {
+      this.serverDefaultsAsserted = false;
+      warnings.push("Clipboard lookup interrupted (250 ms limit); copy-command left unchanged (OSC 52 if unset). Will retry on the next fresh session.");
+      return;
+    }
     if (copyCommand !== null) {
       const cc = await this.tmuxAdapter.setServerOption("copy-command", copyCommand);
       if (!cc.ok) {
@@ -156,17 +163,18 @@ export async function resolveCopyCommand(
 
 /**
  * OPR.0.4.6.02 S1 — default `command -v <bin>` probe (POSIX shell builtin).
- * Returns true when the binary resolves on PATH. Nonblocking + best-effort; a 250 ms child deadline or any
- * failure (spawn error, non-shell env) reads as absent.
+ * Returns true when the binary resolves on PATH. A killed probe rejects so
+ * the applier can warn and retry; other failures read as absent.
  */
 async function defaultHasCommand(bin: string): Promise<boolean> {
   try {
-    return await runAsyncSite("tmux_options.command_v", () => new Promise<boolean>(resolve => {
+    return await runAsyncSite("tmux_options.command_v", () => new Promise<boolean>((resolve, reject) => {
       execFile("/bin/sh", ["-c", 'command -v "$1"', "--", bin], {
         timeout: 250, killSignal: "SIGKILL", maxBuffer: 1024,
-      }, error => resolve(!error));
+      }, error => error?.killed ? reject(error) : resolve(!error));
     }));
-  } catch {
+  } catch (error) {
+    if ((error as { killed?: boolean } | null)?.killed) throw error;
     return false;
   }
 }
