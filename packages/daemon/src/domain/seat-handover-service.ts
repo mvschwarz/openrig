@@ -1335,10 +1335,11 @@ export class SeatHandoverService {
       });
       // (e/Class-B): capture the RETIRING occupant's generation BEFORE registerClaimedSession mints the
       // successor's tenure below — after that mint the node's "current" generation IS the successor's
-      // (the name is reused), so this is the only point the retiree's generation is resolvable.
-      const retiringGeneration =
-        this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
+      // (the name is reused), so this is the only point the retiree's generation is resolvable. It is read by
+      // this node, not by its session name: an earlier generation of the seat (an archived rig of the same
+      // name) can hold a newer session row under that name.
       const tenureBefore = this.readOccupantTenure(input.node.id);
+      const retiringGeneration = tenureBefore?.generationUuid ?? undefined;
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
       const newSession = this.sessionRegistry.registerClaimedSession(
         input.node.id,
