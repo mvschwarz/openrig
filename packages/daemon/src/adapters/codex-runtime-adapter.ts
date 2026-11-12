@@ -668,7 +668,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const command = `node "${relay}"`;
-    const keySource = canonicalCodexHookSource(hooksPath);
+    const keySource = codexHookSourcePath(hooksPath);
     const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
@@ -678,7 +678,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     if (!expected) return;
-    const inlineSource = canonicalCodexHookSource(configPath);
+    const inlineSource = codexHookSourcePath(configPath);
     let config = stripped;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groups = document.hooks[event] ?? [];
@@ -714,22 +714,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * OPR.0.4.3.33 — compute + splice Codex's `[hooks.state."<key>"] trusted_hash` for our 4
-   * authored activity hooks into `content`. `key_source` is the canonicalized config path
-   * (Codex keys trust by `std::fs::canonicalize(config.toml).display()`); we best-effort
-   * `realpathSync` the config path to match — on a miss (file not yet on real disk, or a mock
-   * fs in tests) we fall back to the plain absolute path, and any resulting key mismatch just
-   * degrades to the launch-time trust gate (Layer-2 floor), never a broken run. The command
+   * authored activity hooks into `content`. Codex 0.167.2 resolves the source folder but
+   * keeps the file name, including a linked file, as returned by app-server hooks/list. The command
    * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
    * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
    */
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
-    let keySource = configPath;
-    try {
-      keySource = fs.realpathSync.native(configPath);
-    } catch {
-      // config.toml not on the real filesystem (first write / unit-test mock fs) — the plain
-      // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
-    }
+    const keySource = codexHookSourcePath(configPath);
     const command = `node "${relay}"`;
     // upsertCodexActivityHooks has just written our marked block. Codex keys by the
     // group's position among this event's groups, not its position inside our block.
@@ -772,7 +763,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       try {
         const original = this.fs.readFile(hooksPath);
         const document = parseCodexHooksJson(original);
-        const keySource = canonicalCodexHookSource(hooksPath);
+        const keySource = codexHookSourcePath(hooksPath);
         let config = updated ?? "";
         const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
         for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
@@ -2451,9 +2442,10 @@ function tomlSections(text: string, current?: string): TomlSection[] {
   return sections;
 }
 
-function canonicalCodexHookSource(path: string): string {
-  // Codex keys hook trust by the canonical source path; a file not on the real filesystem keeps its plain path.
-  try { return fs.realpathSync.native(path); } catch { return path; }
+function codexHookSourcePath(file: string): string {
+  // Resolve a linked home folder, but retain a linked config.toml/hooks.json file's own name.
+  try { return nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file)); }
+  catch { return file; } // The folder may not exist yet, including with an injected filesystem.
 }
 
 /** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */
