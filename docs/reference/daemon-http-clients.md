@@ -82,6 +82,13 @@ All of them are server-sent events (`text/event-stream`):
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
   Live events that arrive during the replay follow it, without duplicates.
+  When a person clicks an answer on an ask with questions (in Steering, the Feed, Slack or an MCP client), the stream
+  carries `queue.answer_recorded`: `{ qitemId, actorSession, questionId, answered, questions, complete, summary }`.
+  `complete: false` means the set is still partial: the ask stays open, and its answers haven't gone back yet. The
+  event carries ids and counts, not the choice; read the ask for its `humanAnswers`. A click that changes nothing (the
+  same option again) has no event, and neither does a typed reply, which settles the ask through its own
+  `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
+  client that re-reads the ask after a gap still sees it.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
