@@ -65,13 +65,14 @@ export function caseContext(cell, { caseId, kind, version }) {
     },
 
     /** Wait until the screen has stopped changing for `quietMs` (the probe oracle's readiness settle). */
-    /** Settled means a capture taken after this call succeeded and the screen hasn't changed for `quietMs`. */
+    /** Settled means a capture taken after this call succeeded and the screen hasn't changed for `quietMs`, counted
+     *  from this call at the earliest: an action just taken (a key, a send) may not have redrawn the screen yet. */
     async settle({ quietMs = 1250, timeoutMs = 60_000 } = {}) {
       const started = performance.now();
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const last = screen.last();
-        if (last && screen.okAt() > started && performance.now() - last.monotonicMs >= quietMs) return true;
+        if (last && screen.okAt() > started && performance.now() - Math.max(last.monotonicMs, started) >= quietMs) return true;
         await sleep(100);
       }
       return false;
