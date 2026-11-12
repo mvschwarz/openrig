@@ -76,6 +76,7 @@ describe("queue create scope advisories preserve admission and output", () => {
   let stderr: string[];
   let responseHeaders: Headers[];
   let createResponses: Array<{ status: number; data: Record<string, unknown> }>;
+  let handoffResponses: Array<{ status: number; data: Record<string, unknown> }>;
   let savedHost: string | null;
   let savedExit: typeof process.exitCode;
 
@@ -134,6 +135,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     stderr = [];
     responseHeaders = [];
     createResponses = [];
+    handoffResponses = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { stdout.push(args.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { stderr.push(args.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
@@ -177,6 +179,71 @@ describe("queue create scope advisories preserve admission and output", () => {
       "--no-nudge", "--full", ...args, ...(json ? ["--json"] : [])], { from: "user" });
   }
 
+  async function seedHandoffSource(tags: string[] | null) {
+    return source.daemon.deps.queueRepo.create({
+      sourceSession: "writer@scope",
+      destinationSession: "writer@scope",
+      body: "handoff source body",
+      summary: "handoff source",
+      nudge: false,
+      ...(tags === null ? {} : { tags }),
+    });
+  }
+
+  async function handoff(
+    app: Hono,
+    qitemId: string,
+    verb: "handoff" | "handoff-and-complete",
+    options: { json?: boolean; tags?: string[]; host?: string; destination?: string } = {},
+  ): Promise<void> {
+    stdout.length = 0;
+    stderr.length = 0;
+    handoffResponses = [];
+    const client = {
+      post: async (url: string, body: unknown) => {
+        const response = await app.request(url, { method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+          body: JSON.stringify(body) });
+        const data = await response.json() as Record<string, unknown>;
+        handoffResponses.push({ status: response.status, data });
+        return { status: response.status, data };
+      },
+      get: async () => ({ status: 200, data: { selfHostId: source.hostId } }),
+    };
+    const deps: QueueDeps = {
+      lifecycleDeps: { readFile: () => null, exists: () => false,
+        fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => client as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    };
+    const args = [verb, qitemId, "--to", options.destination ?? "worker@scope", "--summary", "handoff scope contract",
+      "--no-nudge", "--full", ...(options.tags ? ["--tags", options.tags.join(",")] : []),
+      ...(options.host ? ["--host", options.host] : []), ...(options.json ? ["--json"] : [])];
+    await queueCommand(deps).parseAsync(args, { from: "user" });
+  }
+
+  function cliHandoffProjection(data: Record<string, unknown>): Record<string, unknown> {
+    const projected = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
+    const advisories = Array.isArray(projected.advisories) ? projected.advisories as Array<Record<string, unknown>> : null;
+    if (!advisories) return projected;
+    const scopeCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
+      "scope_check_unavailable", "scope_check_skipped"]);
+    const preserved = advisories.filter(advisory => !scopeCodes.has(String(advisory.code)));
+    if (preserved.length > 0) projected.advisories = preserved;
+    else delete projected.advisories;
+    return projected;
+  }
+
+  function handoffScopeAdvisories(data: Record<string, unknown>): Array<Record<string, unknown>> {
+    const advisories = Array.isArray(data.advisories) ? data.advisories as Array<Record<string, unknown>> : [];
+    const scopeCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
+      "scope_check_unavailable", "scope_check_skipped"]);
+    return advisories.filter(advisory => scopeCodes.has(String(advisory.code)));
+  }
+
+  function expectHandoffJsonProjection(data: Record<string, unknown>): void {
+    expect(stdout).toEqual([JSON.stringify(cliHandoffProjection(data))]);
+  }
+
   function committed(f: Fixture, id: string, tags: string[] | null): void {
     const stored = f.daemon.deps.queueRepo.getById(id);
     expect(stored).toMatchObject({ qitemId: id, destinationSession: "worker@scope",
@@ -193,6 +260,187 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   const scopeLines = () => stderr.join("\n").split("\n")
     .filter(line => /\bscope\b|mission:|slice:/i.test(line)).join("\n");
+
+  const handoffVerbs = [
+    { verb: "handoff" as const, closedState: "handed-off" },
+    { verb: "handoff-and-complete" as const, closedState: "done" },
+  ];
+
+  const inheritedHandoffScopeCases = [
+    { name: "unresolved mission", tags: ["mission:missing-mission", "project:alpha"], code: "unresolved_scope", text: /unresolved|resolves to 0/i },
+    { name: "ambiguous mission", tags: ["mission:DUP.MISSION", "project:alpha"], code: "ambiguous_scope", text: /ambiguous|resolves to 2/i },
+    { name: "empty mission", tags: ["mission:", "project:alpha"], code: "empty_scope", text: /empty value/i },
+    { name: "conflicting missions", tags: ["mission:release", "mission:missing-mission", "project:alpha"], code: "conflicting_scope", text: /conflicting scope tags/i },
+    { name: "unavailable catalogue", tags: ["mission:release", "project:alpha"], code: "scope_check_unavailable", text: /unavailable|could not run/i },
+  ];
+
+  it.each(handoffVerbs.flatMap(({ verb, closedState }) => inheritedHandoffScopeCases.map(scopeCase => ({
+    ...scopeCase, verb, closedState,
+  }))))("queue handoff scope reports inherited $name for $verb without changing the committed write", async row => {
+    if (row.name === "unavailable catalogue") fs.writeFileSync(path.join(source.root, "workspace.yaml"), "projects: invalid\n");
+    const original = await seedHandoffSource(row.tags);
+    await handoff(source.app, original.qitemId, row.verb, { json: true });
+
+    expect(handoffResponses).toHaveLength(1);
+    expect(handoffResponses[0]!.status).toBe(201);
+    const data = handoffResponses[0]!.data;
+    const advisories = handoffScopeAdvisories(data);
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0]).toMatchObject({ code: row.code, message: expect.stringMatching(row.text) });
+    expect(advisories[0]!.message).toContain(`queue ${row.verb} scope check`);
+    expect(advisories[0]!.message).toContain("inherited from the source item");
+    expect(scopeLines()).toContain("Warning:");
+    expect(scopeLines()).toContain("inherited from the source item");
+    if (row.code === "scope_check_unavailable") expect(scopeLines()).not.toMatch(/unresolved|resolves to 0/i);
+
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const created = data.created as { qitemId: string; tags: string[] | null; state: string };
+    expect(closed).toMatchObject({ state: row.closedState, closureReason: "handed_off_to" });
+    expect(created.tags).toEqual(row.tags);
+    expect(source.daemon.deps.queueRepo.getById(created.qitemId)?.tags).toEqual(row.tags);
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs.flatMap(({ verb, closedState }) => [
+    { verb, closedState, sourceTags: ["mission:release", "project:alpha"], tags: ["mission:missing-mission", "project:alpha"], warns: true },
+    { verb, closedState, sourceTags: ["mission:missing-mission", "project:alpha"], tags: ["mission:release", "project:alpha"], warns: false },
+  ]))("queue handoff scope treats explicit tags as a full $verb replacement (warns: $warns)", async row => {
+    const original = await seedHandoffSource(row.sourceTags);
+    await handoff(source.app, original.qitemId, row.verb, { json: true, tags: row.tags });
+
+    const data = handoffResponses[0]!.data;
+    const created = data.created as { qitemId: string; tags: string[] | null };
+    expect(handoffResponses[0]!.status).toBe(201);
+    expect(created.tags).toEqual(row.tags);
+    expect(source.daemon.deps.queueRepo.getById(created.qitemId)?.tags).toEqual(row.tags);
+    expect(source.daemon.deps.queueRepo.getById(original.qitemId)?.state).toBe(row.closedState);
+    if (row.warns) {
+      const [advisory] = handoffScopeAdvisories(data);
+      expect(advisory).toMatchObject({ code: "unresolved_scope", message: expect.stringContaining("explicit tags supplied on this handoff") });
+      expect(scopeLines()).toContain("explicit tags supplied on this handoff");
+    } else {
+      expect(handoffScopeAdvisories(data)).toEqual([]);
+      expect(scopeLines()).toBe("");
+    }
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs.flatMap(({ verb, closedState }) => [
+    { verb, closedState, tags: ["mission:release", "slice:SLICE.ONE", "project:alpha"] },
+    { verb, closedState, tags: null },
+  ]))("queue handoff scope stays quiet for resolved or untagged $verb rows", async row => {
+    const original = await seedHandoffSource(row.tags);
+    await handoff(source.app, original.qitemId, row.verb, { json: true });
+    const data = handoffResponses[0]!.data;
+    const created = data.created as { qitemId: string; tags: string[] | null };
+
+    expect(handoffResponses[0]!.status).toBe(201);
+    expect(handoffScopeAdvisories(data)).toEqual([]);
+    expect(scopeLines()).toBe("");
+    expect(created.tags).toEqual(row.tags);
+    expect(source.daemon.deps.queueRepo.getById(original.qitemId)?.state).toBe(row.closedState);
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs)("queue handoff scope checks local inherited cross-host provenance for $verb", async ({ verb }) => {
+    const tags = ["mission:missing-mission", "project:alpha", "cross-host"];
+    const original = await seedHandoffSource(tags);
+    await handoff(source.app, original.qitemId, verb, { json: true });
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+
+    expect(advisory).toMatchObject({ code: "unresolved_scope", message: expect.stringContaining("inherited from the source item") });
+    expect(scopeLines()).toContain("inherited from the source item");
+    expect(scopeLines()).not.toMatch(/skipped|forwarded/i);
+    expectHandoffJsonProjection(data);
+  });
+
+  it("queue handoff scope keeps the default full stdout projection unchanged", async () => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    await handoff(source.app, original.qitemId, "handoff");
+    const data = handoffResponses[0]!.data;
+
+    expect(handoffScopeAdvisories(data)).toHaveLength(1);
+    expect(scopeLines()).toContain("Warning:");
+    expect(stdout).toEqual([JSON.stringify(cliHandoffProjection(data), null, 2)]);
+  });
+
+  it.each(handoffVerbs)("queue handoff scope reports cross-host $verb as skipped without sender scope reads", async ({ verb, closedState }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:missing-mission", "slice:MISSING.SLICE", "project:alpha"]);
+    const senderReads = observeSenderScopeReads();
+    const { app, observation } = forwardingApp(receiver);
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture" });
+
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses).toEqual([201]);
+    expect(handoffResponses[0]!.status).toBe(201);
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+    expect(advisory).toMatchObject({ code: "scope_check_skipped", message: expect.stringContaining("queue handoff") });
+    expect(advisory!.message).toContain("cross-host");
+    expect(advisory!.message).toContain("inherited from the source item");
+    expect(scopeLines()).toContain("Note:");
+    expect(scopeLines()).toContain("skipped");
+    expect(senderReads).toEqual([]);
+
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const created = data.created as { qitemId: string; tags: string[]; advisories?: Array<{ code: string }> };
+    expect(closed?.state).toBe(closedState);
+    expect(created.tags).toEqual(expect.arrayContaining(["mission:missing-mission", "slice:MISSING.SLICE", "cross-host"]));
+    expect(receiver.daemon.deps.queueRepo.getById(created.qitemId)?.tags).toEqual(created.tags);
+    expect(process.exitCode ?? 0).toBe(0);
+    // The new internal daemon diagnostic is intentionally absent from stdout; the forwarded row remains intact.
+    expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs)("queue handoff scope emits no advice when local $verb fails", async ({ verb }) => {
+    await handoff(source.app, "qitem-does-not-exist", verb, { json: true });
+    expect(handoffResponses[0]!.status).toBe(404);
+    expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
+    expect(scopeLines()).toBe("");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it.each(handoffVerbs)("queue handoff scope emits no advice when cross-host $verb forwarding fails", async ({ verb }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const { app, observation } = forwardingApp(receiver, false, () => new Response(JSON.stringify({ error: "fixture_forward_failed" }), { status: 502 }));
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture" });
+
+    expect(observation.forwards).toBe(1);
+    expect(handoffResponses[0]!.status).toBe(502);
+    expect(source.daemon.deps.queueRepo.getById(original.qitemId)?.state).toBe("pending");
+    expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
+    expect(scopeLines()).toBe("");
+    expect(process.exitCode).toBe(2);
+  });
+
+  it.each(handoffVerbs)("queue handoff scope emits no advice when cross-host $verb close conflicts", async ({ verb }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    if (verb === "handoff") {
+      await source.daemon.deps.queueRepo.handoff({ qitemId: original.qitemId,
+        fromSession: "writer@scope", toSession: "worker@scope", nudge: false });
+    } else {
+      await source.daemon.deps.queueRepo.handoffAndComplete({ qitemId: original.qitemId,
+        fromSession: "writer@scope", toSession: "worker@scope", nudge: false });
+    }
+    const { app, observation } = forwardingApp(receiver);
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture" });
+
+    expect(observation.forwards).toBe(0);
+    expect(handoffResponses[0]!.status).toBe(409);
+    expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
+    expect(scopeLines()).toBe("");
+    expect(process.exitCode).toBe(1);
+  });
 
   function assertJsonCreate(f: Fixture, destination: string, tags: string[]): Record<string, unknown> {
     expect(createResponses).toHaveLength(1);

@@ -299,6 +299,11 @@ export interface CreateScopeAdvisory {
   message: string;
 }
 
+export interface CreateScopeAdvisoryContext {
+  verb: "handoff" | "handoff-and-complete";
+  tagSource: "inherited" | "explicit";
+}
+
 function displayScopeTag(raw: string): string | null {
   const cleaned = raw.replace(/[\x00-\x1f\x7f]+/g, "").trim();
   return cleaned.startsWith(MISSION_TAG) || cleaned.startsWith(SLICE_TAG) ? cleaned : null;
@@ -357,31 +362,53 @@ export function skippedCreateScopeAdvisory(tags: string[] | null | undefined): C
   return scopeTags.length > 0 ? { status: "skipped", tags: scopeTags } : null;
 }
 
-export function toCreateScopeAdvisory(check: CreateScopeCheck): CreateScopeAdvisory {
+export function toCreateScopeAdvisory(check: CreateScopeCheck, context?: CreateScopeAdvisoryContext): CreateScopeAdvisory {
+  let advisory: CreateScopeAdvisory;
   switch (check.status) {
     case "unresolved":
-      return { code: "unresolved_scope",
+      advisory = { code: "unresolved_scope",
         message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is unresolved (resolves to 0 directories); row was created.` };
+      break;
     case "ambiguous":
-      return { code: "ambiguous_scope",
+      advisory = { code: "ambiguous_scope",
         message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is ambiguous (resolves to ${check.count} directories, cannot uniquely resolve); row was created.` };
+      break;
     case "empty":
-      return { code: "empty_scope",
+      advisory = { code: "empty_scope",
         message: `queue create scope check: ${check.tag} has an empty value; row was created.` };
+      break;
     case "conflict":
-      return { code: "conflicting_scope",
+      advisory = { code: "conflicting_scope",
         message: `queue create scope check: conflicting scope tags (${displayScopeTags(check.tags).join(", ")}); row was created.` };
+      break;
     case "unavailable": {
       const tags = displayScopeTags(check.tags).join(", ");
       const message = check.reason === "missing-mission"
         ? `queue create scope check unavailable (${tags}) without mission context: mission tag is missing; row was created.`
         : `queue create scope check unavailable (${tags}): could not run scope check on this host; row was created.`;
-      return { code: "scope_check_unavailable", message };
+      advisory = { code: "scope_check_unavailable", message };
+      break;
     }
     case "skipped":
-      return { code: "scope_check_skipped",
+      advisory = { code: "scope_check_skipped",
         message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      break;
+    default: {
+      const unreachable: never = check;
+      return unreachable;
+    }
   }
+  if (!context) return advisory;
+
+  const provenance = context.tagSource === "inherited"
+    ? "the effective scope tags were inherited from the source item"
+    : "the effective scope tags came from explicit tags supplied on this handoff";
+  return {
+    ...advisory,
+    message: advisory.message
+      .replace("queue create", `queue ${context.verb}`)
+      .replace("; row was ", `; ${provenance}; row was `),
+  };
 }
 
 /**

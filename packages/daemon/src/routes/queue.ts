@@ -34,6 +34,7 @@ import {
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
+  type CreateScopeAdvisoryContext,
   type CurrentWorkRow,
   type MissionsRootResolver,
   type RoleOrientation,
@@ -159,7 +160,7 @@ export function queueRoutes(): Hono {
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
   }
-  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null, context?: CreateScopeAdvisoryContext) {
     try {
       const check = evaluateCreateScope(tags, () => {
         const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
@@ -180,7 +181,7 @@ export function queueRoutes(): Hono {
         const value = store?.resolveOne("workspace.slices_root").value;
         return typeof value === "string" && value.trim() ? value : null;
       });
-      return check ? toCreateScopeAdvisory(check) : null;
+      return check ? toCreateScopeAdvisory(check, context) : null;
     } catch {
       return null;
     }
@@ -589,9 +590,16 @@ export function queueRoutes(): Hono {
       return errorResponse(c, err);
     }
 
-    // Same {closed, created} shape as the local transactional handoff;
-    // `created` is the origin daemon's row, verbatim.
-    return c.json({ closed: closed.item, created: fwd.payload }, 201);
+    // `created` is the origin daemon's row, verbatim. The origin can also report
+    // that its own scope check was skipped, without pretending the forwarding
+    // daemon inspected remote filesystem state.
+    const scopeCheck = skippedCreateScopeAdvisory(effectiveTags);
+    const scopeAdvisory = scopeCheck ? toCreateScopeAdvisory(scopeCheck, {
+      verb: terminalState === "done" ? "handoff-and-complete" : "handoff",
+      tagSource: body.tags == null ? "inherited" : "explicit",
+    }) : null;
+    return c.json({ closed: closed.item, created: fwd.payload,
+      ...(scopeAdvisory ? { advisories: [scopeAdvisory] } : {}) }, 201);
   }
 
   /**
@@ -1009,8 +1017,13 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scope = createScopeAdvisory(c, result.created.tags, {
+        verb: "handoff",
+        tagSource: body.tags == null ? "inherited" : "explicit",
+      });
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1094,8 +1107,13 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scope = createScopeAdvisory(c, result.created.tags, {
+        verb: "handoff-and-complete",
+        tagSource: body.tags == null ? "inherited" : "explicit",
+      });
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
