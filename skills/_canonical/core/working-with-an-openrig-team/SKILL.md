@@ -33,8 +33,9 @@ behave; this skill is the loop around them.
 
   > To ask me anything, create a queue item to `<your seat>` (`rig queue create --destination <your seat> ...`), then
   > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
-  > check it when the person asks. When you finish, put the outcome in this item's resolution and any file in its
-  > evidence ref.
+  > check it when the person asks. Don't ask in your own terminal: the person isn't there. If you hand this item on,
+  > copy this paragraph into the new item. When you finish, put the outcome in this item's resolution and any file in
+  > its evidence ref.
 - Tell the person the `qitemId` it returns. It's how both of you find this work again.
 - If the call times out, check `rig_queue_show` with that same `qitemId` before trying again. If you retry, pass the same id
   as `qitemId`. Never retry with a new one: that creates the work twice.
