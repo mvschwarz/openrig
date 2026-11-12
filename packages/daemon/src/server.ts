@@ -38,6 +38,7 @@ import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
+import { teamOperationsCapabilities } from "./domain/team-operations.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -84,6 +85,7 @@ import { skillsRoutes } from "./routes/skills.js";
 import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
+import { networkRoutes } from "./routes/network.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
@@ -242,12 +244,16 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** The outbound network connector (`rig network`); started after the listener binds. */
+  networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
   modelDivergenceMonitor?: import("./domain/model-divergence/model-divergence-monitor.js").ModelDivergenceMonitor;
   /** S10 — the in-daemon gateway subsystem (amended M1 §3: in-process, no second deployable).
    *  Optional so test harnesses constructing AppDeps directly need not provide one; the health
    *  route reports honestly when absent. */
   gatewaySubsystem?: import("./domain/gateway/gateway-subsystem.js").GatewaySubsystem;
+  /** Concrete local relay inbound handler (`POST /api/gateway/relay/inbound`). */
+  relayInboundHandler?: import("./domain/gateway/relay-inbound.js").RelayInboundHandler;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**
@@ -280,6 +286,7 @@ export interface AppDeps {
   reviewGatherer?: import("./domain/review/gather.js").ReviewGatherer;
   // OPR.0.4.6.02 C3 — the terminal-provider-ride composer (herdr/cmux views).
   terminalService?: import("./domain/terminal/terminal-service.js").TerminalService;
+  rexStatusRelay?: import("./domain/terminal/rex-agent-status.js").RexAgentStatusRelay;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   /** User Settings v0 — daemon-side settings store (env > file > default). */
   settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
@@ -577,6 +584,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
     c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);
+    c.set("relayInboundHandler" as never, deps.relayInboundHandler);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
     c.set(
       "cmuxLayoutService" as never,
@@ -631,6 +639,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
+    c.set("networkConnector" as never, deps.networkConnector);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
@@ -788,6 +797,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.route("/api/rigs", rigsRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
+  app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
@@ -824,7 +834,8 @@ export function createApp(deps: AppDeps): Hono {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
-    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null,
+      fixedGeometry: () => deps.settingsStore?.resolveOne("terminal.fixed_geometry").value === true });
   } else if (deps.enableNodeWebSocket) {
     registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }
@@ -868,6 +879,9 @@ export function createApp(deps: AppDeps): Hono {
     "/api/hosts",
     hostsRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
+  // A selected local seat's connections to a remote hub (`rig network`): bindings, status and disconnect. Its writes carry
+  // a participant's token, so they take the same operator-bearer posture as the hosts routes.
+  app.route("/api/network", networkRoutes({ bearerToken: deps.missionControlBearerToken ?? null }));
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
   // Living Notes Packet 2 (OPR.0.4.4.20) — composed-review read contract.
@@ -901,7 +915,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
   // S10 — gateway subsystem admin (slack enable/disable with the seeding rule preserved).
   // A shared Slack app's relay carries the token `rig host pair` issued: this daemon's auth bearer.
-  app.route("/api/gateway", gatewayRoutes({ relayBearerToken: deps.missionControlBearerToken ?? null }));
+  app.route(
+    "/api/gateway",
+    gatewayRoutes({
+      relayBearerToken: deps.missionControlBearerToken ?? null,
+      relayInboundHandler: deps.relayInboundHandler,
+    }),
+  );
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).

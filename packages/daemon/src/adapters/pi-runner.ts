@@ -21,7 +21,8 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
+import stringWidth from "string-width";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -29,6 +30,7 @@ import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
+import { validateLaunchWrapper } from "../domain/launch-wrapper.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
@@ -37,19 +39,339 @@ import {
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
+/** Bind the selected account's credentials while retaining the seat's own Pi resources. */
+export function preparePiAccount(agentDir: string, accountHome: string | undefined): void {
+  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  const marker = nodePath.join(agentDir, ".openrig-account");
+  const auth = nodePath.join(agentDir, "auth.json");
+  // Validate every explicit home, including the seat's own directory, before changing any link.
+  if (accountHome) {
+    const source = nodePath.join(accountHome, "auth.json");
+    fs.accessSync(source, fs.constants.R_OK);
+    if (!fs.statSync(source).isFile()) throw new Error("Selected Pi auth must be a file");
+  }
+  if (accountHome && fs.realpathSync(accountHome) !== fs.realpathSync(agentDir)) {
+    const source = nodePath.join(accountHome, "auth.json");
+    const current = fs.lstatSync(auth, { throwIfNoEntry: false });
+    if (current && (!current.isSymbolicLink() || !fs.existsSync(marker))) {
+      throw new Error("Existing Pi login is not a managed account link; use a confirmed account switch");
+    }
+    fs.rmSync(auth, { force: true });
+    // Record ownership before linking so a crash between these writes is retryable.
+    fs.writeFileSync(marker, accountHome, { mode: 0o600 });
+    fs.symlinkSync(source, auth);
+  } else if (!accountHome && fs.existsSync(marker)) {
+    // A Pi login may have replaced the link since it was installed.
+    if (fs.lstatSync(auth, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(auth);
+    fs.rmSync(marker);
+  }
+}
+
 // ── Submitted input boundaries ─────────────────────────────────────────────
 // Canonical TTY buffers can overflow before Node sees even the paste terminator.
 // Use Node's line editor in raw mode, with only paste framing handled here.
 export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 
+// ── The compose region's physical layout ──────────────────────────────────────────
+// One layout model for painting, erasing and the caret: cells fill terminal rows
+// greedily, a wide character that no longer fits wraps whole to the next row, and
+// an explicit newline starts one. Every row the compositor paints or erases, and
+// the caret it places, derives from here — measured with the daemon's string-width.
+
+/** Where a compose region sits on screen, and where its caret lands. */
+export interface ComposeLayout { rows: number; caretRow: number; caretColumn: number; }
+
+const SEGMENTER = (() => {
+  try {
+    return new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  } catch {
+    return null;
+  }
+})();
+
+/** Grapheme clusters: what a terminal lays out. A ZWJ family emoji is one cluster
+ *  taking two cells where its code points would sum to six; a combining mark adds none. */
+export function* graphemesOf(text: string): Generator<string> {
+  if (SEGMENTER) {
+    for (const part of SEGMENTER.segment(text)) yield part.segment;
+  } else {
+    for (const character of text) yield character;
+  }
+}
+
+const TAB_WIDTH = 8;
+
+export function composeLayout(text: string, width: number, caret = text.length): ComposeLayout {
+  if (!text) return { rows: 0, caretRow: 0, caretColumn: 0 };
+  if (width <= 0) return { rows: text.split("\n").length, caretRow: 0, caretColumn: 0 };
+  let row = 0;
+  let column = 0;
+  let caretRow = 0;
+  let caretColumn = 0;
+  let index = 0;
+  const place = () => { caretRow = row; caretColumn = column; };
+  for (const segment of graphemesOf(text)) {
+    if (index === caret) place();
+    if (segment === "\n") {
+      row += 1;
+      column = 0;
+    } else if (segment === "\t") {
+      // A tab advances to the next ordinary tab stop, clamped to the last column.
+      column = Math.min((Math.floor(column / TAB_WIDTH) + 1) * TAB_WIDTH, width - 1);
+    } else {
+      const cells = Math.max(0, stringWidth(segment));
+      if (column + cells > width) {
+        row += 1;
+        column = 0;
+      }
+      column += cells;
+    }
+    index += segment.length;
+  }
+  if (index === caret) place();
+  return { rows: row + 1, caretRow, caretColumn };
+}
+
+// ── Pane live region (compose + status) ────────────────────────────────────────
+// A seat pane is a plain terminal: one bottom live region holds the operator's draft
+// and the runner's status line, and is erased and repainted around every transcript
+// write. Nothing else may write at the cursor, or a draft freezes into scrollback and
+// streamed text fuses with it mid-word. When the terminal's width is unknown the
+// compositor places nothing — the pane falls back to plain output, and the draft,
+// though still editable, is not drawn.
+
+/** The live region a pane host repaints around transcript writes. */
+export interface PaneCompositor {
+  /** Bind the line editor the compose line renders from, and where its cursor sits. */
+  attach(read: () => string, redraw: () => void, caretUp?: () => number, readCursor?: () => number): void;
+  /** Unbind the editor; any held streamed tail is flushed and the live region is dropped. */
+  detach(): void;
+  /** A keystroke changed the draft: repaint the live region from readline's state. A
+   *  draft that just went away flushes a held streamed tail first, as plain output would. */
+  refresh(): void;
+  /** Streamed model text: verbatim while no live region exists; once a draft or a
+   *  status line is on the bottom, complete lines go above the region and an
+   *  unfinished line is held, so no live line is split or frozen into scrollback. */
+  transcript(text: string): void;
+  /** One complete line of transcript. */
+  line(text: string): void;
+  /** A keypress is about to echo: close an open transcript line first, or the echo
+   *  and the next streamed deltas would land on top of it. */
+  beforeInput(): void;
+  /** Pin the latest diagnostic on the status line. The transcript copy is the caller's;
+   *  this pin is never the only copy. */
+  diagnostic(text: string): void;
+  /** Drop a pinned status line. */
+  clearStatus(): void;
+  /** Before the submit commits: drop the draft line so no partial copy scrolls, and
+   *  finish any held streamed line; the durable copy is the commit line below. */
+  beforeSubmit(): void;
+  /** Repaint the live region in place. */
+  repaint(): void;
+}
+
+export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
+  let status: string | null = null;
+  /** The status text actually on screen: clipped when it was painted. A resize must
+   *  size the region from this, not from the longer text it was pinned with. */
+  let paintedStatus: string | null = null;
+  let readInput: (() => string) | null = null;
+  let redrawLine: (() => void) | null = null;
+  let held = "";
+  let openLine = false;
+  let screenRows = 0;
+  let readCaretUp: (() => number) | null = null;
+  let readCaretIndex: (() => number) | null = null;
+  const widthKnown = () => typeof out.columns === "number" && out.columns > 0;
+  const composeText = () => (readInput && redrawLine ? readInput() : "");
+  const composeRows = () => {
+    const text = composeText();
+    return text && widthKnown() ? composeLayout(text, out.columns).rows : 0;
+  };
+  const clip = (text: string) => {
+    const flat = text.replace(/[\r\n\t]+/g, " ").trimEnd();
+    if (!widthKnown() || stringWidth(flat) < out.columns) return flat;
+    let used = 0;
+    let clipped = "";
+    for (const segment of graphemesOf(flat)) {
+      const cells = Math.max(0, stringWidth(segment));
+      if (used + cells > out.columns - 1) break;
+      clipped += segment;
+      used += cells;
+    }
+    return `${clipped}\u2026`;
+  };
+  const eraseLines = (lines: number) => {
+    let sequence = "";
+    for (let index = 0; index < lines; index += 1) sequence += index === 0 ? "\r\u001b[2K" : "\u001b[1A\r\u001b[2K";
+    if (sequence) out.write(sequence);
+  };
+  /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
+   *  to the terminal, so nothing else can change these rows behind the compositor's back —
+   *  except a reflow, which the resize handler owns. */
+  const paint = () => {
+    paintedStatus = status !== null ? clip(status) : null;
+    if (paintedStatus !== null) {
+      out.write(paintedStatus);
+      out.write("\n");
+    }
+    const rows = composeRows();
+    if (rows) redrawLine?.();
+    screenRows = (status !== null ? 1 : 0) + (rows || (status !== null ? 1 : 0));
+    // Only a painted region closes an open transcript line. With nothing painted the
+    // cursor still sits on the line a flush left open, and the next keystroke belongs
+    // to that line's context, not to a fresh one.
+    if (screenRows > 0) openLine = false;
+  };
+  const eraseScreen = () => {
+    // Nothing painted: there is no region to erase, and stepping down from a stale
+    // caret count would move the cursor off the transcript line it is still on.
+    if (screenRows === 0) return;
+    const down = readCaretUp ? readCaretUp() : 0;
+    if (down > 0) out.write(`\u001b[${down}B`);
+    eraseLines(screenRows);
+    screenRows = 0;
+  };
+  const flushHeld = () => {
+    if (!held) return;
+    out.write(held.endsWith("\n") ? held : `${held}\n`);
+    held = "";
+    openLine = false;
+  };
+  const writeVerbatim = (text: string) => {
+    out.write(text);
+    openLine = !text.endsWith("\n");
+  };
+  const writeAbove = (text: string) => {
+    eraseScreen();
+    out.write(text.endsWith("\n") ? text : `${text}\n`);
+    paint();
+  };
+  // A tile attaching or detaching reflows the pane, and the terminal keeps the cursor on
+  // its character. So the old paint now occupies exactly what the new width says it does:
+  // the pinned status wraps to ceil(cells/columns) rows, the draft to its layout rows.
+  // Move down to the region's last row — past the lines below the caret — erase exactly
+  // that many rows, and repaint at the new width. No max(): under-erasing leaves a stale
+  // copy of a wrapped status, over-erasing drops a transcript line off the screen.
+  const onResize = () => {
+    if (!widthKnown()) {
+      screenRows = 0;
+      return;
+    }
+    const draft = composeText();
+    const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
+    const draftRows = layout ? layout.rows : 0;
+    const statusLines = paintedStatus !== null ? Math.max(1, Math.ceil(stringWidth(paintedStatus) / out.columns)) : 0;
+    const down = layout ? layout.rows - 1 - layout.caretRow : 0;
+    if (down > 0) out.write(`\u001b[${down}B`);
+    // A pinned status without a draft also owns the blank row its trailing newline
+    // left the cursor on — the same row paint() counts into screenRows.
+    eraseLines(statusLines + (draftRows || (status !== null ? 1 : 0)));
+    screenRows = 0;
+    paint();
+  };
+  out.on("resize", onResize);
+  const pane: PaneCompositor = {
+    attach(read, redraw, caretUp, readCursor) {
+      readInput = read;
+      redrawLine = redraw;
+      readCaretUp = caretUp ?? null;
+      readCaretIndex = readCursor ?? null;
+    },
+    detach() {
+      eraseScreen();
+      flushHeld();
+      readInput = null;
+      redrawLine = null;
+      readCaretUp = null;
+      readCaretIndex = null;
+      openLine = false;
+      screenRows = 0;
+    },
+    refresh() {
+      eraseScreen();
+      // With no region left, an unfinished streamed line goes out verbatim so the
+      // next delta continues it on the same row instead of splitting mid-word.
+      if (held && status === null && !composeText()) {
+        writeVerbatim(held);
+        held = "";
+      }
+      paint();
+    },
+    transcript(text) {
+      if (!text) return;
+      if (status === null && composeRows() === 0 && screenRows === 0) {
+        if (held) {
+          writeVerbatim(held);
+          held = "";
+        }
+        writeVerbatim(text);
+        return;
+      }
+      held += text;
+      let newline = held.indexOf("\n");
+      while (newline >= 0) {
+        const line = held.slice(0, newline + 1);
+        held = held.slice(newline + 1);
+        writeAbove(line);
+        newline = held.indexOf("\n");
+      }
+    },
+    line(text) {
+      pane.transcript(`${text}\n`);
+    },
+    beforeInput() {
+      if (!openLine) return;
+      out.write("\n");
+      openLine = false;
+    },
+    diagnostic(text) {
+      // Without a known width there is no region to pin into. Callers already wrote
+      // the transcript copy; printing here would duplicate it.
+      if (!widthKnown()) return;
+      if (openLine) {
+        out.write("\n");
+        openLine = false;
+      }
+      eraseScreen();
+      status = clip(text);
+      paint();
+    },
+    clearStatus() {
+      if (status === null) return;
+      eraseScreen();
+      status = null;
+      paint();
+    },
+    beforeSubmit() {
+      eraseScreen();
+      openLine = false;
+      flushHeld();
+    },
+    repaint() {
+      paint();
+    },
+  };
+  return pane;
+}
+
 export function createRunnerInput(
   input: NodeJS.ReadStream,
   output: NodeJS.WriteStream,
   onSubmit: (block: string) => void,
+  pane?: PaneCompositor,
 ): readline.Interface {
-  const reject = () => output.write(
-    "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.\n",
-  );
+  const say = (text: string) => {
+    if (pane) {
+      pane.line(text);
+      pane.diagnostic(text);
+    } else {
+      output.write(`${text}\n`);
+    }
+  };
+  const reject = () => {
+    say("[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.");
+  };
   const submit = (block: string) => {
     if (Buffer.byteLength(block) > MAX_PI_INPUT_BYTES) reject();
     else if (block.trim()) onSubmit(block);
@@ -59,15 +381,43 @@ export function createRunnerInput(
     return readline.createInterface({ input, crlfDelay: Infinity }).on("line", submit);
   }
 
+  const [major = 0, minor = 0, patch = 0] = process.versions.node.split(".").map(Number);
+  const batchText = (major === 22 && (minor === 21 || (minor === 22 && patch === 0)))
+    || (major === 24 && minor >= 9 && (minor < 11 || (minor === 11 && patch <= 1)))
+    || (major === 25 && (minor === 0 || (minor === 1 && patch === 0)));
   const keys = new PassThrough();
+  const editorInput = batchText ? new PassThrough() : keys;
+  // Readline edits against a discard sink: it must never draw on the terminal, because
+  // _refreshLine does moveCursor(0, -prevRows) + clearScreenDown(), which erases whatever the
+  // compositor put above the draft. The compositor owns every terminal byte instead.
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  // Readline wraps its edit against output.columns; carry the terminal's geometry onto the sink.
+  Object.assign(sink, { columns: output.columns, rows: output.rows });
+  let caretUp = 0;
+  const renderCompose = () => {
+    const text = `${editor.line ?? ""}`;
+    if (!text) return;
+    const width = typeof output.columns === "number" && output.columns > 0 ? output.columns : 0;
+    output.write(text);
+    if (!width) return;
+    const cursor = Math.max(0, Math.min(Number(editor.cursor) || 0, text.length));
+    const layout = composeLayout(text, width, cursor);
+    caretUp = layout.rows - 1 - layout.caretRow;
+    if (caretUp > 0) output.write(`\u001b[${caretUp}A`);
+    output.write("\r");
+    if (layout.caretColumn > 0) output.write(`\u001b[${layout.caretColumn}C`);
+  };
+  pane?.attach(() => `${editor.line ?? ""}`, renderCompose, () => caretUp, () => Math.max(0, Math.min(Number(editor.cursor) || 0, `${editor.line ?? ""}`.length)));
+
   const editor = readline.createInterface({
-    input: keys, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+    input: editorInput, output: sink, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
   });
   // Node forces dumb-terminal mode without editing if TERM=dumb. When terminal: true
   // was requested, remove the dumb-mode override so VT100 line editing is preserved.
   if (Object.prototype.hasOwnProperty.call(editor, "_ttyWrite")) {
     delete (editor as any)._ttyWrite;
   }
+
   const decoder = new StringDecoder("utf8");
   let pending = "";
   let paste: string | null = null;
@@ -77,12 +427,35 @@ export function createRunnerInput(
     // Node documents changing rl.line together with rl.cursor. The installed
     // typings mark them readonly, so assign this pair through one explicit seam.
     Object.assign(editor, { line, cursor });
-    editor.prompt(true);
+    pane?.refresh();
   };
   const clear = () => setLine("", 0);
+  // Node 22.21–22.22.0 (also some 24/25 releases) appends batched text after
+  // cursor edits. Decode keys with Node, then write each plain-text run at once;
+  // controls flush that run first. Fixed Node keeps its original undo grouping.
+  let typed = "";
+  const flushTyped = () => {
+    if (!typed) return;
+    const text = typed;
+    typed = "";
+    editor.write(text);
+  };
+  const keypress = (text: string | undefined, key: readline.Key) => {
+    if (text && !key.ctrl && !key.meta && !/[\u0000-\u001f\u007f]/.test(text)) typed += text;
+    else {
+      flushTyped();
+      editor.write(text ?? "", key);
+    }
+  };
+  if (batchText) {
+    readline.emitKeypressEvents(keys);
+    keys.on("keypress", keypress);
+  }
   const consume = (text: string) => {
     if (paste === null) {
+      pane?.beforeInput();
       keys.write(text);
+      if (batchText) flushTyped();
     } else if (!discarded) {
       pasteBytes += Buffer.byteLength(text);
       if (pasteBytes > MAX_PI_INPUT_BYTES) {
@@ -114,7 +487,7 @@ export function createRunnerInput(
         paste = null;
         discarded = false;
         clear();
-        output.write("\n[pi-runner] input cleared\n");
+        say("[pi-runner] input cleared");
         onSubmit("/abort");
       } else if (paste === null) {
         paste = "";
@@ -133,6 +506,7 @@ export function createRunnerInput(
         paste = null;
       }
     }
+    pane?.refresh();
   };
   const wasRaw = input.isRaw;
   const end = () => editor.close();
@@ -140,13 +514,19 @@ export function createRunnerInput(
   output.write("\u001b[?2004h");
   input.on("data", receive);
   input.once("end", end);
-  editor.on("line", submit);
+  editor.on("line", (line) => {
+    pane?.beforeSubmit();
+    submit(line);
+  });
   editor.once("close", () => {
     input.removeListener("data", receive);
     input.removeListener("end", end);
     input.setRawMode(wasRaw);
     input.pause();
+    keys.removeListener("keypress", keypress);
     keys.destroy();
+    pane?.detach();
+    if (editorInput !== keys) editorInput.destroy();
     output.write("\u001b[?2004l");
   });
   return editor;
@@ -187,7 +567,7 @@ function diagnosticText(details: unknown[]): string {
     : "").find(Boolean) ?? "";
 }
 
-function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   const text = diagnosticText(details);
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
@@ -198,7 +578,7 @@ function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
  *  turn normally; OMP repeats the message on turn_end, and either runtime can
  *  announce it again when automatic retries exhaust. The core coalesces the
  *  repeats into one notice per failure. */
-function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
+function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime | string): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
     return event.success === false ? { errorNotice: errorNotice([event.finalError, event.error], runtime) } : {};
   }
@@ -209,7 +589,7 @@ function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime
   return {};
 }
 
-export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime = "pi"): MirrorAndActivity {
+export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi"): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
     case "agent_start":
@@ -301,6 +681,11 @@ export interface RunnerIo {
   mirrorLine(line: string): void;
   /** Append raw text to the current pane line (streamed deltas). */
   mirrorAppend(text: string): void;
+  /** Pin a copy of a diagnostic on the pane's status line, when the pane provides one.
+   *  The transcript copy is written by the caller; this pin is never the only copy. */
+  diagnostic?(text: string): void;
+  /** Drop a pinned status line at the start of a new agent turn. */
+  clearStatus?(): void;
   /** POST to the daemon activity endpoint. May resolve to the parsed JSON
    *  response (null on transport failure) so identity delivery can retry. */
   postActivity(payload: Record<string, unknown>): void | Promise<Record<string, unknown> | null>;
@@ -443,9 +828,11 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
       /** K4: the credential observation taken before Pi was spawned. */
-      launchCredentialEvidence?: PiCredentialEvidence } = {},
+      launchCredentialEvidence?: PiCredentialEvidence;
+      /** The session file this launch resumes (--session). */
+      requestedSessionFile?: string } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -532,16 +919,16 @@ export class RunnerCore {
 
   /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
   private reportDroppedFrame(reason: string | null | undefined): void {
-    if (reason) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (reason) this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
   }
 
-  private get runtime(): RunnerRuntime { return this.opts.runtime ?? "pi"; }
+  private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
     if (block === "/abort") {
       this.io.sendRpc({ type: "abort" });
-      this.io.mirrorLine("[pi-runner] abort sent");
+      this.diag("[pi-runner] abort sent");
       return;
     }
     if (block.startsWith("/followup ")) {
@@ -565,7 +952,7 @@ export class RunnerCore {
    *  closes it. One sent while idle is posted when its run opens (handleEvent), so a prompt Pi handles without a run opens
    *  no turn. */
   private acceptIntoOpenRun(): void {
-    if (this.runtime !== "pi" || !this.streaming) return;
+    if (this.runtime === "omp" || !this.streaming) return;
     this.turn += 1;
     this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
@@ -586,7 +973,7 @@ export class RunnerCore {
       } else {
         // Advertised but refused: v1 as before, so a reply over 1 MiB still fails, visibly.
         const detail = typeof record.error === "string" ? record.error : "refused";
-        this.io.mirrorLine(`[omp-runner] RPC protocol v2 not negotiated (${detail}); replies over 1 MiB will fail`);
+        this.diag(`[omp-runner] RPC protocol v2 not negotiated (${detail}); replies over 1 MiB will fail`);
       }
       return;
     }
@@ -596,7 +983,7 @@ export class RunnerCore {
       if (record.id === GET_STATE_ID) {
         this.ready = false;
         this.writeSidecar({});
-        this.io.mirrorLine(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
+        this.diag(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
         // OMP cannot provide a resume token without get_state; stop it so the
         // launch fails now instead of waiting out readiness.
         if (this.runtime === "omp") this.io.stopChild?.();
@@ -605,11 +992,11 @@ export class RunnerCore {
       if (record.id === CATCH_UP_ID && this.runtime === "pi") {
         // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
         // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.io.mirrorLine(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
+        this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
         this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
         return;
       }
-      this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+      this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
       if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
@@ -626,11 +1013,25 @@ export class RunnerCore {
       const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
-        this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
-        this.io.stopChild?.();
+        if (this.runtime === "omp") {
+          this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
+          this.io.stopChild?.();
+          return;
+        }
+        // For custom protocol: pi-rpc community harnesses, reporting no session file
+        // reads as needing attention rather than stopping the child process.
+        this.diag(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
+        this.raiseAttention("runtime_error");
         return;
       }
       this.writeSidecar({});
+      if (this.resumedElsewhere()) {
+        // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
+        // seat asks for attention rather than beating idle on a session nothing records.
+        this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
+        this.raiseAttention("runtime_error");
+        return;
+      }
       if (!wasReady) {
         // Only the initial transition to ready announces READY in the pane.
         // Subsequent get_state evaluations confirm liveness silently to avoid
@@ -763,7 +1164,7 @@ export class RunnerCore {
    *  silent working state. So a lost agent_end is not a Pi outcome, and no time limit is needed
    *  on the beat — long silent turns stay covered. */
   heartbeat(): void {
-    if (this.runtime !== "pi" || !this.ready || this.attention) return;
+    if (this.runtime === "omp" || !this.ready || this.attention) return;
     const now = Date.parse(this.io.now());
     if (this.streaming) {
       if (this.lastActivityPostMs !== null && now - this.lastActivityPostMs < STREAM_HEARTBEAT_MS) return;
@@ -782,14 +1183,21 @@ export class RunnerCore {
     this.attentionIsLatest = false;
   }
 
+  /** A diagnostic stays in the transcript — the readiness probe and the operator both read
+   *  it there; a pane with a status line pins the latest one as a convenience copy. */
+  private diag(text: string): void {
+    this.io.mirrorLine(text);
+    this.io.diagnostic?.(text);
+  }
+
   private handleEvent(event: Record<string, unknown>): void {
-    if ((this.runtime === "omp" || this.runtime === "pi") && event.type === "extension_ui_request") {
+    if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
       const detail = [event.title, event.message].filter((text): text is string => typeof text === "string")
         .map(stripVTControlCharacters).join(" — ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").slice(0, 400);
-      if (this.runtime === "pi" && !dialog) {
-        if (method === "notify") this.io.mirrorLine(`[pi-runner] ${detail}`);
+      if (this.runtime !== "omp" && !dialog) {
+        if (method === "notify") this.diag(`[${this.runtime}-runner] ${detail}`);
         return; // Pi notifications and other fire-and-forget UI requests expect no answer.
       }
       // RPC does not mount an interactive UI. Reply at once; otherwise the
@@ -798,8 +1206,8 @@ export class RunnerCore {
         this.io.sendRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
       }
       if (dialog) {
-        this.io.mirrorLine(this.runtime === "pi"
-          ? `[pi-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
+        this.diag(this.runtime !== "omp"
+          ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
         this.raiseAttention("permission_prompt");
       }
@@ -812,13 +1220,16 @@ export class RunnerCore {
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
     const entryId = typeof event.entryId === "string" ? event.entryId
-      : (this.runtime !== "pi" && typeof event.id === "string" ? event.id : undefined);
+      : (this.runtime === "omp" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
       this.writeSidecar({});
     }
 
-    if (event.type === "agent_start") this.clearAttention();
+    if (event.type === "agent_start") {
+      this.clearAttention();
+      this.io.clearStatus?.();
+    }
     if (this.runtime === "omp") {
       if (event.type === "agent_start" || event.type === "turn_start"
         || (event.type === "message_start" && message?.role === "assistant")
@@ -837,7 +1248,7 @@ export class RunnerCore {
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
-    const opening = this.runtime === "pi" && mapped.streaming === true && !this.streaming;
+    const opening = this.runtime !== "omp" && mapped.streaming === true && !this.streaming;
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
     if (opening) {
       this.turn += 1;
@@ -862,7 +1273,7 @@ export class RunnerCore {
       // the repeat lacks it, then reset at the next assistant message/agent
       // turn, not at agent_end.
       if (event.type === "message_end" || !this.assistantErrorShown) {
-        this.io.mirrorLine(mapped.errorNotice);
+        this.diag(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
       // Only typed, explicitly transient HTTP failures may release the send
@@ -910,7 +1321,14 @@ export class RunnerCore {
     if (this.runtime === "omp" && this.ready) this.postSessionIdentity();
   }
 
+  /** A resume that came up on another session file started a different session: the requested one stays the seat's. */
+  private resumedElsewhere(): boolean {
+    return !!this.opts.requestedSessionFile && !!this.sessionFile && this.sessionFile !== this.opts.requestedSessionFile;
+  }
+
   private postSessionIdentity(): void {
+    // Never the identity of a session other than the one this launch resumes: it would replace the seat's resume token.
+    if (this.resumedElsewhere()) return;
     if (this.runtime === "omp" && (!this.sessionFile || !this.io.sessionFileExists?.(this.sessionFile))) return;
     if (this.runtime === "omp" && (this.identityPersisted || this.identityInFlight)) return;
     const result = this.io.postActivity({
@@ -948,8 +1366,8 @@ export class RunnerCore {
       runtime: this.runtime,
       hookEvent,
       subtype,
-      // A Pi runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
-      ...(this.runtime === "pi" && hookEvent === "Stop" && subtype !== "pi_exited" ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
+      // A Pi-protocol runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
+      ...(this.runtime !== "omp" && hookEvent === "Stop" && subtype !== `${this.runtime}_exited` ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
       ...extra,
       occurredAt: this.io.now(),
     };
@@ -973,7 +1391,9 @@ export class RunnerCore {
 // ── CLI entry ────────────────────────────────────────────────────────────────
 
 interface RunnerArgs {
-  runtime?: RunnerRuntime;
+  accountHome?: string;
+  runtime?: RunnerRuntime | string;
+  command?: string;
   sessionName: string;
   stateRoot: string;
   cwd: string;
@@ -986,6 +1406,8 @@ interface RunnerArgs {
   /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
   usageFacts?: boolean;
   openRouterCharge?: boolean;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] must be an absolute path). */
+  launchWrapper?: string[];
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -1001,13 +1423,15 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       return value;
     };
     switch (flag) {
+      case "--command": args.command = next(); break;
       case "--session-name": args.sessionName = next(); break;
       case "--runtime": {
         const runtime = next();
-        if (runtime !== "pi" && runtime !== "omp") throw new Error(`unsupported runtime: ${runtime}`);
+        if (!runtime) throw new Error("runtime must not be empty");
         args.runtime = runtime;
         break;
       }
+      case "--account-home": args.accountHome = next(); break;
       case "--state-root": args.stateRoot = next(); break;
       case "--cwd": args.cwd = next(); break;
       case "--launch-id": args.launchId = next(); break;
@@ -1017,6 +1441,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
       case "--openrouter-charge": args.openRouterCharge = true; break;
+      case "--launch-wrapper-arg": {
+        const arg = next();
+        (args.launchWrapper ??= []).push(arg);
+        break;
+      }
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -1040,6 +1469,19 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.accountHome !== undefined && ((args.runtime ?? "pi") !== "pi" || !nodePath.isAbsolute(args.accountHome) || /[\0\r\n]/.test(args.accountHome))) {
+    throw new Error("--account-home requires an absolute Pi account directory");
+  }
+  if (args.launchWrapper) {
+    if (args.runtime === "omp") {
+      throw new Error("--launch-wrapper-arg is only supported for the Pi runtime");
+    }
+    const validated = validateLaunchWrapper(args.launchWrapper);
+    if (!validated[0] || !nodePath.isAbsolute(validated[0])) {
+      throw new Error(`launch_wrapper[0]: runner requires an absolute executable path (got ${JSON.stringify(validated[0] ?? "")})`);
+    }
+    args.launchWrapper = validated;
+  }
   return args as RunnerArgs;
 }
 
@@ -1114,8 +1556,8 @@ const WORK_LIVENESS_SECONDS = 30;
 /** The Pi heartbeat scheduler — one 5s tick drives both beats (see PI_HEARTBEAT_TICK_MS).
  *  Exported so tests drive the real interval with fake timers instead of calling heartbeat()
  *  by hand, which is exactly the gap that hid the 15s-tick latency in the first cut. */
-export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime): { stop(): void } {
-  if (runtime !== "pi") return { stop() {} };
+export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime | string): { stop(): void } {
+  if (runtime === "omp") return { stop() {} };
   const timer = setInterval(() => core.heartbeat(), PI_HEARTBEAT_TICK_MS);
   timer.unref();
   return { stop: () => clearInterval(timer) };
@@ -1150,6 +1592,16 @@ export function resolveRuntimeExecutable(
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
 ): { ok: true; path: string } | { ok: false; error: string } {
+  if (nodePath.isAbsolute(name)) {
+    if (ops.isExecutable(name)) {
+      try {
+        return { ok: true, path: ops.realpath(name) };
+      } catch (err) {
+        return { ok: false, error: `could not resolve ${name}: ${(err as Error).message}` };
+      }
+    }
+    return { ok: false, error: `'${name}' is not executable` };
+  }
   const onPath = (env.PATH ?? "").split(nodePath.delimiter)
     .filter((dir) => nodePath.isAbsolute(dir))
     .map((dir) => nodePath.join(dir, name))
@@ -1211,6 +1663,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = piSeatPaths(args.stateRoot, args.sessionName);
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  if (runtime === "pi") {
+    try { preparePiAccount(paths.agentDir, args.accountHome); }
+    catch (err) {
+      // Say what actually failed: a login that isn't a managed link, a missing or unreadable file, or an I/O error.
+      // Name the seat's own login file, and the declared account file when there is one.
+      const seatAuth = JSON.stringify(nodePath.join(paths.agentDir, "auth.json"));
+      const accountAuth = args.accountHome ? JSON.stringify(nodePath.join(args.accountHome, "auth.json")) : null;
+      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed (seat login file ${seatAuth}${accountAuth && accountAuth !== seatAuth ? `, account file ${accountAuth}` : ""}): ${(err as Error).message}. Resolve that, then retry the account operation.`);
+      process.exitCode = 2;
+      return;
+    }
+  }
 
   const { catchUpSince } = prepareRunnerSidecar(
     {
@@ -1235,6 +1699,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     openrigHome: process.env.OPENRIG_HOME,
     openrigUrl: endpoint?.baseUrl ?? process.env.OPENRIG_URL,
   });
+  if (runtime === "pi" && args.accountHome && fs.lstatSync(nodePath.join(paths.agentDir, "auth.json"), { throwIfNoEntry: false })?.isSymbolicLink()) {
+    // Only selected accounts load the Node compatibility shim; unrelated launches are unchanged.
+    childEnv.NODE_OPTIONS = `--require=${JSON.stringify(nodePath.resolve(import.meta.dirname, "../../assets/pi-account-lock.cjs"))}`;
+  }
   const childArgs = buildPiChildArgs({
     sessionsDir: paths.sessionsDir,
     sessionName: args.sessionName,
@@ -1258,14 +1726,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
-  // shim) cannot find its target there, so resolve the real binary first,
-  // with the runner's own environment.
-  let command: string = runtime;
-  if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+  // OMP runs under a per-seat HOME, wrapped Pi launches hand the resolved
+  // Pi binary to the wrapper, and a pi-rpc fork names its own executable
+  // (--command), so a HOME-dependent launcher on PATH (a mise shim) is
+  // resolved first with the runner's own environment. Unwrapped Pi stays
+  // bare "pi".
+  let command: string = args.command ?? runtime;
+  if (args.command || runtime === "omp" || args.launchWrapper?.length) {
+    const resolved = resolveRuntimeExecutable(args.command ?? runtime, process.env);
     if (!resolved.ok) {
-      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
+      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
       // of waiting out its readiness timeout. The durable cursor survives.
       const at = new Date().toISOString();
@@ -1301,7 +1771,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // (or was added after it, and is then seen by the next one).
   const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
 
-  const child = spawn(command, childArgs, {
+  const spawnFile = args.launchWrapper?.length ? args.launchWrapper[0]! : command;
+  const spawnArgs = args.launchWrapper?.length ? [...args.launchWrapper.slice(1), command, ...childArgs] : childArgs;
+  const child = spawn(spawnFile, spawnArgs, {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1309,6 +1781,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   // The child may close its pipe before the first RPC write completes.
   child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
+
+  const pane = createPaneCompositor(process.stdout);
+  // Diagnostics stay in the transcript — the pane's readiness probe greps it, and people
+  // and agents read the history there; the status line only pins the latest copy.
+  const paneDiag = (text: string) => {
+    pane.line(text);
+    pane.diagnostic(text);
+  };
 
   const chargeLookup = new OpenRouterChargeLookup({
     fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
@@ -1328,7 +1808,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       }, () => false as const).finally(() => clearTimeout(timeout));
     },
     schedule: (fn, ms) => { setTimeout(fn, ms).unref(); },
-    notice: (line) => { process.stdout.write(`${line}\n`); },
+    notice: (line) => { paneDiag(line); },
   });
 
   // One activity post at a time: the daemon reads its newest record by arrival, so a beat still in flight when a turn
@@ -1351,8 +1831,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
-    mirrorLine: (line) => process.stdout.write(`${line}\n`),
-    mirrorAppend: (text) => process.stdout.write(text),
+    mirrorLine: (line) => pane.line(line),
+    mirrorAppend: (text) => pane.transcript(text),
+    diagnostic: (text) => pane.diagnostic(text),
+    clearStatus: () => pane.clearStatus(),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const result = postInOrder(payload).catch(() => null);
@@ -1407,9 +1889,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
+    requestedSessionFile: args.sessionFile });
 
-  let transportUp = runtime === "pi";
+  let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     if (runtime === "omp" && !core.isReady()) {
       try {
@@ -1432,11 +1915,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (!line.trim()) return;
-    process.stdout.write(`[${runtime}:err] ${line}\n`);
+    paneDiag(`[${runtime}:err] ${line}`);
     stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
+        if (args.launchWrapper?.length) return "";
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
           timeout: 3000, killSignal: "SIGKILL", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
         if (version.error || version.status !== 0) return "";
@@ -1445,15 +1929,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       });
       if (detail) {
         reportedPiCapability = true;
-        process.stdout.write(`[pi-runner] ${detail}\n`);
+        paneDiag(`[pi-runner] ${detail}`);
       }
     }
   });
-  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
+  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block), pane);
 
-  if (runtime === "pi") {
+  if (runtime !== "omp") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
+      paneDiag(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : (args.command ?? "pi")}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();
@@ -1480,7 +1964,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
-      console.error(transportUp
+      paneDiag(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
         : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
@@ -1489,7 +1973,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.exitCode = code ?? 1;
   };
   child.on("error", (err) => {
-    console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
+    paneDiag(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
   // "close" fires once OMP's stdio is drained, so its stderr is in the tail

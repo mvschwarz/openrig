@@ -232,6 +232,7 @@ export interface InboundDeps {
 
 export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-channel message identity double-dispatch guard
+  private relayAttemptsInFlight = 0;
   private readonly replyingTo = new Set<string>(); // click replies being posted now
   private retryPass: Promise<{ retried: number; landed: number }> | undefined;
   private readonly botApps = new Map<string, string>(); // bot_id → its app, from bots.info
@@ -245,6 +246,15 @@ export class InboundRouter {
   private readonly botLimiter: BotLimiter;
   constructor(private readonly deps: InboundDeps) {
     this.botLimiter = new BotLimiter(deps.now);
+  }
+
+  /** Point-in-time local HTTP attempts, independent of durable retained records. */
+  getRelayAttemptsInFlight(): number { return this.relayAttemptsInFlight; }
+
+  private async sendForward(host: string, env: SocketEnvelope): Promise<Awaited<ReturnType<EnvelopeForwarder>>> {
+    this.relayAttemptsInFlight++;
+    try { return await this.deps.forward!.send(host, env); }
+    finally { this.relayAttemptsInFlight--; }
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
@@ -909,7 +919,7 @@ export class InboundRouter {
   /** Relay an envelope to the machine that owns its channel. The hub has already acknowledged it to
    *  Slack, so a failed relay is kept with its host and retried, never dropped. */
   async forwardEnvelope(host: string, env: SocketEnvelope): Promise<{ status: InboundDisposition; reason?: string }> {
-    const r = await this.deps.forward!.send(host, env);
+    const r = await this.sendForward(host, env);
     const channel = envelopeChannel(env) ?? "-";
     if (r.ok) {
       this.deps.log?.(`forwarded ${env.type} channel=${channel} -> ${host}`);
@@ -936,7 +946,7 @@ export class InboundRouter {
     for (const e of entries) {
       if (failedHosts.has(e.ev.host)) { stillFailing.push(e); continue; }
       sent++;
-      const r = await this.deps.forward.send(e.ev.host, e.ev.envelope);
+      const r = await this.sendForward(e.ev.host, e.ev.envelope);
       if (r.ok) landed++;
       else { failedHosts.add(e.ev.host); stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 }); }
     }

@@ -46,6 +46,15 @@ export interface OutboundPostPayload {
   /** #1013 — the row's state, so the renderer can tell a gate PARKED on a human
    *  (state=blocked) from the same row while an agent seat owns it. */
   state?: string | null;
+  /** Set by the gateway when it posts although it can't tell whether an earlier attempt landed: the post says it may
+   *  repeat, and an attempt record that can't be written doesn't stop it. Its quiet release, when one posts it later, sets
+   *  it again from the ask's row. Never part of a buffered decision. */
+  possibleRepeat?: boolean;
+  /** Set by the gateway when it posts an ask whose current state it couldn't check: the post says so. */
+  stateUnconfirmed?: boolean;
+  /** Set by the gateway when it posts although the person's quiet hours couldn't be read: the post says so. Decided at
+   *  each post from a fresh read, never part of a buffered decision. */
+  quietUnreadable?: boolean;
 }
 
 export interface OutboundDriverDeps {

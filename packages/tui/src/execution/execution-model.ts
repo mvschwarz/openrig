@@ -29,6 +29,8 @@ export interface ExecutionViewSnap {
   q2_sequencing: Array<Record<string, unknown>>;
   q3_care?: Array<Record<string, unknown>>;
   q4_ladder: Array<Record<string, unknown>>;
+  /** #2761: what the mission records for the ladder (absent on older daemons). */
+  q4_records?: Record<string, unknown>;
   q5_park: Array<Record<string, unknown>>;
   q6_parallelism?: Record<string, unknown>;
   /** S06: existing workflow engine facts joined to the selected mission. */
@@ -220,6 +222,13 @@ function declaredText(slice: SliceFacts): string {
   return slice.scope?.status?.trim().toLowerCase() || "no declared status";
 }
 
+/** A declared word in the done bucket (done, shipped, promoted, closed…), as the daemon buckets it beside the ladder;
+ *  an older daemon serves no bucket, and only the word "done" counts. */
+function declaredDone(ladder: Record<string, unknown>, word: string): boolean {
+  const bucket = record(ladder["recorded_status"])["bucket"];
+  return typeof bucket === "string" ? bucket === "done" : word === "done";
+}
+
 function seatShort(seat: unknown): string {
   const full = str(seat, "");
   return full.includes("@") ? full.slice(0, full.indexOf("@")) : full;
@@ -267,7 +276,7 @@ function stateWord(slice: SliceFacts): string {
   if (slice.readiness?.configured) return "outcomes pending";
   if (stageText(slice) === "retired" || declaredText(slice) === "retired") return "retired";
   if (declaredText(slice) === "deferred" || declaredText(slice) === "closed-deferred") return "deferred";
-  return declaredText(slice) === "done" ? "declared done" : "planned";
+  return declaredDone(slice.ladder, declaredText(slice)) ? "declared done" : "planned";
 }
 
 function proofText(scope: SliceScopeSnap | null): string | null {
@@ -426,6 +435,7 @@ function collectIndeterminate(execution: ExecutionViewSnap, slices: SliceFacts[]
 function evidenceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], width: number, timeZone = DEFAULT_TIME_ZONE): ContentLine[] {
   const attributed = slices.filter(slice => slice.readiness?.configured);
   const gitBasis = str(record(execution.sources?.["git"])["basis"], "(no git source cell)");
+  const recordsBasis = record(execution.q4_records)["basis"];
   const lines: ContentLine[] = [
     { text: `${execution.mission} · ${attributed.length ? "proof provenance" : "evidence gap"} · derived ${displayTime(execution.derived_at, timeZone) || "?"}` },
     { text: "" },
@@ -441,6 +451,7 @@ function evidenceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], widt
   }
   lines.push({ text: "" }, sectionRule("code lineage · separate from item judgments", width),
     { text: `  git:         ${gitBasis}` },
+    ...(typeof recordsBasis === "string" ? wrapDetailLines([{ text: `  records:     ${recordsBasis}` }], width) : []),
     ...wrapDetailLines([{ text: "  Build, review and merge facts remain on each slice's code evidence. Daemon adoption applies only to the unscoped daemon-source view. Artifact acceptance supplies none of these code facts." }], width));
   for (const item of collectIndeterminate(execution, slices)) {
     lines.push({ text: "" }, sectionRule(`${item.where} unconfirmed for ${item.members.length} slice${item.members.length === 1 ? "" : "s"}`, width));
@@ -845,7 +856,7 @@ export function executionSliceStripLines(
   const evidence = `${evidenceText(slice.cells, slice.rank)}${unconfirmed.length ? ` · ${unconfirmed.join(" / ")} unconfirmed (${slice.cells[RUNGS.find((rung) => slice.cells[rung].state === "undetermined")!].basis})` : ""}`;
   const liveWord = slice.lane ? (waitingOn(slice.lane) ? "waiting" : str(activity["activity"], "claimed")) : "no claimed lane";
   const declaredWord = declared?.trim().toLowerCase() || "no declared status";
-  const next = (declaredWord === "done" || declaredWord === "retired" || declaredWord === "deferred" || declaredWord === "closed-deferred") && !slice.lane
+  const next = (declaredWord === "retired" || declaredWord === "deferred" || declaredWord === "closed-deferred" || declaredDone(slice.ladder, declaredWord)) && !slice.lane
     ? `none — declared ${declaredWord}`
     : nextText(slice) ?? (slice.lane ? (waitingOn(slice.lane) ? `waiting on ${waitingOn(slice.lane)}, see the waiting row above` : "in progress on the lane above") : "nothing the projection can sequence");
   return [

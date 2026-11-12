@@ -1,4 +1,4 @@
-import { physicalSessionName, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
@@ -26,6 +26,11 @@ export interface HookActivityInput {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while it stays idle (OpenRig's pi runner). */
   livenessSeconds?: number | null;
+  /** #99: the reset instant a Claude usage limit stated; kept only on that typed failure. */
+  resetsAt?: string | null;
+  /** The provider's own session id the hook reports (Claude's session_id). A stated reset is kept only when this is
+   *  the seat's own Claude session (its resume token), so a helper on another login can't park the seat's pool. */
+  sessionId?: string | null;
 }
 
 export type RecordHookActivityResult =
@@ -113,6 +118,16 @@ export class AgentActivityStore {
     } catch { return unavailablePermissionStop(); }
   }
 
+  /** #99: whether a hook's Claude session id is the seat's own Claude session (its current resume token). A helper
+   *  Claude started from the seat's shell posts as the seat but runs its own session, possibly on another login. */
+  private isSeatOwnClaudeSession(nodeId: string, hookSessionId: string | null | undefined): boolean {
+    const token = typeof hookSessionId === "string" ? hookSessionId.trim() : "";
+    if (!token) return false;
+    const row = this.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+      .get(nodeId) as { resume_type: string | null; resume_token: string | null } | undefined;
+    return row?.resume_type === "claude_id" && row.resume_token?.trim() === token;
+  }
+
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {
     if (!input.sessionName && !input.nodeId) {
       return {
@@ -147,7 +162,8 @@ export class AgentActivityStore {
       // tap filter on it); semantics that depend on the runtime use the seat's.
       runtime: input.runtime ?? session.runtime,
       seatRuntime: session.runtime,
-      communityRunner: session.community_runner === 1,
+      communityRunner: recordedRunner(session.community_runner),
+      piRpc: session.community_runner === AGENT_RUNNER_HOSTED_PI_RPC,
       hookEvent: input.hookEvent,
       subtype: input.subtype ?? null,
       sampledAt,
@@ -158,6 +174,10 @@ export class AgentActivityStore {
     if (input.hookAgentId !== undefined) activity.hookAgentId = input.hookAgentId;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
     if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
+    if (input.resetsAt && isClaudeRateLimitHook(activity.runtime, input.hookEvent, input.subtype)
+      && this.isSeatOwnClaudeSession(session.node_id, input.sessionId)) {
+      activity.resetsAt = input.resetsAt;
+    }
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -394,13 +414,15 @@ export class AgentActivityStore {
 
 /** The activity a runtime hook event means, before freshness or generation checks. The one mapping behind
  *  ingest, the send gate and the wake ladder. `seatRuntime` is the managed seat's runtime: runtime_error is
- *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
-export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false): AgentActivity["state"] {
+ *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. OpenRig's hosted
+ *  Pi-protocol runner raises it too for a `protocol: pi-rpc` fork (`piRpc`, its launch record), when the fork reports
+ *  no session file; a preset's own runner (`runner: true`) only records it (harness-runner-contract). */
+export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false, piRpc = false): AgentActivity["state"] {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || ((seatRuntime === "omp" || piRpc) && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
   // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.
@@ -438,7 +460,7 @@ function latestHookState(activity: AgentActivity | null | undefined, seatRuntime
   if (activity?.evidenceSource !== "runtime_hook") return "unknown";
   if (activity.stale !== true) return activity.state;
   return activity.reason === "stale_runtime_hook"
-    ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime, activity.communityRunner === true) : "unknown";
+    ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime, activity.communityRunner === true, activity.piRpc === true) : "unknown";
 }
 
 /** The store's latest hook still says the seat waits on a person. Nothing newer was recorded, so nothing
@@ -469,6 +491,8 @@ function normalizeHookActivity(input: {
   seatRuntime: string | null;
   /** The session was recorded as launched for a community runner (its own launch fact, never a hook's claim). */
   communityRunner?: boolean;
+  /** That runner is OpenRig's hosted Pi-protocol runner for a `protocol: pi-rpc` preset (its launch record). */
+  piRpc?: boolean;
   hookEvent: string;
   subtype: string | null;
   sampledAt: string;
@@ -479,7 +503,7 @@ function normalizeHookActivity(input: {
   const rawSubtype = input.subtype;
   const reason = normalizeReason(rawSubtype ?? rawEvent);
   const runtime = input.runtime;
-  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime, input.communityRunner === true);
+  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime, input.communityRunner === true, input.piRpc === true);
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
@@ -512,6 +536,7 @@ function normalizeHookActivity(input: {
     stale: false,
     generation: input.generation ?? null,
     ...(input.communityRunner ? { communityRunner: true } : {}),
+    ...(input.piRpc ? { piRpc: true } : {}),
   };
 }
 

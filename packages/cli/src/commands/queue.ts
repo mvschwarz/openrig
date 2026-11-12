@@ -1,20 +1,22 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { Command, InvalidArgumentError } from "commander";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, type DaemonResponse } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
-import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
+import { sessionRigOf, isHumanSeatSessionRef, parseSessionName } from "../session-name.js";
 import { realDeps } from "./daemon.js";
 import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
-import { loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
+import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
+import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
+import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -36,6 +38,8 @@ export interface DeliveryVerifyDeps {
 
 export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
+  /** The host registry `--host` resolves against on the verbs that name an existing row; tests give their own. */
+  hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
 }
 
 interface DeliveryResultBase {
@@ -540,7 +544,11 @@ function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSou
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   let remote = remoteHostOf(hostId);
-  if (remote && await daemonSelfHostId(client) === remote) remote = undefined;
+  const requestedRemote = remote;
+  const selfHostId = requestedRemote ? await daemonSelfHostId(client) : undefined;
+  if (remote && selfHostId === remote) remote = undefined;
+  const remoteConfirmed = requestedRemote !== undefined && typeof selfHostId === "string"
+    && selfHostId.trim().length > 0 && selfHostId !== requestedRemote;
   let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (remote) {
@@ -555,7 +563,46 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
-  return { reader, options };
+  return { reader, options, remote, remoteConfirmed };
+}
+
+/** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
+ *  `--host`: the remote daemon itself, called by this CLI with the host's bearer, as `send --host` does (#2637). The
+ *  selected daemon has no route that reads another host's queue, and a direct call lets the remote record the actor
+ *  as `<seat>@<rig>@<this host>`, the provenance `send --host` gives. Without `--host`, `local`, or a `--host` naming
+ *  the selected daemon's own host id, the selected daemon, unchanged. Explicit-only: never `rig host select`. */
+interface QueueHostTarget { client: DaemonClient; options: { headers?: Record<string, string>; timeoutMs?: number }; remote?: string }
+
+async function queueHostTarget(deps: QueueDeps, local: DaemonClient, hostId: string | undefined, write: boolean): Promise<QueueHostTarget | { error: string; message: string }> {
+  const remote = remoteHostOf(hostId);
+  if (!remote) return { client: local, options: {} };
+  // A --host naming the selected daemon's own id stays local, as create's does (the daemon's resolvesToLocalHost).
+  if (await daemonSelfHostId(local) === remote) return { client: local, options: {} };
+  const registry = (deps.hostRegistryLoader ?? loadHostRegistry)();
+  if (!registry.ok) return { error: "host_registry_unreadable", message: `--host ${remote}: this CLI's host registry can't be read (${registry.error}).` };
+  // The queue forwarder's rule for learned bindings (one policy): a self-id resolves only through a binding learned at
+  // its entry's current URL, with no recorded conflict, so a stale binding never sends a write to a replaced endpoint.
+  const learned = loadHostBindings();
+  const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
+  if (!match.ok) {
+    const unused = ineligibleBindingDetail(registry.registry, learned, remote);
+    return { error: "unknown_host", message: `--host ${remote}: no such host in this CLI's host registry (see rig host list).${unused ? ` ${unused}` : ""}` };
+  }
+  if (match.host.transport !== "http") return { error: "host_not_http", message: `--host ${remote}: its registry entry is SSH, not a daemon URL; queue verbs need an http host.` };
+  const bearer = resolveRemoteBearer(match.host);
+  if (!bearer.ok) return { error: "host_bearer_unavailable", message: `--host ${remote}: ${bearer.error}` };
+  const client = remoteDaemonClient(deps.clientFactory, match.host.url, await resolveOriginSelfHostId(deps.lifecycleDeps));
+  const headers = bearerAuthHeaders(bearer.token);
+  return {
+    client,
+    options: { ...(Object.keys(headers).length > 0 ? { headers } : {}), ...(write ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : {}) },
+    remote,
+  };
+}
+
+/** The ` --host <id>` a printed follow-up command needs to reach the same row again. */
+function hostFlag(target: QueueHostTarget): string {
+  return target.remote ? ` --host ${shellQuote(target.remote)}` : "";
 }
 
 /** A successful forward isn't a delivery receipt. Never accept a different remote row as this create's receipt. */
@@ -580,7 +627,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 
 /** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
  *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remoteConfirmed?: boolean }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   const target = await queueReadTarget(deps, client, hostId);
@@ -595,7 +642,8 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
+        remoteConfirmed: target.remoteConfirmed };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
@@ -604,8 +652,10 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   }
 }
 
-async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
-  const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, hostUsed = false): Promise<void> {
+  // A direct --host write already settled its host when it chose the target: its receipt keeps the host it used.
+  // create and handoff, which the selected daemon forwards, are settled here as before.
+  const settled = receipt && status < 400 ? (hostUsed ? receipt : await settleReceiptHost(client, receipt)) : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
     printResult(json, body, status);
@@ -622,6 +672,7 @@ async function printQueueItemResult(
   body: unknown,
   status: number,
   receipt: ReceiptContext | null = null,
+  remoteHost?: string,
 ): Promise<void> {
   if (status >= 400 && body && typeof body === "object"
     && (body as { error?: unknown }).error === "qitem_not_found") {
@@ -636,10 +687,11 @@ async function printQueueItemResult(
     body = {
       ...body,
       hint: `Queue item ${JSON.stringify(qitemId)} was not found on ${daemon}.\n`
-        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
+        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`
+        + (remoteHost ? "" : `\nOr name that host: rig queue show ${shellQuote(qitemId)} --host <host-id> --full --json`),
     };
   }
-  await printWriteResult(client, json, body, status, receipt);
+  await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, remoteHost !== undefined);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -843,6 +895,54 @@ function requireSeatSession(ignoredFlag: string): string | undefined {
   return undefined;
 }
 
+/** The flags `rig queue update` takes that write more than a note. `--source` records a note only (#2866). */
+const UPDATE_STATE_WRITE_FLAGS = [
+  ["state", "--state"], ["reopen", "--reopen"], ["closureReason", "--closure-reason"], ["closureTarget", "--closure-target"],
+  ["closureRequiredAt", "--closure-required-at"], ["resolution", "--resolution"], ["blockedOn", "--blocked-on"],
+  ["wakeWatchdog", "--wake-watchdog"], ["wakeAfter", "--wake-after"], ["summary", "--summary"], ["evidenceRef", "--evidence-ref"],
+] as const;
+
+/**
+ * #2866: who appends a `rig queue update` note. Inside a managed seat it is the seat (the X-OpenRig-Session header the
+ * DaemonClient stamps), whatever --source says. Outside one, a routine can name itself with --source <name>@external:
+ * it rides the body as the declared actor, which the daemon records as claimed:v1 because no header names a seat, so
+ * the note is attributed to an external actor and never to a seat, and OPENRIG_SESSION_NAME is never forged. The
+ * external path records a note only, on the local daemon (the caller refuses a --host that resolves to another host).
+ * Returns the body actor to send (undefined = the header decides), or false after printing why nothing was sent.
+ */
+function resolveUpdateActor(source: string | undefined, opts: Record<string, unknown>): { actorSession?: string } | false {
+  const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
+  // Trimmed like the DaemonClient's header (senderIdentityHeaders): a blank env is no seat, so the two never disagree.
+  const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+  if (source !== undefined) {
+    const trimmed = source.trim();
+    if (parseSessionName(trimmed).kind !== "external") {
+      return refuse(`--source must be <name>@external (got '${source}'): it names a routine outside any seat, never a seat. Nothing was sent.`);
+    }
+    const writes = UPDATE_STATE_WRITE_FLAGS.filter(([key]) => opts[key] !== undefined).map(([, flag]) => flag);
+    if (opts.note === undefined || writes.length > 0) {
+      return refuse(`--source records a note only: pass --note and nothing else that writes${writes.length > 0 ? ` (got ${writes.join(", ")})` : ""}. ` +
+        "Changing a row needs a seat. Nothing was sent.");
+    }
+    if (seat) {
+      process.stderr.write(`warning: --source ${trimmed} is ignored: this runs in the seat ${seat}, which is the note's actor.\n`);
+      return {};
+    }
+    return { actorSession: trimmed };
+  }
+  if (seat) return {};
+  const noteOnly = opts.note !== undefined && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
+  return refuse(noteOnly
+    ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set, so " +
+      "there's no seat to act as: run this from a managed seat, or add --source <name>@external to record the note as " +
+      "that external routine (claimed, never a seat). --actor is ignored: the actor is the seat's own identity."
+    : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set " +
+      "OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --actor is ignored: the actor is " +
+      "the seat's own identity. Changing a row needs a seat, and notes need a seat; an external routine can pass " +
+      "--source <name>@external for a note only. A person answering an ask addressed to them (a host pairing approval, " +
+      "say) does it in the TUI (rig tui, then attention) or in Steering, not with this command.");
+}
+
 function extractRigName(sessionName: string): string | undefined {
   // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
   return sessionRigOf(sessionName);
@@ -919,8 +1019,21 @@ function emitHostResolutionError(res: { error: string; message: string }, json: 
   process.exitCode = 1;
 }
 
+/** Emit a local queue-list filter error without printing rows returned by a daemon that ignored it. */
+function emitQueueListFilterError(res: { error: string; message: string }, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(res));
+  } else {
+    console.error(res.message);
+  }
+  process.exitCode = 1;
+}
+
 const QUEUE_HOST_OPTION_HELP =
   "OPR.0.4.6.MH3: route this queue write to a REGISTERED remote host (see rig host ls). EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. Equivalent to the host-qualified destination form member@rig@<host>.";
+
+const QUEUE_HOST_ROW_OPTION_HELP =
+  "#2637: read or act on a row held by a REGISTERED remote host (see rig host ls). This CLI calls that host's daemon directly with its bearer, as send --host does; a write is recorded there as <seat>@<rig>@<this host>. EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. A blocker, watchdog or row id given with it must exist on that host.";
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
@@ -1132,8 +1245,51 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           remoteHost: remoteHostOf(hostResolved.hostId) };
+        const emitScopeAdvisories = (created: Record<string, unknown>) => {
+          const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
+          for (const value of advisories) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            const advisory = value as { code?: unknown; message?: unknown };
+            if (typeof advisory.message !== "string") continue;
+            switch (advisory.code) {
+              case "scope_check_skipped":
+                console.error(`Note: ${advisory.message}`);
+                break;
+              case "unresolved_scope":
+              case "ambiguous_scope":
+              case "empty_scope":
+              case "conflicting_scope":
+              case "scope_check_unavailable":
+                console.error(`Warning: ${advisory.message}`);
+                break;
+            }
+          }
+        };
+        const emitRecoveredScopeAdvisory = (recoveredRemote: boolean) => {
+          const recoveredTags: string[] = [];
+          for (const raw of tags ?? []) {
+            if (recoveredTags.length >= 8) break;
+            if (!raw.startsWith("mission:") && !raw.startsWith("slice:")) continue;
+            const prefix = raw.startsWith("mission:") ? "mission:" : "slice:";
+            const body = raw.slice(prefix.length).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 120);
+            const sanitized = body ? `${prefix}${body}` : prefix;
+            if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
+          }
+          if (recoveredTags.length === 0) return;
+          // Only a confirmed different host ID justifies "forwarded";
+          // all other recovered outcomes remain neutral.
+          if (recoveredRemote) {
+            console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
+          } else {
+            console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
+          }
+        };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number) => {
+        const finish = async (created: Record<string, unknown>, status: number, recovered?: "neutral" | "remote") => {
+          if (status < 400) {
+            if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
+            else emitScopeAdvisories(created);
+          }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
@@ -1163,7 +1319,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200);
+              await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
               return;
             }
           }
@@ -1180,7 +1336,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200);
+            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
@@ -1206,6 +1362,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!requireSeatSession("destination")) return;
       const deps = getDeps();
+      // No --host here (#2678 review): a row is claimed by its destination seat, on the host that holds it.
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }));
@@ -1246,12 +1403,22 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+After reading an existing remote successor, record its exact closure target, including the host:
+  rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
+The note can accompany the closing update or be appended later; a separate note is not required.
+A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
+For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
+`)
+    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
+      source?: string;
       state?: string;
       reopen?: boolean;
       closureReason?: string;
@@ -1264,6 +1431,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       summary?: string;
       evidenceRef?: string;
       note?: string;
+      host?: string;
       json?: boolean;
       full?: boolean;
     }) => {
@@ -1285,10 +1453,22 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
-      if (!requireSeatSession("actor")) return;
+      // #2866: outside a seat, --source <name>@external names the routine appending a note (the declared body actor).
+      const actor = resolveUpdateActor(opts.source, opts);
+      if (!actor) return;
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, true);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        if (actor.actorSession !== undefined && target.remote) {
+          // #2866: the other host would record the routine bare, indistinguishable from a routine of its own (a
+          // forwarded create stamps the origin; this path doesn't). A --host that resolves locally is fine.
+          console.error(`--source with --host ${target.remote} is not supported: that host would record ${actor.actorSession} ` +
+            "without the host it ran on. Run the routine on the host that holds the row. Nothing was sent.");
+          process.exitCode = 1;
+          return;
+        }
+        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,
           closureReason: opts.closureReason,
@@ -1301,9 +1481,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
-        });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }));
-      });
+          ...actor,
+        }, target.options);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
   // OPR.0.4.4.19 FR-6 — the first-class park affordance (C5 leg 1). One verb,
@@ -1324,6 +1505,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--continuation <text>", "What resumes. Workspace deferred/not-imminent work belongs in a mission/slice")
     .option("--wake-watchdog <jobId>", "Attach an existing live watchdog id targeting the parked owner")
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -1345,6 +1527,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       continuation?: string;
       wakeWatchdog?: string;
       wakeAfter?: number;
+      host?: string;
       json?: boolean;
       full?: boolean;
     }) => {
@@ -1352,8 +1535,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // ignored, no body actorSession. Verify the env, else the daemon returns 400 actor_required (no seat identity to record). Matches `resolve`.
       if (!requireSeatSession("actor")) return;
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, true);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: "blocked",
           blockedOn: opts.on,
           summary: opts.summary,
@@ -1361,9 +1546,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
-        });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }));
-      });
+        }, target.options);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
   // OPR.0.4.4.19 FR-7 — the resolve verb's CLI wrapper: a THIN client of the
@@ -1658,10 +1843,14 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show one qitem and its derived waiting state (bounded preview; --full for complete body)")
     .option("--full", "Complete original record; may be large (use --full --json for lossless JSON)")
     .option("--json", "JSON preview with completeness, original byte size and exact full command")
-    .action(async (qitemId: string, opts: { full?: boolean; json?: boolean }) => {
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
+    .action(async (qitemId: string, opts: { full?: boolean; json?: boolean; host?: string }) => {
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const client = target.client;
+        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
         const json = opts.json ?? false;
         const item = res.data;
         // --full is a pure passthrough of today's COMPLETE item shape (the
@@ -1669,7 +1858,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         // passthrough on error responses / non-object payloads, where there is
         // no string body to preview.
         if (opts.full || res.status >= 400 || !isRecordWithStringBody(item)) {
-          await printQueueItemResult(client, qitemId, json, item, res.status);
+          await printQueueItemResult(client, qitemId, json, item, res.status, null, target.remote);
           return;
         }
         // The closing transition is for --full; the bounded preview prints the record as it did before.
@@ -1677,7 +1866,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
         // Append-only additions: keep `body` in place (now the preview) and add
         // the honest size + truncation flag. Object otherwise unchanged.
-        const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
+        const fullCommand = `rig queue show ${shellQuote(qitemId)}${hostFlag(target)} --full --json`;
         // Everything held back from this preview is declared, so a reader that trusts readView runs --full.
         const omitted = [
           ...(bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []),
@@ -1696,6 +1885,47 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           console.error(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
         }
         if (compact && compact.emptyOmitted.length > 0) console.error(showEmptyNotice(compact.emptyOmitted, fullCommand));
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
+    });
+
+  cmd
+    .command("artifact <qitemId>")
+    .description("Read a qitem's evidenceRef through the daemon's shared roots; a code-result manifest also comes back parsed as codeResult")
+    .option("--root <name>", "The shared root a relative evidenceRef is under")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { root?: string; json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const json = opts.json ?? false;
+        const item = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (item.status >= 400) { await printQueueItemResult(client, qitemId, json, item.data, item.status); return; }
+        const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
+        const rootsRes = await client.get<{ roots?: SharedRoot[] }>("/api/files/roots");
+        if (rootsRes.status >= 400) { printResult(json, rootsRes.data, rootsRes.status); return; }
+        const roots = rootsRes.data?.roots ?? [];
+        // The same rule as rig_artifact_read: only a file in a shared root is read, through the daemon.
+        const plan = planItemArtifact(ref, roots, opts.root);
+        if ("unavailable" in plan) {
+          if (json) console.log(JSON.stringify({ available: false, qitemId, reason: plan.unavailable, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name) }));
+          else console.error(`${qitemId}: ${plan.unavailable}`);
+          process.exitCode = 1;
+          return;
+        }
+        const res = await client.get<FileRead>(`/api/files/read?${new URLSearchParams({ root: plan.read.root, path: plan.read.path }).toString()}`);
+        if (res.status >= 400) { printResult(json, res.data, res.status); return; }
+        const read = res.data ?? {};
+        const parsed = codeResultOf(read);
+        if (json) {
+          console.log(JSON.stringify({ available: true, qitemId, root: read.root, path: read.path, size: read.size, mtime: read.mtime, binary: read.binary === true,
+            ...(read.binary ? {} : { text: read.content ?? "" }), truncated: read.truncated === true, ...parsed }));
+          return;
+        }
+        if (read.binary) console.log(`A binary file (${read.root}:${read.path}): not shown as text.`);
+        else process.stdout.write(read.content ?? "");
+        // Notices go to stderr, so stdout stays the file.
+        if (parsed && "codeResult" in parsed) console.error(`code result: ${parsed.codeResult.repo} ${parsed.codeResult.base}..${parsed.codeResult.revision}${parsed.codeResult.paths.length ? ` (${parsed.codeResult.paths.length} paths)` : ""}`);
+        else if (parsed) console.error(parsed.codeResultIssue);
+        if (read.truncated) console.error(`… cut at ${read.truncatedAtBytes} of ${read.totalBytes} bytes, as the daemon reads it`);
       });
     });
 
@@ -1704,21 +1934,43 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
     .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest transitions, ${TRANSITIONS_SHOWN} in all, always including the current disposition)`)
-    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
+    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean; host?: string }) => {
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const client = target.client;
+        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, target.options);
         // Slice 15 P3: with output.compact on, the recent story; the notice goes to stderr so it stays
         // visible when the array is piped through jq.
         if (!opts.full && res.status < 400 && Array.isArray(res.data) && compactOutputEnabled()) {
           const { transitions, earlier } = compactTransitions(res.data as Record<string, unknown>[]);
           printResult(opts.json ?? false, transitions, res.status);
-          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)} --full${opts.json ? " --json" : ""}`));
+          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)}${hostFlag(target)} --full${opts.json ? " --json" : ""}`));
           return;
         }
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
-      });
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, null, target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
+
+  const listTagFiltersInArgumentOrder: string[] = [];
+  const collectListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(value);
+    return [...previous, value];
+  };
+  const collectMissionListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`mission:${value}`);
+    return [...previous, value];
+  };
+  const collectSliceListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`slice:${value}`);
+    return [...previous, value];
+  };
+
+  cmd.hook("preSubcommand", (_parent, subcommand) => {
+    if (subcommand.name() === "list") listTagFiltersInArgumentOrder.length = 0;
+  });
 
   cmd
     .command("list")
@@ -1733,8 +1985,12 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
+    .option("--tag <tag>", "Exact, case-sensitive tag filter; repeat for AND (commas are literal)", collectListTag, [] as string[])
+    .option("--mission <id>", "Filter by the exact mission:<id> tag; repeatable", collectMissionListTag, [] as string[])
+    .option("--slice <id>", "Filter by the exact slice:<id> tag; repeatable", collectSliceListTag, [] as string[])
     .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")
+    .option("--host <id>", `${QUEUE_HOST_ROW_OPTION_HELP} With --host, the rows of every rig on that host unless --destination or --source narrows them; --owned and --mine name this host's seat and are refused.`)
     .addHelpText("after", `
 Default: active items in your current rig, compact summary (like 'docker ps').
 Current rig is derived from OPENRIG_SESSION_NAME's @<rig> suffix.
@@ -1748,6 +2004,7 @@ Four orthogonal axes (docker/kubectl pattern):
 Active states: pending, in-progress, blocked.
 History (-a adds): done, canceled, handed-off, failed, denied.
 Use --state <states> to select specific states explicitly.
+Use repeated --tag <tag> values to require every exact, case-sensitive tag; commas are literal. --mission <id> and --slice <id> add mission:<id> and slice:<id> filters. Exact duplicates collapse and blank values are refused. A returned row that lacks a requested tag reveals an older daemon that ignored the filter; an empty list cannot prove it applied it.
 
 Depth: 'rig queue show <qitemId>' previews one body; add --full for the complete record.
 Frontier source: 'rig queue list' is the default status surface.
@@ -1775,47 +2032,90 @@ Examples:
       source?: string;
       state?: string;
       targetRepo?: string;
+      tag?: string[];
+      mission?: string[];
+      slice?: string[];
       limit: string;
       json?: boolean;
+      host?: string;
     }) => {
-      const deps = getDeps();
-      const params = new URLSearchParams();
-      const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      if (opts.owned && !sessionName) {
-        console.error("Cannot use --owned: checked OPENRIG_SESSION_NAME and RIGGED_SESSION_NAME, but neither caller seat identity is set. Set one to a canonical seat@rig address, or use --destination <session>.");
-        process.exitCode = 1;
+      const useJson = opts.json || opts.o === "json";
+      const orderedTags = listTagFiltersInArgumentOrder.splice(0);
+      const invalidTag = [...(opts.tag ?? []), ...(opts.mission ?? []), ...(opts.slice ?? [])]
+        .some((value) => value.trim().length === 0);
+      if (invalidTag) {
+        emitQueueListFilterError({ error: "tag_invalid", message: "tag filters cannot be blank" }, useJson);
         return;
       }
-      const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
-
-      if (opts.owned && sessionName) {
-        params.set("destinationSession", sessionName);
-      } else if (opts.mine && sessionName) {
-        params.set("as", sessionName);
-      } else if (!opts.allRigs && !hasExplicitScope) {
-        const rigName = sessionName ? extractRigName(sessionName) : undefined;
-        if (rigName) {
-          params.set("rig", rigName);
+      const tags = [...new Set(orderedTags)];
+      const deps = getDeps();
+      const remote = remoteHostOf(opts.host);
+      // The seat env names a seat of THIS host. On another host's daemon (a --host that resolves remote) it scopes
+      // nothing that daemon holds: no rig is derived from it, and --owned/--mine are refused.
+      const seatScope = (onRemote: boolean): URLSearchParams | null => {
+        const params = new URLSearchParams();
+        const sessionName = onRemote ? undefined : readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        if (onRemote && (opts.owned || opts.mine)) {
+          emitHostResolutionError({ error: "host_scope_unsupported", message: `--host ${remote} lists another host's rows: --${opts.owned ? "owned" : "mine"} names this host's seat. Use --destination or --source with the address as that host stores it.` }, useJson);
+          return null;
         }
-      }
+        if (opts.owned && !sessionName) {
+          console.error("Cannot use --owned: checked OPENRIG_SESSION_NAME and RIGGED_SESSION_NAME, but neither caller seat identity is set. Set one to a canonical seat@rig address, or use --destination <session>.");
+          process.exitCode = 1;
+          return null;
+        }
+        const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
 
-      if (!opts.all) {
-        params.set("activeOnly", "1");
-      }
-      if (!opts.full) {
-        params.set("compact", "1");
-      }
-      if (opts.destination) params.set("destinationSession", opts.destination);
-      if (opts.source) params.set("sourceSession", opts.source);
+        if (opts.owned && sessionName) {
+          params.set("destinationSession", sessionName);
+        } else if (opts.mine && sessionName) {
+          params.set("as", sessionName);
+        } else if (!opts.allRigs && !hasExplicitScope) {
+          const rigName = sessionName ? extractRigName(sessionName) : undefined;
+          if (rigName) {
+            params.set("rig", rigName);
+          }
+        }
+
+        if (!opts.all) {
+          params.set("activeOnly", "1");
+        }
+        if (!opts.full) {
+          params.set("compact", "1");
+        }
+        if (opts.destination) params.set("destinationSession", opts.destination);
+        if (opts.source) params.set("sourceSession", opts.source);
+        if (opts.state) params.set("state", opts.state);
+        if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
+        for (const tag of tags) params.append("tag", tag);
+        if (opts.limit) params.set("limit", String(opts.limit));
+        return params;
+      };
+      // Without --host, the scope is settled before the daemon is contacted, as before.
+      if (!remote && !seatScope(false)) return;
       warnIfUnknownStates(opts.state);
-      if (opts.state) params.set("state", opts.state);
-      if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
-      if (opts.limit) params.set("limit", String(opts.limit));
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/list?${params.toString()}`);
-        const useJson = opts.json || opts.o === "json";
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, useJson);
+        const params = seatScope(target.remote !== undefined);
+        if (!params) return;
+        const res = await target.client.get<unknown>(`/api/queue/list?${params.toString()}`, target.options);
+        if (res.status < 400 && tags.length > 0 && Array.isArray(res.data)) {
+          const ignored = res.data.some((value) => {
+            if (!value || typeof value !== "object") return true;
+            const rowTags = (value as { tags?: unknown }).tags;
+            return !Array.isArray(rowTags) || tags.some((tag) => !rowTags.includes(tag));
+          });
+          if (ignored) {
+            emitQueueListFilterError({
+              error: "filter_unsupported",
+              message: "The daemon returned a queue row missing a requested exact tag; it may be too old to apply tag filters. Empty results cannot confirm tag filtering.",
+            }, useJson);
+            return;
+          }
+        }
         printResult(useJson, res.data, res.status);
-      });
+      }, remote !== undefined, remote);
     });
 
   cmd
@@ -1869,6 +2169,100 @@ Examples:
       if (opts.limit) params.set("limit", String(opts.limit));
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/undelivered?${params.toString()}`);
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("erase")
+    .description("Erase queue rows in one exact scope: an account's rows, a list of ids, or the closed-work retention windows; a dry run unless --apply")
+    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array")
+    .option("--rig <id>", "With --members: the account rig's id. Also erases the rig's own records that outlive it (events, snapshots, node and seat records); refused unless every member is a session of it")
+    .option("--ids <file>", "These qitem ids, one per line or a JSON array; a report's qitems entries, or an erasure ledger's JSON lines, keep each one's action")
+    .option("--action <action>", "With --ids: delete (default) removes each row and keeps only its id; scrub removes its content and keeps the row", enumArg(["delete", "scrub"]))
+    .option("--routine", "Run this daemon's closed-work windows now (retention.closed_content_days, retention.closed_metadata_days)")
+    .option("--apply", "Erase. Without it the command reports what would be erased and changes nothing")
+    .option("--actor <session>", "Who is erasing, when OPENRIG_SESSION_NAME isn't set (recorded as a claimed identity)")
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", [
+      "",
+      "Name exactly one scope. What each one erases:",
+      "  --members  every row whose source and destination are both members, in any state, deleted with its transitions,",
+      "             outbox and inbox copies, stream actions, events and audit rows; then member-to-member outbox and inbox",
+      "             entries no row owns, and the members' stream items. A row with one member endpoint is reported under",
+      "             mixed and left untouched. With --rig, also the rig's own events, snapshots and node and seat records.",
+      "  --ids      the listed rows, deleted or scrubbed (a report's qitems entries keep their action); a deleted id",
+      "             that's already gone keeps (or regains) its id marker.",
+      "  --routine  closed rows (done, canceled, denied, handed-off) past the windows, aged from when they closed.",
+      "A deleted row keeps only its id, and a create that reuses that id is refused (qitem_erased). A row a workflow still",
+      "references is reported under gaps and left. Output is JSON: clean (true only when nothing was left), complete,",
+      "qitems, mixed, gaps, alreadyAbsent, linked, unlinked and rig. Refusals: erase_scope_required, erase_scope_conflict,",
+      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_ids_invalid, erase_action_invalid,",
+      "erase_routine_off. A run that stops on an error returns what it committed, with error.stage, and exits 2.",
+      "Reference: docs/reference/queue-erasure.md",
+    ].join("\n"))
+    .action(async (opts: { members?: string; rig?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {
+      const list = (flag: string, path: string): unknown[] | undefined => {
+        let text: string;
+        try {
+          text = fs.readFileSync(path, "utf8");
+        } catch (err) {
+          console.error(`--${flag} ${path}: can't be read (${err instanceof Error ? err.message : String(err)}). Nothing was erased.`);
+          process.exitCode = 1;
+          return undefined;
+        }
+        if (text.trimStart().startsWith("[")) {
+          try {
+            const parsed: unknown = JSON.parse(text);
+            if (Array.isArray(parsed)) return parsed;
+          } catch { /* reported below */ }
+          console.error(`--${flag} ${path}: not a JSON array. Nothing was erased.`);
+          process.exitCode = 1;
+          return undefined;
+        }
+        // One entry per line: a plain id or session, or (an erasure ledger's line) a JSON object.
+        const entries: unknown[] = [];
+        for (const line of text.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0 && !entry.startsWith("#"))) {
+          if (!line.startsWith("{")) {
+            entries.push(line);
+            continue;
+          }
+          try {
+            entries.push(JSON.parse(line));
+          } catch {
+            console.error(`--${flag} ${path}: a line isn't valid JSON (${line.slice(0, 60)}). Nothing was erased.`);
+            process.exitCode = 1;
+            return undefined;
+          }
+        }
+        return entries;
+      };
+      const body: Record<string, unknown> = { apply: opts.apply === true };
+      if (opts.members !== undefined) {
+        const members = list("members", opts.members);
+        if (!members) return;
+        body.members = members;
+      }
+      // Sent as given: the daemon refuses a rig without members (erase_rig_invalid), never drops it.
+      if (opts.rig !== undefined) body.rig = opts.rig;
+      if (opts.ids !== undefined) {
+        const ids = list("ids", opts.ids);
+        if (!ids) return;
+        body.ids = ids;
+        if (opts.action) body.action = opts.action;
+      }
+      if (opts.routine) body.routine = true;
+      if (!readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")) {
+        if (!opts.actor) {
+          console.error("OPENRIG_SESSION_NAME is not set and --actor wasn't given, so there's no one to record as erasing. Nothing was erased.");
+          process.exitCode = 1;
+          return;
+        }
+        body.actorSession = opts.actor;
+      }
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<unknown>("/api/queue/erase", body);
         printResult(opts.json ?? false, res.data, res.status);
       });
     });

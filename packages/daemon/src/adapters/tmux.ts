@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,8 +7,10 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
+import { tmuxOnDaemonServer } from "./tmux-server.js";
+import { TMUX_SERVER_LIMIT_PREFIX } from "../tmux-server-start.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -76,7 +79,7 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 
 export type TmuxResult =
   | { ok: true; warnings?: string[]; stopPhase?: StopPhase }
-  | { ok: false; code: string; message: string; stopPhase?: StopPhase };
+  | { ok: false; code: string; message: string; stopPhase?: StopPhase; inputReadFailure?: InputReadDiagnostic };
 
 /** Furthest external stop boundary reached; an attempted command can have an uncertain effect. */
 export type StopPhase = "none" | "detach_attempted" | "detached" | "kill_attempted";
@@ -197,6 +200,15 @@ function tmuxReportedError(err: unknown): unknown {
   return typeof stderr === "string" ? new Error(stderr) : err;
 }
 
+/** No server answers on the socket: tmux's "no server running", or a socket that is missing or refuses, read from what
+ *  tmux said (its stderr when the exec kept it, else the message past an exec's "Command failed" line). */
+function isServerMissingError(err: unknown): boolean {
+  const reported = tmuxReportedError(err);
+  if (!(reported instanceof Error)) return false;
+  const said = new Error(tmuxDiagnosticStart(reported.message).trim());
+  return isNoServerError(said) || isTmuxTransportAbsentError(said);
+}
+
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = tmuxDiagnosticStart(err.message).toLowerCase();
@@ -236,7 +248,7 @@ function isTmuxTransportAbsentError(err: unknown): boolean {
 }
 
 function classifyWriteError(err: unknown): TmuxResult {
-  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message };
+  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message, ...(err.inputReadFailure ? { inputReadFailure: err.inputReadFailure } : {}) };
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
@@ -268,7 +280,9 @@ function parentSessionEnvWarning(target: string, err: unknown): string {
 /** Shell-quote a string using single quotes (POSIX-safe). */
 /** One pane's text from a batched capture, with the time its chunk was read (#309 review). `text` is null for a
  *  session that is gone or an empty capture. */
-export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true }
+export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true;
+  /** The pane and its process that this capture read, from the same tmux call (#2515). */
+  pane?: { id: string; pid: number } }
 
 /** The most sessions one batched capture chains (#308). Not a byte bound: a chunk whose output overflows exec's buffer
  *  fails and is split in half. */
@@ -308,6 +322,28 @@ const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
  *  path — this join only renders them for a shell. */
 function posixJoinArgv(argv: string[]): string {
   return argv.map((a) => (SHELL_SAFE.test(a) ? a : shellQuote(a))).join(" ");
+}
+
+/** The stderr a failed exec kept apart, or "" (a timeout, a spawn error). Never the message: it echoes the command. */
+function execStderrText(error: unknown): string {
+  const e = error as { execStderr?: unknown; stderr?: unknown };
+  return typeof e.execStderr === "string" && e.execStderr.trim() ? e.execStderr
+    : typeof e.stderr === "string" ? e.stderr : "";
+}
+
+/** systemd-run's own refusal of an option it does not have (before 254), read from its stderr only. */
+const NO_EXPAND_ENVIRONMENT = /(?:unrecognized|unknown) option[^\n]*--expand-environment/i;
+/** The user manager's refusal of OOMPolicy= for a scope (before 253), read from systemd-run's stderr only. */
+const NO_OOM_POLICY = /Cannot set property OOMPolicy|Unknown (?:property|assignment)[^\n]*OOMPolicy/i;
+
+/** What a failed exec said, on one line: its stderr when it kept one apart, else its message past the command. */
+function execFailureReason(error: unknown): string {
+  const e = error as { execStderr?: unknown; stderr?: unknown; message?: unknown; code?: unknown };
+  const stderr = typeof e.execStderr === "string" && e.execStderr.trim() ? e.execStderr
+    : typeof e.stderr === "string" && e.stderr.trim() ? e.stderr : "";
+  const text = stderr || tmuxDiagnosticStart(String(e.message ?? error));
+  const reason = text.trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean).join("; ");
+  return reason || `systemd-run failed${e.code !== undefined ? ` (exit ${String(e.code)})` : ""}`;
 }
 
 function parseSessionLine(line: string): TmuxSession | null {
@@ -471,6 +507,7 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
+      await this.startServerBeforeImplicitStart();
       const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
@@ -512,7 +549,7 @@ export class TmuxAdapter {
     }
   }
 
-  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
+  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void, nodeId?: string) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
     const guard = this.deliveryGuard;
     if (!guard) return write(target, () => {});
     try {
@@ -562,10 +599,11 @@ export class TmuxAdapter {
         }
         // Revalidate registry/occupant after the asynchronous observation. Write
         // to the immutable pane ID, not a session name which could be recycled.
-        return guard.input(identity, () => write(pane, () => guard.checkInput(identity)));
+        return guard.input(identity, () => write(pane, () => guard.checkInput(identity), bound.nodeId));
       });
     } catch (error) {
-      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
+      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message),
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
   }
 
@@ -587,6 +625,8 @@ export class TmuxAdapter {
   ) { this.serverArgs = [...serverArgs]; }
 
   private readonly serverArgs: readonly string[];
+  /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
+  private scopeSkipLogged = false;
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -614,11 +654,30 @@ export class TmuxAdapter {
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
-    const file = this.fileOps.tmpName();
-    await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
-    const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
-    await this.fileOps.unlink(file).catch(() => {});
-    return output;
+    const body = (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n";
+    const source = async (startFirst: boolean): Promise<string> => {
+      const file = this.fileOps.tmpName();
+      await this.fileOps.writeFile(file, body, { mode: 0o600, flag: "wx" });
+      try {
+        const output = await this.run(["tmux", ...(startFirst ? ["start-server", ";"] : []), "source-file", file]);
+        await this.fileOps.unlink(file).catch(() => {});
+        return output;
+      } catch (error) {
+        // No server read it, so the private file was never consumed.
+        if (!startFirst && isServerMissingError(error)) await this.fileOps.unlink(file).catch(() => {});
+        throw error;
+      }
+    };
+    if (!startServer || !this.userScopePossible()) return source(startServer);
+    // #2710: `start-server` would start a missing server in the daemon's cgroup. Try on the running server first;
+    // only when there is none, start it as startServer does (in the user scope) and run the command as before.
+    try {
+      return await source(false);
+    } catch (error) {
+      if (!isServerMissingError(error)) throw error;
+    }
+    await this.startServer();
+    return source(true);
   }
 
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
@@ -629,22 +688,106 @@ export class TmuxAdapter {
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
+    const serverUp = async () => (await this.probeSession(probeName)).state !== "transport_unavailable";
+    const awaitServer = async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        if (await serverUp()) return true;
+      }
+      return false;
+    };
     try {
-      if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
+      if (await serverUp()) return { ok: true };
+      // #2710: on Linux, the server (and with it every seat) goes into a transient systemd --user scope of its own,
+      // so stopping or restarting the daemon's unit no longer takes the seats with it. Any failure keeps the start below.
+      if (await this.startServerInUserScope()) {
+        if (await awaitServer()) return { ok: true };
+        console.warn("[tmux] The systemd user scope was made but the seat terminal server did not answer in time; starting it in the daemon's cgroup as before.");
+      }
       // tmux -D keeps an empty server alive. Stays on the shell-string path
       // deliberately: detach + stdio redirection have no argv equivalent,
       // and server bootstrap is POSIX-specific (psmux auto-starts its own).
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
-      }
+      if (await awaitServer()) return { ok: true };
       return { ok: false, code: "tmux_unavailable", message: "The terminal server did not become available. Check tmux and its socket permissions." };
     } catch (error) {
       return { ok: false, code: "tmux_unavailable", message: `Terminal server unavailable: ${(error as Error).message}` };
     }
+  }
+
+  /** Linux only: run `tmux -D` as the command of a transient `systemd-run --user --scope`. systemd-run exits once the
+   *  scope holds the backgrounded server, so its exit status says whether the scope was made. True when it was; false,
+   *  with a log line giving the reason, when the start must fall back to the daemon's own cgroup. A start where no scope
+   *  is tried (not a user service, no user manager) says why once per adapter, not at every server start. */
+  private async startServerInUserScope(): Promise<boolean> {
+    if (process.platform !== "linux") return false;
+    const fallback = (reason: string) => {
+      console.warn(`[tmux] Seat terminal server not in a systemd user scope (${reason}); starting it in the daemon's cgroup as before.`);
+      return false;
+    };
+    const unavailable = this.userScopeUnavailable();
+    if (unavailable) {
+      if (this.scopeSkipLogged) return false;
+      this.scopeSkipLogged = true;
+      return fallback(unavailable);
+    }
+    const server = TMUX_SERVER_LIMIT_PREFIX + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
+    // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
+    const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
+      "--quiet", "--collect", "--unit", `openrig-tmux-${randomUUID().slice(0, 8)}`,
+      "--description", "OpenRig seat terminal server", ...(literal ? ["--expand-environment=no"] : []),
+      // A scope's default OOM policy stops every process in it when the kernel OOM-kills one: one seat would take all.
+      ...(oomPolicy ? ["-p", "OOMPolicy=continue"] : []),
+      "--", "/bin/sh", "-c", `${server} </dev/null >/dev/null 2>&1 &`]);
+    let oomPolicy = true;
+    let literal = true;
+    const dropped: string[] = [];
+    for (;;) {
+      try {
+        await this.exec(scoped(oomPolicy, literal));
+        if (!oomPolicy) {
+          console.warn(`[tmux] Seat terminal server in a systemd user scope without OOMPolicy=continue (${dropped.join("; ")}).`);
+        }
+        return true;
+      } catch (error) {
+        const reason = execFailureReason(error);
+        // Only systemd's own message on stderr drops an option: a timeout or an unknown failure echoes the whole
+        // command (options included) in its message, and must fall back with the reason, not retry without them.
+        const stderr = execStderrText(error);
+        // systemd before 254 has no --expand-environment (and never expands): retry without it.
+        if (literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { literal = false; dropped.push(reason); continue; }
+        // systemd before 253 has no OOMPolicy= for scopes: the scope is still worth having without it.
+        if (oomPolicy && NO_OOM_POLICY.test(stderr)) { oomPolicy = false; dropped.push(reason); continue; }
+        return fallback(reason);
+      }
+    }
+  }
+
+  /** Before a command that would start a missing server itself (new-session), start it the way startServer does (#2710),
+   *  so that first start also lands in the systemd user scope. Only where such a scope can exist; the caller's start stays. */
+  private async startServerBeforeImplicitStart(): Promise<void> {
+    if (this.userScopePossible()) await this.startServer();
+  }
+
+  /** Where startServer may put the server in a systemd user scope (#2710). */
+  private userScopePossible(): boolean {
+    return this.userScopeUnavailable() === null;
+  }
+
+  /** Why no systemd user scope is tried, or null. Only the environment is read. The scope is for a daemon that is itself
+   *  a service of the systemd user manager (the manager sets MANAGERPID for its services; a process started by hand
+   *  from a shell that inherited it, under such a service, also counts, which is harmless): restarting that unit no longer
+   *  takes the seats along. A daemon started from a login session keeps its seats in that session, as before: there a
+   *  scope under the user manager would die with it when the last session ends without lingering. */
+  private userScopeUnavailable(): string | null {
+    if (process.platform !== "linux") return "not Linux";
+    // systemd-run --user reaches the user manager through $XDG_RUNTIME_DIR; without it there is none to ask.
+    if (seatRuntimeDir(process.env) === undefined) return "no systemd user manager: XDG_RUNTIME_DIR is not an absolute path";
+    if (!process.env.MANAGERPID) return "the daemon is not a systemd user service: MANAGERPID is unset";
+    return null;
   }
 
   async listSessions(): Promise<TmuxSession[]> {
@@ -1171,16 +1314,26 @@ export class TmuxAdapter {
     }
   }
 
-  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill. */
+  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.
+   *  A seat's session is stopped only when it carries that seat's OpenRig marker, and each effect runs only while that
+   *  id still names a session on the server it was read from: a replaced server reuses ids for other terminals. */
   async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {
     let stopPhase: StopPhase = "none";
     if (this.deliveryGuard) {
-      const result = await this.guardedInput(name, async (pane, beforeWrite) => {
-        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
-        const sessionId = stdout.trim();
-        if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+      const result = await this.guardedInput(name, async (pane, beforeWrite, nodeId) => {
+        // The session id and its server (pid and start time) in one read, so the effects below can be held to both.
+        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
+          `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
+        const [sessionId = "", pid = "", start = ""] = stdout.trim().split("|");
+        if (!/^\$\d+$/.test(sessionId) || !/^\d+$/.test(pid) || !/^\d+$/.test(start)) {
+          return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+        }
+        if (nodeId) {
+          const unproven = await this.unprovenSeatSession(name, sessionId, nodeId);
+          if (unproven) return unproven;
+        }
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
+          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -1193,16 +1346,48 @@ export class TmuxAdapter {
     return this.killSessionUnchecked(name);
   }
 
+  /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
+   *  OPENRIG_NODE_ID. One without it (adopted, bound or discovered from outside), or with another seat's, is left
+   *  running and named; nothing is detached or killed. */
+  private async unprovenSeatSession(name: string, sessionId: string, nodeId: string): Promise<TmuxResult | null> {
+    let marker: string | null = null;
+    try {
+      const out = (await this.run(["tmux", "show-environment", "-t", sessionId, "OPENRIG_NODE_ID"])).trim();
+      if (out.startsWith("OPENRIG_NODE_ID=")) marker = out.slice("OPENRIG_NODE_ID=".length);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/unknown variable/i.test(message)) {
+        return { ok: false, code: "guard_target_unknown", message: `'${name}' was left running: its OpenRig marker couldn't be read (${message.trim()}), so nothing was detached or killed.` };
+      }
+    }
+    if (marker === nodeId) return null;
+    const why = marker === null ? "doesn't carry this seat's OpenRig marker (OPENRIG_NODE_ID)" : `carries another seat's OpenRig marker (OPENRIG_NODE_ID=${marker})`;
+    return { ok: false, code: "seat_target_unproven", message: `'${name}' was left running: its tmux session ${sessionId} ${why}, so it can't be shown `
+      + "to be this seat's terminal, and nothing was detached or killed. A session OpenRig didn't create, such as an adopted one, has no marker. "
+      // On the daemon's own tmux server: a person's plain `tmux` can reach another server, and a namesake there.
+      + `If it is this seat's, look first with \`${tmuxOnDaemonServer()} attach -t ${shellQuote(`=${name}`)}\`, then stop it with `
+      + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` and run the command again.` };
+  }
+
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
-  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void): Promise<TmuxResult> {
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void,
+    server?: { pid: string; start: string }): Promise<TmuxResult> {
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
+    // With its server, an effect runs only while this id is that session on that server: tmux checks and acts in one
+    // command, so a server replaced since the read (whose ids name other terminals) is left alone.
+    const changed = "openrig-stop-target-changed";
+    const effect = (verb: string, flag: string): string[] => server
+      ? ["tmux", "if-shell", "-F", "-t", session,
+        `#{&&:#{==:#{session_id},${session}},#{&&:#{==:#{pid},${server.pid}},#{==:#{start_time},${server.start}}}}`,
+        `${verb} ${flag} '${session}'`, `display-message -p ${changed}`]
+      : ["tmux", verb, flag, session];
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
     beforeEffect?.();
     phase?.("detach_attempted");
     try {
-      await this.run(["tmux", "detach-client", "-s", session],
-        `tmux detach-client -s ${shellQuote(session)}`);
+      const out = await this.run(effect("detach-client", "-s"), server ? undefined : `tmux detach-client -s ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); nothing was detached or killed.` };
     } catch (err) {
       // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
       const message = err instanceof Error ? err.message : String(err);
@@ -1212,8 +1397,8 @@ export class TmuxAdapter {
     beforeEffect?.();
     phase?.("kill_attempted");
     try {
-      await this.run(["tmux", "kill-session", "-t", session],
-        `tmux kill-session -t ${shellQuote(session)}`);
+      const out = await this.run(effect("kill-session", "-t"), server ? undefined : `tmux kill-session -t ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); it was detached, but nothing was killed.` };
       const pane = this.freshProbes.get(name);
       this.freshProbes.delete(name);
       if (pane) this.freshProbes.delete(pane);
@@ -1481,9 +1666,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
+  /** Leave every mode the pane is in, through the same input guard as sendKeys. Modes stack: copy mode can sit under
+   *  run-shell output (view-mode), a chooser, customize or clock mode, and `send-keys -X cancel` leaves only a copy or
+   *  view mode on top. `copy-mode -q` (tmux 3.1a+) leaves them all and types nothing; older tmux falls back to -X cancel. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite();
+      try {
+        await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
+        return { ok: true };
+      } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
+      }
+    }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */
@@ -1549,6 +1750,15 @@ export class TmuxAdapter {
   async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
     const lines = await this.sessionEnvLines(sessionName);
     return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+  }
+
+  /** Compare transient native values with the kept session. Only differing names escape this read. */
+  async differingSessionEnv(sessionName: string, running: Readonly<Record<string, string>>): Promise<string[] | null> {
+    const lines = await this.sessionEnvLines(sessionName);
+    if (lines === null) return null;
+    const inherited = new Set(lines);
+    return Object.entries(running).filter(([key, value]) => key !== "CLAUDE_CONFIG_DIR" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+      && !inherited.has(`${key}=${value}`)).map(([key]) => key).sort();
   }
 
   private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
@@ -1619,12 +1829,14 @@ export class TmuxAdapter {
     const captureChunk = async (chunk: string[]): Promise<void> => {
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
+      // The marker line also names the pane and its process that the capture after it reads, in the same call.
+      const header = (k: number) => `${mark(k)} #{pane_id} #{pane_pid}`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", `=${t}:`, header(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
-        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
+        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(header(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
       ).join(" \\; ");
       let output: string;
       let capturedAt: Date;
@@ -1668,14 +1880,18 @@ export class TmuxAdapter {
         return; // a single session that failed: read per target by the caller
       }
       const segments: Array<string[] | null> = chunk.map(() => null);
+      const panes: Array<PaneCapture["pane"]> = chunk.map(() => undefined);
+      const marker = new RegExp(`^__openrig_capture_${nonce}_(\\d+)__(?: (.*))?$`);
       let cur = -1;
       const outLines = output.split("\n");
       if (outLines.length && outLines[outLines.length - 1] === "") outLines.pop(); // the final newline, not a line
       for (const line of outLines) {
-        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? /_(\d+)__$/.exec(line) : null;
-        if (m && line === mark(Number(m[1]))) {
+        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? marker.exec(line) : null;
+        if (m && Number(m[1]) < chunk.length) {
           cur = Number(m[1]);
           segments[cur] = [];
+          const identity = /^(%\d+) (\d+)$/.exec(m[2] ?? "");
+          panes[cur] = identity ? { id: identity[1]!, pid: Number(identity[2]) } : undefined;
         } else if (cur >= 0) {
           segments[cur]!.push(line);
         }
@@ -1685,7 +1901,7 @@ export class TmuxAdapter {
         if (seg == null) return; // its marker never printed: read per target
         // capture-pane prints its lines newline-terminated, as the per-target read returns them
         const text = seg.length ? seg.join("\n") + "\n" : "";
-        out.set(t, { text: text === "" ? null : text, capturedAt });
+        out.set(t, { text: text === "" ? null : text, capturedAt, ...(panes[k] ? { pane: panes[k] } : {}) });
       });
     };
     const unique = [...new Set(targets)];
@@ -1954,6 +2170,25 @@ export class TmuxAdapter {
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
+    }
+  }
+
+  /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
+   *  "" when it reported none). Empty when the session has no clients, or when the session or the server is gone;
+   *  null when tmux can't be read. */
+  async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
+    try {
+      const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+        `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+      return output.split("\n").flatMap((line) => {
+        const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+        const tty = line.slice(0, Math.max(separator, 0));
+        return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
+      });
+    } catch (err) {
+      return isServerMissingError(err) || isSessionAbsenceError(tmuxReportedError(err)) ? [] : null;
     }
   }
 

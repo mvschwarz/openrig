@@ -10,7 +10,7 @@
 //   {type:"user"|"assistant", message:{role, content}} where content is a STRING or an array of
 //   {type:"text"|"thinking"|"tool_use", text?} blocks (only "text" carries user-visible content).
 // Codex rollout lines use {payload:{type:"message", role, content}} — handled by the same reader.
-import { existsSync, readFileSync } from "node:fs";
+import { openSync, fstatSync, readSync, closeSync } from "node:fs";
 
 export interface JsonlExchange {
   role: string;
@@ -55,29 +55,60 @@ function toExchange(obj: unknown): JsonlExchange | null {
   return null;
 }
 
+/** Read complete lines newest-first; join bytes before UTF-8 decoding, including long records. */
+function* readLinesBackwards(path: string): Generator<string> {
+  const fd = openSync(path, "r");
+  try {
+    let position = fstatSync(fd).size;
+    let fragments: Buffer[] = [];
+    while (position > 0) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, position));
+      position -= chunk.length;
+      let read = 0;
+      while (read < chunk.length) {
+        const count = readSync(fd, chunk, read, chunk.length - read, position + read);
+        if (count === 0) throw new Error("transcript changed before the recap read completed");
+        read += count;
+      }
+      let end = chunk.length;
+      while (end > 0) {
+        const newline = chunk.lastIndexOf(10, end - 1);
+        if (newline === -1) break;
+        const tail = chunk.subarray(newline + 1, end);
+        yield (fragments.length ? Buffer.concat([tail, ...fragments.reverse()]) : tail).toString("utf8");
+        fragments = [];
+        end = newline;
+      }
+      if (end > 0) fragments.push(chunk.subarray(0, end));
+    }
+    if (fragments.length) yield Buffer.concat(fragments.reverse()).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
- * Parse a provider session JSONL at `path` into the LAST `n` {role, content} exchanges (bounded recap).
- * Honest-degraded: missing/unreadable file → []; unparseable/metadata/text-less lines are skipped.
+ * Parse the LAST `n` visible exchanges without reading the whole provider session transcript.
+ * Memory follows the selected exchanges and longest visited line, not the whole file.
+ * Honest-degraded: any read/decoding failure returns []; never return a partial recap.
+ * Unparseable/metadata/text-less lines are skipped, as before.
  */
 export function parseJsonlExchanges(path: string, n: number): JsonlExchange[] {
-  if (!existsSync(path)) return [];
-  let raw: string;
+  if (n <= 0) return [];
+  const exchanges: JsonlExchange[] = [];
   try {
-    raw = readFileSync(path, "utf8");
+    for (const line of readLinesBackwards(path)) {
+      let obj: unknown;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue; // corrupt/blank line — skip, never throw
+      }
+      const ex = toExchange(obj);
+      if (ex && exchanges.push(ex) >= n) break;
+    }
   } catch {
     return [];
   }
-  const exchanges: JsonlExchange[] = [];
-  for (const line of raw.split("\n")) {
-    if (line.trim().length === 0) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue; // corrupt line — skip, never throw
-    }
-    const ex = toExchange(obj);
-    if (ex) exchanges.push(ex);
-  }
-  return n >= exchanges.length ? exchanges : exchanges.slice(exchanges.length - n);
+  return exchanges.reverse();
 }

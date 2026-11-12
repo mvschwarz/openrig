@@ -153,11 +153,15 @@ drive a recognized native menu as before. Otherwise, with the delivery guard
 attached, it reads the visible composer under the seat's lease immediately before
 pasting, after buffer preparation. Empty input proceeds. A recognized dim
 suggestion is displayed separately and counts as empty; typed or pasted text
-(author unknown) stops the send with `override_input_present`. An unreadable input
-stops with `override_input_unknown`, never an empty-input claim. Both return single-send HTTP
+(author unknown) stops the send with `override_input_present`: single-send HTTP
 409, `sent: false`, and caller-only `existingInput` evidence (visible rows, suggestion
 rows, cursor/dimensions and target binding). A collapsed paste shows its label,
 not the hidden contents. OpenRig neither holds nor retries this stopped override.
+
+An input that can't be read doesn't stop the override. The answer is typed and
+nothing is cleared. The result reports `existingInput` with classification
+`unreadable`, never empty, and a warning that the answer may join or submit
+existing text.
 
 Inspect the shown input in the native terminal, deliberately clear the prompt with
 native/tmux controls, then issue the send again. Manual clearing runs outside
@@ -205,7 +209,10 @@ and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
 reason and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. The reasons are:
+retry is scheduled. `rig send` to several seats and `rig broadcast` print a held
+recipient as `retained, not delivered; inspect with rig seat held-messages`, never
+as sent, and their summary adds the held count (`1/3 delivered, 1 held`). A held
+recipient alone doesn't make the command fail. The reasons are:
 
 - `typing_guard_enabled`: the seat's mode holds this send (`hold`, or a level that
   holds this kind of message).
@@ -222,6 +229,18 @@ retry is scheduled. The reasons are:
 one with a reused `deliveryId`; the result warns older callers that this field no
 longer deduplicates input. The CLI does not generate a deduplication key.
 
+The last recorded managed-compaction input refusal appears as `inputReadFailure` in the attempt
+record and `rig compact --state`: the preparation or compact stage, `composer`
+(the explicit composer hold) or `draft-aware` check, reader status, confidence,
+a fixed read-failure reason and cursor flags. An owed restore step reports it in
+`owedRestore.lastDelivery`. These fields contain no input text, suggestions,
+terminal frames or exception messages. Confidence and timeout fields are `null`
+when that reader does not supply them; a known composer read timeout reports
+`timedOut: true`. A generic `capture_unavailable` does not identify the failed
+capture operation. Older records lack this diagnostic. It neither changes the
+refusal nor retries an attempt; missing metadata cannot establish which check
+caused a historical refusal.
+
 Clearing a draft, changing modes or restarting does not flush saved messages or
 callbacks. To try again, send a current request: it rechecks the recipient and input.
 A caller abort before paste cancels input; after a write may have started, the
@@ -235,6 +254,26 @@ false` and the protection reason, rather than claiming durable custody.
 
 Reading never sends. Retirement frees that record's active retention quota while
 preserving evidence; it does not deliver a message or close queue work.
+
+A seat holds one message per sender, so one sender can't fill its held quota and
+drop everyone else's messages. A sender's newest held message retires its earlier
+ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
+<id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
+held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
+record stays readable with `--id`. Held messages are never replayed, so this changes
+no delivery. A `draft-aware` attempt takes its sender's place only once it settles
+as held; one that is then delivered leaves the held messages as they are. A queue
+wake to a `draft-aware` seat counts its sender's held message there as room, by the
+same rule. At a full quota, a sender with nothing held there is still refused, and
+nothing from another sender is touched. A committed wake is never refused, and the
+sender's next held message coalesces it like any other. A message that settles as
+held late, behind a newer held send, folds into that send's newest part and leaves
+its other parts held. An urgent message coalesced under a routine one passes its
+marking to the newest. Never coalesced: the other parts of the same send, a
+watchdog's reminders (one per job), and an unattributed sender.
+
+A backlog held before this change clears at that sender's next held message to the
+seat, or at once with `rig seat retire-held-message`.
 
 ## Input evidence and outcomes
 
@@ -336,7 +375,10 @@ accounting. Historical outbox receipts do not suppress a lone reminder or preven
 message tells its recipient that delivery may repeat after an unconfirmed attempt. Its job history records the
 current transport result; an unknown write is not proof that nothing arrived.
 
-The transport still protects approval/question prompts, human drafts and recipient identity. Scheduler timing,
+The transport still protects approval/question prompts and recipient identity. Under the default
+`transport.draft_delivery` (`deliver`), an ordinary send or work notice that meets a person's draft at a Claude Code or
+Codex prompt is pasted into it and the combined input is submitted, unless the seat's typing guard holds input
+(`draft-aware`, `openrig-urgent`, `urgent-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
 current parked-row eligibility and stop checks still apply. This changes message retries, not the idempotence of
 structured continuity actions such as creating a cutover baton.
 

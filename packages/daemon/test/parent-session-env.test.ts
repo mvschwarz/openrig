@@ -13,6 +13,9 @@ const CONFIGURATION = {
   CLAUDE_CODE_OAUTH_TOKEN: "t",
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9",
   HERDR_SOCKET_PATH: "/h.sock",
+  // They select which herdr-core to talk to; only the terminal scope (HC_SCOPE, HC_TERMINAL_*) is removed.
+  HC_SESSION: "default",
+  HC_SOCKET: "/run/hc.sock",
 };
 
 describe("removeParentSessionEnv", () => {
@@ -37,5 +40,17 @@ describe("removeParentSessionEnv", () => {
     const env: Record<string, string | undefined> = { ...CONFIGURATION };
     expect(removeParentSessionEnv(env)).toEqual([]);
     expect(env).toEqual(CONFIGURATION);
+  });
+
+  it("removes the herdr-core terminal's scope but never HC_SESSION or HC_SOCKET (they only select a core)", () => {
+    const env: Record<string, string | undefined> = {
+      HC_SCOPE: "s-7",
+      HC_TERMINAL_ID: "t7",
+      HC_TERMINAL_SOCKET: "/run/t.sock",
+      HC_SESSION: "work",
+      HC_SOCKET: "/run/w.sock",
+    };
+    expect(removeParentSessionEnv(env).sort()).toEqual(["HC_SCOPE", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET"]);
+    expect(env).toEqual({ HC_SESSION: "work", HC_SOCKET: "/run/w.sock" });
   });
 });

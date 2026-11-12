@@ -1,0 +1,64 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "hc-get-after-close",
+  "channel": "hc-cli",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "argv": [
+      "hc",
+      "get",
+      "--json",
+      "t4"
+    ],
+    "via": "scripts/sandbox hc (HC_SESSION=herdr-app-<sandbox>)"
+  },
+  "reply": {
+    "exit": 0,
+    "stdout": "{\"address\":\"t4\",\"argv\":[\"sleep\",\"3600\"],\"cols\":200,\"created_ms\":1793857415617,\"cwd\":\"<sandbox>/work\",\"die_with_parent\":false,\"exit_code\":null,\"finished_ms\":1793857420082,\"identity\":\"ghostty\",\"keep\":true,\"labels\":{\"herdr.seen\":\"0\",\"herdr.space\":\"sp524ffbf49bcbe210ae2be30d9d1a8a76\",\"herdr.tab\":\"tb-capture-view\",\"openrig.op\":\"op-2\",\"openrig.role\":\"viewer\",\"where\":\"person-space / 2\"},\"name\":null,\"notify\":true,\"parent\":null,\"pid\":436120,\"reason\":\"killed\",\"reported\":false,\"rm\":false,\"rows\":120,\"screen\":\"exact\",\"signal\":1,\"state\":\"finished\",\"status\":null,\"status_ms\":null,\"template\":null,\"title\":\"\",\"turn\":0}\n",
+    "stderr": "",
+    "json": {
+      "address": "t4",
+      "argv": [
+        "sleep",
+        "3600"
+      ],
+      "cols": 200,
+      "created_ms": 1793857415617,
+      "cwd": "<sandbox>/work",
+      "die_with_parent": false,
+      "exit_code": null,
+      "finished_ms": 1793857420082,
+      "identity": "ghostty",
+      "keep": true,
+      "labels": {
+        "herdr.seen": "0",
+        "herdr.space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+        "herdr.tab": "tb-capture-view",
+        "openrig.op": "op-2",
+        "openrig.role": "viewer",
+        "where": "person-space / 2"
+      },
+      "name": null,
+      "notify": true,
+      "parent": null,
+      "pid": 436120,
+      "reason": "killed",
+      "reported": false,
+      "rm": false,
+      "rows": 120,
+      "screen": "exact",
+      "signal": 1,
+      "state": "finished",
+      "status": null,
+      "status_ms": null,
+      "template": null,
+      "title": "",
+      "turn": 0
+    }
+  },
+  "elapsed_ms": 27,
+  "notes": "The closed pane's terminal as core reports it now."
+}

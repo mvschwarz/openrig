@@ -63,8 +63,9 @@ import type {
   ViewDescriptor,
 } from "./terminal-provider.js";
 
-/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller). */
-export type TerminalProviderName = "herdr" | "cmux" | "rex";
+/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller;
+ *  herdr-app = Rig-layout views in a herdr-app client, by name only). */
+export type TerminalProviderName = "herdr" | "cmux" | "rex" | "herdr-app";
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
 /** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. Rex is never chosen here. */
 const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
@@ -80,7 +81,13 @@ export interface OpenViewRequest {
   expectedPlan?: string;
   /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
   viewportColumns?: number;
+  /** Reuse a workspace that still shows this view live instead of opening a copy (herdr). */
+  reuseLive?: boolean;
+  /** The herdr-app client (its app home) for provider herdr-app. */
+  herdrApp?: HerdrAppTarget;
 }
+
+export interface HerdrAppTarget { appHome?: string }
 
 export interface TerminalPreview {
   provider: string;
@@ -95,6 +102,8 @@ export interface TerminalPreview {
   task?: TaskMembership;
   capabilities: { ensureViewer: boolean };
   viewDescriptor?: ViewDescriptor;
+  /** The composed view's remote tiles with their hosts; complete, so empty means every opened seat is local. */
+  remote: Array<{ seat: string; host: string }>;
 }
 
 /** The `rig terminal views` payload: saved views + the live rig names you can open. */
@@ -129,6 +138,10 @@ export interface TerminalServiceDeps {
   resolveProvider(name: string): TerminalProvider | null;
   /** Resolve an explicit session without altering the default provider instance. */
   resolveSessionProvider?(name: string, session: string): TerminalProvider | null;
+  /** Daemon shutdown: stops herdr-app's own watcher and timers. */
+  stopHerdrApp?(): void;
+  /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
+  resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
   /** Live seats of a rig BY NAME; null when no such rig is known (vs [] = a known-but-empty rig). */
@@ -154,6 +167,11 @@ export interface TerminalServiceDeps {
    * absolute path is used; anything else, or no resolver, keeps the bare `tmux` token.
    */
   resolveLocalTmux?(): Promise<string | null> | string | null;
+}
+
+/** The opened seats on another host, from the composed tiles: the complete list, so empty means all local. */
+function remoteOpened(composed: ComposedView, opened?: readonly string[]): Array<{ seat: string; host: string }> {
+  return composed.opened.flatMap(pane => pane.host && (!opened || opened.includes(pane.seat)) ? [{ seat: pane.seat, host: pane.host }] : []);
 }
 
 /** Build the one shared result shape for a pre-provider failure (view/provider not found). */
@@ -198,7 +216,7 @@ export class TerminalService {
       (selector, controls) => this.renderFollowing(selector, controls));
   }
 
-  async stop(): Promise<void> { this.unsubscribeScope?.(); await this.following?.stop(); }
+  async stop(): Promise<void> { this.unsubscribeScope?.(); this.deps.stopHerdrApp?.(); await this.following?.stop(); }
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
@@ -213,8 +231,20 @@ export class TerminalService {
       if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
     }
     const { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs } = req;
-    return this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
+    const result = await this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
       { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs });
+    if (result.code !== "follow_unsupported" || result.following?.enabled !== false) return result;
+    // The selector is durably retired BEFORE a one-shot snapshot is dispatched.
+    // A lost reply or restart must not make Core events repeat the open.
+    const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
+    if ("code" in composed || !composed.task?.complete) return { ...result,
+      error: `${result.error ?? "Live following is unsupported."} No snapshot opened: ${"code" in composed ? composed.error : "task membership is incomplete."}` };
+    if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed before the snapshot; refresh its preview.");
+    const note = `Snapshot: this view will not track later owner changes. ${result.error ?? "Live following is unsupported."}`;
+    const snapshot = await selected.provider.openView({ ...composed, opened: composed.opened.map(p => this.viewerPane(p)), spaceLabel: `Snapshot: ${composed.task.name}` });
+    return { ...snapshot, following: result.following, task: composed.task, remote: remoteOpened(composed, snapshot.opened),
+      ...(selected.session !== undefined ? { session: selected.session } : {}),
+      viewDescriptor: { kind: "fixed", name: composed.task.name }, notes: [...(snapshot.notes ?? []), note] };
   }
 
   private async renderFollowing(selector: FollowingSelector, controls: FollowControls): Promise<OpenViewResult> {
@@ -236,16 +266,23 @@ export class TerminalService {
         { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
     };
     const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent, membershipError);
-    return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
+    // Following resolves local task owners only, so its remote list is empty unless a composed tile says otherwise.
+    return { ...result, remote: composed ? remoteOpened(composed, result.opened) : [], ...(selected.session !== undefined ? { session: selected.session } : {}),
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
 
-  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session">): {
+  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session" | "herdrApp">): {
     name: string; provider: TerminalProvider; session?: string;
   } | OpenViewResult {
     const name = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    if (name === "herdr-app") {
+      if (req.session !== undefined) return errorResult(name, "unsupported_terminal_session", "herdr-app selects its client by app home, not by session.");
+      const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+      return provider ? { name, provider, session: provider.appHome }
+        : errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    }
     const defaultProvider = this.deps.resolveProvider(name);
-    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, cmux or rex`);
+    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, herdr-app, cmux or rex`);
     if (req.session === undefined) return { name, provider: defaultProvider };
     const session = typeof req.session === "string" ? req.session.trim() : "";
     if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
@@ -310,8 +347,10 @@ export class TerminalService {
         absent: composed.absent, degraded: composed.degraded, notes,
       };
     }
-    const result = await provider.openView({ ...composed, planId });
-    if (result.opened.length === 0 && composed.opened.length > 0) {
+    const result = req.reuseLive ? await provider.openView({ ...composed, planId }, { reuseLive: true }) : await provider.openView({ ...composed, planId });
+    // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
+    // A reused workspace already shows every tile.
+    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app" && !result.reusedWorkspace) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
       notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");
@@ -319,7 +358,7 @@ export class TerminalService {
     if (!composed.kernelLayout && composed.opened.some(pane => !pane.readOnly)) {
       notes.push("The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.");
     }
-    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
+    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), remote: remoteOpened(composed, result.opened), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
   }
 
   private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
@@ -367,7 +406,7 @@ export class TerminalService {
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     await this.viewerMappings(provider, composed);
     const tmux = daemonTmuxServerInfo();
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, remote: remoteOpened(composed), viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
       capabilities: { ensureViewer: !!composed.task && !!provider.ensureViewer },
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }
@@ -411,6 +450,17 @@ export class TerminalService {
     });
   }
 
+  /** Close one herdr-app Rig view: its cells leave the client's layout first, then only its own verified viewers end.
+   *  Seats are never touched. Other providers have no close. */
+  async closeView(req: { provider?: string; view: string; herdrApp?: HerdrAppTarget }): Promise<OpenViewResult> {
+    const name = req.provider?.trim() ?? "herdr-app";
+    if (name !== "herdr-app") return errorResult(name, "close_unsupported", "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.");
+    const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+    if (!provider) return errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    if (!req.view.trim()) return errorResult(name, "view_required", "Name the Rig view to close (rv-…).");
+    return provider.closeView(req.view.trim());
+  }
+
   /** List saved views + the rig names openable as derived views. */
   async listViews(detail = false): Promise<ListViewsResult> {
     const result: ListViewsResult = {
@@ -444,8 +494,14 @@ export class TerminalService {
   }
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
-  async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
+  async status(providerName?: string, session?: string, herdrApp?: HerdrAppTarget): Promise<TerminalStatusResult> {
     const tmux = daemonTmuxServerInfo();
+    if (providerName === "herdr-app") {
+      const selected = this.selectProvider({ provider: "herdr-app", ...(herdrApp ? { herdrApp } : {}) });
+      if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
+      return { ...(tmux ? { tmux } : {}), session: selected.session, providers: [{ name: selected.name,
+        status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
+    }
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };

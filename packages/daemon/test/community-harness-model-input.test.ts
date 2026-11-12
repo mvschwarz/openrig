@@ -56,7 +56,7 @@ describe("a community harness that takes the seat's declared model", () => {
     const { app, sendShellCommand } = seat(PRESET);
     const result = await app.launchHarness(binding("vendor/model"), { name: "w@r" });
     expect(result).toEqual({ ok: true });
-    expect(sendShellCommand.mock.calls[0]![1]).toBe("synth-launch");
+    expect(sendShellCommand.mock.calls[0]![1]).toBe("/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-launch");
   });
 
   it("passes the model on a resume as well, and each launch its own model when the declaration changes", async () => {

@@ -64,7 +64,7 @@ export class DraftAwareDelivery {
           this.outbox.retain(entry ? { ...entry, tags: entry.tags ?? undefined, auditPointer: entry.auditPointer ?? undefined }
             : { outboxId: id, senderSession: opts.actorSession ?? "unknown", destinationSession: session, body: text,
               auditPointer: opts.auditPointer, identityProvenance: opts.identityProvenance, identityPrincipal: opts.identityPrincipal, ...(opts.urgent ? { urgency: "urgent" } : {}) },
-            target, !!opts.committedOutboxIds);
+            target, !!opts.committedOutboxIds, { coalesce: false, sameSend: receipt.ids });
           this.db.prepare("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=? WHERE outbox_id=?")
             .run(JSON.stringify(receipt), id);
         }
@@ -79,7 +79,7 @@ export class DraftAwareDelivery {
       // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
       await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
       result = await this.deliver(session, text, { ...opts,
-        onInputEffect: phase => { inputWritten = true; opts.onInputEffect?.(phase); },
+        onInputEffect: (phase, written) => { inputWritten = true; opts.onInputEffect?.(phase, written); },
         beforeWrite: () => {
           if (opts.queueWake && !this.wakeApplicable?.(entries)) throw new DeliveryGuardError("draft_wake_superseded", "The queue wake is no longer applicable; no further input was written.");
           opts.beforeWrite?.();
@@ -95,7 +95,8 @@ export class DraftAwareDelivery {
         : guardError ? error.message : "The delivery attempt ended without a reliable write result. Repeating the request may duplicate input.";
       result = { ok: false, sessionName: session, outcome: "failed", inputPhase,
         ...(inputWritten || inputPhase === "not_reached" ? { sent: inputWritten } : {}),
-        reason: guardError ? error.code : "delivery_indeterminate", error: detail };
+        reason: guardError ? error.code : "delivery_indeterminate", error: detail,
+        ...(guardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
     if (inputWritten) result = { ...result, sent: true };
     const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded",
@@ -122,6 +123,8 @@ export class DraftAwareDelivery {
             this.outbox.finalizeDelivery(id, state);
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
+          // Settled as held: only now does it take its sender's place (#2430); a delivered attempt never absorbs held ones.
+          if (state === "retained") for (const id of receipt.ids) this.outbox.coalesceSettled(id, receipt.ids);
         })();
       } catch { recorded = false; }
     }

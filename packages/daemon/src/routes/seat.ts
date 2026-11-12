@@ -75,7 +75,8 @@ seatRoutes.get("/held-messages/:seatRef", c => {
       const entry = outbox.getById(id);
       if (entry?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No retained history for this node and ID" }, 404);
       const delivery = guarded?.lookup(id);
-      return c.json({ entry, ...(delivery ? { delivery } : {}) });
+      const coalesced = outbox.coalescedInto(id);
+      return c.json({ entry, ...(delivery ? { delivery } : {}), ...(coalesced.length > 0 ? { coalesced: { count: coalesced.length, outboxIds: coalesced } } : {}) });
     }
     const page = outbox.heldForNode(target.nodeId, Number(c.req.query("limit") ?? 100), Number(c.req.query("offset") ?? 0));
     return c.json({ ...page, items: page.items.map(entry => {
@@ -112,7 +113,7 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
     return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
-      ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(target.nodeId, 1).total,
+      ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
 
@@ -136,7 +137,7 @@ seatRoutes.get("/status/node/:nodeId", (c) => {
   return c.json({ ...result.status, node_id: nodeId, contract: "seat-node.v1",
     supported_actions: ["set-permissions", "set-policy", "set-model", "set-effort"],
     ...(runtimeSwitch ? { runtimeSwitch } : {}),
-    ...(guard ? { typingGuard: { ...guard.preference(nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(nodeId, 1).total } } : {}) });
+    ...(guard ? { typingGuard: { ...guard.preference(nodeId), heldCount: new OutboxHandler(guard.db).heldCount(nodeId) } } : {}) });
 });
 
 /** The handover's dependencies, which a runtime switch's successor launch shares. */

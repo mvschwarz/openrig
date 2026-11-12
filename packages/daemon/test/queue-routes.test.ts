@@ -342,6 +342,47 @@ describe("queue routes", () => {
     expect(job).toMatchObject({ target_session: "b@r", interval_seconds: 45, state: "active" });
   });
 
+  describe("#2739: a park on an outside condition", () => {
+    const post = (qitemId: string, body: Record<string, unknown>) => app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, body: JSON.stringify(body),
+    });
+    const show = async (qitemId: string) => (await app.request(`/api/queue/${qitemId}`)).json() as Promise<Record<string, any>>;
+    async function claimed() {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "park-without-wake repro", nudge: false });
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      return row.qitemId;
+    }
+
+    it("a later wake on the same blocker arms a timer, and the row shows it", async () => {
+      // The reporter's two calls: parked on an external gate with no wake, then the same blocker with --wake-after 10m.
+      const id = await claimed();
+      expect((await post(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "parked without a wake" })).status).toBe(200);
+      expect((await show(id)).waiting.nextBackstop).toMatchObject({ mechanism: "UNVERIFIED: no timed backstop", dueAt: null });
+      expect((await post(id, { state: "blocked", blockedOn: "external:some-gate", wakeAfterSeconds: 600, transitionNote: "adding a wake later" })).status).toBe(200);
+      const wake = db.prepare("SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' ORDER BY transition_id DESC")
+        .get(id) as { wake_ref: string } | undefined;
+      expect(db.prepare("SELECT interval_seconds, state FROM watchdog_jobs WHERE job_id = ?").get(wake?.wake_ref)).toMatchObject({ interval_seconds: 600, state: "active" });
+      expect((await show(id)).waiting.nextBackstop).toMatchObject({ mechanism: `watchdog:${wake?.wake_ref}`, intervalSeconds: 600 });
+    });
+
+    it("with no wake, the park lands and its reply says no wake is set; with any wake, it says nothing", async () => {
+      const id = await claimed();
+      const parked = await post(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "parked without a wake" });
+      expect(parked.status).toBe(200);
+      const parkedBody = await parked.json() as Record<string, any>;
+      expect(parkedBody).toMatchObject({ state: "blocked", blockedOn: "external:some-gate" });
+      expect(parkedBody.advisories).toEqual([expect.objectContaining({ code: "park_without_wake", blockedOn: "external:some-gate",
+        message: expect.stringContaining("No wake is set for this park") })]);
+
+      // A wake added later, a re-park that keeps that live timer, and a park on a live qitem get no advisory.
+      const advisoriesOf = async (qitemId: string, body: Record<string, unknown>) => (await (await post(qitemId, body)).json() as Record<string, any>).advisories;
+      expect(await advisoriesOf(id, { state: "blocked", blockedOn: "external:some-gate", wakeAfterSeconds: 600, transitionNote: "adding a wake later" })).toBeUndefined();
+      expect(await advisoriesOf(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "still waiting" })).toBeUndefined();
+      const upstream = await queueRepo.create({ sourceSession: "a@r", destinationSession: "c@r", body: "upstream", nudge: false });
+      expect(await advisoriesOf(await claimed(), { state: "blocked", blockedOn: upstream.qitemId, transitionNote: "waits on upstream" })).toBeUndefined();
+    });
+  });
+
   describe("update resolution", () => {
     type Start = "pending" | "in-progress" | "blocked" | "done" | "canceled" | "handed-off" | "failed" | "denied";
     const post = (qitemId: string, body: Record<string, unknown>, session = "b@r") => app.request(`/api/queue/${qitemId}/update`, {
@@ -806,6 +847,110 @@ describe("queue routes", () => {
         queueRepo.routeToFallback(row.qitemId, "c@r", "b@r unreachable");
         expect((await show(row.qitemId)).resolution).toBe("fallback: b@r unreachable");
       });
+    });
+  });
+
+  describe("GET /:qitemId names a handed-off row's successor (#2794)", () => {
+    const show = async (qitemId: string) => (await app.request(`/api/queue/${qitemId}`)).json() as Promise<Record<string, any>>;
+    const stored = (qitemId: string) => db.prepare("SELECT state, closure_reason, closure_target, handed_off_to FROM queue_items WHERE qitem_id = ?").get(qitemId);
+
+    it("a handoff names the row it made, and the closed row is stored as before", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      const { created } = await queueRepo.handoff({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
+      const item = await show(source.qitemId);
+      expect(item.closureTarget).toBe("next@r");
+      expect(item.successors).toEqual([{ qitemId: created.qitemId, destinationSession: "next@r", state: "pending", via: "handedOffFrom" }]);
+      expect(item).not.toHaveProperty("successorNote");
+      expect(item).not.toHaveProperty("successorsTruncated");
+      // The read changes nothing stored: the closure target still names the new owner, as the docs say.
+      expect(stored(source.qitemId)).toEqual({ state: "handed-off", closure_reason: "handed_off_to", closure_target: "next@r", handed_off_to: "next@r" });
+    });
+
+    it("handoff-and-complete (a done row) names the row it made, and its state as it is now", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.claim({ qitemId: source.qitemId, destinationSession: "b@r" });
+      const { closed, created } = await queueRepo.handoffAndComplete({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
+      expect(closed.state).toBe("done");
+      queueRepo.claim({ qitemId: created.qitemId, destinationSession: "next@r" });
+      expect((await show(source.qitemId)).successors).toEqual([{ qitemId: created.qitemId, destinationSession: "next@r", state: "in-progress", via: "handedOffFrom" }]);
+    });
+
+    it("past 20 successors, the newest 20 are named and successorsTruncated says the list is cut", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'next@r', handed_off_to = 'next@r' WHERE qitem_id = ?").run(source.qitemId);
+      const insert = db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, handed_off_from)
+        VALUES (?, ?, ?, 'b@r', 'next@r', 'pending', 'routine', 'x', ?)`);
+      const id = (n: number) => `qitem-succ-${String(n).padStart(2, "0")}`;
+      const add = (n: number) => { const ts = `2026-11-10T00:00:${String(n).padStart(2, "0")}.000Z`; insert.run(id(n), ts, ts, source.qitemId); };
+      for (let n = 1; n <= 20; n++) add(n);
+      const full = await show(source.qitemId);
+      expect(full.successors).toHaveLength(20);
+      expect(full).not.toHaveProperty("successorsTruncated");
+      add(21);
+      const cut = await show(source.qitemId);
+      expect(cut.successors.map((s: { qitemId: string }) => s.qitemId)).toEqual(Array.from({ length: 20 }, (_, i) => id(i + 2)));
+      expect(cut.successorsTruncated).toBe(true);
+      expect(cut).not.toHaveProperty("successorNote");
+    });
+
+    it("a close whose target is a local row id names that row", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      const reply = await queueRepo.create({ sourceSession: "b@r", destinationSession: "a@r", body: "the return", nudge: false });
+      queueRepo.claim({ qitemId: source.qitemId, destinationSession: "b@r" });
+      const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: reply.qitemId }),
+      });
+      expect(res.status).toBe(200);
+      expect((await show(source.qitemId)).successors).toEqual([{ qitemId: reply.qitemId, destinationSession: "a@r", state: "pending", via: "closureTarget" }]);
+    });
+
+    it("a cross-host handoff names its successor as recorded, without looking it up remotely", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = ?, handed_off_to = ? WHERE qitem_id = ?")
+        .run("qitem-xh-0123456789abcdef@far-host", "next@r", source.qitemId);
+      const item = await show(source.qitemId);
+      expect(item.successors).toEqual([]);
+      expect(item.successorNote).toBe("It was handed to another host; its successor there is qitem-xh-0123456789abcdef@far-host. This daemon has no copy.");
+    });
+
+    it("a handoff with no successor on this daemon says so", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.claim({ qitemId: source.qitemId, destinationSession: "b@r" });
+      await app.request(`/api/queue/${source.qitemId}/update`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+      });
+      const item = await show(source.qitemId);
+      expect(item.successors).toEqual([]);
+      expect(item.successorNote).toBe("No row on this daemon was made by this handoff.");
+    });
+
+    it("a lookup that fails still answers the read, and says the successor couldn't be looked up", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      await queueRepo.handoff({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
+      const list = vi.spyOn(queueRepo, "list").mockImplementation(() => { throw Object.assign(new Error("busy"), { code: "SQLITE_BUSY" }); });
+      try {
+        const res = await app.request(`/api/queue/${source.qitemId}`);
+        expect(res.status).toBe(200);
+        const item = await res.json();
+        expect(item.state).toBe("handed-off");
+        expect(item.successors).toEqual([]);
+        expect(item.successorNote).toBe("Its successor couldn't be looked up; the closure target is as recorded.");
+      } finally { list.mockRestore(); }
+    });
+
+    it("an open row, or a row closed another way, carries no successor fields", async () => {
+      const open = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      expect(await show(open.qitemId)).not.toHaveProperty("successors");
+      queueRepo.claim({ qitemId: open.qitemId, destinationSession: "b@r" });
+      await app.request(`/api/queue/${open.qitemId}/update`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ state: "done", closureReason: "no-follow-on", transitionNote: "finished" }),
+      });
+      const done = await show(open.qitemId);
+      expect(done).not.toHaveProperty("successors");
+      expect(done).not.toHaveProperty("successorNote");
     });
   });
 
@@ -1652,6 +1797,83 @@ describe("queue routes", () => {
     expect(data).toHaveLength(1);
   });
 
+  it("issue2728 applies repeated exact tags before the limit and composes existing filters", async () => {
+    const seed = async (item: {
+      body: string;
+      tags: string[];
+      createdAt: string;
+      targetRepo?: string;
+      sourceSession?: string;
+      destinationSession?: string;
+      state?: string;
+    }) => {
+      const created = await queueRepo.create({
+        sourceSession: item.sourceSession ?? "lead@rig-a",
+        destinationSession: item.destinationSession ?? "worker@rig-a",
+        body: item.body,
+        tags: item.tags,
+        targetRepo: item.targetRepo ?? "repo-a",
+        nudge: false,
+      });
+      db.prepare("UPDATE queue_items SET ts_created = ?, state = ? WHERE qitem_id = ?")
+        .run(item.createdAt, item.state ?? "pending", created.qitemId);
+      return created.qitemId;
+    };
+
+    const olderMatch = await seed({
+      body: "older exact match",
+      tags: ["review", "publish"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const newerOneTag = await seed({
+      body: "newer review-only row",
+      tags: ["review"],
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    await seed({ body: "wrong repo", tags: ["review", "publish"], targetRepo: "repo-b", createdAt: "2026-01-03T00:00:00.000Z" });
+    await seed({ body: "wrong destination", tags: ["review", "publish"], destinationSession: "other@rig-a", createdAt: "2026-01-04T00:00:00.000Z" });
+    await seed({ body: "wrong state", tags: ["review", "publish"], state: "done", createdAt: "2026-01-05T00:00:00.000Z" });
+    await seed({ body: "wrong rig", tags: ["review", "publish"], sourceSession: "lead@other-rig", destinationSession: "worker@other-rig", createdAt: "2026-01-06T00:00:00.000Z" });
+    await seed({ body: "case variant is not exact", tags: ["Review", "publish"], createdAt: "2026-01-07T00:00:00.000Z" });
+    await seed({ body: "substring is not exact", tags: ["reviewer", "publish"], createdAt: "2026-01-08T00:00:00.000Z" });
+    await seed({ body: "comma-joined tag stays literal", tags: ["review,publish"], createdAt: "2026-01-09T00:00:00.000Z" });
+
+    const query = "targetRepo=repo-a&destinationSession=worker%40rig-a&state=pending&rig=rig-a";
+    const bounded = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=1`);
+    expect(bounded.status).toBe(200);
+    expect(((await bounded.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const exactOnly = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=10`);
+    expect(exactOnly.status).toBe(200);
+    expect(((await exactOnly.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const single = await app.request(`/api/queue/list?tag=review&${query}&limit=5`);
+    expect(((await single.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([newerOneTag, olderMatch]);
+
+    const active = await app.request("/api/queue/list?tag=review&tag=publish&targetRepo=repo-a&destinationSession=worker%40rig-a&rig=rig-a&activeOnly=1&limit=5");
+    expect(((await active.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const blank = await app.request("/api/queue/list?tag=%20");
+    expect(blank.status).toBe(400);
+    expect(await blank.json()).toMatchObject({ error: "tag_invalid" });
+  });
+
+  it("issue2728 keeps repeated tags composed with the attention list path", async () => {
+    const matching = await queueRepo.create({
+      sourceSession: "a@r", destinationSession: "human-founder@external", body: "older human ask",
+      tags: ["review"], nudge: false,
+    });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run("2026-01-01T00:00:00.000Z", matching.qitemId);
+    await queueRepo.create({
+      sourceSession: "a@r", destinationSession: "human-founder@external", body: "newer unrelated human ask",
+      tags: ["other"], nudge: false,
+    });
+
+    const response = await app.request("/api/queue/list?attention=1&tag=review&limit=1");
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([matching.qitemId]);
+  });
+
   it("GET /api/queue/list follows a handoff to its successor and filters by updatedSince", async () => {
     const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
@@ -2458,9 +2680,11 @@ describe("queue routes", () => {
 
       const response = await app.request("/api/queue/whoami?session=bob@r");
       expect(response.status).toBe(200);
-      const body = await response.json() as { currentWork: { workNodePath: string } | null; currentWorkBasis: string };
+      const body = await response.json() as { currentWork: { workNodePath: string } | null; currentWorkBasis: string; workRoots: string[] };
       expect(body.currentWork?.workNodePath).toBe(path.join(temporaryWorkspace, "alpha", "work-items", "release", "slices", "01-work"));
       expect(body.currentWorkBasis).toContain("one typed in-progress work node");
+      // The refocus hook passes these to the trace, so work in a catalogued project traces to its own root (#2693).
+      expect(body.workRoots).toEqual([path.join(temporaryWorkspace, "alpha"), path.join(temporaryWorkspace, "beta")]);
 
       const withCandidates = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
       const candidateBody = await withCandidates.json() as { workCandidates: { candidates: Array<{ workNodePath: string | null }> } };

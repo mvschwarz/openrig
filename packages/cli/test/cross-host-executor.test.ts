@@ -156,8 +156,10 @@ describe("runCrossHostCommand", () => {
     expect(capture.command).toBe("ssh");
     // D13 supersession: the remote command now runs under `sh -lc` (login-shell PATH
     // resolution) — the quoted argv rides inside one further quoting layer.
+    // SEP-1: `--` ends ssh's own option parsing before the target.
     expect(capture.args).toEqual([
       "-o", "ConnectTimeout=10",
+      "--",
       "vm-test.local",
       "sh -lc ''\\''rig'\\'' '\\''send'\\'' '\\''dev-impl@rig'\\'' '\\''hello world'\\'' '\\''--verify'\\'''",
     ]);
@@ -200,6 +202,29 @@ describe("runCrossHostCommand", () => {
     await runCrossHostCommand(HOST_WITH_USER, ["rig", "ps"], { spawn });
     expect(capture.args?.[0]).toBe("-l");
     expect(capture.args?.[1]).toBe("ops");
+  });
+
+  it("SEP-1 — `--` separates the options from the target, whatever shape the target has", async () => {
+    const capture: { command?: string; args?: readonly string[] } = {};
+    const spawn = mockSpawnFor({ exitCode: 0, capture });
+    await runCrossHostCommand({ id: "vm-test", transport: "ssh", target: "-oProxyCommand=touch /tmp/nothing" }, ["rig", "ps"], { spawn });
+    const args = capture.args ?? [];
+    const separator = args.indexOf("--");
+    expect(separator).toBeGreaterThan(0);
+    // The whole target reaches ssh as one argument after the separator, so an option-shaped
+    // destination is a host ssh rejects rather than an option it obeys.
+    expect(args[separator + 1]).toBe("-oProxyCommand=touch /tmp/nothing");
+    // Everything we pass as an option stays before it.
+    expect(separator).toBeGreaterThan(args.indexOf("-o"));
+    expect(separator).toBeLessThan(args.length - 1);
+  });
+
+  it("SEP-1 — the separator sits after -l <user> too", async () => {
+    const capture: { command?: string; args?: readonly string[] } = {};
+    const spawn = mockSpawnFor({ exitCode: 0, capture });
+    await runCrossHostCommand(HOST_WITH_USER, ["rig", "ps"], { spawn });
+    const args = capture.args ?? [];
+    expect(args.slice(0, args.indexOf("--"))).toEqual(["-l", "ops", "-o", "ConnectTimeout=10"]);
   });
 
   it("happy path returns stdout/stderr verbatim", async () => {

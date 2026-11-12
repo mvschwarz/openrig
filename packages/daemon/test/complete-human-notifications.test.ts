@@ -188,11 +188,29 @@ describe("complete human notifications", () => {
     expect(await (await app.request("/api/queue/list?attention=1")).json()).toEqual([]);
   });
 
-  it("keeps failed FYIs pending and out of delivered history", async () => {
+  it("keeps failed FYIs pending and out of delivered history for both Slack and Relay failure notes", async () => {
     const item = await repo.create({ ...request, humanIntent: "update" });
     expect(item.state).toBe("pending"); expect(repo.listDeliveredHumanUpdates()).toEqual([]);
-    repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=x class=transport error=synthetic" });
-    expect(repo.getById(item.qitemId)?.state).toBe("pending"); expect(repo.listDeliveredHumanUpdates()).toEqual([]);
+    const slackKey = `${item.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(item.qitemId)!.transitionId}`;
+    repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel", transitionNote: `slack-owner-notification-transport-failed notification_key=${slackKey} class=transport error=synthetic` });
+    expect(repo.getById(item.qitemId)).toMatchObject({ state: "pending", deliveryOutcome: "transport-failed" });
+    expect(repo.listDeliveredHumanUpdates()).toEqual([]);
+
+    const relayItem = await repo.create({ ...request, humanIntent: "update", summary: "Relay FYI" });
+    const relayKey = `${relayItem.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(relayItem.qitemId)!.transitionId}`;
+    repo.update({
+      qitemId: relayItem.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-transport-failed notification_key=${relayKey} connector_ref=relay-1 class=relay-http-502 error=bad-gateway`,
+    });
+    expect(repo.getById(relayItem.qitemId)).toMatchObject({
+      state: "pending",
+      deliveryOutcome: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+    });
+    expect(repo.getById(relayItem.qitemId)?.deliveryFailureDetail).toContain("connector_ref=relay-1");
+    expect(repo.findUndelivered().map((q) => q.qitemId)).toContain(relayItem.qitemId);
+    expect(repo.listDeliveredHumanUpdates()).toEqual([]);
   });
 
   it("keeps digest timing but dispatches each human request/update completely with stable identity", async () => {
@@ -209,5 +227,121 @@ describe("complete human notifications", () => {
     const ids = first.map((call) => call[3].decisionId);
     await runDeliveryDigestFlush(input);
     expect((dispatch.mock.calls.slice(2) as unknown as typeof first).map((call) => call[3].decisionId)).toEqual(ids);
+  });
+
+  it("closes informational updates on relay acceptance while keeping decision asks and blocked work open", async () => {
+    const update = await repo.create({ ...request, humanIntent: "update", body: "FYI update via relay" });
+    const ask = await repo.create({
+      ...request,
+      humanIntent: "decision",
+      body: "Decision ask via relay",
+      humanQuestions: [
+        {
+          id: "q1",
+          question: "Approve phase 1?",
+          options: [
+            { id: "yes", label: "Yes" },
+            { id: "no", label: "No" },
+          ],
+        },
+        {
+          id: "q2",
+          question: "Approve phase 2?",
+          options: [
+            { id: "yes", label: "Yes" },
+            { id: "no", label: "No" },
+          ],
+        },
+      ],
+    });
+    expect(
+      repo.recordHumanAnswer({
+        qitemId: ask.qitemId,
+        actorSession: "human-founder@external",
+        questionId: "q1",
+        optionId: "yes",
+      }),
+    ).toMatchObject({ status: "recorded", complete: false });
+
+    const blockedWork = await repo.create({
+      ...request,
+      destinationSession: "worker@rig",
+      body: "Agent work parked on human decision",
+    });
+    repo.update({
+      qitemId: blockedWork.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: "human-founder@external",
+      summary: "Blocked on founder",
+      evidenceRef: "/private/retained-proof.md",
+      transitionNote: "parked on founder",
+    });
+
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: update.qitemId,
+      notificationKey: `${update.qitemId}:1`,
+      deliveryId: "d-update",
+      connectorRef: "relay-1",
+      level: "NOTICE",
+      kind: "human-update",
+    });
+    const transitionsAfterFirstUpdateReceipt = repo.listTransitions(update.qitemId).length;
+
+    // Idempotent duplicate receipt does not append another transition
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: update.qitemId,
+      notificationKey: `${update.qitemId}:1`,
+      deliveryId: "d-update",
+      connectorRef: "relay-1",
+      level: "NOTICE",
+      kind: "human-update",
+    });
+    expect(repo.listTransitions(update.qitemId)).toHaveLength(transitionsAfterFirstUpdateReceipt);
+
+    expect(repo.getById(update.qitemId)).toMatchObject({
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+    const delivered = repo.listDeliveredHumanUpdates({ limit: 10 });
+    const deliveredUpdate = delivered.find((item) => item.qitemId === update.qitemId);
+    expect(deliveredUpdate).toBeDefined();
+    expect(deliveredUpdate?.deliveryReceipt.startsWith("relay-owner-notification-accepted ")).toBe(true);
+    expect(deliveredUpdate?.deliveryOutcome).toBe("accepted");
+
+    // Caller humanIntent override cannot close a decision ask or alter recorded answers
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: ask.qitemId,
+      notificationKey: `${ask.qitemId}:2`,
+      deliveryId: "d-ask",
+      connectorRef: "relay-1",
+      replyRef: "ref-ask",
+      level: "ALERT",
+      kind: "human-required",
+      humanIntent: "update",
+    });
+
+    expect(repo.getById(ask.qitemId)).toMatchObject({
+      state: "pending",
+      humanAnswers: { q1: "yes" },
+    });
+
+    // Notice acceptance with caller humanIntent="update" on blocked agent work must NEVER close or unpark it
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: blockedWork.qitemId,
+      notificationKey: `${blockedWork.qitemId}:3`,
+      deliveryId: "d-blocked-notice",
+      connectorRef: "relay-1",
+      level: "NOTICE",
+      kind: "human-update",
+      humanIntent: "update",
+    });
+
+    expect(repo.getById(blockedWork.qitemId)).toMatchObject({
+      state: "blocked",
+      blockedOn: "human-founder@external",
+      humanAnswers: null,
+    });
+    expect(repo.hasRelayOwnerNotificationReceipt(blockedWork.qitemId, `${blockedWork.qitemId}:3`)).toBe(true);
   });
 });

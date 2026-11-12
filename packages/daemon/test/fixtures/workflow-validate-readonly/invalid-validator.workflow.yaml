@@ -1,0 +1,14 @@
+workflow:
+  id: wf-validate-ro-invalid-role
+  version: 1
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@rig
+  steps:
+    - id: produce
+      actor_role: ghost
+      allowed_exits:
+        - done

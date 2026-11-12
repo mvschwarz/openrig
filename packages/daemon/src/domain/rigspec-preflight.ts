@@ -11,6 +11,8 @@ import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError,
 import { shellQuote } from "../adapters/shell-quote.js";
 import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
+import { isLaunchWrapperRuntime, unsupportedCommunityRunnerLaunchWrapperMessage } from "./launch-wrapper.js";
+import { resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -146,7 +148,7 @@ export class RigSpecPreflight {
 
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { releaseScanCache } from "./skill-discovery.js";
@@ -380,6 +382,9 @@ async function preflightMembers(
         }
       }
 
+      // Agent spec advisories (non-blocking): the base spec's and each import's, one warning each.
+      warnings.push(...agentSpecAdvisoryWarnings(`${pod.id}.${member.id}`, resolveResult));
+
       // Resolve profile via resolveNodeConfig
       const ctx: ResolutionContext = {
         baseSpec: resolveResult.resolved,
@@ -433,6 +438,8 @@ async function preflightMembers(
         const app = loadCommunityHarnessPreset(member.runtime);
         if (!app.ok) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
+        } else if (member.launchWrapper?.length && app.preset.runner && !app.preset.launchWrapper) {
+          errors.push(`${pod.id}.${member.id}: ${unsupportedCommunityRunnerLaunchWrapperMessage(member.runtime)}`);
         }
       }
 
@@ -443,6 +450,13 @@ async function preflightMembers(
       const cwdError = getOpenRigInstallCwdError(configResult.config.cwd, preflightCtx.cwdOverride);
       if (cwdError) {
         errors.push(`${pod.id}.${member.id}: ${cwdError}`);
+      }
+      if (isLaunchWrapperRuntime(member.runtime) && member.launchWrapper && member.launchWrapper.length > 0) {
+        try {
+          resolveLaunchWrapperArgv(member.launchWrapper, process.env.PATH ?? "", process.cwd());
+        } catch (err) {
+          errors.push(`${pod.id}.${member.id}: ${(err as Error).message}`);
+        }
       }
     }
   }

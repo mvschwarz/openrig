@@ -66,7 +66,14 @@ not fill in; if so, follow the form.
     asked at RECORD stays on Steering and the Feed without a post. Running it again reuses each ask's
     one decision rather than making another, so an ask whose post is confirmed isn't posted again. As
     with any Slack post, one whose earlier attempt Slack couldn't confirm may post once more, marked as
-    a possible repeat. `--wait <seconds>` (default 10) is how long it waits for Slack receipts.
+    a possible repeat. An ask OpenRig can't fully check still posts, once per gateway run, through the
+    person's delivery rules, so a readable quiet window still holds it. That's an ask whose attempt
+    record can't be read, whose state can't be checked, or whose person's quiet hours can't be read.
+    The Slack post can show "Delivery may repeat after an earlier unconfirmed attempt.", "OpenRig
+    couldn't check that this ask is still open." and "OpenRig couldn't read your quiet hours." These
+    supplementary notes are omitted if they do not fit. The row and command also report when the
+    person's quiet-hours setting couldn't be read. An ask that is no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for
+    Slack receipts.
 
 ## What the app asks for
 
@@ -349,8 +356,7 @@ decisions, and posts its own replies.
 - **Changing forwarding entries is not a drain or cancellation:** relays already retained keep
   their original host and remain visible in `rig slack status`, even after the last entry is
   removed. An enabled connector retries them; disabling it pauses retry without deleting them.
-  Let relays finish before removing a forward entry. A zero dead-letter backlog alone does not
-  prove they have drained: it does not count relay HTTP requests still in flight.
+  Let relays finish before removing a forward entry; `rig slack status` shows local in-flight attempts separately from retained records, but zero does not prove global quiescence.
 - **Who answered:** every post starts `From <seat> on <machine>`, using the machine's host id (set
   it with `host.name`).
 - **The hub's own channels** are handled on the hub, as before. A channel can be relayed to one
@@ -378,11 +384,18 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
   wake-ladder alerts. These reach the person exactly as they would outside quiet. An ask below the posting level is only
   logged, as at any time.
 - **When quiet ends,** each held ask that never started posts once, on its own, with no mention. One that no longer applies
-  isn't posted, and its row says why: it closed, a newer notification replaced it, its recipient changed, or it's now below
-  the posting level.
+  isn't posted, and its row says why: it closed, a newer notification replaced it, its recipient changed, its person has no
+  connector any more (it stays on Steering and the Feed), or it's now below the posting level.
 - **A post that may already be in Slack**, confirmed or only partly sent, isn't held: it finishes as itself, in its own
   thread.
-- **If quiet hours can't be read,** nothing is posted to that person until they can.
+- **If quiet hours can't be read,** that isn't a quiet window. An ask that would post goes to its usual destination with
+  no mention, and the post says "OpenRig couldn't read your quiet hours."; the ask's row records it. The person's other
+  delivery settings still decide: an escalation, a digest, an ask below the posting level, and a quiet window that can be
+  read work as before. This covers ordinary posts and digests, and asks already held for quiet hours: while the quiet
+  hours can't be read, the next release check (within about a minute) posts each of them, with no mention and the same
+  line, even if the window may still be on. The line is supplementary: a post at Slack's text or block limit leaves it
+  out, and the ask's row and `rig slack post-open-asks` still say the quiet hours couldn't be read. A person reached
+  through a relay waits until their quiet hours can be read, as before, because that post can't carry the line.
 
 ## Reconnect recovery and status
 
@@ -406,9 +419,11 @@ budget window when exhausted. Slack's per-method `Retry-After` is retained acros
 Only an acknowledged edit gets a success receipt. `rig slack status` shows queued reconciliation
 and the last edit failure. Transient failures retry with increasing waits, capped at an hour,
 behind other queued work. Permanent Slack failures (such as missing scope, a deleted original,
-an archived channel or an uneditable message) remain unfinished and are retried only on the next
-connector start. They do not keep consuming edit capacity. These edit calls have their own
-budget, separate from missed-message scanning below.
+an archived channel or an uneditable message) remain unfinished. A deleted original is recorded
+on the row and never asked about again; a new post of the same ask is tried afresh. The others,
+which a scope, membership, a different bot token or an upgrade can fix, are retried on the next
+connector start. A message is uneditable when the configured token didn't post it. They do not keep consuming edit capacity. These edit calls have their own budget,
+separate from missed-message scanning below.
 
 The baseline already includes public-channel history access and `chat:write`. Private-channel
 reads may require `groups:history`, which the baseline does not grant; a refused read never
@@ -455,9 +470,18 @@ not covered by that margin. A corrupt or unreadable checkpoint leaves recovery u
 and preserves the existing file; live inbound continues.
 
 Each pass admits at most four history calls, 100 entries and 15 seconds of work, with a
-five-second request ceiling. Channels and threads take turns within that one budget, so with many
-tracked threads each thread is scanned every few passes; `rig slack status` shows how far behind
-the oldest waiting thread is. Work already started on a message, such as
+five-second request ceiling. Channels and threads take turns within that one budget. Each tracked
+thread is scanned once after each start and after each Socket Mode reconnect that followed a gap
+(not a refresh Slack overlaps with the old connection), which catches replies sent while no
+connection was up; replies while connected arrive live. A thread the pass at the connect itself
+reaches is scanned once more, since that pass stops five seconds short of the connect. Those scans go in need order: a thread
+leaving the seven-day window within six hours first, since once it leaves a missed reply is never
+recovered; then threads whose ask still waits on the person (its queue row is pending, in progress
+or blocked) before the rest, each newest first. The order comes from the saved checkpoints, so a
+restart starts with the newest open ask, not the oldest thread. After that a thread is scanned again
+only as a backstop, hourly while its ask waits on the person and daily otherwise. A machine the hub
+relays to can't see a gap in relayed events, so there a settled thread's backstop is three hours. `rig slack status` shows how far behind the oldest waiting thread is and how
+many threads are settled. Work already started on a message, such as
 an attachment transfer, is not cancelled by these limits or by a stop, and a new
 pass waits for it to finish. Rate limits retain Slack's Retry-After across restart, and hold back
 only the method Slack limited (channel history or thread replies).
@@ -466,8 +490,8 @@ When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
 failures appear as recovery limitations. A tracked thread Slack can't find stays incomplete in
-status, with no further call, until its thread mapping changes or the daemon restarts or rewires
-the connector; that isn't proof the thread was deleted. No additional scope is required to keep
+status and is asked again at most once a day, across restarts; that isn't proof the thread was
+deleted. No additional scope is required to keep
 live delivery working. Threads nobody tracks, older open threads, threads closed more than seven
 days ago and other channels remain outside this recovery scope; global chronological order is
 not promised. This change does not replay intervals already checkpointed before broadcast-reply

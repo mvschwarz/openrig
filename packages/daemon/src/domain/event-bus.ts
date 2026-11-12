@@ -28,12 +28,19 @@ interface ActiveEnvelope {
   registered: Set<PersistedEvent>;
 }
 
+/** The SQL condition leaving `omit` out, bound as parameters: empty when there's nothing to leave out. */
+function typesLeftOut(omit: readonly string[]): string {
+  return omit.length ? ` AND type NOT IN (${omit.map(() => "?").join(", ")})` : "";
+}
+
 export class EventBus {
   private subscribers = new Set<Subscriber>();
   private activeEnvelope: ActiveEnvelope | null = null;
   private drainingNotifyRows = false;
   private notifyingSubscribers = false;
   private notifyEnvelopeRuns = 0;
+  /** Transient events published during a fan-out, delivered at its end (see publishTransient). */
+  private pendingTransient: PersistedEvent[] = [];
   private notifyDrainStatus: NotifyDrainStatus;
   readonly db: Database.Database;
 
@@ -104,6 +111,29 @@ export class EventBus {
   }
 
   /**
+   * Run a writer whose failure the caller handles, in its own savepoint (a transaction outside one). If it throws
+   * anywhere, even after a nested write of its own was released, everything it wrote rolls back, the event tokens it
+   * persisted leave the active envelope too, and the caller's transaction can still commit its fallback. With no
+   * envelope and no transaction open (a direct answer from Slack), it runs in a notify envelope of its own, so its events
+   * reach subscribers only after it commits, and a throw delivers none of them.
+   */
+  discardOnThrow<T>(writer: () => T): T {
+    const envelope = this.activeEnvelope;
+    if (!envelope && !this.db.inTransaction) return this.withNotifyEnvelope(() => writer());
+    const persisted = envelope ? new Set(envelope.persisted) : null;
+    const registered = envelope ? new Set(envelope.registered) : null;
+    try {
+      return this.db.transaction(writer)();
+    } catch (err) {
+      if (envelope && persisted && registered) {
+        for (const token of [...envelope.persisted]) if (!persisted.has(token)) envelope.persisted.delete(token);
+        for (const token of [...envelope.registered]) if (!registered.has(token)) envelope.registered.delete(token);
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Run one caller-owned synchronous transaction under the W2b notification
    * envelope. Every token persisted through EventBus during the callback must
    * be registered before it returns. The exact object-identity sets are
@@ -139,8 +169,18 @@ export class EventBus {
       }
     });
 
-    const result = txn();
+    const queuedBefore = this.pendingTransient.length;
+    let result: T;
+    try {
+      result = txn();
+    } catch (err) {
+      // Drop only what this rolled-back transaction published; transients queued before it (by an enclosing fan-out)
+      // stay queued for that fan-out.
+      this.pendingTransient.length = queuedBefore;
+      throw err;
+    }
     this.drainNotifyRowsToQuiescence(this.notifyDrainStatus.watermark);
+    if (this.pendingTransient.length > 0 && !this.notifyingSubscribers) this.flushTransientOutsideFanout();
     return result;
   }
 
@@ -156,6 +196,74 @@ export class EventBus {
   assertNotifyEnvelopeExercised(): void {
     if (this.notifyEnvelopeRuns === 0) {
       throw new Error("zero notify envelope transactions examined");
+    }
+  }
+
+  /**
+   * Deliver an event to the in-memory subscribers WITHOUT storing it: no row, no seq of its own, no move of the notify
+   * watermark, never in a replay. For high-volume signals whose only readers are live (view.changed). The event carries
+   * `transient: true` and, as its `seq`, `causeSeq` (the stored event that caused it; the newest stored seq without one).
+   * Pass `causeSeq` whenever there is a cause (the view event bridge always does): without it, the newest stored seq may
+   * be a row not drained yet, and the transient then reaches subscribers before the stored event whose seq it carries.
+   *
+   * Every published transient goes to one pending queue, and the whole queue is emptied at the end of every fan-out
+   * (notifySubscribers), before the rows that subscribers stored meanwhile are drained. Published during a fan-out (a
+   * subscriber reacting to a stored event, the usual case), it is therefore delivered at the end of that fan-out:
+   * every subscriber sees the cause, then its transients, then the next stored event. Published outside a fan-out and
+   * outside a notify envelope, it is delivered before this call returns. Published inside a notify envelope's
+   * transaction, it is only queued: the end of the next fan-out empties the queue (when the envelope drains rows, the
+   * fan-out of its first row, so before the envelope's later rows), or, when the envelope drained none, the envelope
+   * delivers it after its drain; a rollback drops only what the transaction queued. No current caller publishes
+   * inside an envelope.
+   */
+  publishTransient(event: RigEvent, causeSeq?: number): PersistedEvent {
+    const transient = {
+      ...event,
+      seq: causeSeq ?? this.maxSeq(),
+      createdAt: new Date().toISOString().replace("T", " ").slice(0, 19),
+      transient: true,
+    } as PersistedEvent;
+    this.pendingTransient.push(transient);
+    if (!this.notifyingSubscribers && !this.activeEnvelope) this.flushTransientOutsideFanout();
+    return transient;
+  }
+
+  /** Deliver the queued transients outside any fan-out, holding the fan-out meanwhile, then drain the rows a
+   *  subscriber stored while receiving them (its own notify was held back by the re-entrancy guard). */
+  private flushTransientOutsideFanout(): void {
+    const nestedRowsStartAfter = this.maxSeq();
+    this.notifyingSubscribers = true;
+    try {
+      this.flushPendingTransient();
+    } finally {
+      this.notifyingSubscribers = false;
+    }
+    if (!this.drainingNotifyRows) this.drainNotifyRowsToQuiescence(nestedRowsStartAfter);
+  }
+
+  /**
+   * Fan out one transient event to in-memory subscribers, each subscriber's error isolated. Called by the bus while it
+   * holds the fan-out (a subscriber that stores an event meanwhile has it drained afterwards, in order).
+   */
+  notifyTransientSubscribers(event: PersistedEvent): void {
+    for (const subscriber of this.subscribers) {
+      try {
+        subscriber(event);
+      } catch (err) {
+        console.error("EventBus subscriber error:", err);
+      }
+    }
+  }
+
+  /** Deliver the queued transients, oldest first, including those published while delivering. Never swallows a
+   *  delivery failure; the queue is emptied either way. */
+  private flushPendingTransient(): void {
+    try {
+      while (this.pendingTransient.length > 0) {
+        this.notifyTransientSubscribers(this.pendingTransient.shift()!);
+      }
+    } finally {
+      this.pendingTransient.length = 0;
     }
   }
 
@@ -177,6 +285,9 @@ export class EventBus {
           console.error("EventBus subscriber error:", err);
         }
       }
+      // The transients this event caused, still inside the fan-out: a subscriber that stores an event while receiving
+      // one is drained below, after them, and is not dropped by the re-entrancy guard above.
+      this.flushPendingTransient();
     } finally {
       this.notifyingSubscribers = false;
     }
@@ -209,28 +320,30 @@ export class EventBus {
     return rows.map((row) => this.rowToPersistedEvent(row));
   }
 
-  private pageStatements?: { all: Database.Statement; rig: Database.Statement };
+  private pageStatements = new Map<string, Database.Statement>();
 
-  /** Up to `limit` events after `seq` and up to `upTo`, oldest first, of one rig when `rigId` is given: a replay read a
-   *  page at a time, which events stored meanwhile never lengthen. */
-  replayPage(seq: number, upTo: number, limit: number, rigId?: string): PersistedEvent[] {
-    this.pageStatements ??= {
-      all: this.db.prepare("SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT ?"),
-      rig: this.db.prepare("SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE rig_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?"),
-    };
-    const rows = (rigId ? this.pageStatements.rig.all(rigId, seq, upTo, limit) : this.pageStatements.all.all(seq, upTo, limit)) as EventRow[];
+  /** Up to `limit` events after `seq` and up to `upTo`, oldest first, of one rig when `rigId` is given, leaving out the
+   *  `omit` types: a replay read a page at a time, which events stored meanwhile never lengthen. */
+  replayPage(seq: number, upTo: number, limit: number, rigId?: string, omit: readonly string[] = []): PersistedEvent[] {
+    const key = `${rigId ? "rig" : "all"}:${omit.length}`;
+    let statement = this.pageStatements.get(key);
+    if (!statement) {
+      statement = this.db.prepare(`SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE ${rigId ? "rig_id = ? AND " : ""}`
+        + `seq > ? AND seq <= ?${typesLeftOut(omit)} ORDER BY seq LIMIT ?`);
+      this.pageStatements.set(key, statement);
+    }
+    const rows = statement.all(...(rigId ? [rigId] : []), seq, upTo, ...omit, limit) as EventRow[];
     return rows.map((row) => this.rowToPersistedEvent(row));
   }
 
-  /** The seq after which the newest `count` events start (of one rig when `rigId` is given): 0 when there are no more
-   *  than `count`, the newest seq for 0. A count past a safe integer is more than any log holds: never an OFFSET SQLite
-   *  cannot take. */
-  seqBeforeNewest(count: number, rigId?: string): number {
+  /** The seq after which the newest `count` events start (of one rig when `rigId` is given), not counting the `omit`
+   *  types: 0 when there are no more than `count`, the newest seq for 0. A count past a safe integer is more than any log
+   *  holds: never an OFFSET SQLite cannot take. */
+  seqBeforeNewest(count: number, rigId?: string, omit: readonly string[] = []): number {
     if (count === 0) return this.maxSeq();
     if (!Number.isSafeInteger(count)) return 0;
-    const row = (rigId
-      ? this.db.prepare("SELECT seq FROM events WHERE rig_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?").get(rigId, count)
-      : this.db.prepare("SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?").get(count)) as { seq: number } | undefined;
+    const row = this.db.prepare(`SELECT seq FROM events WHERE ${rigId ? "rig_id = ?" : "1"}${typesLeftOut(omit)} ORDER BY seq DESC LIMIT 1 OFFSET ?`)
+      .get(...(rigId ? [rigId] : []), ...omit, count) as { seq: number } | undefined;
     return row?.seq ?? 0;
   }
 
@@ -240,7 +353,9 @@ export class EventBus {
     let cursor = startAfter;
     try {
       for (;;) {
-        const rows = this.rowsAfter(cursor);
+        const rows = this.db.prepare(
+          "SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+        ).all(cursor, 500) as EventRow[];
         if (rows.length === 0) return;
         for (const row of rows) {
           let event: PersistedEvent;

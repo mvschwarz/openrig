@@ -1063,7 +1063,7 @@ describe("StartupOrchestrator", () => {
       opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
     const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
     expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false, resumingConversation: false });
     const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
     expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
@@ -1071,8 +1071,29 @@ describe("StartupOrchestrator", () => {
     expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
     vi.mocked(adapter.project).mockClear();
     expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
+  });
+
+  // A restore or `rig up --existing` resumes the seat's own conversation: with a saved repository choice it learns only
+  // whether its launch carries the guidance, so a supported Codex keeps it out of the tracked AGENTS.md. The saved file
+  // never changes, and a fork or a continuation isn't asked.
+  it("a resume with a saved repository choice asks only whether its launch carries the guidance, and keeps the saved file", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }) =>
+      opts?.resuming && !opts.resumingConversation ? { file: null } : { file: "/elsewhere/AGENTS.md", launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    const saved = { ...makeBinding(), guidanceFile: null } as NodeBinding;
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
+    for (const call of [vi.mocked(adapter.project).mock.calls[0]?.[1], vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1], vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]]) {
+      expect(call).toMatchObject({ guidanceFile: null, guidanceLaunchInstructions: true });
+    }
+    // A fork, or a seat whose saved choice is its own file, isn't asked.
+    guidanceFileFor.mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: { ...saved, guidanceFile: "/state/agent/AGENTS.md" } as NodeBinding }))).ok).toBe(true);
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, forkSource: { kind: "native_id", value: "parent-1" }, binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {
@@ -2909,5 +2930,94 @@ describe("StartupOrchestrator", () => {
     // Both files were delivered — overlay appended, not replacing role guidance
     expect(deliveredFiles).toContain("guidance/role.md");
     expect(deliveredFiles).toContain("openrig-start.md");
+  });
+
+  describe("launch_wrapper injection in StartupOrchestrator.startNode", () => {
+    function ensureLaunchWrapperColumn(): void {
+      const cols = db.pragma("table_info(nodes)") as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "launch_wrapper")) {
+        db.exec("ALTER TABLE nodes ADD COLUMN launch_wrapper TEXT;");
+      }
+    }
+
+    it.each(["pi", "codex", "claude-code"] as const)("reads current DB launch_wrapper for %s fresh and fork launches, overriding stale bindings after clear", async runtime => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("wrapper-rig");
+      const parentNode = rigRepo.addNode(rig.id, "parent", { runtime, launchWrapper: ["parent-wrapper", "--"] });
+      const targetNode = rigRepo.addNode(rig.id, "target", { runtime, launchWrapper: ["target-wrapper", "--seat", "target", "--"] });
+      const session = sessionRegistry.registerSession(targetNode.id, `r01-${runtime}`);
+      sessionRegistry.updateStatus(session.id, "running");
+
+      const observedBindings: NodeBinding[] = [];
+      const adapter = mockAdapter({
+        runtime,
+        launchHarness: vi.fn(async (binding, opts) => {
+          observedBindings.push(binding);
+          return {
+            ok: true,
+            resumeToken: opts.resumeToken ?? "new-token",
+            resumeType: runtime === "pi" ? "pi_session_file" : "codex_id",
+          };
+        }),
+      });
+      const orch = createOrchestrator();
+      const baseSeed = { rigId: rig.id, nodeId: targetNode.id, sessionId: session.id };
+      const baseBinding = { ...makeBinding(), nodeId: targetNode.id, tmuxSession: `r01-${runtime}` };
+
+      // 1. Fresh launch injects target node's DB launch_wrapper
+      const freshRes = await orch.startNode(makeInput(baseSeed, { adapter, binding: baseBinding }));
+      expect(freshRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 2. Fork launch reads target node's DB launch_wrapper, never parent node's
+      expect(parentNode.id).not.toBe(targetNode.id);
+      const forkRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: baseBinding,
+        forkSource: { kind: "native_id", value: "parent-session-id" },
+      }));
+      expect(forkRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 3. Clearing DB row overrides stale launchWrapper on input.binding
+      rigRepo.setNodeLaunchWrapper(targetNode.id, null);
+      const clearedRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: { ...baseBinding, launchWrapper: ["stale-wrapper", "--"] },
+      }));
+      expect(clearedRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toBeUndefined();
+      expect("launchWrapper" in (observedBindings.at(-1) ?? {})).toBe(false);
+    });
+
+    it.each(["pi", "codex", "claude-code"].flatMap(runtime => [
+      ["non-canonical empty array", "[]"],
+      ["corrupt JSON", "{not-json"],
+      ["relative executable", '["./relative-wrapper","--"]'],
+      ["newline in arg", '["valid-wrapper","bad\\narg"]'],
+    ].map(([label, badStored]) => [runtime, label, badStored] as const)))("fails closed at permission_selection before projection or launch when stored %s launch_wrapper is %s", async (runtime, _label, badStored) => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("bad-wrapper-rig");
+      const node = rigRepo.addNode(rig.id, "impl", { runtime });
+      const session = sessionRegistry.registerSession(node.id, "r01-bad");
+      sessionRegistry.updateStatus(session.id, "running");
+
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(badStored, node.id);
+
+      const adapter = mockAdapter({ runtime });
+      const orch = createOrchestrator();
+      const result = await orch.startNode(makeInput(
+        { rigId: rig.id, nodeId: node.id, sessionId: session.id },
+        { adapter, binding: { ...makeBinding(), nodeId: node.id, tmuxSession: "r01-bad" } },
+      ));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.startupStatus).toBe("failed");
+        expect(result.errors[0]).toMatch(/^Permission selection: Seat .* launch_wrapper/);
+      }
+      expect(adapter.project).not.toHaveBeenCalled();
+      expect(adapter.deliverStartup).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+    });
   });
 });

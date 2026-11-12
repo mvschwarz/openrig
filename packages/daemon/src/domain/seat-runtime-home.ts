@@ -5,12 +5,15 @@ import type Database from "better-sqlite3";
 import { parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 
 /** The native variable that selects each runtime's home, and with it the account that home is logged in to. */
-export const RUNTIME_HOME_VAR = { "claude-code": "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;
+export const RUNTIME_HOME_VAR = { "claude-code": "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME", pi: "PI_CODING_AGENT_DIR" } as const;
 export type HomeRuntime = keyof typeof RUNTIME_HOME_VAR;
 
 /** Provider environment excluded by an explicit isolated account-home selection. */
 export const ACCOUNT_HOME_PROVIDER_ENV = [...OUTRANKING_TOKEN_ENV, ...ANTHROPIC_PROFILE_ENV, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
   "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "OPENAI_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK"] as const;
+
+/** Additional provider keys excluded only when selecting a Pi account. */
+export const PI_ACCOUNT_HOME_PROVIDER_ENV = ["OPENROUTER_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY", "MINIMAX_API_KEY", "MISTRAL_API_KEY", "GEMINI_API_KEY"] as const;
 
 export interface SeatRuntimeHome {
   /** The seat's own home: an absolute path its member, else its rig, declares in `env:`. */
@@ -59,10 +62,10 @@ export function seatRuntimeHome(db: Database.Database, nodeId: string | null | u
 }
 
 /** The home a seat's launches and OpenRig's readers use: its own, else the daemon's explicit value. Undefined means the
- *  runtime's native default. */
+ *  runtime's native default, except Pi which keeps its managed seat login and never inherits the daemon home. */
 export function effectiveRuntimeHome(db: Database.Database, nodeId: string | null | undefined, runtime: HomeRuntime,
   daemonHome: string | undefined, ignoreAccountHome = false): string | undefined {
-  return seatRuntimeHome(db, nodeId, runtime, ignoreAccountHome).home ?? daemonHome;
+  return seatRuntimeHome(db, nodeId, runtime, ignoreAccountHome).home ?? (runtime === "pi" ? undefined : daemonHome);
 }
 
 /** Every distinct home seats declare for a runtime (absolute values only), for readers that find a record by an id that is
@@ -90,7 +93,7 @@ export function declaredRuntimeHomes(db: Database.Database, runtime: HomeRuntime
  *  ignored, so the launch leaves it out too and the runtime resolves as if the seat declared none. */
 export function withoutIgnoredRuntimeHomes(env: SeatEnv): SeatEnv {
   const out = { ...env };
-  for (const name of Object.values(RUNTIME_HOME_VAR)) {
+  for (const name of [RUNTIME_HOME_VAR.codex, RUNTIME_HOME_VAR["claude-code"]]) {
     const value = out[name];
     if (value !== undefined && !path.isAbsolute(value)) delete out[name];
   }

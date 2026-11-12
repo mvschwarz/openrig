@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { execFile, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 // The runner conformance check that ships in docs/reference, run against a test double that keeps the contract, and
 // against copies of it that each break one promise: the check must pass the first and catch every break.
@@ -15,7 +16,7 @@ type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?:
 type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
 async function check(args: string[], runnerFlags = "", nodeArgs: string[] = [], timeoutMs = 90_000): Promise<{ code: number; report: Report }> {
-  const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
+  const runner = `${shellQuote(process.execPath)} ${shellQuote(RUNNER)} --agent {agent}${runnerFlags}`;
   try {
     const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: timeoutMs });
     return { code: 0, report: JSON.parse(stdout) };
@@ -33,12 +34,25 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
     // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 2 });
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 2, advisory: 2 });
     expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
     expect(report.results.find((r) => r.id === "4c")).toMatchObject({ status: "advisory", met: true });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
+
+  it("checks native-child wrapping and environment scrubbing when the runner declares wrapper support", async () => {
+    const { code, report } = await check(["--cases", "10", "--launch-wrapper"]);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map(r => [r.id, r.status])).toEqual([["10", "pass"]]);
+    expect(code).toBe(0);
+  }, 60_000);
+
+  it.each(["ignore-wrapper", "leak-wrapper"])("rejects a runner that breaks wrapper conformance: %s", async mutation => {
+    const { code, report } = await check(["--cases", "10", "--launch-wrapper"], ` --break ${mutation}`);
+    expect(report.results).toMatchObject([{ id: "10", status: "fail" }]);
+    expect(code).toBe(1);
+  }, 60_000);
 
   // Section 9 marks the shutdown duty as proposed, and a runner may list what keeps running in its limits. So the check
   // reports it on its own, outside pass and fail and the exit status.
@@ -72,7 +86,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   }, 60_000);
 
   // Each break, the case that must catch it, and the check in that case that names it.
-  it.concurrent.each([
+  // Each mutation launches many tmux sessions; overlap can fail startup before reaching the intended break.
+  it.each([
     ["record-early", "1", "no launch record while session/new is still unanswered"],
     ["record-on-failure", "1b", "no conversation in a launch record"],
     ["split-lines", "2", "one pasted block is exactly one session/prompt"],

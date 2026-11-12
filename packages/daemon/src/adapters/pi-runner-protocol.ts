@@ -201,7 +201,7 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime | string; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
@@ -242,8 +242,12 @@ export function buildPiChildEnv(
 // ── Command construction ─────────────────────────────────────────────────────
 
 export interface PiRunnerLaunchOpts {
+  /** Explicit prepared account, never inferred from the shell environment. */
+  accountHome?: string;
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
+  /** Custom executable to spawn inside the runner (e.g. for Pi-fork community harnesses). */
+  command?: string;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -268,6 +272,8 @@ export interface PiRunnerLaunchOpts {
   forkRef?: string;
   /** Launch-attempt scope stamped into every runner sidecar write. */
   launchId: string;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] resolved to an absolute path by the daemon). */
+  launchWrapper?: readonly string[];
 }
 
 /** The shape `rig seat set-effort` accepts for an effort level. */
@@ -292,8 +298,13 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     "--launch-id", shellQuote(opts.launchId),
     ...(opts.runtime === "omp"
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : [`--${opts.trust}`]),
+      : (opts.runtime && opts.runtime !== "pi"
+        ? ["--runtime", shellQuote(opts.runtime), `--${opts.trust}`]
+        : [`--${opts.trust}`])),
   ];
+  if (opts.command) {
+    parts.push("--command", shellQuote(opts.command));
+  }
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
@@ -311,6 +322,12 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     parts.push("--usage-facts");
     if (opts.openRouterCharge) parts.push("--openrouter-charge");
   }
+  if (opts.accountHome && opts.runtime !== "omp") parts.push("--account-home", shellQuote(opts.accountHome));
+  if (opts.launchWrapper?.length && opts.runtime !== "omp") {
+    for (const arg of opts.launchWrapper) {
+      parts.push("--launch-wrapper-arg", shellQuote(arg));
+    }
+  }
   return parts.join(" ");
 }
 
@@ -326,7 +343,7 @@ export function buildPiChildArgs(opts: {
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
 }): string[] {
   const args = [
     "--mode", "rpc",

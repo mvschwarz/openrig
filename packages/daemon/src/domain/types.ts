@@ -38,6 +38,8 @@ export interface Node {
   advisor?: string | null;
   /** Claude MCP loading for this seat; null/absent preserves the provider default. */
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
+  launchWrapper?: string[] | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -121,6 +123,11 @@ export interface Session {
 
 // -- Event types --
 
+/** What a delivery-evidence record says was admitted: the outbox rows that exist, none, or unknown when they couldn't be read. */
+export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
+/** A send's own screen check as it reported it, or nulls when none ran. */
+export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -180,6 +187,24 @@ export type RigEvent =
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
+  /** What one send's own result says was admitted, written and seen on screen, for the seat and
+   *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
+   *  result shows reached the input; `terminalObserved` is today's screen check, verbatim; `inputBoundary` is unknown:
+   *  no harness here reports a prompt's origin, so no hook attributes one. Never acceptance, a claim or completion. It names no node, so a node's own event
+   *  reads never see it: the session and occupant generation name the seat. */
+  | { type: "transport.delivery_evidence"; sessionName: string; seatKind: "tmux" | "external_cli" | "unknown";
+      pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
+      admitted: DeliveryEvidenceAdmitted;
+      written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
+      terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+  /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
+   *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
+   *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
+   *  input boundary stays unknown. It names no node. */
+  | { type: "transport.prompt_observation"; sessionName: string; occupantGeneration: string | null; runtime: string | null;
+      source: "UserPromptSubmit"; nativeSessionId: string | null; nativePromptId: string | null; nativeTurnId: string | null;
+      promptSha256: string; promptBytes: number; observedAt: string | null }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
@@ -243,7 +268,7 @@ export type RigEvent =
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
         | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string }
@@ -305,6 +330,10 @@ export type RigEvent =
   // consumers on /api/views/:name/sse when ANY queue state mutation
   // changes a view result-set, not just create/handoff/claim/unclaim.
   | { type: "queue.updated"; qitemId: string; fromState: string; toState: string; closureReason: string | null; closureTarget: string | null; actorSession: string; summary: string | null }
+  // A person's clicked answer recorded on an ask with questions: `answered` of `questions` now have an answer, and
+  // `complete` says whether that's all of them. A partial set is a change to the ask, not its answer: the ask stays open
+  // until the set is complete and returned.
+  | { type: "queue.answer_recorded"; qitemId: string; actorSession: string; questionId: string; answered: number; questions: number; complete: boolean; summary: string | null }
   // Coordination primitive (PL-004 Phase B) — project (classifier) / view.
   // project.classified: emitted when a stream item is successfully projected.
   // classifier.lease_*: lifecycle of the daemon-enforced single-writer lease.
@@ -348,7 +377,7 @@ export type RigEvent =
   // because its source file disappeared from the scanned workflows folder.
   // Provides a traceable audit-log entry for OQ-4 ("Remove cache row when
   // file disappears + audit-log entry. Clean Library + traceable.").
-  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" }
+  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" | "source_missing" | "unregistered" }
   // PL-005 Phase A: Mission Control / Queue Observability events.
   // Action audit + cross-CLI-version drift detection.
   | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
@@ -361,6 +390,9 @@ export type RigEvent =
 export type PersistedEvent = RigEvent & {
   seq: number;
   createdAt: string;
+  /** Set on an event delivered only in memory (EventBus.publishTransient): never stored, never replayed. Its `seq` is
+   *  the seq of the stored event that caused it, not a seq of its own. */
+  transient?: true;
 };
 
 // -- Composite types --
@@ -385,6 +417,8 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
+  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  onRestore?: SkillOnRestore;
 }
 
 export interface NodeStartupSnapshot {
@@ -608,6 +642,8 @@ export interface AgentActivity {
   hookAgentId?: string | null;
   /** Recorded on a hook for a session launched for a community runner (its launch fact, not the hook's claim). */
   communityRunner?: boolean;
+  /** That runner is OpenRig's hosted Pi-protocol runner for a `protocol: pi-rpc` preset (its launch fact). */
+  piRpc?: boolean;
 
   state: AgentActivityState;
   reason: string;
@@ -619,6 +655,9 @@ export interface AgentActivity {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
   livenessSeconds?: number | null;
+  /** #99: when a Claude usage limit (StopFailure/rate_limit) says it resets, read by the relay from Claude's own
+   *  message. Only the instant is kept, never the message. */
+  resetsAt?: string | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
@@ -787,6 +826,8 @@ export interface NodeInventoryEntry {
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; absent = none. */
+  launchWrapper?: string[];
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
   permissionPolicy?: string | null;
   resolvedSpecName: string | null;
@@ -1046,7 +1087,10 @@ export interface LifecycleDefaults {
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
-export interface SkillResource { id: string; path: string; }
+/** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
+ *  copy (the default), or follow the source, taking today's bytes and today's selection. */
+export type SkillOnRestore = "keep_saved" | "follow_source";
+export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
 export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
@@ -1132,6 +1176,8 @@ export interface LegacyRigSpecNode {
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
+  launchWrapper?: string[];
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1257,6 +1303,8 @@ export interface RigSpecPodMember {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex member's own permission envelope; the seat's live record afterwards. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
+  launchWrapper?: string[];
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

@@ -320,6 +320,8 @@ describe("SuccessorSessionLauncher", () => {
 
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_launch_failed" });
     expect((res as { message: string }).message).toContain("codex binary not found");
+    // #2985: the launch itself failed, so no successor was sent into the pane.
+    expect(res).not.toHaveProperty("successorLaunched");
     // The preserved seat's session is NEVER killed on unwind (retiree state stays recoverable).
     expect(killSession).not.toHaveBeenCalled();
     // No discovery candidate was committed for a failed successor.
@@ -330,6 +332,8 @@ describe("SuccessorSessionLauncher", () => {
     checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_not_ready" });
+    // #2985: the harness launch was sent and only readiness failed: the successor may still come up in this pane.
+    expect(res).toMatchObject({ replacementStarted: true, successorLaunched: true, tmuxPane: "%7" });
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
@@ -463,6 +467,8 @@ describe("SuccessorSessionLauncher", () => {
     checkReady.mockRejectedValue(new Error("tmux socket closed"));
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_readiness_failed" });
+    // #2985: the launch was sent before the probe threw, so the successor may still be in the pane.
+    expect(res).toMatchObject({ replacementStarted: true, successorLaunched: true, tmuxPane: "%7" });
     expect((res as { message: string }).message).toContain("tmux socket closed");
     expect(checkReady).toHaveBeenCalledTimes(1);
     expect(killSession).not.toHaveBeenCalled();
@@ -473,6 +479,7 @@ describe("SuccessorSessionLauncher", () => {
     checkReady.mockResolvedValue({ ready: false, code: "trust_gate", reason: "trust prompt" });
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_attention_required" });
+    expect(res).toMatchObject({ replacementStarted: true, successorLaunched: true, tmuxPane: "%7" });
     expect(checkReady).toHaveBeenCalledTimes(1);
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
@@ -630,6 +637,35 @@ describe("SuccessorSessionLauncher", () => {
       expect(res.ok).toBe(true);
       const [, command] = respawnPane.mock.calls[0]!;
       expect(command).toBe("/bin/sh");
+    });
+  });
+
+  describe("launch_wrapper forwarding", () => {
+    it.each(["codex", "claude-code"])("forwards %s node.launchWrapper on binding for createSuccessor and stageSuccessor", async runtime => {
+      const created = await launcher().createSuccessor({
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--succ"] },
+        departingSessionName: "dev-impl@rig",
+      });
+      expect(created.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--succ"],
+      });
+
+      launchHarness.mockClear();
+      const staged = await launcher().stageSuccessor({
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--staged"] },
+        canonicalSession: "dev-impl@rig",
+        stagingSession: "openrig-switch-1",
+        occupantGeneration: "gen-1",
+        onPaneCreated: () => {},
+        staged: { prepare: async () => [] },
+      });
+      expect(staged.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--staged"],
+      });
     });
   });
 });

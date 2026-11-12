@@ -2,7 +2,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
-import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
@@ -18,6 +18,8 @@ import { isTypedGateBlocker } from "./queue-repository.js";
 //   "INDETERMINATE" (with a named basis), never idle/dead/done/false.
 // - THE LADDER IS THE SCHEMA: done-ness is five named rungs
 //   (locked/built/reviewed/folded/adopted); a single "done" boolean does not exist.
+//   What a team recorded about a slice (its `status:` word, a `merged:<pr>` report)
+//   is shown beside the rungs as labelled testimony and never sets one.
 // - PROJECTION, NOT AUTHORITY: every cell carries the row/artifact/command that
 //   makes it one command from source.
 //
@@ -38,9 +40,15 @@ import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { parseFrontmatter } from "./slices/slice-indexer.js";
+import { parseFrontmatter, sliceStatusBucket } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
+
+/** #2661 (c): the dep's answer for a seat, or null when absent or failing (a read never breaks the view). */
+export function compactionOwedSinceOf(deps: { compactionOwedSince?: (sessionName: string) => string | null }, session: string | null | undefined): string | null {
+  if (!session) return null;
+  try { return deps.compactionOwedSince?.(session) ?? null; } catch { return null; }
+}
 import { resolveWorkNodeDirs } from "./current-work.js";
 import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
@@ -68,8 +76,11 @@ export interface ExecutionViewDeps {
       needsInput: { count: number; reason: string | null };
       decidedBy: string | null;
       changedAt: string;
+      backgroundWork?: { observedAt: string } | null;
     } | null;
   };
+  /** #2661 (c): since when (ISO) a seat's managed post-compaction restore is owed, or null (the pickup's grace). */
+  compactionOwedSince?: (sessionName: string) => string | null;
   now?: () => Date;
   buildInfo?: BuildInfo;
   /** Injectable for tests; synchronous fakes are also accepted. */
@@ -643,46 +654,78 @@ interface ReviewArtifactFact {
   artifactType: string | null;
 }
 
-/** Read review drops co-located with this slice, plus the legacy global registry
- * when no catalogued project was selected. Both sources keep the same slice and
- * built-commit join; unbound global artifacts cannot establish project review. */
-function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[], proofDir: string, includeGlobal: boolean): ReviewArtifactFact[] | Indeterminate {
-  const out: ReviewArtifactFact[] = [];
-  let readable = false;
-  const scanDirectory = (dir: string, local: boolean) => {
-    let files: string[];
-    try {
-      files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
-      readable = true;
-    } catch { return; }
-    for (const f of files) {
-      let raw: string;
-      try { raw = fs.readFileSync(path.join(dir, f), "utf8"); }
-      catch { continue; }
-      const fm = parseFrontmatter(raw);
-      const sliceVal = typeof fm["slice"] === "string" ? fm["slice"] : null;
-      if (!sliceVal || !sliceDirOrId.includes(sliceVal)) continue;
-      const artifactType = typeof fm["artifact_type"] === "string" ? fm["artifact_type"] : null;
-      // A local QA/guard drop does not become a review leg merely by living in proof/.
-      if (local && !["rev1-r1", "rev1-r2", "adjudication"].includes(artifactType ?? "")) continue;
-      out.push({ path: path.join(dir, f),
-        verdict: typeof fm["verdict"] === "string" ? fm["verdict"] : INDETERMINATE,
-        candidateSha: typeof fm["candidate_sha"] === "string" ? fm["candidate_sha"] : null,
-        artifactType });
-    }
-  };
-  scanDirectory(proofDir, true);
-  if (includeGlobal) {
-    let rigs: string[] = [];
-    try { rigs = fs.readdirSync(rigsRoot); readable = true; } catch { /* Local proof remains usable. */ }
-    for (const rig of rigs) {
-      const stateDir = path.join(rigsRoot, rig, "state");
-      let entries: string[];
-      try { entries = fs.readdirSync(stateDir); } catch { continue; }
-      for (const entry of entries.filter((e) => e.startsWith("review"))) scanDirectory(path.join(stateDir, entry), false);
+/** One parsed review drop, before it is joined to a slice. */
+interface ReviewDrop extends ReviewArtifactFact { slice: string | null }
+
+/** The legacy global registry, listed and parsed once per execution-view read. */
+interface ReviewRegistry { readable: boolean; drops: ReviewDrop[] }
+
+/** Files read, or time spent, before the registry read yields to the event loop. Both are soft. */
+const REGISTRY_SLICE_FILES = 32;
+const REGISTRY_SLICE_MS = 8;
+
+function readReviewDrop(file: string): ReviewDrop | null {
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); }
+  catch { return null; }
+  const fm = parseFrontmatter(raw);
+  return { path: file,
+    verdict: typeof fm["verdict"] === "string" ? fm["verdict"] : INDETERMINATE,
+    candidateSha: typeof fm["candidate_sha"] === "string" ? fm["candidate_sha"] : null,
+    artifactType: typeof fm["artifact_type"] === "string" ? fm["artifact_type"] : null,
+    slice: typeof fm["slice"] === "string" ? fm["slice"] : null };
+}
+
+function listReviewFiles(dir: string): string[] | null {
+  try { return fs.readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => path.join(dir, f)); }
+  catch { return null; }
+}
+
+/** Every rig's `state/review*` drops, in the order a per-slice scan met them. Every slice of one read joins this same
+ *  list, so the registry is read once per read, not once per slice; it yields between files so other work runs. */
+async function readReviewRegistry(rigsRoot: string): Promise<ReviewRegistry> {
+  let rigs: string[];
+  try { rigs = fs.readdirSync(rigsRoot); } catch { return { readable: false, drops: [] }; }
+  const drops: ReviewDrop[] = [];
+  let read = 0;
+  let sliceStart = performance.now();
+  for (const rig of rigs) {
+    const stateDir = path.join(rigsRoot, rig, "state");
+    let entries: string[];
+    try { entries = fs.readdirSync(stateDir); } catch { continue; }
+    for (const entry of entries.filter((e) => e.startsWith("review"))) {
+      for (const file of listReviewFiles(path.join(stateDir, entry)) ?? []) {
+        if (read >= REGISTRY_SLICE_FILES || performance.now() - sliceStart >= REGISTRY_SLICE_MS) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          read = 0;
+          sliceStart = performance.now();
+        }
+        read++;
+        const drop = readReviewDrop(file);
+        if (drop) drops.push(drop);
+      }
     }
   }
-  return readable ? out : INDETERMINATE;
+  return { readable: true, drops };
+}
+
+/** Read review drops co-located with this slice, plus the legacy global registry
+ * when no catalogued project was selected (`registry` is null for a project-scoped read). Both sources keep the same slice and
+ * built-commit join; unbound global artifacts cannot establish project review. */
+function scanReviewArtifacts(registry: ReviewRegistry | null, sliceDirOrId: string[], proofDir: string): ReviewArtifactFact[] | Indeterminate {
+  const out: ReviewArtifactFact[] = [];
+  const join = (drops: ReviewDrop[], local: boolean) => {
+    for (const { slice, ...fact } of drops) {
+      if (!slice || !sliceDirOrId.includes(slice)) continue;
+      // A local QA/guard drop does not become a review leg merely by living in proof/.
+      if (local && !["rev1-r1", "rev1-r2", "adjudication"].includes(fact.artifactType ?? "")) continue;
+      out.push(fact);
+    }
+  };
+  const localFiles = listReviewFiles(proofDir);
+  join((localFiles ?? []).map(readReviewDrop).filter((drop): drop is ReviewDrop => drop !== null), true);
+  if (registry) join(registry.drops, false);
+  return localFiles !== null || registry?.readable ? out : INDETERMINATE;
 }
 
 type Rung =
@@ -858,6 +901,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       // A blocked row's pickup is parked before it reads its history, so that history is not read at all.
       lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
       activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count, needsInputReason: arbitrated?.needsInput.reason,
+      backgroundWork: arbitrated?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
       claimedAt: r.claimed_at,
       lastHeartbeat: r.last_heartbeat,
       postClaimMotionCount: Number(r.post_claim_motion ?? 0),
@@ -938,11 +982,21 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // ---- Q4 ladder (also feeds Q2's deps-folded) ----
   const rigsRoot = (deps.rigsRoot ?? resolveLegacyTopologyRigsRoot)();
   const commitCache = new Map<string, string | null>();
+  // Read on first use and shared by every slice of this read; the next read lists the registry again.
+  let registryRead: Promise<ReviewRegistry> | undefined;
   const ladderOf = async (facts: SliceFacts): Promise<Record<string, unknown>> => {
     const fm = facts.frontmatter;
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
       ? { value: true, basis: `frontmatter approved-spec-at=${fm["approved-spec-at"]}` }
-      : { value: false, basis: "no approved-spec-at in frontmatter" };
+      : { value: false, basis: "no approved-spec-at in frontmatter; plan lock is a Part B step (rig scope slice approve --scope spec), so the default flow reads false here whatever the recorded status" };
+    // The team's own word for the slice: the node file's status:, as the scopes views read it (never PROGRESS.md),
+    // bucketed by the table `GET /api/slices` uses. Testimony: it never sets a rung or next-up.
+    const rawStatus = fm["status"];
+    const statusWord = typeof rawStatus === "string" && rawStatus.trim() ? rawStatus.trim() : null;
+    const nodeFile = path.basename(facts.specPath);
+    const recorded_status = statusWord
+      ? { word: statusWord, bucket: sliceStatusBucket(statusWord), basis: `${nodeFile} frontmatter status:, recorded by the team, not verified; it never sets a rung` }
+      : { word: null, bucket: null, basis: `no status: in ${nodeFile} frontmatter` };
     // built: latest candidate:<sha> tag on a row bound to this slice.
     const candRows = rows
       .filter((r) => sliceOfRow(r) === facts.id || sliceOfRow(r) === facts.dir)
@@ -979,7 +1033,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     // tags, full shas, annotated fields) join by RESOLVED commit; malformed,
     // ambiguous, or non-resolving inputs are excluded with the reason carried —
     // they neither clear nor poison.
-    const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])], path.join(path.dirname(facts.specPath), "proof"), !opts?.project);
+    const registry = opts?.project ? null : await (registryRead ??= readReviewRegistry(rigsRoot));
+    const artifacts = scanReviewArtifacts(registry, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])], path.join(path.dirname(facts.specPath), "proof"));
     let reviewed: Record<string, unknown>;
     if (artifacts === INDETERMINATE) {
       reviewed = { value: INDETERMINATE, basis: opts?.project ? `slice-local review-artifact root unreadable (${path.dirname(facts.specPath)}/proof)` : `review-artifact roots unreadable (slice proof/ and ${rigsRoot})`, legs: [] };
@@ -1065,7 +1120,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         : buildInfo.commit
           ? await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
           : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
-    return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
+    return { slice_id: facts.id, dir: facts.dir, recorded_status, locked, built, reviewed, folded, adopted };
   };
 
   const ladderCache = new Map<string, Record<string, unknown>>();
@@ -1079,6 +1134,20 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // so mutable refs (HEAD/main) are observed again on the next request.
   const q4: Record<string, unknown>[] = [];
   for (const s of slices) q4.push(await ladderFor(s));
+  // #2761: say once what the mission records for the ladder, so missing records never read as missing work.
+  const withCandidate = q4.filter((l) => (l["built"] as { candidate_sha?: unknown }).candidate_sha !== INDETERMINATE).length;
+  const withMergeReport = q4.filter((l) => !!(l["folded"] as { merge_report?: unknown }).merge_report).length;
+  const q4Records = {
+    slices: q4.length,
+    with_candidate: withCandidate,
+    with_merge_report: withMergeReport,
+    repo_context: repoCtx ?? INDETERMINATE,
+    basis: q4.length === 0
+      ? "no slices in this mission"
+      : withCandidate === 0
+        ? "no slice in this mission has a candidate:<sha> row, so built, reviewed and merged read INDETERMINATE: not recorded, which is not the same as not done. The default flow (sdlc-conventions.md Part A) doesn't record them; each slice's recorded_status is the team's own word"
+        : `${withCandidate} of ${q4.length} slices have a candidate:<sha> row; ${repoCtx ? `merged is tested in repo context ${repoCtx}` : "no row carries worktree_path= (EC-3), so merged can't be tested"}`,
+  };
 
   // ---- Q2 sequencing ----
   const q2 = [];
@@ -1193,6 +1262,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         // As in Q1: a blocked row is parked before its history is read; its armed wake is still looked up below.
         lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
         activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
+        backgroundWork: activity?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
         state: r.state,
         claimedAt: r.claimed_at,
         lastHeartbeat: r.last_heartbeat,
@@ -1291,7 +1361,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity; unscoped rows excluded" } : {}),
     view: "execution",
     readiness,
-    project_readiness: missionsRoot ? readProjectReadiness(missionsRoot, readPolicy) : null,
+    project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,
     // Authored guidance is carried verbatim in meaning, never parsed into edges or acceptance.
     planning_guidance: arrangement?.state === "valid" ? arrangement.guidance : [],
     mission,
@@ -1336,6 +1406,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     q2_sequencing: q2,
     q3_care: q3,
     q4_ladder: q4,
+    q4_records: q4Records,
     q5_park: q5,
     q6_parallelism: q6,
   };

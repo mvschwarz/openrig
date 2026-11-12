@@ -30,6 +30,8 @@ export interface RenderInstance {
   hopCount?: number;
   /** OPR.0.4.6.FAC1: the instance's bound rig (API-carried; null/absent = unbound, renders nothing). */
   boundRig?: string | null;
+  /** #2730: what the run is for, as its `--root-objective` gave it; null for an instance from before it was kept. */
+  rootObjective?: string | null;
   /**
    * WF-1 FR-2's API-carried classification (present since the
    * completion fixback at 384e60f1). RAIL 1 (arch ruling): the CLI
@@ -181,6 +183,7 @@ export function renderTraceTree(
   const lines: string[] = [];
   const name = instance.workflowName ? `${instance.workflowName}${instance.workflowVersion ? ` v${instance.workflowVersion}` : ""}` : "";
   lines.push(`${statusGlyph(instance.status)} ${instance.instanceId}  ${name}  status=${instance.status}${instance.hopCount !== undefined ? `  hops=${instance.hopCount}` : ""}${instance.boundRig ? `  rig=${instance.boundRig}` : ""}`);
+  if (instance.rootObjective) lines.push(`  objective: ${instance.rootObjective}`);
   if (instance.createdAt) {
     lines.push(`  created ${instance.createdAt}${instance.createdBySession ? ` by ${instance.createdBySession}` : ""}  age ${humanAge(instance.createdAt, nowIso)}`);
   }
@@ -254,6 +257,8 @@ function isStuck(instance: RenderInstance): boolean {
 export interface AttentionRow {
   instanceId: string;
   workflowName: string;
+  /** #2730: what the run is for; null when the instance doesn't record it. */
+  rootObjective: string | null;
   /** All classes for this instance — exactly-once row, combined. */
   classes: string[];
   reasons: string[];
@@ -320,6 +325,7 @@ export function composeAttentionRollup(instances: RenderInstance[]): AttentionRo
     attention.push({
       instanceId: inst.instanceId,
       workflowName: inst.workflowName ?? "",
+      rootObjective: inst.rootObjective ?? null,
       classes,
       reasons,
       affordance,
@@ -345,6 +351,7 @@ export function renderStatus(rollup: AttentionRollup): string[] {
     lines.push(
       `${fitCell("▲", 2)}${fitCell(row.instanceId, 30)}${fitCell(row.workflowName, 20)}${fitCell(row.classes.join("+"), 16)}${row.reasons.join("; ")}`,
     );
+    if (row.rootObjective) lines.push(`  ${fitCell("", 2)}  objective: ${row.rootObjective}`);
     lines.push(`  ${fitCell("", 2)}└ ${row.affordance}`);
   }
   return lines;
@@ -374,6 +381,7 @@ export function renderInstanceShow(
   const lines: string[] = [];
   lines.push(`${statusGlyph(instance.status)} ${instance.instanceId}  status=${instance.status}`);
   if (instance.workflowName) lines.push(`  workflow: ${instance.workflowName}${instance.workflowVersion ? ` v${instance.workflowVersion}` : ""}`);
+  if (instance.rootObjective) lines.push(`  objective: ${instance.rootObjective}`);
   // OPR.0.4.6.FAC1: the bound rig renders when present (unbound rows unchanged).
   if (instance.boundRig) lines.push(`  rig:      ${instance.boundRig}`);
   if (instance.createdAt) lines.push(`  created:  ${instance.createdAt}${instance.createdBySession ? ` by ${instance.createdBySession}` : ""}  (age ${humanAge(instance.createdAt, nowIso)})`);

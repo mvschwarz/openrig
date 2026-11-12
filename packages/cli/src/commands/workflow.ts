@@ -172,7 +172,7 @@ export function workflowCommand(depsOverride?: WorkflowDeps): Command {
 
   cmd
     .command("validate <specPath>")
-    .description("Validate a workflow spec file (returns structured ok/error report)")
+    .description("Validate a workflow spec file in memory, without registering it (returns structured ok/error report)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -637,19 +637,86 @@ exception routes only. Existing obligations keep their owners and evidence.
     });
 
   cmd
-    .command("trace <instanceId>")
-    .description("Show one workflow instance + its append-only step trail (audit-only verdict)")
+    .command("unregister [spec]")
+    .description("Take a workflow spec out of the registry: <name> or <name>@<version>, or --prune-missing for versions whose file is gone")
+    .option("--prune-missing", "Remove every registered version whose source file no longer exists (scoped to [spec] when given)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
+A version that unfinished work (an active, waiting or resumable failed instance) is pinned to
+is never removed; with --prune-missing it is retained, readable by that work but hidden from
+the library, and a later prune removes it. A file still inside the workflows folder or the
+built-in starters is kept, because the next scan registers it again: move or delete the file.
+A file whose presence can't be checked (an access error, not "no such file") is kept and named.
+An empty version (name@) is a usage error.
+
+Examples:
+  $ rig workflow unregister qa-probe
+  $ rig workflow unregister pedido-do-board@1
+  $ rig workflow unregister --prune-missing
+  $ rig workflow unregister --prune-missing --json | jq '.removed[] | "\\(.name)@\\(.version) \\(.sourcePath)"'
+`)
+    .action(async (spec: string | undefined, opts: { pruneMissing?: boolean; json?: boolean }) => {
+      if (!spec && !opts.pruneMissing) {
+        console.error("Name a workflow spec (<name> or <name>@<version>) or pass --prune-missing.");
+        process.exitCode = 1;
+        return;
+      }
+      let name: string | undefined;
+      let version: string | undefined;
+      if (spec) {
+        const at = spec.lastIndexOf("@");
+        name = at > 0 ? spec.slice(0, at) : spec;
+        version = at > 0 ? spec.slice(at + 1) : undefined;
+      }
+      if (version !== undefined && version.trim() === "") {
+        console.error(`The version after @ is empty in "${spec}": use <name>@<version>, or <name> for every version.`);
+        process.exitCode = 1;
+        return;
+      }
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          removed?: Array<{ name: string; version: string; sourcePath: string }>;
+          kept?: Array<{ name: string; version: string; sourcePath: string; reason: "pinned" | "scanned" | "unchecked" }>;
+        }>("/api/workflow/specs/unregister", { name, version, pruneMissing: opts.pruneMissing === true });
+        if (opts.json || res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const removed = res.data.removed ?? [];
+        const kept = res.data.kept ?? [];
+        if (removed.length === 0 && kept.length === 0) console.log("Nothing to remove.");
+        for (const row of removed) console.log(`removed  ${row.name}@${row.version}  ${row.sourcePath}`);
+        for (const row of kept) {
+          const why = row.reason === "pinned"
+            ? "unfinished work is pinned to this version"
+            : row.reason === "unchecked"
+              ? "its file couldn't be checked (not ENOENT), so it isn't treated as missing"
+              : "the file is still in a scanned folder; move or delete it";
+          console.log(`kept     ${row.name}@${row.version}  ${row.sourcePath}  (${why})`);
+        }
+      });
+    });
+
+  cmd
+    .command("trace <instanceId>")
+    .description("Show one workflow instance + its append-only step trail (audit-only verdict)")
+    .option("--full", "Return the complete step trail instead of the 50 most recent closures (trailCompleteness: complete)")
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+The default trail holds the 50 most recent closures; trailCompleteness says
+"recent" when older ones were left out. --full asks the daemon for all of them.
+
 Examples:
   $ rig workflow trace WF01ABC
   $ rig workflow trace WF01ABC --json | jq '.trail[] | {step, actor, exit}'
+  $ rig workflow trace WF01ABC --full --json | jq '.trailCompleteness, (.trail | length)'
 `)
-    .action(async (instanceId: string, opts: { json?: boolean }) => {
+    .action(async (instanceId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<{ instance?: unknown; reconciliation?: unknown; trail?: unknown[]; frontier?: unknown[]; failures?: unknown[]; boundaryObligations?: unknown[]; unknowns?: string[] }>(
-          `/api/workflow/${encodeURIComponent(instanceId)}/trace`,
+        const res = await client.get<{ instance?: unknown; reconciliation?: unknown; trail?: unknown[]; trailCompleteness?: string; frontier?: unknown[]; failures?: unknown[]; boundaryObligations?: unknown[]; unknowns?: string[] }>(
+          `/api/workflow/${encodeURIComponent(instanceId)}/trace${opts.full ? "?full=true" : ""}`,
         );
         // WF3 FR-2: human mode renders the per-step tree (mini-req 2's
         // one-screen bar); --json byte-identical (BR-2).
@@ -667,6 +734,9 @@ Examples:
         } as Parameters<typeof renderTraceTree>[0];
         const trail = (res.data.trail ?? []) as Parameters<typeof renderTraceTree>[1];
         for (const line of renderTraceTree(instance, trail)) console.log(line);
+        if (res.data.trailCompleteness === "recent") {
+          console.log(`  (the ${trail.length} most recent closures; older ones left out - all of them: rig workflow trace ${instanceId} --full)`);
+        }
       });
     });
 

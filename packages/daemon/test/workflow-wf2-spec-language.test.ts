@@ -13,6 +13,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
@@ -188,7 +189,7 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
     migrate(db, [
       outboxEntriesSchema,
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,

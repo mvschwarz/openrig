@@ -440,6 +440,28 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     db.close();
   });
 
+  it("keeps a released seat's recorded process through the prune, and still prunes a stopped one", async () => {
+    // rig unclaim leaves the latest row detached with origin claimed, and the process running. A fresh launch reads
+    // that process's record before reopening a tmux server, so the 5 s sweep mustn't drop it.
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", status: "detached" });
+    db.prepare("UPDATE sessions SET origin = 'claimed' WHERE node_id = 'n1'").run();
+    seedSeat(db, { nodeId: "n2", sessionName: "s2@rig", pane: "%2", status: "exited" });
+    const store = new SeatIdentityStore(db);
+    for (const [nodeId, sessionName, pid] of [["n1", "s1@rig", 5151], ["n2", "s2@rig", 6161]] as const) {
+      store.upsert({ nodeId, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%1", observedPid: pid, observedPanePid: pid - 1, observedCommand: "claude", matchedLayer: 1 },
+        sessionName, observedAt: NOW().toISOString() });
+    }
+    const rec = new SeatIdentityReconciler({ db, tmux: makeTmux({ sessions: [] }), now: NOW });
+
+    await rec.reconcileAll();
+
+    expect(store.getProcessEvidence("n1")).toEqual({ sessionName: "s1@rig", pid: 5151, panePid: 5150, observedAt: NOW().toISOString() });
+    expect(store.getForNode("n2")).toBeNull();
+    db.close();
+  });
+
   it("liveness is NOT derived from heartbeats — a dead pane stays non-green regardless of any heartbeat", async () => {
     // The reconciler never reads queue/classifier/hook state; a seat whose pane
     // is gone yields pane_missing even if (hypothetically) work/heartbeats exist.

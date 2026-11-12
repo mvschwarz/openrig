@@ -1,3 +1,17 @@
+import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
+import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
+import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
+import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_instance_root_objective.js";
+import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
+import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
+import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
+import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
+import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
+import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
+import { networkReceiptsSchema } from "./migrations/161_network_receipts.js";
+import { sessionAddressReadIndexesSchema } from "./migrations/162_session_address_read_indexes.js";
+import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
+import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -5,6 +19,7 @@ import { nodeStartupGuidanceFileSchema } from "./migrations/146_node_startup_gui
 import { managedBlockWritesSchema } from "./migrations/147_managed_block_writes.js";
 import { outboxDispatchedIndexSchema } from "./migrations/148_outbox_dispatched_index.js";
 import { streamIntakeCursorSchema } from "./migrations/149_stream_intake_cursor.js";
+import { nodeLaunchWrapperSchema } from "./migrations/150_node_launch_wrapper.js";
 import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
@@ -301,4 +316,19 @@ export const ALL_MIGRATIONS: Migration[] = [
   managedBlockWritesSchema,
   outboxDispatchedIndexSchema,
   streamIntakeCursorSchema,
+  nodeLaunchWrapperSchema,
+  piAccountSwitchesSchema,
+  workflowInstanceSpecSchema,
+  eventsRetentionMarksSchema,
+  workflowInstanceRootObjectiveSchema,
+  queueErasureSchema,
+  queueErasureLinkIndexesSchema,
+  queueErasureBatchesSchema,
+  queueInboxCheckinsSchema,
+  queueItemsHandedOffFromIndexSchema,
+  networkBindingsSchema,
+  networkReceiptsSchema,
+  sessionAddressReadIndexesSchema,
+  networkInstallationsSchema,
+  queueItemsReplyToIndexSchema,
 ];

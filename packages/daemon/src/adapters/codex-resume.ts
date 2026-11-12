@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
-import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, buildCodexResumeCore, codexNonLoginShellArg } from "../domain/native-resume-probe.js";
 import { verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
@@ -38,6 +38,8 @@ interface CodexResumeOptions {
   detectDaemonSupport?: CodexDaemonSupportDetector;
   /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
   readNetworkDefault?: CodexNetworkDefaultReader;
+  /** launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off. */
+  codexLoginShell?: () => boolean;
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
    *  seat's own home when it has one. */
   ensureManagedConfig?: (codexHome?: string) => Promise<void>;
@@ -82,9 +84,14 @@ export class CodexResumeAdapter {
     // The seat's own permission envelope, read live; it replaces the posture decision, as on the pod-aware path.
     codexPermissions?: CodexMemberPermissions,
     beforeNativeDispatch?: () => boolean,
+    launchWrapper?: readonly string[],
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
+    }
+    const wrapped = launchWrapper?.length ? launchWrapper : undefined;
+    if (wrapped && !this.options.seatLaunchEnvironment) {
+      return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
     const codexHome = seatCodexHome ?? this.options.codexHome;
 
@@ -138,14 +145,14 @@ export class CodexResumeAdapter {
       workspaceArg.trim() || undefined,
       resolvedPosture,
       model,
-      `${postureArg}${networkArg}`,
+      `${postureArg}${networkArg}${this.options.codexLoginShell?.() ? "" : codexNonLoginShellArg}`,
       daemonSupport?.kind === "supported",
       effort,
     ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}) })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Codex resume preparation; no native command was sent." };
     const textResult = beforeNativeDispatch

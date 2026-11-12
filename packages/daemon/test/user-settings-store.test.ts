@@ -25,7 +25,7 @@ const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md"
 
 function clearEnv(): () => void {
   const keys = [
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_TERMINAL_FIXED_GEOMETRY", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -99,9 +99,18 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
   });
 
+  it("web fixed geometry is off by default and explicitly selectable through file or environment", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: false, source: "default" });
+    store.set("terminal.fixed_geometry", "true");
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: true, source: "file" });
+    process.env.OPENRIG_TERMINAL_FIXED_GEOMETRY = "false";
+    expect(store.resolveOne("terminal.fixed_geometry")).toMatchObject({ value: false, source: "env" });
+  });
+
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
-      "daemon.port", "daemon.host", "daemon.db_conflict",
+      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -123,6 +132,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
       "launch.non_interruptive",
+      "launch.codex_login_shell",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
@@ -169,11 +179,13 @@ describe("SettingsStore (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.tmux_server",
       "terminal.history_limit",
+      "terminal.fixed_geometry",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.
       "output.whoami_peers",
+      "output.rebuild_recaps",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
       // The providers chosen at rig setup --providers, which kernel boot honours.
@@ -183,15 +195,21 @@ describe("SettingsStore (User Settings v0)", () => {
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
       "transport.local_user_guard",
+      "transport.draft_delivery",
       // Slice 22 (OPR.0.7.2.22) — typed decisions, off by default.
       "decisions.enabled",
       "decisions.consumers",
       "decisions.template_dir",
+      "acp.to",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
       "retention.watchdog_days",
       "retention.usage_samples_days", // 51-08 A2 (plan-lock rev-1): the PM-ruled 14d telemetry window
+      "retention.events_days", // the history-only event types of events
+      "retention.closed_content_days", // closed-work erasure: content
+      "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
@@ -264,6 +282,43 @@ describe("SettingsStore (User Settings v0)", () => {
     }
   });
 
+  it.each([
+    ["retention.closed_content_days", "closedContentDays", "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS"],
+    ["retention.closed_metadata_days", "closedMetadataDays", "OPENRIG_RETENTION_CLOSED_METADATA_DAYS"],
+  ] as const)("%s defaults to 0 (keep), resolves file then env, and refuses negative or non-integer values", (key, fileKey, envKey) => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne(key)).toMatchObject({ value: 0, source: "default" });
+    store.set(key, "30");
+    expect(store.resolveOne(key)).toMatchObject({ value: 30, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention[fileKey]).toBe(30);
+    process.env[envKey] = "7";
+    try {
+      expect(store.resolveOne(key)).toMatchObject({ value: 7, source: "env" });
+    } finally {
+      delete process.env[envKey];
+    }
+    for (const raw of ["-1", "2.5", "30days"]) expect(() => store.set(key, raw)).toThrow(new RegExp(key.replace(".", "\\.")));
+  });
+
+  it("retention.events_days defaults to 0 (keep), resolves file then env, accepts 0 and refuses negative or non-integer values", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "default" });
+    store.set("retention.events_days", "3");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 3, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
+    process.env.OPENRIG_RETENTION_EVENTS_DAYS = "5";
+    try {
+      expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 5, source: "env" });
+    } finally {
+      delete process.env.OPENRIG_RETENTION_EVENTS_DAYS;
+    }
+    store.set("retention.events_days", "0");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "file" });
+    for (const raw of ["-3", "2.5", "3days"]) {
+      expect(() => store.set("retention.events_days", raw)).toThrow(/retention\.events_days/);
+    }
+  });
+
   it("defaults output.whoami_peers to 8 and accepts only an integer >= 1 (slice 15 P5)", () => {
     const store = new SettingsStore(configPath);
     expect(store.resolveOne("output.whoami_peers")).toMatchObject({ value: 8, source: "default" });
@@ -271,6 +326,19 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("output.whoami_peers")).toMatchObject({ value: 12, source: "file" });
     for (const raw of ["0", "-3", "2.5", "8junk", "many"]) {
       expect(() => store.set("output.whoami_peers", raw)).toThrow(/output\.whoami_peers/);
+    }
+  });
+
+  it("configures the optional rebuild recap preview without limiting retained history", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 3, source: "default" });
+    store.set("output.rebuild_recaps", "0");
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 0, source: "file" });
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "2");
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 2, source: "env" });
+    vi.unstubAllEnvs();
+    for (const raw of ["-1", "2.5", "2recaps", "9007199254740992"]) {
+      expect(() => store.set("output.rebuild_recaps", raw)).toThrow(/output\.rebuild_recaps/);
     }
   });
 

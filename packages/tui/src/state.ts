@@ -26,7 +26,7 @@ import { SECTION_REGISTRY, SYSTEM_SECTIONS } from "./sections.js";
 import { scopesExplorerRows } from "./scopes/scopes-model.js";
 import { GRAPH_STYLE_NAMES } from "./topology/render-graph.js";
 import { rowStatusGlyph } from "./topology/glyphs.js";
-import { hostLabel } from "./topology/host-label.js";
+import { hostLabel, hostReachabilitySuffix } from "./topology/host-label.js";
 
 export function defaultSections(): SectionDef[] {
   return SECTION_REGISTRY.map((section) => ({ ...section }));
@@ -184,7 +184,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return { ...next, lastError: action.message };
     case "config-category": {
       if (!CONFIG_CATEGORIES.some((c) => c.id === action.category)) return { ...next, lastError: "Unknown CONFIG category" };
-      return syncSelection(resetContent({ ...next, section: "config", drill: [], viewTab: "table", configCategory: action.category, configKey: null, filter: "", healthOpen: null }), snap);
+      return syncSelection(resetContent({ ...next, section: "config", drill: [], viewTab: "table", configCategory: action.category, configKey: null, configFocus: action.focus ?? null, filter: "", healthOpen: null }), snap);
     }
     case "config-setting":
       return resetContent({ ...next, section: "config", drill: [], viewTab: "table", configKey: action.key, healthOpen: null });
@@ -201,6 +201,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       next.healthOpen = null;
       next.configCategory = null;
       next.configKey = null;
+      next.configFocus = null;
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
       return syncSelection(
@@ -367,8 +368,8 @@ function location(s: ViewState): string {
 }
 
 function navigationFrame(s: ViewState): NavigationFrame {
-  const { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey } = s;
-  return { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey };
+  const { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus } = s;
+  return { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus };
 }
 
 function applyDrill(state: ViewState, next: ViewState, action: Extract<Action, { type: "drill" }>, snap: FleetSnapshot): ViewState {
@@ -671,7 +672,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       const expanded = new Set(state.expanded);
       for (const host of snap.hosts) {
         rows.push({
-          label: `  ▾ ${hostLabel(host)}${host.reachable ? "" : " (unreachable)"}`,
+          label: `  ▾ ${hostLabel(host)}${hostReachabilitySuffix(host)}`,
           action: { type: "drill", resource: "host", name: host.name },
           key: `host:${host.name}`,
         });

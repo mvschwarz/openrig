@@ -30,7 +30,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
 
   const terminalToken = opts?.bearerToken ?? null;
-  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken }));
+  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken, diagnosticContext: "terminal" }));
 
   const send = async (c: Context) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
@@ -186,7 +186,6 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         delivery_in_progress: 409,
         delivery_indeterminate: 409,
         override_input_present: 409,
-        override_input_unknown: 409,
         draft_input_busy: 409,
         draft_input_unknown: 409,
         draft_input_changed: 409,

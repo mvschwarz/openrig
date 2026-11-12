@@ -121,7 +121,7 @@ export function composeView(
   const localTmux = `${ctx.localTmux ? shellQuote(ctx.localTmux) : "tmux"}${localServer ? ` ${localServer}` : ""}`;
 
   for (const m of members) {
-    const attachFlag = m.readOnly ? "-r " : "-f ignore-size ";
+    const attachFlag = m.readOnly ? "-r " : "";
 
     if (m.host !== null) {
       // Remote member: classify by the registry entry's transport.
@@ -187,6 +187,7 @@ export function composeView(
         paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         recoveryCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
         readOnly: m.readOnly,
+        host: m.host,
       });
       continue;
     }

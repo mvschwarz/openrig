@@ -12,14 +12,21 @@ const normalize = (text: string): string => text.replace(/\s+/g, "");
 // so a mode-bar line is also known by its leading marker.
 const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
-// The suffix is a circle glyph and an effort level, e.g. `◐ medium` or `● high`; arbitrary text is not one.
-const PASTE_HINT = /^paste again to expand(?:\s{2,}[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort)?$/;
+// Only a known effort hint or installed-update notice may share the paste-hint row.
+const PASTE_HINT = /^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))))?$/;
 export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
   return (bar === "" && line !== "") || /(?:shift\+tab to cycle|\? for shortcuts)/i.test(bar) || MODE_BAR_START.test(bar)
     || PASTE_HINT.test(bar);
 };
+// A row between Claude's closing rule and its footer that a person's statusLine does not print, or that a menu, picker
+// or dialog could be drawing (#2798): a blank row (a fullscreen renderer reserves one for a statusLine that prints
+// nothing), `❯`, `›` or `»` anywhere in the row (so a statusLine that uses one as a separator reads as not one), a row
+// that starts with a numbered choice (`1. `, `2) `) with or without a border or gutter before it, a box corner, or a row
+// framed by side borders. Anything else there is read by position as a statusLine row, including the indicator Claude
+// draws at the right of the first one (`● high · /effort`, which sits on the footer row when no statusLine prints).
+export const CLAUDE_NOT_STATUS_LINE_ROW = /^\s*$|[❯›»╭╮╰╯┌┐└┘]|^[\s│┃⎿]*\d+[.)]\s|^\s*[│┃].*[│┃]\s*$/;
 // This placeholder occupies an empty composer while submitted text is queued.
 export const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
@@ -33,10 +40,17 @@ export function composerRegion(pane: string | null, runtime: string | null = nul
     // Prompt text can itself contain rules (the startup challenge does), and a rule in the prompt can be followed by a
     // line that looks like a mode bar. The composer's closing rule is the last rule on the screen: only the footer
     // lines come after it. An unrecognized footer under it leaves the region unverified rather than falling back to
-    // a rule inside the prompt.
+    // a rule inside the prompt. On Claude, a person's statusLine draws its rows between that rule and the footer; they
+    // are read by position, as claudeSeatIdle reads them, and none may be a row a statusLine does not print (#2798).
     for (let i = lines.length - 1; i > inputAt; i--) {
       if (!/^[─═-]{10,}$/.test(lines[i]!.trim())) continue;
-      if (isComposerFooter((lines.slice(i + 1).find((next) => next.trim()) ?? "").trim())) end = i;
+      const below = lines.slice(i + 1);
+      const footer = below.findIndex((row) => row.trim() !== "" && isComposerFooter(row.trim()));
+      const gap = footer < 0 ? [] : below.slice(0, footer);
+      // Only blank rows above the footer: as before. With statusLine rows there, every row of the gap, blank ones too,
+      // must pass the rule (a blank row between them is what a fullscreen renderer or a menu could leave).
+      if (footer >= 0 && (gap.every((row) => !row.trim())
+        || (runtime === "claude-code" && !gap.some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row))))) end = i;
       break;
     }
   }

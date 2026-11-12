@@ -8,7 +8,7 @@ applies-when: |
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
 last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-10-08
+last-updated: 2026-11-09
 ---
 
 # Test layers: what to run before you push, and what each layer proves
@@ -315,7 +315,10 @@ The most useful next pieces of harness work, roughly in dependency order:
    `claude-executable-foreground.test.ts` holds that recorder open in private Bash, zsh, dash and ksh panes
    to check parent PID, process-group ownership, tmux's pane command and parent-shell
    restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
-   native readiness, history or answers.
+   native readiness, history or answers. The provider-shaped half now exists for the delivery suite: local
+   stand-in Messages and Responses servers in `packages/test-system/delivery/stand-ins/` that a real Claude Code or
+   Codex can talk to with no account, logging each request's exact bytes. Nothing drives a real program through them
+   yet.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 
@@ -448,9 +451,12 @@ not as current status.
 
 ## Help wanted: command families without a behavioural scenario
 
-> This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `e8f0ab34`, `packages/cli/src/index.ts` registers 87 top-level
-> commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
+> This list may be stale. The tables below cover the families that have a proposed first
+> check: at `b29a70f14`, the Commander tree returned by `createProgram()`
+> (`packages/cli/src/index.ts`) registers 92 top-level families, 87 of which have a row
+> below (7 of them marked partial); `roster` and `telemetry` now have rows too. These 5
+> families still have no row: `acp`, `community-harness`, `edge`, `environment`, `exec`.
+> Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`
 > check only proves the command is discoverable. Existing unit tests are not counted here.
@@ -522,6 +528,8 @@ Before you start, two honest constraints:
 | reads | `status` | Two rigs in different states. Status matches their exact identities and transitions. |
 | reads | `ps` | Two rigs with overlapping seat names. Rig and node filters return exactly the intended members. |
 | reads | `usage` | Deterministic stub telemetry. top and series respect seat and time bounds. Missing data isn't reported as zero. |
+| reads | `roster` | A scratch workspace with two rigs and a rosters folder: `rig roster find` returns the expected specialists, and an empty folder reports none without an error. |
+| reads | `telemetry` | Deterministic retained-metadata fixtures: one bounded page returns exactly the recorded rows, and a history gap is named rather than skipped silently. |
 | reads | `health` | Known fresh, stale and cleared findings. Scope, explain and diagnosis values match the fixture. |
 | continuity | `snapshot` | Snapshot two seats. Rig, membership and snapshot bytes survive a daemon restart. |
 | continuity | `restore` | Restore after a daemon and tmux reset. Seat identity and nonce answers survive. |

@@ -1,3 +1,4 @@
+import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./claude-continuation-launch.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -7,11 +8,12 @@ import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-i
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
-import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
+import { dirname, isAbsolute, join } from "node:path";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
@@ -32,8 +34,8 @@ import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
+import { absentGuidanceBlocks, applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
 import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -80,7 +82,8 @@ export type ReconcileNodeResult =
         | "process_lineage_mismatch"
         | "fg_process_not_runtime"
         | "resume_token_not_used"
-        | "pane_not_usable";
+        | "pane_not_usable"
+        | "proof_superseded";
       detail: string;
       probe?: NativeResumeProbeEvidence;
       attemptId?: number;
@@ -100,6 +103,7 @@ import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -223,7 +227,7 @@ export interface NarrowLaunchResult {
   };
 }
 
-interface RestoreOrchestratorDeps {
+export interface RestoreOrchestratorDeps {
   db: Database.Database;
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
@@ -250,6 +254,9 @@ interface RestoreOrchestratorDeps {
   }>;
   /** Return whether a persisted fresh launch can be attempted without discarding the current pane. */
   freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
+  /** A seat's skill selection as its spec says today (from its launch recipe), so skills that follow their source
+   *  (`on_restore: follow_source`) come back with today's bytes and today's selection. Absent: saved selection only. */
+  seatSkillSelection?: (rigId: string, nodeId: string) => Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }>;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
   /** Read-only current authored selection for Claude activity hooks (the
@@ -262,6 +269,9 @@ interface RestoreOrchestratorDeps {
 export class RestoreOrchestrator {
   readonly db: Database.Database;
   private activeRestores = new Set<string>();
+  /** #3039: per node, the guidance blocks its resumed launch carried, which the check after the launch doesn't look for in
+   *  the repository file. */
+  private launchGuidanceBlocks = new Map<string, Set<string>>();
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
@@ -278,6 +288,7 @@ export class RestoreOrchestrator {
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
+  private seatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
@@ -322,6 +333,7 @@ export class RestoreOrchestrator {
     this.listProcesses = deps.listProcesses;
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
+    this.seatSkillSelection = deps.seatSkillSelection;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
@@ -437,7 +449,7 @@ export class RestoreOrchestrator {
       for (const blocker of validation.blockers) {
         if (!SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId) continue;
         // A seat joined with `rig attach` as an external CLI isn't launched, so its startup files don't hold it.
-        if (this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType === "external_cli") continue;
+        if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(blocker.nodeId)?.attachmentType)) === "external") continue;
         const reason = `${blocker.message} ${blocker.remediation}`;
         heldForStartup.set(blocker.nodeId, heldForStartup.has(blocker.nodeId) ? `${heldForStartup.get(blocker.nodeId)} ${reason}` : reason);
       }
@@ -621,12 +633,14 @@ export class RestoreOrchestrator {
    *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. `keepEffort`, with
    *  `keepPane`: launch with that effort (the running process's own, kept by a provider switch) in place of the seat's
    *  saved one, unless the seat has an explicit choice when the launch reads it; it isn't saved as the seat's choice.
+   *  `keepClaudeLaunch`, for a token-only provider switch, captures current arguments/environment before stopping.
    *  `onLaunchEffort`, with `keepPane`, hears the effort the launch selected and why, whether or not one was kept. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     snapshotId?: string;
     keepPane?: boolean;
+    keepClaudeLaunch?: boolean;
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
@@ -640,6 +654,7 @@ export class RestoreOrchestrator {
     holdReason?: string;
     snapshotId?: string;
     keepPane?: boolean;
+    keepClaudeLaunch?: boolean;
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
@@ -697,12 +712,12 @@ export class RestoreOrchestrator {
       }
       if (opts.keepPane) {
         launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
-          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry,
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, keepClaudeLaunch: opts.keepClaudeLaunch, resumePeriodicCarry,
             ...(opts.keepEffort ? { keepEffort: opts.keepEffort } : {}), ...(opts.onLaunchEffort ? { onLaunchEffort: opts.onLaunchEffort } : {}) }, subsetWarnings));
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
-      const external = this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli";
+      const external = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external";
       const sessions = external ? [] : this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -817,7 +832,7 @@ export class RestoreOrchestrator {
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
       // A seat joined with `rig attach` as an external CLI has no tmux session to check, and restore leaves it attached.
-      if (this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external") continue;
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
@@ -893,7 +908,7 @@ export class RestoreOrchestrator {
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
       // An external CLI's claim has no tmux session; restore leaves it attached (restoreNodeWithCompensation).
-      if (this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") continue;
+      if (seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") continue;
       try {
         // Replacement must preserve unknown transport state before any reconciliation write.
         if (selectedIds) {
@@ -1080,7 +1095,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1099,7 +1114,7 @@ export class RestoreOrchestrator {
 
     // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
     const external = this.sessionRegistry.getBindingForNode(nodeId);
-    if (external?.attachmentType === "external_cli") {
+    if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId) };
     }
 
@@ -1236,7 +1251,9 @@ export class RestoreOrchestrator {
       return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
     }
     // Read before takeover ends the process. An unavailable witness keeps normal launch resolution unchanged.
-    const claudeExecutable = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane) : undefined;
+    const continuation = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane, opts?.keepClaudeLaunch, this.sessionRegistry.getBindingForNode(node.id)?.tmuxSession ?? undefined) : undefined;
+    const claudeExecutable = continuation?.executable, claudeLaunch = continuation?.launch;
+    if (opts?.keepClaudeLaunch && keptPane && node.runtime === "claude-code") warnings?.push(...(claudeLaunch?.warnings ?? ["Running Claude launch capture unavailable; using ordinary launch settings."]));
 
     // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
     // delivery guard resolves the pane through it.
@@ -1278,9 +1295,14 @@ export class RestoreOrchestrator {
         warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
       }
     } else {
-      // No durably-bound session name (old data / null binding or empty
-      // tmux_session) → observable derived-name fallback (PRD back-compat AC).
-      warnings?.push(`FR-5: no durably-bound session name for ${node.logicalId}; falling back to a derived session name.`);
+      // A supported stop deliberately removes the binding after recording an intentional exit.
+      // Keep the warning for unclean/legacy state and incomplete binding rows.
+      const latest = this.db.prepare(
+        "SELECT status, intentionally_stopped FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get(nodeId) as { status: string; intentionally_stopped: number } | undefined;
+      if (priorState.binding || latest?.status !== "exited" || latest.intentionally_stopped !== 1) {
+        warnings?.push(`FR-5: no durably-bound session name for ${node.logicalId}; falling back to a derived session name.`);
+      }
     }
 
     // Derived-name FALLBACK — only when no usable pin. The existing derive,
@@ -1320,14 +1342,31 @@ export class RestoreOrchestrator {
     // OPR.0.7.0.13: a Claude seat's team skills come back before its session starts, because the session's plugin list
     // is set then. `rig down` removed the unchanged files OpenRig wrote but kept the records, so they are put back from
     // their recorded sources (only where those still match) and the seat's plugin is written again. An edited or
-    // unprovable file is named, never substituted. Nothing is replayed into a resumed conversation; this is the seat's
-    // storage on disk.
+    // unprovable file is named, never substituted. Following skills additionally refresh their current selection;
+    // Codex receives that selection after resume readiness, without replaying other saved startup content.
     // The rehydration's decisions are carried into the fresh relaunch's replay below, so no later writer undoes them.
     let seatRehydration: SeatSkillRehydration | undefined;
+    let restoredSkillCatalog: string | undefined;
     if (node.runtime === "claude-code" || node.runtime === "codex") {
       const seatSkills = seatSkillPaths({ rigId, logicalId: node.logicalId, runtime: node.runtime });
       if (hasSeatSkillRecords(seatSkills)) {
+        let followsSources = hasFollowingSeatSkills(seatSkills);
         if (node.runtime === "claude-code") warnings?.push(...ensureSeatSkillPlugin(seatSkills).map((w) => `Restore: ${w}`));
+        // Skills whose resource says `on_restore: follow_source` take today's bytes and today's selection, before the
+        // saved ones are put back; an edit is still kept. When today's selection can't be read, the saved one stands.
+        if (this.seatSkillSelection) {
+          const today = await this.seatSkillSelection(rigId, nodeId).catch((error: unknown) => ({ ok: false as const, reason: (error as Error).message }));
+          if (today.ok) {
+            followsSources ||= today.selection.following.length > 0;
+            const followed = followSeatSkills(seatSkills, today.selection);
+            const changes = [["refreshed", followed.refreshed], ["added", followed.added], ["removed", followed.removed]] as const;
+            const summary = changes.filter(([, ids]) => ids.length > 0).map(([what, ids]) => `${what} ${ids.join(", ")}`);
+            if (summary.length > 0) warnings?.push(`Restore: ${node.logicalId} follows its skills' sources (on_restore: follow_source): ${summary.join("; ")}`);
+            warnings?.push(...followed.warnings);
+          } else if (hasFollowingSeatSkills(seatSkills)) {
+            warnings?.push(`Restore: ${node.logicalId} keeps its saved skills: today's selection can't be read (${today.reason})`);
+          }
+        }
         const rehydrated = rehydrateSeatSkills(seatSkills);
         seatRehydration = rehydrated;
         if (rehydrated.restored.length > 0) warnings?.push(`Restore: put back ${rehydrated.restored.length} skill file(s) for ${node.logicalId} from their recorded sources`);
@@ -1345,7 +1384,8 @@ export class RestoreOrchestrator {
         if (node.runtime === "codex") {
           try {
             const catalog = writeSeatSkillCatalog(seatSkills);
-            if (catalog.kept) warnings?.push(`Restore: ${seatCatalogKeptNote(catalog)}`);
+            if (catalog.kept) warnings?.push(`Restore: ${seatCatalogKeptNote(catalog)}; the updated catalog was not sent`);
+            else if (followsSources) restoredSkillCatalog = catalog.path;
           } catch (error) {
             warnings?.push(`Restore: seat_catalog_not_written: ${seatSkills.catalogPath}: ${(error as Error).message}`);
           }
@@ -1385,14 +1425,14 @@ export class RestoreOrchestrator {
     }
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
 
-  private async claudeContinuationExecutable(pane: string): Promise<string | undefined> {
+  private async claudeContinuationExecutable(pane: string, keepLaunch = false, session?: string): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
     const native = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
     if (!native) return undefined;
@@ -1402,7 +1442,14 @@ export class RestoreOrchestrator {
     try {
       if (!executable || !isAbsolute(executable)) return undefined;
       accessSync(executable, constants.X_OK);
-      return statSync(executable).isFile() ? realpathSync(executable) : undefined;
+      if (!statSync(executable).isFile()) return undefined;
+      const selected = realpathSync(executable);
+      if (!keepLaunch) return { executable: selected };
+      const launch = await captureClaudeContinuation(native.process.pid, selected, session ? env => this.tmuxAdapter.differingSessionEnv(session, env) : undefined);
+      const current = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+      if (!current || current.process.pid !== native.process.pid || current.process.startedAt !== native.process.startedAt) return undefined;
+      return { executable: selected, launch };
     } catch { return undefined; }
   }
 
@@ -1504,6 +1551,17 @@ export class RestoreOrchestrator {
     try { this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(file, nodeId); } catch { /* no column */ }
   }
 
+  /** #3039: whether this resume's launch carries the seat's guidance, by the adapter's own fresh-launch rule (a Codex
+   *  conversation resume). Anything unanswered or unreadable keeps the repository path. */
+  private async resumeLaunchCarriesGuidance(adapter: import("./runtime-adapter.js").RuntimeAdapter | undefined,
+    binding: import("./runtime-adapter.js").NodeBinding): Promise<boolean> {
+    if (!adapter?.guidanceFileFor) return false;
+    try {
+      const answer = adapter.guidanceFileFor(binding, { resuming: true, resumingConversation: true });
+      return (answer instanceof Promise ? await answer : answer).launchInstructions === true;
+    } catch { return false; }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1511,6 +1569,8 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     warnings?: string[],
   ): RestoreNodeResult {
+    const launchCarried = this.launchGuidanceBlocks.get(node.id);
+    this.launchGuidanceBlocks.delete(node.id);
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
@@ -1537,7 +1597,9 @@ export class RestoreOrchestrator {
     const noted = notes.length > 0 ? { ...result, guidanceNotes: notes } : result;
     let missing: string[];
     try {
-      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
+      // #3039: a block the resumed launch carried isn't looked for in the repository file; one it couldn't carry still is.
+      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })
+        .filter((id) => !launchCarried?.has(id));
     } catch (err) {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
@@ -1637,7 +1699,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1645,6 +1707,7 @@ export class RestoreOrchestrator {
     /** Collected out-of-band (this method has many return points): activity-hook
      *  restore gaps the caller attaches to the node result as `restoreGaps`. */
     activityHookGaps?: string[],
+    restoredSkillCatalog?: string,
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
@@ -1784,6 +1847,18 @@ export class RestoreOrchestrator {
       }
     }
 
+    // #3039: a pod-aware resume whose saved choice is the repository file asks the adapter, as startup does, whether its
+    // launch carries the guidance (a Codex conversation resume, the fresh launch's rule). Then the saved guidance goes with
+    // the resume as developer instructions (the containment below lets only it through), and the repository AGENTS.md
+    // gets only #2456's refresh of blocks already there. A legacy resume starts its harness before startNode, so it can't.
+    let launchCarriesGuidance = false;
+    this.launchGuidanceBlocks.delete(node.id);
+    if (resumeRequested && resumeToken && launchResult && isPodAware && startupCtx && !startupCtx.guidanceFile) {
+      launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, session?.communityHarness),
+        { ...launchResult.binding, guidanceFile: null, cwd: launchCwd, codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined });
+    }
+    let launchGuidance: import("./runtime-adapter.js").ResolvedStartupFile[] | null = null;
+
     // A narrow exception to the replay containment below: before either native resume path
     // starts the harness, put back only the MISSING managed guidance blocks from the saved
     // startup selection. Ordinary `rig down` strips them; without this the resumed
@@ -1817,6 +1892,23 @@ export class RestoreOrchestrator {
       if (linked && guidance) {
         warnings?.push(`Restore guidance: ${node.logicalId}: ${linked} is now a link, so nothing was put back in ${guidance.targetPath}, which other sessions could read.`);
         guidance = null;
+      }
+      if (guidance && guidance.items.length > 0 && launchCarriesGuidance && startupCtx) {
+        // #3039: a block the file doesn't hold at all goes with the launch instead of being put back, when its source reads
+        // now (the writer's own read). Everything else stays with the writer below, as before: a block already there
+        // (refreshed or kept and named), a partial one, a source that's gone or can't be read (gaps), and the seat-skills
+        // line (the person's yes was for that file). So the launch's own placement writes nothing here: each block it gets is
+        // absent from the file. Each goes as an optional startup file, so a read that fails at the launch skips it rather
+        // than stopping the resume, and the check after the launch looks only past the blocks the launch reports it sent.
+        let absent = new Set<string>();
+        try { absent = new Set(absentGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })); }
+        catch { /* unreadable: the writer below reports it */ }
+        const reads = (path: string): boolean => { try { readFileSync(path, "utf-8"); return true; } catch { return false; } };
+        const carried = guidance.items.filter((item) => absent.has(item.blockId) && !item.unresolved
+          && item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && reads(item.sourcePath));
+        launchGuidance = carried.map((item) => ({ path: item.blockId, absolutePath: item.sourcePath, ownerRoot: dirname(item.sourcePath),
+          deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
+        guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
@@ -1857,7 +1949,7 @@ export class RestoreOrchestrator {
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
-          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
+          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeLaunch);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -1947,7 +2039,8 @@ export class RestoreOrchestrator {
     // launches are new histories and keep their replay.
     // One narrow exception: MISSING managed guidance blocks are put back before the harness
     // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
-    // nothing else is replayed.
+    // nothing else is replayed. #3039: when the resumed launch carries the guidance instead, only that
+    // saved guidance passes, as optional startup files (launchGuidance): no action, skill or other resource.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
@@ -2021,7 +2114,7 @@ export class RestoreOrchestrator {
           const existsFn = opts.fsOps?.exists ?? (() => true);
           const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
@@ -2040,6 +2133,13 @@ export class RestoreOrchestrator {
               return false;
             }
             return true;
+          });
+
+          // A following Codex seat gets its current list after native resume is ready, through the ordinary
+          // startup delivery path. The saved startup context stays intact; no other startup material is replayed.
+          if (resumeRequested && restoredSkillCatalog) filteredFiles.push({
+            path: "openrig-seat-skills.md", absolutePath: restoredSkillCatalog,
+            ownerRoot: dirname(restoredSkillCatalog), deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"],
           });
 
           // Check if any required files were dropped
@@ -2082,8 +2182,11 @@ export class RestoreOrchestrator {
             ...launchResult.binding,
             // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
             guidanceFile: startupCtx.guidanceFile ?? null,
+            // #3039: the resumed launch carries the guidance chosen above, so startup doesn't ask again and the adapter queues it.
+            ...(launchGuidance ? { guidanceLaunchInstructions: true as const } : {}),
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
+            ...(opts?.claudeLaunch ? { claudeLaunch: opts.claudeLaunch } : {}),
             cwd: launchCwd,
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
@@ -2126,6 +2229,11 @@ export class RestoreOrchestrator {
               ...(selected ? { beforeNativeLaunch: () => selected.beforeNative(launchResult.session.id, launchResult.binding.id) } : {}),
             });
             warnings?.push(...(startupResult.warnings ?? []));
+            // #3039: the blocks the resumed launch actually sent, by the adapter's own record, are the ones the check after the
+            // launch doesn't look for in the repository file.
+            const carriedIds = new Set((launchGuidance ?? []).map((f) => f.path));
+            const sentGuidance = carriedIds.size > 0 && launchResult.binding.tmuxSession ? adapter.launchGuidanceSent?.(launchResult.binding.tmuxSession) : undefined;
+            if (sentGuidance?.length) this.launchGuidanceBlocks.set(node.id, new Set(sentGuidance.filter((id) => carriedIds.has(id))));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested
@@ -2448,6 +2556,7 @@ export class RestoreOrchestrator {
     advisor?: string | null,
     beforeNative?: () => boolean,
     claudeExecutable?: string,
+    claudeLaunch?: ClaudeContinuationLaunch,
   ): Promise<
     | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
@@ -2461,6 +2570,7 @@ export class RestoreOrchestrator {
     let teamPermissionDefault = false;
     let claudePermissions: import("./claude-permission-rules.js").ClaudePermissionRules | undefined;
     let claudeMcp: ClaudeMcp | undefined;
+    let launchWrapper: string[] | undefined;
     let codexPermissions: import("./codex-member-permissions.js").CodexMemberPermissions | undefined;
     let permissionMode: string | undefined;
     try {
@@ -2471,6 +2581,7 @@ export class RestoreOrchestrator {
       teamPermissionDefault = override.teamPermissionDefault === true;
       claudePermissions = override.claudePermissions;
       claudeMcp = runtime === "claude-code" ? readSeatClaudeMcp(this.db, nodeId) : undefined;
+      launchWrapper = isLaunchWrapperRuntime(runtime) ? readSeatLaunchWrapper(this.db, nodeId) : undefined;
       codexPermissions = override.codexPermissions;
       resolvedPosture = override.launchPosture ?? resolvedPosture;
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
@@ -2492,9 +2603,11 @@ export class RestoreOrchestrator {
       const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
+      const wrapperTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
+      const wrappedTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
+        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;
@@ -2527,9 +2640,12 @@ export class RestoreOrchestrator {
         ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome, ...(codexPermissions !== undefined ? [codexPermissions] : [])]
         : launchTail;
       const guardedCodexTail = beforeNative ? [...codexTail, ...Array(Math.max(0, 6 - codexTail.length)).fill(undefined), beforeNative] : codexTail;
+      const wrappedCodexTail = launchWrapper?.length
+        ? [...guardedCodexTail, ...Array(Math.max(0, 7 - guardedCodexTail.length)).fill(undefined), launchWrapper]
+        : guardedCodexTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
-        ...(guardedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean]));
+        ...(wrappedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean, launchWrapper?: readonly string[]]));
       if (result.ok) {
         const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: codexPermissions ? undefined : resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
@@ -2555,7 +2671,16 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
+      const result = await this.piResume.resume(
+        sessionName,
+        resumeType,
+        resumeToken,
+        cwd,
+        model,
+        resolvedPosture,
+        effort,
+        ...(launchWrapper?.length ? ([launchWrapper] as const) : []),
+      );
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -2750,24 +2875,33 @@ export class RestoreOrchestrator {
       return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
     }
 
-    // All four preconditions hold. Append (never mutate) the audit event.
-    this.eventBus.emit({
-      type: "restore.outcome_reconciled",
-      rigId,
-      nodeId,
-      attemptId,
-      from: fromStatus,
-      to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
-    });
+    // The checks above awaited native reads. A restore that started since, or a changed binding or expected token,
+    // makes this proof one for an older subject, so it can't settle the current outcome.
+    const latestStart = this.db.prepare(
+      "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
+    ).get(rigId) as { seq: number } | undefined;
+    const latestBinding = this.db.prepare(
+      "SELECT tmux_session FROM bindings WHERE node_id = ?"
+    ).get(nodeId) as { tmux_session: string | null } | undefined;
+    const latestSession = this.db.prepare(
+      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+    if (latestStart?.seq !== attemptId || latestBinding?.tmux_session !== sessionName
+      || latestSession?.session_name !== sessionName || latestSession.resume_token !== expectedResumeToken) {
+      return { ok: false, code: "proof_superseded", attemptId, detail: "A newer restore attempt, binding or resume token was recorded while the live seat was checked, so this proof doesn't settle the current outcome." };
+    }
 
-    return {
-      ok: true,
-      attemptId,
-      from: fromStatus,
-      to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
-    };
+    const evidence = { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" as const };
+    // A check that overlapped this one may have settled the attempt already: one receipt is enough.
+    const settledMeanwhile = !priorReconciliation && this.db.prepare(
+      "SELECT 1 FROM events WHERE rig_id = ? AND node_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? LIMIT 1",
+    ).get(rigId, nodeId, attemptId);
+    // All four preconditions hold. Append (never mutate) the audit event.
+    if (!settledMeanwhile) {
+      this.eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId, from: fromStatus, to: "operator_recovered", evidence });
+    }
+
+    return { ok: true, attemptId, from: fromStatus, to: "operator_recovered", evidence };
   }
 
   private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {

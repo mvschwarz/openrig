@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -8,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   lstatSync,
   writeFileSync,
@@ -555,7 +557,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
 }
 
-if (import.meta.url === `file://${resolve(process.argv[1])}`) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     await main();
   } catch (err) {
@@ -906,12 +908,13 @@ function validateAuthoringLayout(layout) {
   }
   const edgeNames = Object.keys(layout.edges).sort();
   const requiredEdges = ["canonical", "plugin", "spec"];
+  // A further edge is another shipped plugin's copy of skills authored on spec or plugin (the openrig bundle's).
   if (
-    edgeNames.length !== requiredEdges.length ||
-    edgeNames.some((edge, index) => edge !== requiredEdges[index])
+    requiredEdges.some((edge) => !edgeNames.includes(edge)) ||
+    edgeNames.some((edge) => !requiredEdges.includes(edge) && layout.edges[edge]?.layout !== "flat")
   ) {
     throw new Error(
-      "Layout control must contain exactly canonical, plugin, and spec edges",
+      "Layout control must contain canonical, plugin, and spec edges; any other edge must be a flat plugin copy",
     );
   }
   if (!isRecord(layout.skills) || Object.keys(layout.skills).length === 0) {

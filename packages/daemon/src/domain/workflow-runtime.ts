@@ -307,12 +307,17 @@ export class WorkflowRuntime {
      *  on that rig when the role declares no preferred_targets.
      *  Absent/null = the shipped fleet-blind string-pick only. */
     boundRig?: string | null,
+    /** #2607: the instance the exception is about. Its route comes from the spec it runs, which another file's
+     *  expansion of the same id and version can't move; without one, the cached row for the id and version. */
+    instanceId?: string,
   ): ExceptionRoute | null {
-    const stored = this.specCache.getByNameVersion(workflowName, workflowVersion);
-    if (!stored) return null;
-    const specRow = bindRowToRig(stored, boundRig ?? null);
+    const instance = instanceId ? this.instanceStore.getById(instanceId) : null;
+    const rig = instance ? instance.boundRig : boundRig ?? null;
+    const stored = instance ? null : this.specCache.getByNameVersion(workflowName, workflowVersion);
+    const specRow = instance ? this.specCache.getForInstance(instance) : stored ? bindRowToRig(stored, rig) : null;
+    if (!specRow) return null;
     const spec = specRow.spec;
-    const roleCtx = roleResolutionContext(this.db, boundRig ?? null);
+    const roleCtx = roleResolutionContext(this.db, rig);
     return resolveExceptionRoute({
       exceptionClass,
       spec,
@@ -362,9 +367,9 @@ export class WorkflowRuntime {
   };
 
   validate(specPath: string, seatLivenessCheck?: SeatLivenessCheckFn): ValidationResult & { exceptionReadiness: ExceptionReadiness } {
-    const specRow = this.specCache.readThrough(specPath);
-    return { ...this.validator.validate(specRow.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
-      exceptionReadiness: this.readExceptionReadiness(specRow.spec, exceptionConfigurationSource(specRow.sourcePath)) };
+    const read = this.specCache.readFromDisk(specPath); // #2726: in memory, never written to workflow_specs
+    return { ...this.validator.validate(read.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
+      exceptionReadiness: this.readExceptionReadiness(read.spec, exceptionConfigurationSource(read.sourcePath)) };
   }
 
   /**
@@ -432,13 +437,14 @@ export class WorkflowRuntime {
     // the bare name straight to readThrough -> spec_file_missing.
     const resolvedSpecPath = this.specCache.resolveSourcePathByName(input.specPath) ?? input.specPath;
     const generatedSpec = input.compiledLifecycle?.workflowSpec;
+    // #2607: the file this run starts from. A cached row can name another file with the same bytes, so the run keeps
+    // this path, not the row's.
+    const specSource = generatedSpec
+      ? input.compiledLifecycle!.sources.find((source) => source.kind === "mission")?.path ?? resolvedSpecPath
+      : resolvedSpecPath;
     let specRow = generatedSpec
-      ? this.specCache.putGenerated(
-          generatedSpec,
-          input.compiledLifecycle!.sources.find((source) => source.kind === "mission")?.path ?? resolvedSpecPath,
-          input.compiledLifecycle!.compiledInputDigest,
-        )
-      : this.specCache.readThrough(resolvedSpecPath);
+      ? this.specCache.putGenerated(generatedSpec, specSource, input.compiledLifecycle!.compiledInputDigest)
+      : this.specCache.readThrough(specSource);
     const validation = this.validator.validate(specRow.spec, this.seatLivenessCheck, this.hostRegistryLookup);
     if (!validation.ok) {
       throw new WorkflowProjectorError(
@@ -740,6 +746,9 @@ export class WorkflowRuntime {
       const instance = this.instanceStore.create({
         workflowName: specRow.name,
         workflowVersion: specRow.version,
+        // #2607: the run keeps the spec it starts with and its file; another file with this id and version can't move it.
+        startedSpec: { sourcePath: specSource, spec: specRow.spec },
+        rootObjective: input.rootObjective,
         createdBySession: input.createdBySession,
         initialFrontier: [],
         // R2 fix: set durable current_step_id at instantiate so the
@@ -1140,7 +1149,7 @@ export class WorkflowRuntime {
       if (!specRow) {
         throw new WorkflowProjectorError(
           "spec_not_cached",
-          `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache; re-run validate to refresh it before resuming`,
+          `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache; re-register its file (workflows-folder scan, or instantiate by path) to refresh it before resuming`,
           { workflowName: instance.workflowName, workflowVersion: instance.workflowVersion },
         );
       }

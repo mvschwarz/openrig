@@ -12,6 +12,14 @@ export function terminalAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** The credential for operator-gated writes (Mission Control actions, a pairing decision): an explicit bearer, else the
+ *  daemon's operator bearer configured as OPENRIG_AUTH_BEARER_TOKEN, else the terminal credential (the same token on a
+ *  daemon that aliases them; none where none is needed). */
+export function operatorAuthHeaders(bearer?: string): Record<string, string> {
+  const token = bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
+  return token ? { Authorization: `Bearer ${token}` } : terminalAuthHeaders();
+}
+
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
 export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
 
@@ -429,9 +437,9 @@ export class DaemonClient {
     // DaemonResponseError carrying the status + a bounded snippet, instead of a
     // raw SyntaxError bubbling to a cryptic (json) or silent (human) CLI exit.
     // A well-formed non-2xx body still parses and returns {status,data}; 204 has none.
-    if (res.status === 204) return { status: res.status, data: undefined as T };
+    if (res.status === 204) return { status: res.status, data: undefined as T, headers: res.headers };
     try {
-      return { status: res.status, data: JSON.parse(text) as T };
+      return { status: res.status, data: JSON.parse(text) as T, headers: res.headers };
     } catch {
       throw new DaemonResponseError(res.status, text);
     }

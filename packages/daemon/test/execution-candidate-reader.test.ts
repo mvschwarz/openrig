@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
@@ -106,7 +107,7 @@ describe("the projector's execution queue", () => {
   const NOW = new Date("2026-10-25T12:00:00.000Z");
   function fixture(file?: string) {
     const db = track(file ? createDb(file) : createDb());
-    migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, queueItemSummarySchema, queueItemsSchema, queueTransitionsSchema, queueTransitionWakesSchema, viewsCustomSchema]);
+    migrate(db, [coreSchema, bindingsSessionsSchema, rigArchiveSchema, eventsSchema, queueItemSummarySchema, queueItemsSchema, queueTransitionsSchema, queueTransitionWakesSchema, viewsCustomSchema]);
     return db;
   }
   const insertRow = (db: Database.Database, id: string, state: string, tags: string[], body: string, claimedAt: string | null = "2026-10-25T11:00:00.000Z") =>

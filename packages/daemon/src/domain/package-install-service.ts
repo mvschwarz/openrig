@@ -8,7 +8,7 @@ import { detectConflicts } from "./conflict-detector.js";
 import { applyPolicy } from "./install-policy.js";
 
 export type PackageInstallOutcome =
-  | { ok: true; installId: string; packageId: string; applied: number; deferred: number }
+  | { ok: true; installId: string; packageId: string; applied: number; deferred: number; notes?: string[] }
   | { ok: false; code: "conflict_blocked"; message: string }
   | { ok: false; code: "policy_rejected"; message: string }
   | { ok: false; code: "manifest_hash_mismatch"; message: string }
@@ -101,7 +101,7 @@ export class PackageInstallService {
     }
 
     // Verify
-    const verification = this.installVerifier.verify(result.installId);
+    const verification = this.installVerifier.verify(result.installId, { skipped: result.notes?.length ?? 0 });
     if (!verification.passed) {
       return { ok: false, code: "verification_failed", message: "Post-apply verification failed" };
     }
@@ -112,6 +112,7 @@ export class PackageInstallService {
       packageId: pkg.id,
       applied: result.applied.length,
       deferred: result.deferred.length,
+      ...(result.notes?.length ? { notes: result.notes } : {}),
     };
   }
 }

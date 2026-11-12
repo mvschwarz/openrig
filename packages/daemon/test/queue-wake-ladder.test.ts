@@ -275,6 +275,75 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls.some((c) => c.target === "worker@r")).toBe(false);
   });
 
+  it("UNKNOWN READS UNKNOWN: a baton whose recorded wake result no reader recognises escalates past the window, never re-sent, and the notice says the outcome is unknown", async () => {
+    const baton = await mkBaton();
+    setNudgeResult(baton.qitemId, "accepted-by-some-new-route", 45);
+    ageCreated(baton.qitemId, 45);
+    await tick();
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(0);
+    const rungs = markersOf(baton.qitemId, LADDER_RUNG_PREFIX);
+    expect(rungs).toHaveLength(1);
+    expect(rungs[0]).toMatch(/wake outcome unknown \(unrecognised result "accepted-by-some-new-route"\)/);
+    expect(calls.some((c) => c.target === "worker@r")).toBe(false);
+  });
+
+  it("UNKNOWN READS UNKNOWN (negative controls): inside the window, or once claimed, an unrecognised result gets nothing", async () => {
+    const fresh = await mkBaton();
+    setNudgeResult(fresh.qitemId, "accepted-by-some-new-route", 5);
+    const claimed = await mkBaton("other@r");
+    setNudgeResult(claimed.qitemId, "accepted-by-some-new-route", 45);
+    ageCreated(claimed.qitemId, 45);
+    repo.claim({ qitemId: claimed.qitemId, destinationSession: "other@r" });
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(fresh.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+    expect(markersOf(claimed.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+  });
+
+  it("KNOWN OUTCOMES KEEP THEIR PATH: a verified wake, a hosted trigger's accepted ring and an unroutable address never enter the ladder", async () => {
+    const batons = [];
+    for (const [idx, result] of ["verified", "wake-accepted:webhook (hook) answered 202; pickup is the member's claim on this row",
+      "unroutable: 'w2@r' has no terminal transport on this daemon"].entries()) {
+      const baton = await mkBaton(`w${idx}@r`);
+      setNudgeResult(baton.qitemId, result, 45);
+      ageCreated(baton.qitemId, 45);
+      batons.push(baton);
+    }
+    await tick();
+    expect(calls).toHaveLength(0);
+    for (const baton of batons) {
+      expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(0);
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+    }
+  });
+
+  it("A WEBHOOK FAILURE AFTER THE POST KEEPS THE FAILED PATH: its effect is unknown, but it is retried as it always was", async () => {
+    const baton = await mkBaton();
+    setNudgeResult(baton.qitemId, "failed:webhook (hook) answered 500", 10);
+    await tick();
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(1);
+    expect(calls).toEqual([{ qitemId: baton.qitemId, target: "worker@r" }]);
+  });
+
+  it("DELIVERY MACHINERY IS NOT PICKUP: a relay-owner-notification-transport-failed note on an unconfirmed or held baton does not count as pickup evidence", async () => {
+    const mod = await ladderMod();
+    for (const [idx, result] of ["gateway-owned: virtual destination", "retained:typing_guard"].entries()) {
+      const baton = await mkBaton(`worker-${idx}@r`);
+      setNudgeResult(baton.qitemId, result, 45);
+      ageCreated(baton.qitemId, 45);
+      repo.transitionLog.append({
+        qitemId: baton.qitemId,
+        state: "pending",
+        actorSession: "daemon@kernel",
+        transitionNote: `relay-owner-notification-transport-failed notification_key=${baton.qitemId}:1 connector_ref=wa-main class=http-503 error=http 503`,
+      });
+      expect(mod.readWakeLadderBackstop(db, baton.qitemId)).not.toBeNull();
+      await tick();
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(1);
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)[0]).toMatch(/orchestrator/);
+    }
+  });
+
   // ── G4: F2 — SUSPENSION DERIVES FROM THE SWAP STATE ──────────────────────────
 
   it("SWAP SUSPENDS THE LADDER: a destination inside the post-swap grace gets ZERO wake attempts and one recorded suspend marker (the stale-wake-burst specimen)", async () => {
@@ -505,6 +574,62 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted) });
     expect(posted).toEqual([baton.qitemId]);
     expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine/.test(r))).toBe(true);
+  });
+
+  it("OPERATOR RUNG RELAY RECEIPT: pending dispatch resolves on matching post-marker relay-owner-notification-accepted", async () => {
+    const baton = await exhaustToSelfSkip();
+    const notificationKey = "notif-key-123";
+    let dispatchCount = 0;
+    const pendingEngine = {
+      dispatchEscalation: async (row: QueueItem) => {
+        dispatchCount++;
+        return { decision: "post", resolved: false, dispatched: true, notificationKey };
+      },
+    };
+
+    // Pre-marker receipt in history (simulates receipt from a previous episode before dispatch):
+    // Must NOT resolve the upcoming dispatch.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-pre`,
+    });
+
+    // 1. Initial tick with pending deliveryEngine outcome (resolved: false).
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine.*notification_key=notif-key-123/.test(r))).toBe(true);
+    // Pre-marker matching receipt did not resolve it; ladder not exhausted yet, underlying baton remains pending.
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
+
+    // 2. Wrong key post-marker relay receipt -> no resolution.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: "relay-owner-notification-accepted notification_key=wrong-key delivery_id=d-1",
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // No second dispatch/resume!
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+
+    // 3. Matching post-marker relay receipt -> exhausts operator rung without second dispatch and without closing pending work.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-2`,
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // Exactly-once dispatch preserved
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)[0]).toContain("engine outcome resolved");
+    // Underlying blocked/pending work is NOT closed/cancelled
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
   });
 
   it("HUMAN RUNG EXPLICIT-ONLY: an agent-to-agent baton ends at the escalation row and nothing is posted to a person", async () => {

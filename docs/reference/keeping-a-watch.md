@@ -59,7 +59,9 @@ rig queue block <task> --on external:<what you check> --wake-after 1h \
 ```
 
 `--on` is always required; `external:<what>` names the outside thing you're waiting on. The timer first fires after
-the interval, not now.
+the interval, not now. Left without `--wake-after` (or `--wake-watchdog`), the task is still set aside, but nothing
+will wake you, and the reply says so with a `park_without_wake` advisory. Set it aside again with `--wake-after` to add
+the timer.
 
 **4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
@@ -294,3 +296,31 @@ Unknown: not said yet.
   delivery guarantee.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance. For an allowance, see "A usage warning" above.
+
+## Recurring reminders for agents
+
+An agent-to-agent reminder can repeat until stopped. This is separate from
+[a person's one-shot watch](#setting-a-watch), which uses `rig queue block --wake-after`.
+
+Save this as `periodic-reminder.yaml`, replacing the example session names with your own:
+
+```yaml
+policy: periodic-reminder
+target:
+  session: worker@my-team
+message: "Finish the current action, then check the pending work."
+```
+
+Register it with all five required flags:
+
+```bash
+rig watchdog register --spec periodic-reminder.yaml --policy periodic-reminder \
+  --target-session worker@my-team --interval-seconds 600 \
+  --registered-by coordinator@my-team
+```
+
+At registration, `--policy` selects the policy; the YAML `policy` field is not the
+selector. YAML `target.session` takes precedence over `--target-session`, so keep them
+aligned. If YAML omits the target, the CLI target is the fallback. Put a non-empty
+`message` in YAML: `--message` is a shortcut only for `context-usage-threshold`.
+The first reminder is due after the interval; this example repeats every 600 seconds.

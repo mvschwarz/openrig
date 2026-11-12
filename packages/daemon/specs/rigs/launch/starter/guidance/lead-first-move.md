@@ -17,7 +17,9 @@ lightly before you start:
   approval and they are not a planning phase: one mission, one slice, then work.
 
 Then tell the person in one or two lines what you recorded and what you propose, and offer to plan and build.
-You build it and `dev-review` checks it before you call it done.
+You build it, and `dev-review` checks the uncommitted change before you commit it or call it done; commit first only if
+the person asks. If the reviewer can't run (it waits on a sign-in or a prompt), tell the person what it waits on and ask
+before committing without the review.
 
 **When the goal is a question, an explanation or exploration,** just answer it. No mission or slice.
 

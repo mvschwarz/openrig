@@ -55,7 +55,8 @@ describe("a request allowed 300 s or more", () => {
   it("carries the method, the seat and the body, and returns the daemon's answer as it came", async () => {
     const client = new DaemonClient(baseUrl, { sessionName: "dev-impl@my-rig" });
     const res = await client.post("/api/transport/send", { session: "qa@my-rig", waitForIdleMs: 400_000 }, { timeoutMs: 405_000 });
-    expect(res).toEqual({ status: 409, data: { ok: false, reason: "wait_for_idle_timeout", sent: false } });
+    expect(res).toEqual({ status: 409, data: { ok: false, reason: "wait_for_idle_timeout", sent: false }, headers: expect.any(Headers) });
+    expect(res.headers?.get("content-type")).toBe("application/json");
     expect(seen.at(-1)).toEqual({ method: "POST", path: "/api/transport/send", session: "dev-impl@my-rig",
       body: JSON.stringify({ session: "qa@my-rig", waitForIdleMs: 400_000 }) });
   });

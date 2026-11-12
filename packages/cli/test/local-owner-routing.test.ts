@@ -88,6 +88,32 @@ describe("optional local user guard at actual CLI consumers", () => {
     expect(selected).toEqual([base]);
     expect(business).toEqual(["POST /api/transport/send"]);
   });
+  it.each([[], ["--host", "host-local"]])("routes a self-qualified send locally with remote selection and flags %j", async (...flags) => {
+    vi.stubEnv("OPENRIG_HOST_SELECTED", "remote-fixture");
+    vi.stubEnv("OPENRIG_PORT", new URL(base).port);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const deps = lifecycle();
+    deps.fetch = async () => ({ ok: true, json: async () => ({ selfHostId: "host-local" }) });
+    const instance = new DaemonClient(base, { ownerProbe: async () => ({ state: "same-user", pid: 42, uid: 501, callerUid: 501 }) });
+    const post = vi.spyOn(instance, "post");
+    await new Command().addCommand(sendCommand({ lifecycleDeps: deps, clientFactory: () => instance }))
+      .parseAsync(["node", "rig", "send", ...flags, "seat@fixture@host-local", "hello"]);
+    expect(business).toEqual(["POST /api/transport/send"]);
+    expect(post).toHaveBeenCalledWith("/api/transport/send", expect.objectContaining({ session: "seat@fixture" }), expect.anything());
+    expect(process.exitCode).toBeUndefined();
+  });
+  it("allows local context on a self-qualified send despite remote selection", async () => {
+    vi.stubEnv("OPENRIG_HOST_SELECTED", "remote-fixture");
+    vi.stubEnv("OPENRIG_PORT", new URL(base).port);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const deps = lifecycle();
+    deps.fetch = async () => ({ ok: true, json: async () => ({ selfHostId: "host-local" }) });
+    const instance = new DaemonClient(base, { ownerProbe: async () => ({ state: "same-user", pid: 42, uid: 501, callerUid: 501 }) });
+    await new Command().addCommand(sendCommand({ lifecycleDeps: deps, clientFactory: () => instance }))
+      .parseAsync(["node", "rig", "send", "seat@fixture@host-local", "hello", "--context", "example"]);
+    expect(business).toEqual(["GET /api/context-packs/library/by-ref/pieces?ref=example", "POST /api/transport/send"]);
+    expect(process.exitCode).toBeUndefined();
+  });
   it("defaults off and performs no owner observation", async () => {
     vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "false");
     const { instance, probe } = client();

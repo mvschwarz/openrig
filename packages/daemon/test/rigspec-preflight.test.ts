@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import nodePath from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -12,6 +13,8 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { LegacyRigSpec as RigSpec } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
@@ -326,6 +329,43 @@ function makeRigYaml(overrides?: Partial<PodRigSpec>): string {
 const RIG_ROOT = "/project/rigs/my-rig";
 
 describe("Rebooted rig preflight", () => {
+  it.each([
+    { label: "runner without capability", declarations: "runner: true\nlaunch_result: true\n", wrapper: ["/bin/sh", "-c"], ready: false },
+    { label: "runner with capability false", declarations: "runner: true\nlaunch_result: true\nlaunch_wrapper: false\n", wrapper: ["/bin/sh", "-c"], ready: false },
+    { label: "runner with capability", declarations: "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n", wrapper: ["/bin/sh", "-c"], ready: true },
+    { label: "runner with no wrapper", declarations: "runner: true\nlaunch_result: true\n", wrapper: undefined, ready: true },
+    { label: "runner with wrapper cleared", declarations: "runner: true\nlaunch_result: true\n", wrapper: [], ready: true },
+    { label: "omitted runner", declarations: "", wrapper: ["/bin/sh", "-c"], ready: true },
+    { label: "runner false", declarations: "runner: false\n", wrapper: ["/bin/sh", "-c"], ready: true },
+  ])("checks community launch_wrapper support during preflight: $label", async ({ declarations, wrapper, ready }) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-community-wrapper-"));
+    const previousHome = process.env.OPENRIG_HOME;
+    try {
+      process.env.OPENRIG_HOME = root;
+      const presets = nodePath.join(root, "community-harnesses");
+      fs.mkdirSync(presets);
+      fs.writeFileSync(nodePath.join(presets, "synth.yaml"),
+        "format: 1\nname: synth\ncommand: synth-runner\nmaintainer: Test\n" + declarations);
+      const result = await rigPreflight({
+        rigSpecYaml: makeRigYaml({ pods: [{ id: "dev", label: "Dev", members: [{
+          id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "synth", cwd: ".",
+          ...(wrapper !== undefined ? { launchWrapper: wrapper } : {}),
+        }], edges: [] }] }),
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") }),
+        materializeOnly: true,
+      });
+      expect(result.ready, JSON.stringify(result.errors)).toBe(ready);
+      if (ready) expect(result.errors).toEqual([]);
+      else expect(result.errors).toContain('dev.impl: launch_wrapper unsupported: the community preset "synth" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.');
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = previousHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+
   it("resolves a selector-only profile from the configured managed skill catalog", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-skill-catalog-"));
     try {
@@ -432,6 +472,26 @@ profiles:
     const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("nonexistent") && e.includes("not found"))).toBe(true);
+  });
+
+  it("shows an unknown uses key as a launch warning, and stays ready", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skils: [review]`,
+    };
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready).toBe(true);
+    expect(result.warnings).toContain(`dev.impl: agent spec advisory (impl, ${RIG_ROOT}/agents/impl): profiles.default.uses.skils: unknown key ignored; known keys are skills, guidance, subagents, plugins, runtime_resources`);
+  });
+
+  it("shows an agent spec's advisories, its own and its imports', as launch warnings, and stays ready", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nimports:\n  - ref: local:../shared\ndefaults:\n  effort: 3\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`,
+      [`${RIG_ROOT}/agents/shared/agent.yaml`]: `name: shared\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    compaction_strategy: harness_native\nresources:\n  skills: []\nprofiles: {}`,
+    };
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready).toBe(true);
+    expect(result.warnings).toContain(`dev.impl: agent spec advisory (impl, ${RIG_ROOT}/agents/impl): defaults.effort: non-string value "3" ignored; effort must be a text value`);
+    expect(result.warnings.filter((w) => w.startsWith(`dev.impl: agent spec advisory (shared, ${RIG_ROOT}/agents/shared): defaults.lifecycle.compaction_strategy: "harness_native" is deprecated`))).toHaveLength(1);
   });
 
   // T5c: invalid restore-policy narrowing surfaces
@@ -651,5 +711,164 @@ describe("seat login-shell PATH warning", () => {
       expect(warning(result.warnings)).toEqual([]);
       expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
     } finally { db.close(); }
+  });
+
+  it.each(["pi", "codex", "claude-code"])("validates launch_wrapper[0] against daemon PATH for %s members", async runtime => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+
+    // 1. Missing or directory wrapper executable on daemon PATH -> preflight error (fail closed)
+    for (const badExec of ["definitely-missing-wrapper-bin-xyz987", "/usr/bin/"]) {
+      const missingYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime,
+            cwd: ".",
+            launchWrapper: [badExec, "--flag"],
+          }],
+          edges: [],
+        }],
+      });
+      const missingResult = await rigPreflight({
+        rigSpecYaml: missingYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(missingResult.ready).toBe(false);
+      expect(missingResult.errors).toContain(
+        `dev.impl: Seat launch requires ${badExec} on the daemon launch PATH.`,
+      );
+    }
+
+    // 2. Resolvable wrapper executable on daemon PATH (/bin/sh and dot-segment /bin/../bin/sh) -> passes preflight
+    for (const wrapper of [["/bin/sh", "-c"], ["/bin/../bin/sh", "-c"]]) {
+      const validYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime,
+            cwd: ".",
+            launchWrapper: wrapper,
+          }],
+          edges: [],
+        }],
+      });
+      const validResult = await rigPreflight({
+        rigSpecYaml: validYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(validResult.ready, JSON.stringify(validResult.errors)).toBe(true);
+      expect(validResult.errors).toEqual([]);
+    }
+  });
+
+  it.each(["codex", "claude-code"] as const)("preflight and %s launch resolve a relative wrapper PATH against daemon cwd, never member cwd", async runtime => {
+    const files: Record<string, string> = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") };
+    const tmpRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-wrapper-cwd-"));
+    const origCwd = process.cwd();
+    const origPath = process.env.PATH;
+    try {
+      const daemonDir = nodePath.join(tmpRoot, "daemon-cwd");
+      const memberDir = nodePath.join(tmpRoot, "member-cwd");
+      fs.mkdirSync(nodePath.join(daemonDir, "rel-bin"), { recursive: true });
+      fs.mkdirSync(nodePath.join(memberDir, "rel-bin"), { recursive: true });
+
+      const daemonWrapper = nodePath.join(daemonDir, "rel-bin", "daemon-only-wrapper");
+      fs.writeFileSync(daemonWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o755 });
+      const memberWrapper = nodePath.join(memberDir, "rel-bin", "member-only-wrapper");
+      fs.writeFileSync(memberWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o755 });
+
+      process.chdir(daemonDir);
+      process.env.PATH = `rel-bin${nodePath.delimiter}${origPath ?? ""}`;
+
+      const daemonScopedYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime,
+            cwd: memberDir,
+            launchWrapper: ["daemon-only-wrapper", "--"],
+          }],
+          edges: [],
+        }],
+      });
+      const daemonScopedResult = await rigPreflight({
+        rigSpecYaml: daemonScopedYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(daemonScopedResult.ready, JSON.stringify(daemonScopedResult.errors)).toBe(true);
+      expect(daemonScopedResult.errors).toEqual([]);
+      const launch = new SeatLaunchEnvironment(mockTmux(), { PATH: process.env.PATH }, daemonDir);
+      expect(launch.resolveLaunchWrapper(["daemon-only-wrapper", "--"])).toEqual([daemonWrapper, "--"]);
+      let claudeLaunch: SeatLaunchEnvironment | undefined;
+      if (runtime === "claude-code") {
+        fs.writeFileSync(daemonWrapper, "#!/bin/sh\nshift\nexec \"$@\"\n");
+        const tmux = mockTmux();
+        tmux.getPaneCommand = async () => "bash";
+        const identity: Record<string, string> = { OPENRIG_NODE_ID: "impl", OPENRIG_SESSION_NAME: "seat" };
+        tmux.getSessionEnv = async (_session, key) => identity[key];
+        claudeLaunch = new SeatLaunchEnvironment(tmux, { PATH: process.env.PATH, OPENRIG_HOME: nodePath.join(tmpRoot, "home") }, daemonDir, daemonWrapper);
+        fs.writeFileSync(nodePath.join(daemonDir, "rel-bin", "claude"), "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\"\n", { mode: 0o755 });
+        const command = await claudeLaunch.command("seat", "claude --resume 'same-id'", { runtime, nodeId: "impl", launchWrapper: ["daemon-only-wrapper", "--"] });
+        expect(command).toContain(shellQuote(daemonWrapper));
+        const observed = await promisify(execFile)("/bin/sh", ["-c", command], { cwd: memberDir, env: { PATH: `${nodePath.join(daemonDir, "rel-bin")}${nodePath.delimiter}${origPath ?? ""}` }, encoding: "utf8" });
+        expect(observed.stdout.trim().split("\n")).toEqual([memberDir, "--resume", "same-id"]);
+      }
+
+      const memberScopedYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime,
+            cwd: memberDir,
+            launchWrapper: ["member-only-wrapper", "--"],
+          }],
+          edges: [],
+        }],
+      });
+      const memberScopedResult = await rigPreflight({
+        rigSpecYaml: memberScopedYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(memberScopedResult.ready).toBe(false);
+      expect(memberScopedResult.errors).toContain(
+        "dev.impl: Seat launch requires member-only-wrapper on the daemon launch PATH.",
+      );
+      expect(() => launch.resolveLaunchWrapper(["member-only-wrapper", "--"])).toThrow("Seat launch requires member-only-wrapper on the daemon launch PATH.");
+      if (claudeLaunch) {
+        const command = await claudeLaunch.command("seat", "claude --resume 'same-id'", { runtime, nodeId: "impl", launchWrapper: ["member-only-wrapper", "--"] });
+        expect(command).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
+      }
+    } finally {
+      process.chdir(origCwd);
+      if (origPath === undefined) delete process.env.PATH;
+      else process.env.PATH = origPath;
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });

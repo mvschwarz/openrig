@@ -5,6 +5,7 @@ describe("time bound advisory", () => {
   it.each([
     "2026", "2026-10", "2026-10-14", "2026-10-14T09", "2026-10-14T09:30", "2026-10-14T09:30:00",
     "2026-10-14T09:30:00.123Z", "2026-10-14T09Z", "2026-10-14T09:30:00+05:30", "2024-02-29T23:59:59Z",
+    "2026-10-14T09:30:00-00:00", "2026-10-14T09:30:00+23:59",
   ])("recognises %s as a date or time", (value) => {
     expect(isRecognisedDateOrTime(value)).toBe(true);
     expect(timeBoundAdvisory("since", value, "installedAt")).toBeUndefined();
@@ -13,6 +14,7 @@ describe("time bound advisory", () => {
   it.each([
     "garbage", "2026-13-45", "2026-00-10", "2026-02-30", "2025-02-29", "2026-10-14T24", "2026-10-14T09:60",
     "Oct 14 2026", "2026-10-14 09:00", "1760000000", " 2026-10-14",
+    "2026-10-14T09:30:00+24:00", "2026-10-14T09:30:00-01:60", "2026-10-14T09+99:99",
   ])("does not recognise %s", (value) => {
     expect(isRecognisedDateOrTime(value)).toBe(false);
     expect(timeBoundAdvisory("since", value, "installedAt")).toBe(

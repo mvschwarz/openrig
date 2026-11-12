@@ -6,6 +6,8 @@ import { stringify as stringifyYaml } from "yaml";
 import {
   validateHumanFragment,
   addHumanFragment,
+  setHumanField,
+  parseBindingSpec,
   projectHumans,
   writeProjection,
   loadHumanRegistry,
@@ -48,6 +50,55 @@ describe("A3 human-fragment validation (add-time == load-time)", () => {
   it("rejects an unknown connector kind (closed enum)", () => {
     const r = validateHumanFragment({ ...fragment(), connectorBindings: [{ kind: "telegram", connectorRef: "x", secretsRef: "v", role: "primary" }] });
     expect(r.ok).toBe(false);
+  });
+
+  it("accepts a relay connector binding and preserves kind=relay", () => {
+    const r = validateHumanFragment({
+      ...fragment(),
+      connectorBindings: [
+        { kind: "relay", connectorRef: "bridge-main", secretsRef: "file:/etc/openrig/relay.env", role: "primary", handle: "mike" },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.fragment.connectorBindings[0]).toEqual({
+        kind: "relay",
+        connectorRef: "bridge-main",
+        secretsRef: "file:/etc/openrig/relay.env",
+        role: "primary",
+        handle: "mike",
+      });
+    }
+  });
+
+  it("parseBindingSpec supports relay file:<absolute-env-file> syntax and rejects relative file: paths", () => {
+    const ok = parseBindingSpec("relay:bridge-main:file:/etc/openrig/relay.env:primary:handle=mike");
+    expect(ok).toEqual({
+      ok: true,
+      binding: {
+        kind: "relay",
+        connectorRef: "bridge-main",
+        secretsRef: "file:/etc/openrig/relay.env",
+        role: "primary",
+        handle: "mike",
+      },
+    });
+    expect(parseBindingSpec("relay:bridge-main:file:relative/relay.env:primary:handle=mike").ok).toBe(false);
+    expect(parseBindingSpec("relay:bridge-main:file::primary:handle=mike").ok).toBe(false);
+  });
+
+  it("parseBindingSpec preserves Slack relative-file backward-compatibility", () => {
+    const parsed = parseBindingSpec("slack:slack-main:file:relative/secrets.env:primary:handle=mike");
+    expect(parsed).toEqual({
+      ok: true,
+      binding: {
+        kind: "slack",
+        connectorRef: "slack-main",
+        secretsRef: "file:relative/secrets.env",
+        role: "primary",
+        handle: "mike",
+      },
+    });
   });
 
   it("accepts a person with no connector binding, as an empty list or left out, and rejects a value that isn't a list", () => {
@@ -107,7 +158,7 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     const loaded = loadHumanRegistry(home);
     expect(loaded).toEqual({
       ok: false,
-      error: "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …",
+      error: "no human configured yet — register one: rig gateway human add <entityId> --display-name … --delivery-class B [--default] (a connector --binding is optional)",
       noHumans: true,
     });
     expect(existsSync(projectionPath(home))).toBe(false); // a load never creates the projection
@@ -237,6 +288,35 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     expect(r.ok).toBe(true);
     const loaded = loadHumanRegistry(home);
     expect(loaded.ok && loaded.entities[0]!.displayName).toBe("Founder Renamed");
+  });
+
+  it("setHumanField updates binding.<n> to a relay file binding and enforces connectorRef+handle uniqueness", () => {
+    expect(addHumanFragment(fragment({ entityId: "mike", address: "mike@external" }), home).ok).toBe(true);
+    expect(addHumanFragment(fragment({ entityId: "founder", displayName: "Founder", address: "founder@external" }), home).ok).toBe(true);
+
+    const setMike = setHumanField(
+      "mike",
+      "binding.0",
+      "relay:bridge-1:file:/etc/openrig/relay1.env:primary:handle=shared-alias",
+      home,
+    );
+    expect(setMike.ok).toBe(true);
+
+    const conflictSameRelay = setHumanField(
+      "founder",
+      "binding.0",
+      "relay:bridge-1:file:/etc/openrig/relay1.env:primary:handle=shared-alias",
+      home,
+    );
+    expect(conflictSameRelay.ok).toBe(false);
+
+    const okOtherRelay = setHumanField(
+      "founder",
+      "binding.0",
+      "relay:bridge-2:file:/etc/openrig/relay2.env:primary:handle=shared-alias",
+      home,
+    );
+    expect(okOtherRelay.ok).toBe(true);
   });
 });
 

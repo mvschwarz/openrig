@@ -34,6 +34,8 @@ export interface GatewayWire {
   status?(): Record<string, unknown>;
   /** A shared Slack app's hub relayed this envelope here (slack/forwarding.ts). Absent: inbound isn't wired. */
   acceptForwarded?(env: never): Promise<{ status: string; reason?: string }>;
+  /** Release the outbound driver's in-memory poll guard when a pull-outbox delivery is acknowledged. */
+  releaseOutboundKey?(key: string): void;
 }
 
 export interface InProcessWireOpts {
@@ -41,6 +43,8 @@ export interface InProcessWireOpts {
   /** The platform delivery seam. Until the relay cutover wires Slack, startup passes an
    *  honest unwired refusal — dispatches are retained durably, never silently dropped. */
   deliver: SubsystemDeliverFn;
+  /** Optional synchronous preparation seam run BEFORE durable enqueue so relay envelopes/refs are frozen once. */
+  prepare?: (decision: OutboundDecision) => OutboundDecision | void;
   /** Ops the delivery layer advertises. The shipped proof-9 rail holds in-process: an
    *  unadvertised op is refused, never attempted. Empty = nothing dispatchable yet. */
   ops?: string[];
@@ -65,6 +69,8 @@ export function buildInProcessWire(opts: InProcessWireOpts): GatewayWire {
     }
     if (outcome.ok) {
       dispatcher.onAck(decision.decisionId); // drain only after delivered
+    } else if (outcome.class === "relay-pull-awaiting-ack") {
+      if (outcome.detail) log(`delivery staged ${decision.decisionId} (${outcome.detail})`);
     } else {
       log(`delivery failed ${decision.decisionId} (${outcome.class}${outcome.detail ? ": " + outcome.detail : ""}) — retained for replay`);
     }
@@ -72,6 +78,7 @@ export function buildInProcessWire(opts: InProcessWireOpts): GatewayWire {
   const dispatcher: GatewayDispatcher = new GatewayDispatcher({
     buffer,
     send: (decision) => { void deliverAndAck(decision); },
+    ...(opts.prepare ? { prepare: opts.prepare } : {}),
   });
   dispatcher.onCapability({
     kind: "capability",
@@ -169,6 +176,11 @@ export class GatewaySubsystem {
   async acceptForwarded(env: unknown): Promise<{ status: string; reason?: string } | null> {
     if (this.state !== "active" || !this.wireHandle?.acceptForwarded) return null;
     return this.wireHandle.acceptForwarded(env as never);
+  }
+
+  releaseOutboundKey(key: string): void {
+    if (this.state !== "active") return;
+    this.wireHandle?.releaseOutboundKey?.(key);
   }
 
   /** Snapshot only: no dispatch-buffer scan, network or recovery work. The connector's

@@ -1,5 +1,6 @@
 import { fieldLine, sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { FleetSnapshot, ViewState } from "../types.js";
+import { pairingLines } from "./pairing.js";
 
 export interface ConfigEntry {
   key: string;
@@ -51,6 +52,7 @@ const LABELS: Record<string, string> = {
   "workspace.projects_root": "Project folders", "workspace.specs_root": "Spec folders",
   "workspace.steering_path": "Steering file", "workspace.catalog_path": "Workspace catalog",
   "workspace.operator_seat_name": "Operator seat", "db.path": "Database",
+  "agents.default_receiver": "Default receiving agent", "agents.operator_session": "Receiving agent (chosen)",
   "topology.root": "Topology root", "context.root": "Context root", "skills.root": "Skills root",
   "ui.timezone": "Timezone", "workflow.exception_routing": "Exception routing",
   "queue.wake_retry_interval_seconds": "Retry interval", "queue.wake_retry_cap": "Retry limit",
@@ -60,7 +62,7 @@ const LABELS: Record<string, string> = {
   "queue.stuck_sweep_unclaimed_age_minutes": "Unclaimed age", "policies.idle_gate_qitem.auto_register": "Auto-registration",
   "snapshots.periodic.enabled": "Periodic snapshots", "snapshots.periodic.interval_seconds": "Snapshot interval",
   "snapshots.periodic.retention_keep": "Snapshots to retain", "ui.terminal.max_live_terminals": "Legacy web terminal limit",
-  "retention.usage_samples_days": "Usage sample retention",
+  "retention.usage_samples_days": "Usage sample retention", "retention.events_days": "Event history retention (days)", "retention.closed_content_days": "Closed work content retention (days)", "retention.closed_metadata_days": "Closed work row retention (days)", "retention.erasure_ledger": "Erasure ledger file",
   "retention.stream_days": "Stream retention (days)", "retention.stream_max_items": "Stream items kept",
   "transcripts.poll_interval_seconds": "Transcript refresh", "transcripts.lines": "Transcript lines",
   "ui.preview.refresh_interval_seconds": "Preview refresh", "ui.preview.max_pins": "Preview pins",
@@ -73,6 +75,7 @@ const LABELS: Record<string, string> = {
   "usage.pi_cost_facts": "Pi cost from persisted entries",
   "usage.pi_openrouter_charge": "OpenRouter charge for Pi requests",
   "transport.verify_input_box": "Verify by input box (Claude Code, Codex)",
+  "transport.draft_delivery": "Send to a seat with a draft at its prompt",
   "terminal.history_limit": "tmux scrollback rows",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",
@@ -230,6 +233,8 @@ function configContentLines(state: ViewState, snap: FleetSnapshot, width: number
     { text: `Next: ${snap.connections?.nextAction ?? "rig gateway status"}` },
     { text: "Guidance only; verification contacts Slack explicitly." },
   ], width));
+  // A pairing request is decided directly here (the Feed's pairing item opens this page on it).
+  if (category === "instance") lines.push(...pairingLines(snap.pairRequests, state.configFocus, width), { text: "" });
   if (category === "display") lines.push(...wrapDetailLines([{ text: `Client timezone: ${state.timeZone} (selected at TUI start)` }], width));
   lines.push({ text: `${entries.length} settings${state.filter ? ` matching “${state.filter}”` : ""} · Enter opens full value/source` }, { text: "" });
   lines.push({ text: "  SETTING / VALUE / SOURCE · env > file > default" });

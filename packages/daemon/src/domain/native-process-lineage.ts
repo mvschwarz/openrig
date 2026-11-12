@@ -25,26 +25,37 @@ export type NativeRuntime = "claude-code" | "codex";
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
   // A quote inside a name or filename is literal, not a shell span delimiter.
+  // A `--settings` or `--mcp-config` JSON value keeps the spaces between its members too, as in
+  // `{"env": {"A": "b"}}`: it stays one token until its braces balance. Braces inside its strings don't count, and
+  // a brace that opens any other option's value is literal (#2508).
   const result: string[] = [];
   let start = 0;
   let quote: string | null = null;
+  let depth = 0;
   const append = (end: number) => {
     if (start === end) return;
     const token = command.slice(start, end);
     result.push(token[0] === '"' && token.at(-1) === '"'
       ? token.slice(1, -1) : token);
   };
+  const structured = () => command.startsWith('"{', start) || command[start] === "{"
+    || command.startsWith("'{", start) || command.startsWith("--settings={", start)
+    || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
+    || command.startsWith('--mcp-config="', start);
+  const jsonValue = () => command.startsWith("--settings={", start) || command.startsWith("--mcp-config={", start)
+    || (command[start] === "{" && (result.at(-1) === "--settings" || result.at(-1) === "--mcp-config"));
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index]!;
     if (quote !== null) {
       if (quote === '"' && char === "\\") { index += 1; continue; }
       if (char === quote) quote = null;
-    } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
-      || command.startsWith("'{", start) || command.startsWith("--settings={", start)
-      || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
-      || command.startsWith('--mcp-config="', start))) {
+    } else if (char === '"' && structured()) {
       quote = char;
-    } else if (/\s/.test(char)) {
+    } else if (char === "{" && jsonValue()) {
+      depth += 1;
+    } else if (char === "}" && depth > 0) {
+      depth -= 1;
+    } else if (/\s/.test(char) && depth === 0) {
       append(index);
       start = index + 1;
     }
@@ -127,8 +138,11 @@ function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
 function claudeProcessAfterScript(row: NativeProcessRow): boolean {
   const path = row.executablePath;
   if (!path || !path.startsWith("/") || path.split("/").some(part => part === "." || part === "..")) return false;
+  // The OS name is the file's own name, or `claude`, which the native installer's versioned binary sets for itself when
+  // a launcher execs it through its `claude` symlink (#2341).
+  const osName = executableName(row.executableName ?? "");
   return claudeExecutable(tokens(row.command)[0] ?? "") && claudeExecutable(path)
-    && executableName(path) === executableName(row.executableName ?? "");
+    && (executableName(path) === osName || osName === "claude");
 }
 
 // The rows whose OS path the script rule reads: a foreground process whose argv[0] is a path named `claude` and
@@ -312,6 +326,10 @@ function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | 
 }
 
 // Managed fresh/resume/fork launches name the current Claude identity explicitly.
+// Claude flags that take no value, so a launcher can add them without hiding the session it names (#2341: a seat's
+// launcher that adds --no-chrome). Claude's own help lists both as switches (2.1.282).
+const CLAUDE_SWITCH_FLAGS: ReadonlySet<string> = new Set(["--chrome", "--no-chrome"]);
+
 function claudeSessionToken(args: string[]): string | null {
   const ids: ClaudeArgvIds = { resume: null, "session-id": null };
   let fork = false;
@@ -334,7 +352,8 @@ function claudeSessionToken(args: string[]): string | null {
     }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
-      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions"
+      || CLAUDE_SWITCH_FLAGS.has(arg)) continue;
     const mcpEnd = claudeMcpValueEnd(args, index);
     if (mcpEnd === null) return null;
     if (mcpEnd !== undefined) { index = mcpEnd; continue; }
@@ -380,7 +399,8 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
       continue;
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
-      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions"
+      || CLAUDE_SWITCH_FLAGS.has(arg)) continue;
     const mcpEnd = claudeMcpValueEnd(args, index);
     if (mcpEnd === null) return unparsed;
     if (mcpEnd !== undefined) { index = mcpEnd; continue; }
@@ -553,35 +573,39 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
 export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean; frozenExecutable?: string } = {}): Promise<NativeProcessRow[]> {
-  try {
-    // Copies: the table is shared with concurrent readers, and executable paths are added below.
-    const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
-    // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
-    // foreground path-named Claude too. `frozenExecutable`: the caller is proving a launch that froze that file (the
-    // installer's symlink resolved to its versioned file), which needs the path only of a path-named Claude whose
-    // argv[0] isn't already the file; an exact launch is proved without it, and a helper timeout can't change its
-    // fingerprint. Every other listing skips that read (on macOS it starts a helper process).
-    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (mayBeClaudeAfterScript(row) && (options.claudeLaunchPaths === true
-      || (!!options.frozenExecutable && tokens(row.command)[0] !== options.frozenExecutable))));
-    if (candidates.length > 0) {
-      const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
-      for (const row of candidates) row.executablePath = paths.get(row.pid);
-    }
-    // Linux argv was captured with this same /proc table sample; never read real /proc
-    // again after a caller has selected a fixture or alternate process-table root.
-    // Only foreground rows can be selected below. Skip macOS helper reads for
-    // background Codex processes; every foreground seat still gets fresh argv.
-    const codexCandidates = process.platform === "darwin"
-      ? rows.filter(row => row.executableName === "codex" && row.pgid !== undefined && row.pgid > 0 && row.pgid === row.tpgid)
-      : [];
-    if (codexCandidates.length > 0) {
-      // A failed or timed-out helper read loses argv evidence, not the process table.
-      // The foreground Codex still participates in delivery's uniqueness check.
-      const argumentsByPid = await readNativeProcessArguments(codexCandidates.map(row => row.pid)).catch(() => new Map<number, string[]>());
-      for (const row of codexCandidates) row.argv = argumentsByPid.get(row.pid) ?? null;
-    }
-    return rows;
-  } catch { return []; }
+  try { return await listNativeProcessesOrThrow(options); } catch { return []; }
+}
+
+/** The same listing, but a failed enumeration rejects instead of reading as an empty table. A caller that shares or
+ *  reuses one listing needs this: an empty array is a legitimate success, so it cannot also mean "failed". */
+export async function listNativeProcessesOrThrow(options: { claudeLaunchPaths?: boolean; frozenExecutable?: string } = {}): Promise<NativeProcessRow[]> {
+  // Copies: the table is shared with concurrent readers, and executable paths are added below.
+  const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
+  // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
+  // foreground path-named Claude too. `frozenExecutable`: the caller is proving a launch that froze that file (the
+  // installer's symlink resolved to its versioned file), which needs the path only of a path-named Claude whose
+  // argv[0] isn't already the file; an exact launch is proved without it, and a helper timeout can't change its
+  // fingerprint. Every other listing skips that read (on macOS it starts a helper process).
+  const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (mayBeClaudeAfterScript(row) && (options.claudeLaunchPaths === true
+    || (!!options.frozenExecutable && tokens(row.command)[0] !== options.frozenExecutable))));
+  if (candidates.length > 0) {
+    const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
+    for (const row of candidates) row.executablePath = paths.get(row.pid);
+  }
+  // Linux argv was captured with this same /proc table sample; never read real /proc
+  // again after a caller has selected a fixture or alternate process-table root.
+  // Only foreground rows can be selected below. Skip macOS helper reads for
+  // background Codex processes; every foreground seat still gets fresh argv.
+  const codexCandidates = process.platform === "darwin"
+    ? rows.filter(row => row.executableName === "codex" && row.pgid !== undefined && row.pgid > 0 && row.pgid === row.tpgid)
+    : [];
+  if (codexCandidates.length > 0) {
+    // A failed or timed-out helper read loses argv evidence, not the process table.
+    // The foreground Codex still participates in delivery's uniqueness check.
+    const argumentsByPid = await readNativeProcessArguments(codexCandidates.map(row => row.pid)).catch(() => new Map<number, string[]>());
+    for (const row of codexCandidates) row.argv = argumentsByPid.get(row.pid) ?? null;
+  }
+  return rows;
 }
 
 export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;
@@ -964,7 +988,9 @@ export async function verifyPaneIdleShell(input: {
     try {
       const pid = await input.tmux.getPanePid(input.target);
       if (!pid) return null;
-      const root = idleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid);
+      // Idle proof needs the complete table, but no executable-path or argv enrichment.
+      const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
+      const root = idleShellRoot(rows, pid);
       return root ? JSON.stringify(root) : null;
     } catch { return null; }
   };

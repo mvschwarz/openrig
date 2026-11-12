@@ -97,6 +97,24 @@ missing tools or logins, kernel startup, a closed viewing terminal and recovery 
 before choosing an action. A healthy daemon doesn't by itself mean the project's seats are ready: check
 `rig ps --nodes --rig <rig-name>`.
 
+If the whole team stopped when a herdr terminal closed, OpenRig or its tmux server was started from inside that
+terminal: herdr-core ends every process started there when the terminal closes. `rig daemon start` no longer passes a
+herdr terminal's scope on, but processes started before that keep it until they restart. OpenRig never restarts them
+for you; restart at a time you choose, from a terminal outside herdr.
+
+With `terminal.tmux_server` at its default (`inherit`), OpenRig puts seats on the tmux server of the shell that
+started it, usually your own default server. If that server was already running, and you had started it from a herdr
+terminal, it carries that terminal's scope. OpenRig can't prevent this, because the server is yours.
+The same applies when a command like `rig chatroom watch`, run in a herdr terminal, starts the default server. Start
+tmux outside herdr, or use `terminal.tmux_server isolated` (see `tmux-servers.md`), which gives OpenRig a server it
+starts itself.
+
+The daemon keeps `HC_SESSION` and `HC_SOCKET`. The herdr-core they select is the one the herdr-app provider starts
+viewers in; `rig terminal status --provider herdr-app` names it (`core` and `assumption`), as do open failures
+(`viewer_start_failed`, `herdr_app_unavailable`) and the note when a window has not confirmed showing a view. If your
+herdr-app window is attached to a different herdr-core than the daemon's, its viewers will not appear there; start the
+daemon with that core's `HC_SESSION` and `HC_SOCKET`.
+
 ### The agent is waiting for permission or can't reach the daemon
 
 Read [Have your agent configure permissions](getting-started.md#have-your-agent-configure-permissions)

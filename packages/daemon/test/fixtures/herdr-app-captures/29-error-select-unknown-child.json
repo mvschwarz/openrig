@@ -1,0 +1,20 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "error-select-unknown-child",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"layout.select\",\"args\":{\"stack\":\"rig-work\",\"child\":\"no-such-child\"}}\n"
+  },
+  "reply": {
+    "line": "{\"error\":\"no stack \\\"rig-work\\\" with a child \\\"no-such-child\\\"\"}\n",
+    "json": {
+      "error": "no stack \"rig-work\" with a child \"no-such-child\""
+    }
+  },
+  "elapsed_ms": 0,
+  "notes": "Select a child the stack does not have."
+}

@@ -23,6 +23,33 @@ import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { DEFAULT_SYSTEM_WORLD_MANIFEST } from "../src/domain/system-world.js";
 
+const startupDnsFixture = vi.hoisted(() => ({
+  discoveredNames: [] as string[],
+  resolverQueries: [] as string[],
+}));
+
+vi.mock("../src/middleware/browser-boundary.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/middleware/browser-boundary.js")>();
+  return {
+    ...actual,
+    discoverTailscaleSelfNames: async () => startupDnsFixture.discoveredNames,
+  };
+});
+
+vi.mock("node:dns", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns")>();
+  class InertResolver {
+    constructor(_options?: { timeout?: number; tries?: number }) {}
+    setServers(_servers: string[]): void {}
+    reverse(address: string): Promise<string[]> {
+      startupDnsFixture.resolverQueries.push(address);
+      return Promise.reject(new Error("inert DNS tripwire: reverse lookup refused"));
+    }
+  }
+  const promises = { ...actual.promises, Resolver: InertResolver };
+  return { ...actual, promises, default: { ...actual.default, promises } };
+});
+
 function saveEnv(...names: string[]): Record<string, string | undefined> {
   return Object.fromEntries(names.map((name) => [name, process.env[name]]));
 }
@@ -84,6 +111,37 @@ describe("createDaemon startup composition", () => {
   });
   afterAll(() => {
     delete process.env.OPENRIG_NO_KERNEL;
+  });
+
+  it("does not consult host Tailscale DNS while applying discovered startup names", async () => {
+    const previousDiscoveredNames = startupDnsFixture.discoveredNames;
+    const previousAllowedHosts = saveEnv("OPENRIG_ALLOWED_HOSTS");
+    process.env.OPENRIG_ALLOWED_HOSTS = "";
+    startupDnsFixture.discoveredNames = ["startup-fixture.tailnet.test"];
+    startupDnsFixture.resolverQueries.length = 0;
+    let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    try {
+      daemon = await createDaemon({
+        tmuxExec: async () => "",
+        cmuxFactory: async () => { throw Object.assign(new Error("fixture: no cmux"), { code: "ENOENT" }); },
+      });
+      const response = await daemon.app.request("/api/adapters/cmux/status", {
+        headers: { Host: "startup-fixture.tailnet.test" },
+      });
+      const undiscoveredResponse = await daemon.app.request("/api/adapters/cmux/status", {
+        headers: { Host: "other.tailnet.test" },
+      });
+      expect(startupDnsFixture.resolverQueries).toEqual([]);
+      expect(response.status).toBe(200);
+      expect(undiscoveredResponse.status).toBe(403);
+      expect(await undiscoveredResponse.json()).toMatchObject({ code: "untrusted_host" });
+    } finally {
+      daemon?.eventLoopMonitor.stop();
+      daemon?.db.close();
+      startupDnsFixture.discoveredNames = previousDiscoveredNames;
+      startupDnsFixture.resolverQueries.length = 0;
+      restoreEnv(previousAllowedHosts);
+    }
   });
 
   it.each(["configured", "native", "empty", "relative"])("the assembled classic clear uses the daemon's %s Claude baseline", async baseline => {

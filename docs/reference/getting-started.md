@@ -180,19 +180,21 @@ user.
 
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
-`~/.claude/skills` and `~/.agents/skills` when the daemon starts. To add it manually, use the release tag matching
-your installed `rig --version`: replace `<release-tag>` below with that tag, including its `v` prefix.
-`rig --version` prints the version and a commit, for example `0.6.11 (379f0a0d)`; the tag is `v0.6.11`.
-The skill is in the repository from v0.6.6; on an older install, use the v0.6.6 tag or upgrade first.
-Choose the command for the agent doing the setup:
+`~/.claude/skills` and `~/.agents/skills` when the daemon starts. For a new install, add it with the command for the
+agent doing the setup. Both use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent codex
 ```
+
+If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
+after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
+`0.6.11 (379f0a0d)`; the tag is `v0.6.11`. The skill is in the repository from v0.6.6; on an older install, use the
+v0.6.6 tag or upgrade first.
 
 These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
@@ -201,11 +203,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -270,6 +272,17 @@ opt in with
 `rig config set terminal.inherit_tmux_environment true`. Setup points out this option
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
+
+Managed Codex seats run tool commands in a non-login shell: OpenRig passes Codex
+`-c allow_login_shell=false`. Tool commands inherit the environment their pane's shell set up,
+OpenRig's command folder included, so plain `rig` works however OpenRig was installed.
+Inherited setup isn't re-run for each command. Setup that lives only in login or rc files, such as
+lines in `~/.bashrc` that your login file doesn't source, or a tmux `default-command` that doesn't
+start a login shell, may be missing from tool commands, and so may shell functions and aliases.
+To defer to Codex's own setting instead, run `rig config set launch.codex_login_shell true`. That
+omits OpenRig's override rather than forcing login shells, and a login file that sets `PATH`
+outright can then hide `rig`. It applies at each seat's next launch; a restart in place keeps
+the running choice.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
@@ -331,9 +344,21 @@ startup reconcile leaves when every kernel terminal is gone, for example after a
 reboot. It does not detect a reboot as such. It uses the same restore as
 `rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
 until the seats are ready. A kernel stopped with `rig down kernel`, including
-one whose seats were already detached, stays down on later starts. So do a kernel
-with only some seats stopped and seats you unclaimed. Start one again with
-`rig up kernel --existing`.
+one whose seats were already detached, stays down on later starts; start it again
+with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+While the kernel's other seats are running, `rig up kernel --existing` refuses
+(it restores only a kernel with no live session), so start one stopped seat with
+`rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
+kernel snapshot that restore ranks first: the newest usable automatic one (taken
+before `rig down`, on the periodic schedule, or at a runtime switch), even when a
+manual one is newer, and otherwise the newest usable one. `--plan` names the
+snapshot it picked and any newer usable one, and `--snapshot-id <id>` picks one
+yourself. Under the default restore policy, which the kernel's seats keep, it
+resumes the seat's saved conversation; a seat it can't resume is reported as
+waiting for a decision, not as started.
+`rig seat launch <seat> --fresh --reason "…"` instead starts a new conversation
+with no continuity source: use it only when you want a fresh occupant, since the
+seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
 empty server and probe again. It records the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux
@@ -805,6 +830,19 @@ option, the seat's agent spec for the target runtime, or the runtime's own
 default), what is cleared, and the costs below. Nothing changes until you run it
 without `--dry-run`.
 
+Use `--runtime pi` to move a Claude Code or Codex seat to Pi; use `--runtime
+claude-code` or `--runtime codex` to move back. Pi uses a fresh managed state
+directory. Select a prepared Pi account with `--account-home /absolute/path`
+(the directory must contain readable `auth.json`), or use the target's configured
+login. A source account override or Claude token is cleared only at commit;
+credentials are never converted between runtimes. Pi-to-Pi account changes keep
+Pi settings, but cross-runtime switches resolve settings afresh for the target.
+
+A configured `launch_wrapper` carries across runtime switches among Pi, Codex
+and Claude Code. It must support each successor executable and preserve that
+runtime's credential environment. A wrapped Pi seat cannot switch to Claude
+Code; set `launch_wrapper: []` in the authored spec and re-apply it first.
+
 The new runtime takes over before the old one stops. Its successor starts beside
 the current occupant, reads a handover (the seat's recap, its open rows and the
 predecessor's screen), and confirms it with `rig seat set-runtime <seat>
@@ -836,12 +874,15 @@ What it costs:
   again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
-- **Codex and Claude Code, single-pane seats.** Startup slash commands aren't
+- **Codex, Claude Code and Pi, single-pane seats.** Startup slash commands aren't
   run by a switch; the dry run lists them.
 
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
+A terminal OpenRig didn't start, such as a seat joined with `rig attach --self`
+from a tmux pane, is left running: `rig down` names it with the commands to stop it by hand, and
+exits 2.
 Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop;
 `rig down` also prints the rig's recorded agent sessions and their activity
 before stopping them.
@@ -871,9 +912,12 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | --- | --- |
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
+| A restored seat still counts as needing attention after its prompt was answered | After a full restore of a Claude or Codex seat, the daemon clears this by itself once the seat reads running or idle and passes its check. If it still counts, check its `restoreOutcome` in `rig ps --nodes --json` (the RESTORE column): when it is `attention_required`, run `rig seat clear-attention <seat>`, which says which check failed; answering the prompt again or running `rig seat continue` doesn't change it. For a partial restore, submit any startup text left in the input box without sending it again, and wait for the agent to respond before clearing attention. See [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
+| `rig status`, `rig terminal open` or `rig daemon start --wait-for-kernel` says a seat "needs attention" or "is waiting on a person" | The daemon flags that seat, and the line gives its recorded reason: a startup that failed or stopped at a sign-in, trust or other gate, a held message, a missing required file, or a question. "Is waiting on a person" means the daemon sees a live question you can answer in that seat's terminal. Look at it with `rig capture <seat>` or in its tile, then follow the row above that matches its message. "Couldn't check" means the check itself failed; it says nothing either way. |
+| A Codex seat, including the kernel's operator, answers every turn with a model error such as "… not supported when using Codex with a ChatGPT account" | Its Codex sign-in works, but that account can't run the model; the kernel picks its runtimes from the providers chosen at setup and their sign-ins, not from which models an account can run. If Claude Code is signed in, move just that seat: `rig seat set-runtime <seat> --runtime claude-code --reason "<model> isn't available to this Codex account"` (`--dry-run` first). Otherwise give it a model the account can run with `rig seat set-model <seat> --model <id> --reason "…"`, then start it again with `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. |
 | Kernel seats fail within a second of the first start, and tmux reports "server exited unexpectedly" | Check that your tmux can capture a pane, then start the failed seats again; see the tmux check below this table. |
 | Shared terminal is absent | Check the kernel's `operator.human` terminal separately from its agents; recover only that seat as described below. Standalone `rig tui` remains available while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
@@ -1150,8 +1194,15 @@ rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd .
 
 OpenRig's `permission_policy: builtin:yolo` setting selects
 `-s danger-full-access -a never` on fresh, resume and fork launches, replacing
-the named-profile argument. The profile recipe above remains useful when you
-want to maintain those choices in native configuration. The legacy
+the named-profile argument. That drops the whole profile, not only its sandbox
+and approval settings. To keep a named profile with full access, put full access
+in the profile itself and leave `permission_policy` absent, as in the recipe
+above. To keep it with a workspace-write or read-only posture that OpenRig
+records, use the member's `codex_permissions` (see
+[per-member Codex permissions](rig-spec.md#per-member-codex-permissions)):
+OpenRig passes `-p` and adds that envelope's flags, and for that seat the
+envelope replaces a policy posture such as `builtin:yolo`. Full access isn't an
+envelope. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at

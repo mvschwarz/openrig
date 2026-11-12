@@ -7,6 +7,7 @@ import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -15,7 +16,7 @@ import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -53,6 +54,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
   let service: SeatHandoverService;
 
   beforeEach(() => {
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "3");
     db = createFullTestDb();
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
@@ -92,6 +94,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
 
   afterEach(() => {
     db.close();
+    vi.unstubAllEnvs();
   });
 
   function tmux(): TmuxAdapter {
@@ -102,8 +105,9 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(): SeatHandoverService {
+  function newService(extra: Partial<ConstructorParameters<typeof SeatHandoverService>[0]> = {}): SeatHandoverService {
     return new SeatHandoverService({
+      ...extra,
       db,
       rigRepo,
       sessionRegistry,
@@ -272,6 +276,133 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     });
   });
 
+  it("rebuild: superseded recaps are briefed as optional history after the required artifacts, never under 'read each'", async () => {
+    seedSeat();
+    rebuildChain.mockImplementation(() => ({
+      artifacts: [
+        { address: "/seats/dev-impl/RECAP.md", label: "authored seat recap (highest trust)" },
+        { address: "/seats/dev-impl/LEARNED.md", label: "seat lineage lessons" },
+        { address: "/seats/dev-impl/recap-superseded/RECAP-2000.md", label: "superseded recap (1 generation back)", optional: true },
+        { address: "/seats/dev-impl/recap-superseded/RECAP-1000.md", label: "superseded recap (2 generations back)", optional: true },
+      ],
+    }));
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok || !("result" in result)) throw new Error("expected handover result");
+    // The record still names every artifact the packet carried.
+    expect(result.result.sourceOutcome).toMatchObject({
+      primedArtifacts: [
+        expect.objectContaining({ address: "/seats/dev-impl/RECAP.md" }),
+        expect.objectContaining({ address: "/seats/dev-impl/LEARNED.md" }),
+        expect.objectContaining({ address: "/seats/dev-impl/recap-superseded/RECAP-2000.md", optional: true }),
+        expect.objectContaining({ address: "/seats/dev-impl/recap-superseded/RECAP-1000.md", optional: true }),
+      ],
+      gaps: [],
+    });
+    const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+    const requiredHeading = "Priming artifacts (read each, in order):";
+    const historyHeading = "Older recaps, newest first (read these only if you need the seat's history):";
+    expect(delivered.indexOf(requiredHeading)).toBeGreaterThanOrEqual(0);
+    expect(delivered.indexOf(historyHeading)).toBeGreaterThan(delivered.indexOf(requiredHeading));
+    const required = delivered.split(requiredHeading)[1]!.split("\n\n")[0]!;
+    expect(required).toContain("/seats/dev-impl/RECAP.md");
+    expect(required).toContain("/seats/dev-impl/LEARNED.md");
+    expect(required).not.toContain("recap-superseded");
+    const history = delivered.split(historyHeading)[1]!;
+    expect(history.indexOf("RECAP-2000.md")).toBeGreaterThanOrEqual(0);
+    expect(history.indexOf("RECAP-2000.md")).toBeLessThan(history.indexOf("RECAP-1000.md"));
+  });
+
+  it.each(["shared folder", "different folder", "relative paths"])("rebuild: long optional history remains reachable (%s)", async (layout) => {
+    seedSeat();
+    const required = [
+      { address: "/seats/dev-impl/RECAP.md", label: "authored seat recap" },
+      { address: "/seats/dev-impl/LEARNED.md", label: "seat lineage lessons" },
+      { address: "/restore/packet", label: "latest restore packet" },
+    ];
+    const history = Array.from({ length: 20 }, (_, index) => ({
+      address: `${layout === "relative paths" ? "" : "/"}seats/dev-impl/${layout === "different folder" && index === 19 ? "archive" : "recap-superseded"}/RECAP-${2000 - index}.md`,
+      label: `superseded recap (${index + 1} generations back)`,
+      optional: true as const,
+    }));
+    rebuildChain.mockReturnValue({ artifacts: [...required, ...history] });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok || !("result" in result)) throw new Error("expected handover result");
+    expect(result.result.sourceOutcome).toMatchObject({ primedArtifacts: [...required, ...history], gaps: [] });
+    const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+    const requiredSection = delivered.split("Priming artifacts (read each, in order):")[1]!.split("\n\n")[0]!;
+    expect(requiredSection.trim().split("\n")).toEqual(required.map((artifact) => `- ${artifact.address} — ${artifact.label}`));
+    if (layout === "shared folder") {
+      for (const artifact of history.slice(0, 3)) expect(delivered).toContain(`- ${artifact.address} — ${artifact.label}`);
+      for (const artifact of history.slice(3)) expect(delivered).not.toContain(artifact.address);
+      expect(delivered).toContain("All 20 older recaps: /seats/dev-impl/recap-superseded/");
+    } else {
+      for (const artifact of history) expect(delivered).toContain(`- ${artifact.address} — ${artifact.label}`);
+      expect(delivered).not.toContain("All 20 older recaps:");
+    }
+  });
+
+  it.each(["2", "0"])("rebuild: optional recap limit %s changes only the briefing", async (limit) => {
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", limit);
+    seedSeat();
+    const artifacts = Array.from({ length: 5 }, (_, index) => ({
+      address: `/seats/dev-impl/recap-superseded/RECAP-${5000 - index}.md`,
+      label: `superseded recap (${index + 1} generations back)`,
+      optional: true as const,
+    }));
+    rebuildChain.mockReturnValue({ artifacts });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+    expect(result.ok).toBe(true);
+    const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+    expect(delivered).not.toContain("Priming artifacts (read each, in order):");
+    expect(delivered).toContain(artifacts[0]!.address);
+    expect(delivered).toContain(artifacts[1]!.address);
+    expect(delivered.includes(artifacts[2]!.address)).toBe(limit === "0");
+    expect(delivered.includes("All 5 older recaps:")).toBe(limit !== "0");
+  });
+
+  it.each(["malformed config", "removed context setting"])("rebuild: preview settings failure preserves delivery and successor binding with the default limit (%s)", async (failure) => {
+    seedSeat();
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "0");
+    const configPath = new SettingsStore().configPath;
+    const originalConfig = existsSync(configPath) ? readFileSync(configPath) : undefined;
+    const artifacts = Array.from({ length: 5 }, (_, index) => ({
+      address: `/seats/dev-impl/recap-superseded/RECAP-${5000 - index}.md`,
+      label: `superseded recap (${index + 1} generations back)`,
+      optional: true as const,
+    }));
+    const required = { address: "/seats/dev-impl/RECAP.md", label: "authored seat recap" };
+    rebuildChain.mockReturnValue({ artifacts: [required, ...artifacts] });
+    checkReady.mockImplementation(async () => {
+      if (failure === "malformed config") writeFileSync(configPath, "{malformed");
+      else vi.stubEnv("OPENRIG_CONTEXT_PACKS_ROOT", "/retired/context-packs");
+      return { ready: true };
+    });
+    try {
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+      expect(result).toMatchObject({
+        ok: true,
+        result: {
+          currentStatus: { continuityOutcome: "rebuilt", handoverResult: "complete" },
+          sourceOutcome: { primedArtifacts: [required, ...artifacts], gaps: [] },
+        },
+      });
+      const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+      expect(delivered).toContain(`- ${required.address} — ${required.label}`);
+      for (const artifact of artifacts.slice(0, 3)) expect(delivered).toContain(artifact.address);
+      for (const artifact of artifacts.slice(3)) expect(delivered).not.toContain(artifact.address);
+      expect(delivered).toContain("All 5 older recaps: /seats/dev-impl/recap-superseded/");
+    } finally {
+      if (originalConfig === undefined) rmSync(configPath, { force: true });
+      else writeFileSync(configPath, originalConfig);
+    }
+  });
+
   it("rebuild: an EMPTY durable chain still executes and says so by name — in the result AND in the delivered packet", async () => {
     const { node } = seedSeat();
     rebuildChain.mockImplementation(() => ({ emptyReason: "no recap chain, no LEARNED, no restore packet for this seat" }));
@@ -407,6 +538,11 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(nodeRow(node.id).handover_result).not.toBe("complete");
     expect(result.guidance).toMatch(/re-wakeable|binding is unchanged/);
+    // #2985: the harness launch itself failed, so nothing was sent into the pane: the failure keeps the generic
+    // guidance and doesn't claim a successor was launched.
+    expect(result).not.toHaveProperty("replacementStarted");
+    expect(result).not.toHaveProperty("successorPane");
+    expect(result.guidance).not.toContain("a successor was launched");
   });
 
   it("rebuild: an induced priming-delivery failure unwinds the successor candidate and reports the step — binding unchanged", async () => {
@@ -480,9 +616,169 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
+  function seedForeignPaneClaim(opts: { archived: boolean; status: "running" | "superseded" | "detached" | "exited" }) {
+    const rig = rigRepo.createRig("seat-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+    sessionRegistry.updateStatus(session.id, opts.status);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    const discovered = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(discovered.id, node.id);
+    if (opts.archived) rigRepo.archiveRig(rig.id);
+    return { rig, node, session, discovered };
+  }
+
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("%s reclaims the pane from an exited owner in an archived rig (#2861)", async (source) => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat({ resumeToken: "native-abc" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true, currentStatus: { handoverResult: "complete" } } });
+    expect(liveSessionId(node.id)).not.toBe(sessionId);
+    expect(sessionRegistry.getBindingForNode(node.id)).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it.each(["superseded", "detached"] as const)("reclaims the pane from a %s owner in an archived rig (#2861)", async (status) => {
+    const previous = seedForeignPaneClaim({ archived: true, status });
+    const { node } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("reclaims a pane claim whose owner node was deleted (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(previous.node.id);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: null });
+    const { node } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("reclaims a pane recorded as claimed without a claimant (#2861)", async () => {
+    const { node } = seedSeat();
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    db.prepare("UPDATE discovered_sessions SET status = 'claimed' WHERE id = ?").run(row.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(discoveryRepo.getDiscoveredSession(row.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("an archived claim owner with a newer running session still refuses (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const running = sessionRegistry.registerSession(previous.node.id, "dev-impl@seat-rig");
+    sessionRegistry.updateStatus(running.id, "running");
+    const { node, sessionId } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it("an exited owner outside an archived rig still refuses (#2861)", async () => {
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const exited = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(exited.id, "exited");
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(row.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it("discovered-source adoption does not reclaim an archived owner's pane (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "adopt", source: `discovered:${previous.discovered.id}` });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it("does not reclaim when the archived owner resumes during the presence probe (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat();
+    hasSession.mockImplementation(async () => {
+      sessionRegistry.updateStatus(previous.session.id, "running");
+      return true;
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it.each([false, true])("does not overwrite a new claim during the presence probe; original owner deleted=%s (#2861)", async (deleted) => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    if (deleted) db.prepare("DELETE FROM nodes WHERE id = ?").run(previous.node.id);
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(running.id, "running");
+    hasSession.mockImplementation(async () => {
+      discoveryRepo.markClaimed(previous.discovered.id, other.id);
+      return true;
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it.each(["fresh", "rebuild"])("%s hands the invalidator the handed-over seat's own generation, not a newer same-name row's", async (source) => {
+    // Re-running a spec archives a stopped rig and makes a new one with its name; the old one, unarchived and restored
+    // while the new one is stopped, records a newer session under the seat's name, and is then archived again.
+    const old = rigRepo.createRig("seat-rig");
+    const oldNode = rigRepo.addNode(old.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(oldNode.id, "dev-impl@seat-rig").id, "exited");
+    rigRepo.archiveRig(old.id);
+    const { node, sessionId } = seedSeat();
+    sessionRegistry.updateStatus(sessionId, "exited");
+    const retiring = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    rigRepo.unarchiveRig(old.id);
+    await new Promise((resolve) => setTimeout(resolve, 2)); // a later millisecond, so its row sorts newer
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(oldNode.id, "dev-impl@seat-rig").id, "exited");
+    rigRepo.archiveRig(old.id);
+    const newer = sessionRegistry.currentOccupantTenure(oldNode.id)!.generationUuid;
+    expect(newer).not.toBe(retiring);
+    expect(sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig")).toBe(newer);
+    const invalidations: Array<{ retiringGeneration?: string }> = [];
+    service = newService({ occupantInvalidator: { invalidateRetiringOccupant: (input) => { invalidations.push(input); } } });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(invalidations).toEqual([expect.objectContaining({ retiringSessionName: "dev-impl@seat-rig", retiringGeneration: retiring })]);
+  });
+
+  it.each([false, true])("a foreign pane claim refuses with a running session present=%s (#237 holds)", async (runningSession) => {
     const { rig, node, sessionId } = seedSeat();
     const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
+    if (runningSession) {
+      const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+      sessionRegistry.updateStatus(running.id, "running");
+    }
     const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
     discoveryRepo.markClaimed(row.id, other.id);
 
@@ -507,7 +803,7 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
     return join(openrigHome, "compaction", "restore-pending", "dev-impl@seat-rig.json");
   }
 
-  function chain(): Array<{ address: string; label: string }> {
+  function chain(): Array<{ address: string; label: string; optional?: true }> {
     const result = buildRebuildPrimingChain(SEAT, { topologyRoot, openrigHome });
     if (!("artifacts" in result)) throw new Error(`expected artifacts, got: ${JSON.stringify(result)}`);
     return result.artifacts;
@@ -570,6 +866,21 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
       join(seatDir, "LEARNED.md"),
       join(seatDir, "recap-superseded", "RECAP-2000.md"),
       join(seatDir, "recap-superseded", "RECAP-1000.md"),
+    ]);
+  });
+
+  it("superseded recaps are marked optional; the current recap, LEARNED and the restore packet are not", () => {
+    const packetDir = join(openrigHome, "packet-y");
+    mkdirSync(packetDir, { recursive: true });
+    writeFileSync(markerPath(), JSON.stringify({ version: 1, outputDir: packetDir }));
+    mkdirSync(join(seatDir, "recap-superseded"), { recursive: true });
+    writeFileSync(join(seatDir, "recap-superseded", "RECAP-1000.md"), "older");
+
+    expect(chain().map((artifact) => [artifact.address, artifact.optional === true])).toEqual([
+      [join(seatDir, "RECAP.md"), false],
+      [join(seatDir, "LEARNED.md"), false],
+      [packetDir, false],
+      [join(seatDir, "recap-superseded", "RECAP-1000.md"), true],
     ]);
   });
 

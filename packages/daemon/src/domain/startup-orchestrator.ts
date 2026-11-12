@@ -18,6 +18,7 @@ import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
@@ -27,6 +28,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { PiCommunityRuntimeAdapter } from "../adapters/pi-community-runtime-adapter.js";
 import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
@@ -361,6 +363,11 @@ export class StartupOrchestrator {
       if (input.adapter.runtime === "claude-code") {
         input = { ...input, binding: { ...input.binding, claudeMcp: readSeatClaudeMcp(this.db, input.nodeId) } };
       }
+      if (isLaunchWrapperRuntime(input.adapter.runtime)) {
+        const launchWrapper = readSeatLaunchWrapper(this.db, input.nodeId);
+        const { launchWrapper: _prior, ...restBinding } = input.binding;
+        input = { ...input, binding: launchWrapper ? { ...restBinding, launchWrapper } : restBinding };
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Permission selection: ${(error as Error).message}`], undefined, false, undefined, false, "permission_selection", true);
     }
@@ -428,12 +435,17 @@ export class StartupOrchestrator {
     // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
     // older snapshot), and a continuation carries its launch's choice, so the adapter isn't asked again and an existing
     // seat isn't silently repointed. This runs after the pending mark: a continuation claims its attempt before any await.
-    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+    // A resume of the seat's own conversation (a restore, `rig up --existing`) whose saved choice is the repository file is
+    // asked too, only whether its launch can carry the guidance: the saved file stays as it is.
+    const resumingConversation = Boolean(input.resumeToken) && !input.forkSource && !input.skipHarnessLaunch;
+    const savedRepositoryResume = resumingConversation && input.binding.guidanceFile === null && !input.binding.guidanceLaunchInstructions;
+    if ((input.binding.guidanceFile === undefined || savedRepositoryResume) && input.adapter.guidanceFileFor) {
       // A continuation launches nothing, so it never chooses guidance that only a launch carries.
-      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch) });
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch), resumingConversation });
       const chosen = answer instanceof Promise ? await answer : answer;
       if (chosen.note) warnings.push(chosen.note);
-      const guidance = { guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) };
+      const file = savedRepositoryResume ? null : chosen.file;
+      const guidance = { guidanceFile: file, ...(chosen.launchInstructions && file === null ? { guidanceLaunchInstructions: true } : {}) };
       input = { ...input, binding: { ...input.binding, ...guidance } };
       // A failure recorded from the delivery input keeps the choice for a later continuation too.
       deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
@@ -578,7 +590,7 @@ export class StartupOrchestrator {
         "INSERT OR REPLACE INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
       ).run(
         input.nodeId,
-        JSON.stringify(input.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath, resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target }))),
+        JSON.stringify(input.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath, resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target, ...(e.onRestore ? { onRestore: e.onRestore } : {}) }))),
         JSON.stringify(input.resolvedStartupFiles),
         JSON.stringify(input.startupActions),
         input.adapter.runtime,
@@ -609,9 +621,11 @@ export class StartupOrchestrator {
     // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
     // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
     // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
-    if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
+    // A protocol: pi-rpc preset runs under OpenRig's hosted Pi-protocol runner, and its launch records that protocol.
+    if (input.adapter instanceof CommunityHarnessRuntimeAdapter || input.adapter instanceof PiCommunityRuntimeAdapter) {
+      const runner = input.adapter instanceof PiCommunityRuntimeAdapter ? "pi-rpc" as const : input.adapter.runner();
       try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
-        input.skipHarnessLaunch ? undefined : input.adapter.runner()); }
+        input.skipHarnessLaunch ? undefined : runner); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 

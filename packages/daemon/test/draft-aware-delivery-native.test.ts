@@ -10,7 +10,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
-import { inspectComposerInput } from "../src/domain/session-transport.js";
+import { annotateInputBox, inspectComposerInput } from "../src/domain/session-transport.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -132,4 +132,68 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       db.close(); rmSync(scratch, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it.each(["update-banner", "cursor-block", "context-hint", "auto-update-short", "auto-update-reason", "auto-update-try-global", "auto-update-try-local"])("submits a multiline paste with %s and keeps a real draft through tmux", async variant => {
+    const scratch = mkdtempSync(join(tmpdir(), "draft-banner-"));
+    const socket = join(scratch, "s");
+    const env = { ...process.env }; delete env.TMUX; delete env.TMUX_TMPDIR;
+    const tmux = async (args: string[]) => (await run("tmux", ["-S", socket, ...args], { env })).stdout;
+    const stateFile = join(scratch, "state.json");
+    const state = () => JSON.parse(readFileSync(stateFile, "utf8")) as { input: string; submissions: string[] };
+    const db = new Database(":memory:");
+    let transport: SessionTransport | undefined;
+    try {
+      const command = [process.execPath, composer, "claude", stateFile, variant].map(shellQuote).join(" ");
+      const wide = variant === "update-banner" || (variant.startsWith("auto-update-") && variant !== "auto-update-short");
+      const [width, height] = wide ? ["120", "40"] : ["68", variant === "cursor-block" ? "31" : "30"];
+      const pane = (await tmux(["-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}", "-x", width, "-y", height, "-s", "worker@test", command])).trim();
+      await vi.waitFor(() => expect(state().input).toBe(""), { timeout: 5000 });
+      migrate(db, ALL_MIGRATIONS);
+      db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
+        INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','terminal');
+        INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running');
+        INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh');`);
+      db.prepare("INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('binding','a','worker@test',?)").run(pane);
+      const adapter = new TmuxAdapter(async () => { throw new Error("Fixture requires argv execution"); }, undefined,
+        async args => tmux(args.slice(1)));
+      const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)); adapter.deliveryGuard = guard;
+      transport = new SessionTransport({ db, tmuxAdapter: adapter, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db) });
+      await guard.set("a", { mode: "draft-aware" }, "human@test", "protect fixture input");
+      if (variant !== "update-banner") {
+        await vi.waitFor(async () => {
+          const snapshot = await adapter.captureComposerSnapshot(pane);
+          const row = variant === "cursor-block" ? 26 : 23;
+          expect(snapshot?.cursor).toEqual({ x: 2, y: row, width: Number(width), height: Number(height) });
+          expect(snapshot!.screen.split("\n")[row]).toContain("❯\u00a0\x1b[7m ");
+          expect(snapshot!.screen.split("\n")[row - 1]).toContain("@moonjoy-workshop ─");
+          const plain = await tmux(["capture-pane", "-p", "-t", pane]);
+          expect(plain.split("\n")[row]).toBe("❯\u00a0");
+          if (variant === "context-hint") expect(plain.split("\n")[26].trim()).toBe("~66k uncached · /clear to start fresh");
+          if (variant.startsWith("auto-update")) {
+            const expected: Record<string, string> = {
+              "auto-update-short": "✘ Auto-update failed · Run claude doctor",
+              "auto-update-reason": "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
+              "auto-update-try-global": "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code",
+              "auto-update-try-local": "✘ Auto-update failed · Try claude doctor or cd ~/.claude/local && npm update @anthropic-ai/claude-code",
+            };
+            expect(plain.split("\n")[26].trim()).toBe(expected[variant]);
+          }
+          expect(annotateInputBox(snapshot!.screen, snapshot!.cursor, "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
+        });
+      } else await vi.waitFor(async () => expect(inspectComposerInput(await adapter.captureComposerSnapshot(pane), "claude-code").state).toBe("empty"));
+      const text = "first line\nsecond line\nlast line";
+      const result = await transport.send("worker@test", text, { deliveryId: "banner", actorSession: "sender@test", verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      await vi.waitFor(() => expect(state()).toEqual({ input: "", submissions: [text] }));
+      await tmux(["send-keys", "-t", pane, "-l", "person's draft"]);
+      await vi.waitFor(() => expect(state().input).toBe("person's draft"));
+      expect(await transport.send("worker@test", "another message", { deliveryId: "draft", verify: false }))
+        .toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+      expect(state()).toEqual({ input: "person's draft", submissions: [text] });
+    } finally {
+      await transport?.guardedDelivery?.stop();
+      await tmux(["kill-server"]).catch(() => {});
+      db.close(); rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

@@ -11,7 +11,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
-import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { SeatLifecycleService, claimedSessionRoutes } from "../src/domain/seat-lifecycle-service.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 
@@ -398,12 +398,56 @@ describe("SeatLifecycleService", () => {
     expect(sessionRegistry.getBindingForNode(a.node.id)).not.toBeNull();
   });
 
+  // #2440 records a launched handover's successor as launched from 0.7.9; one handed over earlier keeps origin=claimed.
+  function recordHandover(nodeId: string, outcome: string | null) {
+    db.prepare("UPDATE nodes SET continuity_outcome = ?, handover_result = 'complete', handover_at = ? WHERE id = ?")
+      .run(outcome, "2026-11-01T10:00:00.000Z", nodeId);
+  }
+
+  it.each(["fresh", "forked", "rebuilt"])("a seat handed over (%s) before 0.7.9 is refused as that case, never pointed at rig unclaim", async (outcome) => {
+    const seat = seatFixture("s5-rig", "dev.handed", { origin: "claimed" });
+    recordHandover(seat.node.id, outcome);
+    for (const result of [
+      await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
+      await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
+    ]) {
+      expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+      if (result.ok) throw new Error("expected refusal");
+      expect(result.message).toContain(`last handover (${outcome} at 2026-11-01T10:00:00.000Z)`);
+      expect(result.message).toContain("before OpenRig 0.7.9");
+      expect(result.guidance).toBe("It keeps that origin until its next launched handover or managed launch.");
+      expect(result.guidance).not.toContain("rig unclaim");
+    }
+    expect(tmux.killed).toEqual([]);
+  });
+
+  it("an adopted seat with no handover, or a discovered one, still points at rig unclaim", async () => {
+    const adopted = seatFixture("s5-rig", "dev.adopted", { origin: "claimed" });
+    const discovered = seatFixture("s5-rig", "dev.discovered", { origin: "claimed" });
+    recordHandover(discovered.node.id, null);
+    for (const seat of [adopted, discovered]) {
+      for (const result of [
+        await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
+        await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
+      ]) {
+        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
+        if (result.ok) throw new Error("expected refusal");
+        expect(result.message).toContain("was adopted (origin=claimed)");
+      }
+    }
+    expect(tmux.killed).toEqual([]);
+  });
+
   it("P4: stop refuses a claimed (adopted) session, an indeterminate probe, and a no-session node", async () => {
     const claimed = seatFixture("s5-rig", "dev.adopted", { origin: "claimed" });
     const claimedResult = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
     expect(claimedResult.ok).toBe(false);
     if (claimedResult.ok) throw new Error("expected refusal");
     expect(claimedResult.code).toBe("claimed_session");
+    // the refusal names the supported route, rig unclaim, and says rig down doesn't stop a session OpenRig didn't start,
+    // even in a one-seat rig.
+    expect(claimedResult.guidance).toBe("To end this session, run rig unclaim 'dev-adopted@s5-rig' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 's5-rig' leaves a session OpenRig didn't start running.");
 
     const probed = seatFixture("s5-rig", "dev.flaky");
     tmux.failProbeFor(probed.sessionName);
@@ -419,6 +463,29 @@ describe("SeatLifecycleService", () => {
     expect(bare.ok).toBe(false);
     if (bare.ok) throw new Error("expected refusal");
     expect(bare.code).toBe("no_session");
+  });
+
+  it("the claimed-session guidance is the same in a rig of several seats, and says rig down leaves an external CLI running", async () => {
+    const claimed = seatFixture("adopted-rig", "dev.adopted", { origin: "claimed" });
+    seatFixture("adopted-rig", "dev.peer");
+    const shared = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
+    if (shared.ok) throw new Error("expected refusal");
+    expect(shared.guidance).toBe("To end this session, run rig unclaim 'dev-adopted@adopted-rig' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 'adopted-rig' leaves a session OpenRig didn't start running.");
+
+    sessionRegistry.updateBinding(claimed.node.id, { attachmentType: "external_cli", externalSessionName: claimed.sessionName });
+    const external = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
+    if (external.ok) throw new Error("expected refusal");
+    expect(external.code).toBe("claimed_session");
+    expect(external.guidance).toContain("rig down leaves it running");
+    expect(external.guidance).not.toContain("run rig down");
+    expect(external.guidance).toContain("run rig unclaim 'dev-adopted@adopted-rig'");
+    expect(tmux.killed).toEqual([]);
+  });
+
+  it("claimedSessionRoutes routes a tmux session through rig unclaim, never rig down", () => {
+    expect(claimedSessionRoutes("r", "a@r")).toBe("To end this session, run rig unclaim 'a@r' (it releases the session from OpenRig "
+      + "and leaves its process running), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. Closing only its viewing window leaves the tmux session running. rig down 'r' leaves a session OpenRig didn't start running.");
   });
 
   // ---- P5 / P6 — clean ----

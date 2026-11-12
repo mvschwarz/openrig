@@ -1,5 +1,5 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
-import { SessionRegistry, physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -18,7 +18,8 @@ import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
-import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { validateResumeToken, validateSessionFileFormat } from "../domain/resume-token-validation.js";
+import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import {
@@ -96,7 +97,7 @@ export function restoredRunnerHookEvidence(
   if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
   const state = !latest.stale ? latest.state
     : latest.reason === "stale_runtime_hook"
-      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true) : "unknown";
+      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true, latest.piRpc === true) : "unknown";
   // A working beat keeps the lifetime it was admitted with, as when it was posted.
   return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
     ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
@@ -115,6 +116,16 @@ export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
 const hookEvidenceSeq = new Map<string, number>();
 // What each seat's runner has said about its turns, for deciding whether a working beat counts (the runner contract §4).
 const workingLiveness = new WorkingLivenessGate();
+/** #99: the reset instant the relay read from a Claude usage limit, as a canonical ISO timestamp, or null. The store
+ *  keeps it only on the typed StopFailure/rate_limit row; the provider lane decides whether it is still ahead. */
+function limitResetsAt(body: Record<string, unknown>): string | null {
+  if (typeof body.resetsAt !== "string" || body.resetsAt.length > 40) return null;
+  const ms = Date.parse(body.resetsAt);
+  // The relay's eight-day horizon, enforced at ingress too: no sender can park a pool for longer than the relay could.
+  return Number.isFinite(ms) && ms <= Date.now() + LIMIT_RESET_MAX_MS ? new Date(ms).toISOString() : null;
+}
+const LIMIT_RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+
 function sourceSequence(body: Record<string, unknown>): number | null {
   return typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null;
 }
@@ -328,10 +339,12 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     || body.eventFamily !== undefined)) return c.json({ ok: true });
 
   // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
-  // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
+  // seat. The staged successor's native identity is kept on the switch record, which the commit applies; a helper of
+  // another runtime the successor starts before then shares its generation, and its id isn't kept (#2702).
   const switchRole = runtimeSwitchActivityRole(store.db, stringOrNull(body.sessionName), stringOrNull(body.generation));
   if (switchRole) {
-    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string") {
+    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string"
+      && !reportedByAnotherRuntime(body)) {
       store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
         .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
@@ -413,11 +426,36 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
+/** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),
+ *  or, only while no launch record exists (an identity post can arrive first), its installed preset declares
+ *  `protocol: pi-rpc`. Any other recorded value never qualifies: a plain launch (0) or a preset's own runner (`runner: true`,
+ *  1) keeps its own identity path, so a later preset edit can't move a launched seat onto this one. */
+function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string, runtime: string): boolean {
+  if (runtime === "pi" || runtime === "omp" || runtime === "claude-code" || runtime === "codex" || runtime === "terminal") {
+    return false;
+  }
+  if (sessionCommunityRunnerSelect(db) !== "NULL") {
+    const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { runner?: number | null } | undefined;
+    if (row?.runner !== null && row?.runner !== undefined) return row.runner === AGENT_RUNNER_HOSTED_PI_RPC;
+  }
+  const found = loadCommunityHarnessPreset(runtime);
+  return found.ok && found.preset.protocol === "pi-rpc";
+}
+
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
     // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
     // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
     // it is format-validated before the persist and never echoed on failure.
-    if (runtime === "pi") {
+    // Pi-RPC community harnesses share this protocol, but persist community:<name>.
+    const isPi = runtime === "pi" && resolved.runtime === "pi";
+    const isCommunityPi = !isPi && (resolved.runtime !== null && resolved.runtime !== "omp" && isPiRpcHarness(store.db, resolved.sessionId, resolved.runtime));
+    // A current generation isn't a runtime binding: a process started inside the seat (a Pi helper, say) carries the
+    // seat's generation. Only the seat's own runtime reports its identity; any other keeps the saved token and publishes
+    // nothing for the seat, as OMP's runtime check does above.
+    if (isCommunityPi && runtime !== resolved.runtime) {
+      return c.json({ ok: true, ignored: "runtime_mismatch", tokenPersisted: false });
+    }
+    if (isPi || isCommunityPi) {
       // A delayed get_state from a retired runner must not replace the successor's
       // resume token or publish a current identity. Keep resolution, this check
       // and both effects synchronous so renewal cannot interleave at an await.
@@ -432,26 +470,27 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
-          error: "Pi session identity ignored: occupant generation is unavailable.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: occupant generation is unavailable.`,
         }, 503);
       }
       if (reason) {
         return c.json({
           ok: false, code: reason, tokenPersisted: false,
-          error: "Pi session identity ignored: emitter is not the registered current occupant.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: emitter is not the registered current occupant.`,
         }, 409);
       }
       const sessionFile = stringOrNull(body.sessionFile);
-      const validation = validateResumeToken("pi", sessionFile);
+      const validation = isPi ? validateResumeToken("pi", sessionFile) : validateSessionFileFormat(sessionFile, resolved.runtime ?? "community");
+      const resumeType = isPi ? "pi_session_file" : `community:${resolved.runtime}`;
       if (validation.ok) {
-        sessionRegistry.updateResumeToken(resolved.sessionId, "pi_session_file", validation.token, "hook");
+        sessionRegistry.updateResumeToken(resolved.sessionId, resumeType, validation.token, "hook");
       }
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "pi",
+        runtime: resolved.runtime ?? "pi",
         sessionId,
         provenance: "rpc",
       });
@@ -496,32 +535,44 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       const still = bindToGrant(c, store, grant, body);
       if ("refused" in still) return still.refused;
     }
-    // #1524 (a), Codex only, synchronous with the write below (no await between them):
-    // - a known earlier occupant's hook (its generation is registered for this node and isn't the current one)
-    //   neither writes nor publishes. An absent or unregistered generation, no current tenure, or an unreadable
-    //   ledger keep today's write.
-    // - Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also
-    //   when it can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal
-    //   thread can't replace it. An absent key, an empty string or a malformed value keep today's write.
-    if (runtime === "codex") {
+    // #1524 (a) for Codex, #2768 for Claude, synchronous with the write below (no await between them): a known earlier
+    // occupant's hook (its generation is registered for this node and isn't the current one) neither writes nor
+    // publishes. An absent or unregistered generation, no current tenure, or an unreadable ledger keep today's write.
+    // A no-launch adoption (reconcile, bind, self-attach) registers the live process again without replacing it, so
+    // an occupant followed only by adoptions is still current; a launch after it is what makes it earlier.
+    if (runtime === "codex" || runtime === "claude-code") {
       let generationMismatch = false;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
         generationMismatch = !!generation && !!current && current.generationUuid !== generation
-          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)
+          && !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation);
       } catch { /* an unreadable ledger is no evidence of a mismatch */ }
       if (generationMismatch) {
         return c.json({
           ok: false, code: "generation_mismatch", tokenPersisted: false,
-          error: "Codex session identity ignored: emitter is an earlier occupant of this seat.",
+          error: `${runtime === "codex" ? "Codex" : "Claude"} session identity ignored: emitter is an earlier occupant of this seat.`,
         }, 409);
       }
+    }
+    // Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also when it
+    // can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal thread can't
+    // replace it. An absent key, an empty string or a malformed value keep today's write.
+    if (runtime === "codex") {
       if (body.transcriptPathPresent === true && body.transcriptPath === null) {
         return c.json({
           ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_absent",
           detail: "Codex reported no transcript for this thread, so the saved conversation pointer was kept.",
         });
       }
+    }
+    // #2702: a report from another runtime started inside the seat (reportedByAnotherRuntime) names a conversation the
+    // seat can't resume. It neither moves the seat's resume target nor is published as its identity.
+    if (reportedByAnotherRuntime(body)) {
+      return c.json({
+        ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_not_this_session",
+        detail: "This report's transcript belongs to another runtime started inside the seat, so the seat keeps its resume target.",
+      });
     }
     // #2341: a reserved occupant generation is registered only when its launch or handover commits. Until then, and
     // after a failed handover, its Claude hooks don't move the seat's resume target, which stays the registered
@@ -585,6 +636,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }
     return c.json({ ok: true, oriented: "verified", nodeId: result.nodeId, challengeId: result.challengeId });
   }
+
+  // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
+  if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
@@ -683,12 +737,15 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     livenessSeconds: beat ? workingLivenessSeconds(body.livenessSeconds)
       : typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
         && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
+    resetsAt: limitResetsAt(body),
+    sessionId: stringOrNull(body.sessionId),
   });
 
   if (!result.ok) {
     const status = result.code === "missing_session_identity" ? 400 : 404;
     return { refused: c.json({ ok: false, code: result.code, error: result.error }, status) };
   }
+  recordPromptObservation(c, body, (result.event as { sessionName?: string } | undefined)?.sessionName ?? stringOrNull(body.sessionName));
 
   // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
   // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
@@ -723,7 +780,7 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
-        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner)),
       );
     }
     if (beat) {
@@ -770,6 +827,33 @@ for (const [router, installTokenAccepted] of [[activityRoutes, true], [guestActi
   router.get("/permission-requests/:askId", (c) => readPermission(c, installTokenAccepted));
   router.post("/permission-requests/:askId/withdraw", (c) => withdrawPermission(c, installTokenAccepted));
 }
+
+// The receiving agent's decision on a request its person answered (`rig seat decide-permission`): on this host's main
+// routes only. The record names the deciding seat (X-OpenRig-Session), which is attribution, not authentication.
+activityRoutes.post("/permission-requests/:askId/decide", async (c) => {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  if (!store || !queueRepo || !eventBus) {
+    return c.json({ ok: false, code: "permission_requests_unconfigured", error: "This daemon doesn't take runner permission requests." }, 503);
+  }
+  let body: Record<string, unknown>;
+  try { body = await c.req.json() as Record<string, unknown>; } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  const optionId = typeof body.optionId === "string" ? body.optionId.trim() : "";
+  if (!optionId) return c.json({ ok: false, code: "invalid_option", error: "Name the option to decide: optionId." }, 400);
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
+  const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
+    ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    stream: c.get("streamStore" as never) as StreamStore | undefined });
+  const decider = transportSenderSession(c) ?? "someone outside a seat";
+  const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "");
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : result.code === "not_recorded" ? 409 : 400);
+  return c.json(result);
+});
 
 type PermissionContext = { store: AgentActivityStore; grant: ActivityGrant | null; registry: SessionRegistry; permissions: RunnerPermissions };
 
@@ -933,7 +1017,7 @@ activityRoutes.get("/parked", (c) => {
     | undefined;
   const queueRepo = c.get("queueRepo" as never) as
     | {
-        list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
+        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
         parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
@@ -950,10 +1034,10 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
+    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
+    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
-      rows: queueRepo
-        .list({ destinationSession: destination, state: ["pending", "in-progress", "blocked"], limit })
-        .map((r) => ({ qitemId: r.qitemId, state: r.state as "pending" | "in-progress" | "blocked", summary: r.summary ?? null })),
+      rows: queueRepo.listOpenObligations(destination, limit),
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
@@ -1029,6 +1113,50 @@ activityRoutes.get("/parked", (c) => {
   });
 });
 
+/** A prompt hook's own observation, recorded as it was reported: a fingerprint and byte length of the prompt the harness
+ *  received, its native session and prompt or turn id, and the generation the hook ran as. It's raw evidence only: neither
+ *  harness reports where a prompt came from (a message OpenRig wrote, a person's own text, a background turn), so it's never
+ *  joined to a message here. A missing or malformed fingerprint records nothing; a bad id or time is left out. The hook
+ *  itself is recorded and answered either way. */
+function recordPromptObservation(c: Context, body: Record<string, unknown>, sessionName: string | null): void {
+  if (body.hookEvent !== "UserPromptSubmit") return;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  const promptSha256 = typeof body.promptSha256 === "string" && /^[0-9a-f]{64}$/.test(body.promptSha256) ? body.promptSha256 : null;
+  const promptBytes = typeof body.promptBytes === "number" && Number.isSafeInteger(body.promptBytes) && body.promptBytes >= 0 ? body.promptBytes : null;
+  if (!eventBus || !sessionName || !promptSha256 || promptBytes === null) return;
+  const nativeId = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null;
+  // An instant, not a string to compare: a time that doesn't parse is left out.
+  const at = typeof body.occurredAt === "string" ? Date.parse(body.occurredAt) : Number.NaN;
+  try {
+    eventBus.emit({ type: "transport.prompt_observation", sessionName, occupantGeneration: stringOrNull(body.generation),
+      runtime: stringOrNull(body.runtime), source: "UserPromptSubmit", nativeSessionId: nativeId(body.sessionId),
+      nativePromptId: nativeId(body.nativePromptId), nativeTurnId: nativeId(body.turnId), promptSha256, promptBytes,
+      observedAt: Number.isFinite(at) ? new Date(at).toISOString() : null });
+  } catch { /* Best effort: the hook is recorded either way. */ }
+}
+
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/** Whether a hook's transcript path is the Claude conversation file for `sessionId` (`…/<session id>.jsonl`, the file
+ *  `claude --resume <session id>` reads), in either path spelling. */
+function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): boolean {
+  return typeof transcriptPath === "string" && transcriptPath.split(/[\\/]/).pop() === `${sessionId}.jsonl`;
+}
+
+/** #2702: whether a relay's report came from another runtime started inside the seat, which inherited the seat's
+ *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started.
+ *  - A claude-code report is the seat's only when it names a Claude Code transcript, `<session id>.jsonl`, the file
+ *    `claude --resume` reads; a Codex helper names a rollout file or null.
+ *  - A codex report is another runtime's only on positive evidence of Claude Code: the relay saw Claude Code's marker,
+ *    CLAUDE_PROJECT_DIR (claudeHook), and the transcript is `<session id>.jsonl`. A Codex seat's own process doesn't
+ *    carry that marker, whatever its rollout file is named (Codex keeps a legacy or supplied name on resume), so its
+ *    report still counts unless that process inherited the marker.
+ *  A report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
+function reportedByAnotherRuntime(body: Record<string, unknown>): boolean {
+  if (body.transcriptPathPresent !== true || typeof body.sessionId !== "string") return false;
+  const claudeTranscript = namesClaudeTranscript(body.transcriptPath, body.sessionId);
+  if (body.runtime === "claude-code") return !claudeTranscript;
+  return body.runtime === "codex" && body.claudeHook === true && claudeTranscript;
 }

@@ -254,7 +254,6 @@ describe("validateMarkdownAddressability — the compose gate", () => {
   });
 });
 
-
 describe("Markdown block boundaries in context addresses", () => {
   it("keeps inline backtick spans from swallowing later sections", () => {
     const text = "## Setup\n```literal ` backticks```\n## Deploy\ndeploy instructions\n";
@@ -278,5 +277,27 @@ describe("Markdown block boundaries in context addresses", () => {
     expect(() => resolveAddress(text, ["independent"])).toThrow(AddressResolutionError);
     expect(validateMarkdownAddressability(text)).toEqual([]);
     expect(resolveAddress(text.replace("\n#\n", "\n# Named\n"), ["independent"]).text).toContain("independent instructions");
+  });
+});
+
+describe("section boundaries in large documents", () => {
+  it("keeps sibling spans independent", () => {
+    const blocks = Array.from({ length: 10000 }, (_, i) => `## Section ${i}\nbody ${i}\n`);
+    const sections = parseMarkdownSections(blocks.join(""));
+    expect(sections).toHaveLength(blocks.length);
+    sections.forEach((section, i) => {
+      const expected = i === blocks.length - 1 ? blocks[i] : blocks[i]!.trimEnd();
+      expect(section.text).toBe(expected);
+      expect(section.ownText).toBe(expected);
+    });
+  });
+
+  it("ends nested spans at the nearest same-or-higher heading, including H1", () => {
+    const text = "## Parent\nintro\n### Child\nchild\n#### Detail\ndetail\n### Sibling\nsibling\n# Boundary\nend";
+    expect(parseMarkdownSections(text).map(({ title, text, ownText }) => ({ title, text, ownText }))).toEqual([
+      { title: "Parent", text: "## Parent\nintro\n### Child\nchild\n#### Detail\ndetail\n### Sibling\nsibling", ownText: "## Parent\nintro" },
+      { title: "Child", text: "### Child\nchild\n#### Detail\ndetail", ownText: "### Child\nchild" },
+      { title: "Sibling", text: "### Sibling\nsibling", ownText: "### Sibling\nsibling" },
+    ]);
   });
 });

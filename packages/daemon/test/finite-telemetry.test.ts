@@ -240,6 +240,45 @@ describe("finite telemetry history", () => {
         expect({ node_id: tenure.nodeId, generation_ordinal: tenure.generationOrdinal, generation_uuid: tenure.generationUuid, kind: tenure.kind, native_session_id_at_boot: tenure.nativeSessionIdAtBoot, boot_at: tenure.bootAt })
             .toEqual({ node_id: "node-a", generation_ordinal: "1", generation_uuid: "uuid-node-a-1", kind: "fresh", native_session_id_at_boot: null, boot_at: time });
     });
+    it("pins the queue-transitions HTTP envelope, decimal IDs, coverage, page bounds, and projected row shape for external consumers", async () => {
+        const db = fixture();
+        db.prepare(`INSERT INTO queue_transitions_archive
+      (transition_id,qitem_id,ts,state,transition_note,actor_session,closure_reason,closure_target,identity_provenance,archived_at)
+      VALUES (1,'q-contract','2026-10-04 09:00:00','pending','private archived note','seat@rig',NULL,NULL,'transport:v1',?)`).run(time);
+        db.prepare(`INSERT INTO queue_transitions
+      (transition_id,qitem_id,ts,state,transition_note,actor_session,closure_reason,closure_target,identity_provenance)
+      VALUES (?,'q-contract','2026-10-04T09:05:00.000Z','done','private active note','seat@rig','no-follow-on','pr-1','transport:v1')`).run(9007199254740993n);
+        expect(TELEMETRY_LIMITS).toEqual({ rows: 128, responseBytes: 131072, recordBytes: 4096, cursorBytes: 2048 });
+        const firstRes = await app(db).request("/api/telemetry/v1/queue-transitions?start=retained&qitemId=q-contract&limit=1");
+        expect(firstRes.status).toBe(200);
+        expect(firstRes.headers.get("content-type")).toContain("application/json");
+        const first = await firstRes.json();
+        expect(first).toEqual({
+            schemaVersion: 1, stream: "queue-transitions", observedAt: time,
+            source: { hostId: "host-test", bootEpoch: "boot-test", sequenceSpaceId: null },
+            rows: [{ transitionId: "1", qitemId: "q-contract", originalTimestamp: "2026-10-04 09:00:00", state: "pending",
+                actorSession: "seat@rig", identityProvenance: "transport:v1", closureReason: null, closureTarget: null, createdAt: time }],
+            page: { requestedAfter: "0", requestedBefore: null, lastScanned: "1", through: "9007199254740993",
+                retainedHighWatermark: "9007199254740993", hasMore: true, nextCursor: expect.any(String), restartCursor: null,
+                fetched: 2, scanned: 1, filtered: 0, withheld: 0, returned: 1, capReason: "source_row_limit" },
+            coverage: { status: "retained_window", historyCompleteness: "unknown", retainedMinimum: "1",
+                gaps: [], gapCount: 0, gapDetailsTruncated: false, eventPayloads: "not_read" },
+        });
+        const secondRes = await app(db).request(`/api/telemetry/v1/queue-transitions?cursor=${encodeURIComponent(first.page.nextCursor)}&qitemId=q-contract&limit=128`);
+        expect(secondRes.status).toBe(200);
+        const second = await secondRes.json();
+        expect(second).toEqual({
+            schemaVersion: 1, stream: "queue-transitions", observedAt: time,
+            source: { hostId: "host-test", bootEpoch: "boot-test", sequenceSpaceId: null },
+            rows: [{ transitionId: "9007199254740993", qitemId: "q-contract", originalTimestamp: "2026-10-04T09:05:00.000Z", state: "done",
+                actorSession: "seat@rig", identityProvenance: "transport:v1", closureReason: "no-follow-on", closureTarget: "pr-1", createdAt: "2026-10-04T09:05:00.000Z" }],
+            page: { requestedAfter: "1", requestedBefore: null, lastScanned: "9007199254740993", through: "9007199254740993",
+                retainedHighWatermark: "9007199254740993", hasMore: false, nextCursor: expect.any(String), restartCursor: null,
+                fetched: 1, scanned: 1, filtered: 0, withheld: 0, returned: 1, capReason: null },
+            coverage: { status: "partial", historyCompleteness: "unknown", retainedMinimum: "1",
+                gaps: [{ code: "retained_sequence_gap", from: "2", through: "9007199254740992" }], gapCount: 1, gapDetailsTruncated: false, eventPayloads: "not_read" },
+        });
+    });
     it("uses indexed key ranges for the actual page SQL, without temp sorting or filter scans", () => {
         const db = fixture();
         events(db, 5000, 1, 7);

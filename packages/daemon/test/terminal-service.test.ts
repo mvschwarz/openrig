@@ -89,10 +89,14 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
         resolveHost: id => id === "edge" ? { id, transport: "ssh", target: "fixture" } : null,
       });
       const svc = new TerminalService(deps);
-      const preview = await svc.previewView({ view: "remote" }) as { planId: string };
+      const preview = await svc.previewView({ view: "remote" }) as { planId: string; remote: unknown };
+      expect(preview.remote).toEqual([{ seat: "worker@edge", host: "edge" }]);
       const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
       expect(result.ok).toBe(true);
       expect(result.code).toBeUndefined();
+      // The remote tile keeps its host, so a consumer never mistakes it for a local seat of the same name.
+      expect(herdr.lastView!.opened[0]!.host).toBe("edge");
+      expect(result.remote).toEqual([{ seat: "worker@edge", host: "edge" }]);
       const command = herdr.lastView!.opened[0]!.paneCommand;
       if (mode === "isolated") {
         expect(command).toBe("ssh -t 'fixture' 'env OPENRIG_HOST_SELECTED=local rig terminal attach --read-only -- '\"'\"'worker@edge'\"'\"''");
@@ -100,7 +104,9 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
         // Main's inherited SSH tiles use remote tmux with identity-pinned replacement handling, not remote rig.
         expect(command).toMatch(/^ssh -t 'fixture' /);
         expect(command).toContain("OPENRIG_NODE_ID");
-        expect(command).toContain("attach -r -t");
+        // A read-only tile only views its seat: it never attaches.
+        expect(command).toContain('open() { t=$1; shift; stty -echo -isig -ixon 2>/dev/null; view "$t" "" "$@"; };');
+        expect(command).not.toMatch(/attach -r|while use/);
         expect(command).toContain("No replacement for $target; reopen the view with rig terminal open.");
         expect(command).not.toContain("rig terminal attach");
         expect(herdr.lastView!.opened[0]!.recoveryCommand).toBe("ssh -t 'fixture' 'tmux attach -r -t '\"'\"'worker@edge'\"'\"''");
@@ -164,12 +170,19 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(notes).toContain("Can you see the team?");
     expect(notes).toContain("does not confirm");
     if (unavailable) {
-      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'dev-driver@acme-build'");
-      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'rev-r1@acme-build'");
+      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -t 'dev-driver@acme-build'");
+      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -t 'rev-r1@acme-build'");
       expect(notes).toContain("include every command in full, unchanged");
     } else {
       expect(notes).not.toContain("attach -t");
     }
+  });
+
+  it("stop() also stops herdr-app's own watcher and timers (daemon shutdown)", async () => {
+    const { deps } = makeDeps();
+    let stopped = 0;
+    await new TerminalService({ ...deps, stopHerdrApp: () => { stopped++; } }).stop();
+    expect(stopped).toBe(1);
   });
 
   it("opens a rig NAME as an interactive derived view (read-write panes)", async () => {
@@ -179,6 +192,8 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(res.provider).toBe("herdr");
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["dev-driver@acme-build", "rev-r1@acme-build"]);
+    // Provenance is explicit: an empty remote list says every opened seat is local (absence would mean unknown).
+    expect(res.remote).toEqual([]);
     // interactive → no `-r` in the composed pane commands
     expect(herdr.lastView?.opened.every((p) => p.readOnly === false)).toBe(true);
     expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'dev-driver@acme-build'");
@@ -238,7 +253,8 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const res = await svc.openView({ view });
     expect(res.ok).toBe(true);
     expect(herdr.lastView?.opened.every((p) => p.readOnly === true)).toBe(true);
-    expect(herdr.lastView?.opened[0]?.paneCommand).toContain("attach -r -t");
+    expect(herdr.lastView?.opened[0]?.paneCommand).toContain('open() { t=$1; shift; stty -echo -isig -ixon 2>/dev/null; view "$t" "" "$@"; };');
+    expect(herdr.lastView?.opened[0]?.paneCommand).not.toMatch(/attach -r|while use/);
     expect(res.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
   });
 
@@ -467,7 +483,7 @@ describe("default saved kernel conversations", () => {
     expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
-    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
+    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
   });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
@@ -482,8 +498,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
-    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -f ignore-size -t 'actual-tui'");
+    expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
@@ -848,4 +864,64 @@ it("previews mission owners and ensure capability through the same scoped resolv
   const preview = await new TerminalService(deps).previewView({ view: "mission:work" });
   expect(preview).toMatchObject({ task: { kind: "mission", id: "work", complete: true, members: [] }, capabilities: { ensureViewer: true } });
   expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
+});
+
+describe("provider herdr-app", () => {
+  class AppProvider extends RecordingProvider {
+    closed: string[] = [];
+    constructor(readonly appHome: string) { super("herdr-app"); }
+    async closeView(viewId: string): Promise<OpenViewResult> { this.closed.push(viewId); return { provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 }; }
+  }
+  const withApp = (overrides: Partial<TerminalServiceDeps> = {}) => {
+    const apps = new Map<string, AppProvider>();
+    const made = makeDeps({
+      resolveHerdrAppProvider: (target) => {
+        const home = target.appHome ?? "/srv/apps/herdr-app";
+        if (!apps.has(home)) apps.set(home, new AppProvider(home));
+        return apps.get(home)!;
+      },
+      ...overrides,
+    });
+    return { ...made, apps, svc: new TerminalService(made.deps) };
+  };
+
+  it("is chosen only by name: an omitted provider keeps herdr even when this daemon can serve herdr-app", async () => {
+    const { svc, apps, herdr } = withApp();
+    await svc.openView({ view: "acme-build" });
+    expect(herdr.lastView).not.toBeNull();
+    expect(apps.size).toBe(0);
+  });
+
+  it("herdr-app is one provider per client: the open goes to the named app home, and plans differ per client", async () => {
+    const { svc, apps } = withApp();
+    const a = await svc.previewView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" } }) as { planId: string };
+    const b = await svc.previewView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/b" } }) as { planId: string };
+    expect(a.planId).not.toBe(b.planId);
+    const opened = await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" }, expectedPlan: a.planId });
+    expect(opened.ok).toBe(true);
+    expect(apps.get("/a")!.lastView).not.toBeNull();
+    expect(apps.get("/b")!.lastView).toBeNull();
+    expect((await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/b" }, expectedPlan: a.planId })).code).toBe("preview_changed");
+  });
+
+  it("a failed herdr-app open gives no attach-by-hand recipe", async () => {
+    const { svc, apps } = withApp();
+    svc["deps"].resolveHerdrAppProvider!({ appHome: "/a" });
+    apps.get("/a")!.openView = async () => ({ provider: "herdr-app", ok: false, opened: [], absent: [], degraded: [], pages: 0, error: "herdr-app is not answering", code: "herdr_app_unavailable" });
+    const result = await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" } });
+    expect(result.code).toBe("herdr_app_unavailable");
+    expect(JSON.stringify(result.notes ?? [])).not.toMatch(/attach directly|env -u TMUX/);
+  });
+
+  it("closes only herdr-app Rig views, in the named client", async () => {
+    const { svc, apps } = withApp();
+    expect((await svc.closeView({ provider: "herdr-app", view: "rv-1", herdrApp: { appHome: "/a" } })).ok).toBe(true);
+    expect(apps.get("/a")!.closed).toEqual(["rv-1"]);
+    expect((await svc.closeView({ provider: "herdr", view: "x" })).code).toBe("close_unsupported");
+  });
+
+  it("without a herdr-app provider, says so", async () => {
+    const svc = new TerminalService(makeDeps().deps);
+    expect((await svc.openView({ view: "acme-build", provider: "herdr-app" })).code).toBe("herdr_app_unsupported");
+  });
 });

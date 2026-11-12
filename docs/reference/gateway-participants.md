@@ -14,7 +14,7 @@ returns `503` with `error: "human_registry_unavailable"`. The result does not in
 ## Participants
 
 A participant is either:
-- **a person**, registered with `rig gateway human add`, with or without a connector binding; or
+- **a person**, registered with `rig gateway human add`, with or without a connector binding (such as Slack or an HTTP loopback [relay](gateway-relay.md)); or
 - **a shared channel**: one vetted Slack channel registered as one participant, `<id>@external`, not a person per
   sender.
 
@@ -22,6 +22,9 @@ People and channels share one address space: a channel can't take a person's id.
 
 A registered person is addressed as `<id>@external`, including without Slack: for example,
 `rig gateway human add alex --display-name "Alex" --delivery-class B` creates `alex@external`, reached in the Feed and Steering.
+A person can also bind to a local bridge adapter using a `relay` binding:
+`rig gateway human add bob --display-name "Bob" --delivery-class B --binding "relay:local-bridge:file:/etc/openrig/relay.env:primary:handle=bob-ops"`
+(see [Gateway Relay Reference](gateway-relay.md) for endpoint, secret provisioning, and custody architecture).
 `human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
 These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions: reply with
 `rig queue create --destination human@host --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
@@ -72,6 +75,25 @@ go to:
 
 `rig gateway default` shows the current default; `rig gateway default --clear` clears the choice. Choosing a default
 never changes `workspace.operator_seat_name`, which keeps its own meaning.
+
+## The default receiving agent
+
+The default person is who OpenRig asks. The default receiving agent is the agent that reads what a person answers when
+nothing else reads it: a request with no owner of its own, such as a host pairing request or a mode's scheduled end, and
+a Slack message no thread or channel route claims. It is:
+1. the agent chosen in `agents.operator_session` (`rig config set agents.operator_session <seat>@<rig>`; a person's
+   address there is ignored);
+2. otherwise the kernel operator, `operator-agent@kernel`, when this host has that seat, running or stopped;
+3. otherwise none, and the request says no agent reads answers on this host.
+
+A stopped receiving agent stays the receiver: answers wait for it, and the person is told it isn't running. OpenRig
+never picks whichever seat happens to be running. The TUI shows the effective agent, where it came from and its state
+under Settings > Agents & runtime ("Default receiving agent"). It never replaces the default person.
+
+For Slack, `rig slack setup --inbound-destination default-receiver` (the default for a new setup) sends unrouted
+messages to the default receiving agent, read when the connector starts. With no receiving agent on the host, they go to
+`operator-agent@kernel` for compatibility, as before. A destination already saved in the connector
+config, `operator-agent@kernel` included, is kept as chosen; pass `default-receiver` to switch it.
 
 ## In the TUI: whose queue, and who acts
 

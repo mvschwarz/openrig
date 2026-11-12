@@ -19,22 +19,25 @@ import type { QueueRepository } from "../../queue-repository.js";
 import type { DispatchResult } from "../dispatcher.js";
 import { DispatchBuffer } from "../dispatch-buffer.js";
 import type { LoadResult } from "../human-registry.js";
+import { sharedChannelAddresses } from "../participants.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SeenStore } from "./state-store.js";
 import { OUTBOUND_OP, toPayload, type OutboundPostPayload } from "./outbound-driver.js";
+import { POSSIBLY_POSTED_CLASS } from "./slack-delivery.js";
 import type { OwnerNotificationLevel } from "../../queue-transition-log.js";
-import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, type ReleaseDisposition } from "../../policies/quiet-release.js";
+import { DISPOSITION_PREFIX as QUIET_RELEASE_DISPOSITION, hasToken, parseQuietHoldNote, QUIET_UNREADABLE_PREFIX, type ReleaseDisposition } from "../../policies/quiet-release.js";
 import { DELIVERY_DEFERRAL_ARMED_PREFIX } from "../../policies/delivery-deferral.js";
 
 export const RE_PRESENT_DECISION_PREFIX = "re-present:";
 const REQUESTED = "slack-re-present-requested";
 const DISPOSITION = "slack-re-present-disposition";
 const UNAVAILABLE = "slack-re-present-state-unavailable";
+const UNCONFIRMED = "slack-re-present-unconfirmed";
 const SEEDED_AT_ENABLE = "seeded-at-enable";
 
 export type OpenAskOutcome =
   | "posted" | "already-posted" | "queued" | "held" | "below-floor"
-  | "no-longer-active" | "superseded" | "recipient-changed"
+  | "no-longer-active" | "superseded" | "recipient-changed" | "no-connector"
   | "state-unavailable" | "transport-failed" | "uncertain";
 
 export interface OpenAskResult {
@@ -66,19 +69,73 @@ export function noteRePresentNotPosted(queueRepo: QueueRepository, qitemId: stri
   queueRepo.update({ qitemId, actorSession: "daemon@kernel", transitionNote: note });
 }
 
+/** What OpenRig couldn't confirm when it went on to post a re-shown ask: whether an earlier attempt reached Slack, the
+ *  ask's current state, or the person's delivery settings. */
+export type RePresentUnconfirmed = "attempt" | "state" | "policy";
+
+/** The gateway's record that it went on to post a re-shown ask although it couldn't confirm `what`. Written before the
+ *  post; what became of the post is its own receipt. */
+export function noteRePresentUnconfirmed(queueRepo: QueueRepository, qitemId: string, notificationKey: string,
+  what: RePresentUnconfirmed[], why: string): void {
+  queueRepo.update({ qitemId, actorSession: "daemon@kernel",
+    transitionNote: `${UNCONFIRMED} notification_key=${notificationKey} what=${what.join(",")} detail=${why.replace(/\s+/g, " ").trim()}` });
+}
+
+const UNCONFIRMED_WORDS: Record<RePresentUnconfirmed, string> = {
+  attempt: "an earlier attempt", state: "the ask's state", policy: "the person's delivery policy",
+};
+
+/** Everything this ask's unconfirmed records say OpenRig couldn't confirm. */
+function unconfirmedOf(notes: string[], key: string): Set<RePresentUnconfirmed> {
+  const what = new Set<RePresentUnconfirmed>();
+  for (const note of notes) {
+    if (!hasToken(note, UNCONFIRMED, key)) continue;
+    for (const item of (/\bwhat=(\S+)/.exec(note)?.[1] ?? "attempt").split(",")) {
+      if (item in UNCONFIRMED_WORDS) what.add(item as RePresentUnconfirmed);
+    }
+  }
+  return what;
+}
+
+/** The marks a later post of a re-shown ask carries, by its row's unconfirmed records for this key: "may repeat" when an
+ *  earlier attempt may be in Slack, and "couldn't check" when its state couldn't be checked. Empty for any other ask. */
+export function rePresentMarks(notes: string[], key: string): { possibleRepeat?: true; stateUnconfirmed?: true } {
+  const what = unconfirmedOf(notes, key);
+  return { ...(what.has("attempt") ? { possibleRepeat: true as const } : {}), ...(what.has("state") ? { stateUnconfirmed: true as const } : {}) };
+}
+
+/** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */
+function postedUnconfirmed(notes: string[], key: string): string | null {
+  const what = unconfirmedOf(notes, key);
+  const words = (["attempt", "state", "policy"] as const).filter((item) => what.has(item)).map((item) => UNCONFIRMED_WORDS[item]);
+  if (notes.some((note) => hasToken(note, QUIET_UNREADABLE_PREFIX, key))) words.push("the person's quiet-hours setting");
+  if (words.length === 0) return null;
+  const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
+  return `posted; ${list} ${words.length === 1 ? "was" : "were"} unconfirmed`;
+}
+
 const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome; detail?: string }> = {
   "row-not-active": { outcome: "no-longer-active" },
   superseded: { outcome: "superseded", detail: "the row has a newer ask since" },
   "recipient-changed": { outcome: "recipient-changed" },
   "below-posting-threshold": { outcome: "below-floor", detail: "the posting floor was raised before it posted" },
+  "no-connector": { outcome: "no-connector", detail: "the person has no connector now: it stays on Steering and the Feed" },
 };
+
+/** A post Slack answered 2xx without a readable reply (slack-delivery's POSSIBLY_POSTED_CLASS): uncertain, not failed. */
+const MAY_BE_IN_SLACK = "may already be in Slack (its reply couldn't be read)";
 
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */
 function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; detail?: string } | null {
-  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) return { outcome: "posted" };
+  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) {
+    const detail = postedUnconfirmed(notes, key);
+    return detail ? { outcome: "posted", detail } : { outcome: "posted" };
+  }
   for (const note of [...notes].reverse()) {
     if (hasToken(note, "slack-owner-notification-transport-failed", key)) {
-      return { outcome: "transport-failed", detail: /\bclass=(\S+)/.exec(note)?.[1] };
+      const failureClass = /\bclass=(\S+)/.exec(note)?.[1];
+      return failureClass === POSSIBLY_POSTED_CLASS ? { outcome: "uncertain", detail: MAY_BE_IN_SLACK }
+        : { outcome: "transport-failed", detail: failureClass };
     }
     if (parseQuietHoldNote(note)?.notificationKey === key || hasToken(note, "quiet-release-returned", key)) {
       return { outcome: "held", detail: "quiet hours: their release posts it when quiet hours end" };
@@ -120,7 +177,20 @@ export interface PostOpenAsksInput {
 /** Show the open asks again: reconcile each, offer the ones enable seeded, then report every ask's outcome. */
 export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAsksResult> {
   const { queueRepo } = input;
-  const ports = makeQueuePorts(queueRepo, { loadHumanRegistry: input.loadHumanRegistry });
+  const loadSlackHumanRegistry = (): LoadResult => {
+    const loaded = input.loadHumanRegistry();
+    if (!loaded.ok) return loaded;
+    return {
+      ...loaded,
+      entities: loaded.entities.filter((entity) =>
+        entity.connectorBindings.some((b) => b.role === "primary" && b.kind === "slack"),
+      ),
+    };
+  };
+  const ports = makeQueuePorts(queueRepo, {
+    loadHumanRegistry: loadSlackHumanRegistry,
+    sharedChannels: () => sharedChannelAddresses(input.home),
+  });
   const episodes = await ports.listOpenAsks({ minimumLevel: input.minimumLevelThatPosts });
   const seen = new SeenStore(input.seenPath ?? path.join(input.home, "state", "slack-outbound-seen.jsonl"));
   const attempted = new SeenStore(path.join(input.home, "state", "slack-attempted-decisions.jsonl"));
@@ -159,7 +229,11 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     const result: OpenAskResult = { qitemId: item.qitemId, notificationKey: key, recipient: item.destinationSession ?? "",
       summary: item.summary ?? null, outcome: "uncertain", reshown: false };
     results.push(result);
-    if (posted) { Object.assign(result, { outcome: "already-posted" }); continue; }
+    if (posted) {
+      const detail = postedUnconfirmed(notesOf(item.qitemId), key);
+      Object.assign(result, { outcome: "already-posted", ...(detail ? { detail } : {}) });
+      continue;
+    }
     if (!eligible) {
       Object.assign(result, { outcome: "below-floor", detail: item.ownerNotificationLevel === "RECORD"
         ? "asked at RECORD: it waits on Steering and the Feed without a Slack post"
@@ -176,10 +250,15 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     if (pending) {
       Object.assign(result, fact?.outcome === "transport-failed"
         ? { outcome: "transport-failed", detail: `${fact.detail ?? "failed"}; kept for another try when the gateway next starts` }
-        : pending);
+        : fact?.detail === MAY_BE_IN_SLACK
+          ? { outcome: "uncertain", detail: `${MAY_BE_IN_SLACK}; the gateway checks Slack for its marker before any resend when it next starts` }
+          : pending);
       continue;
     }
-    if (fact && fact.outcome !== "state-unavailable") { Object.assign(result, fact); continue; }
+    if (fact && fact.outcome !== "state-unavailable") {
+      Object.assign(result, fact.detail === MAY_BE_IN_SLACK ? { ...fact, detail: `${MAY_BE_IN_SLACK}; no resend is pending` } : fact);
+      continue;
+    }
     if (!(statuses instanceof Map)) { Object.assign(result, notOffered("seen store", statuses.unreadable)); continue; }
     const status = statuses.get(key);
     if (status === "log-class-contained") { Object.assign(result, LOG_ONLY); continue; }

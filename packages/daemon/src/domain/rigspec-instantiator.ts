@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -20,6 +21,7 @@ import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { resolveLaunchCwd } from "./cwd-resolution.js";
 import type { RecordCreated } from "./operation-correlation.js";
+import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -126,6 +128,7 @@ export class RigInstantiator {
             claudeTokenRef: specNode.claudeTokenRef,
             claudeMcp: specNode.claudeMcp,
             codexPermissions: specNode.codexPermissions,
+            launchWrapper: specNode.launchWrapper,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -316,7 +319,7 @@ export class RigInstantiator {
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -325,7 +328,7 @@ import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, f
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
-import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
+import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
@@ -336,7 +339,7 @@ import type {
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
-import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
+import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths, type SeatSkillSelection } from "./seat-skill-storage.js";
 import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
@@ -549,7 +552,7 @@ export class PodRigInstantiator {
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string; recordCreated?: RecordCreated },
   ): Promise<MaterializeOutcome> {
     let raw: unknown;
     try {
@@ -695,9 +698,9 @@ export class PodRigInstantiator {
         if (!materializedRigId) {
           const rig = this.deps.rigRepo.createRig(rigSpec.name);
           materializedRigId = rig.id;
-          opts?.recordCreated?.(rig.id);
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
+        opts?.recordCreated?.(materializedRigId);
 
         // PL-007: persist the rig's typed workspace block when declared.
         if (rigSpec.workspace) {
@@ -936,6 +939,7 @@ export class PodRigInstantiator {
         member: { ...context.member, agentRef: live.agentRef ?? "", profile: live.profile ?? "default", runtime: live.runtime ?? "",
           model: live.model ?? undefined, effort: live.effort ?? undefined, advisor: live.advisor ?? undefined,
           claudeMcp: live.runtime === "claude-code" ? live.claudeMcp ?? undefined : undefined,
+          launchWrapper: isLaunchWrapperRuntime(live.runtime) ? (live.launchWrapper ?? []) : undefined,
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           permissionPolicy: undefined },
@@ -965,6 +969,7 @@ export class PodRigInstantiator {
     const changed = (["agentRef", "profile", "runtime", "model", "effort", "advisor", "codexConfigProfile"] as const)
       .filter(key => !isDeepStrictEqual(saved.member[key] ?? null, context.member[key] ?? null));
     const changes: string[] = [...changed];
+    if (!sameLaunchWrapper(saved.member.launchWrapper, context.member.launchWrapper)) changes.push("launchWrapper");
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
@@ -1344,7 +1349,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1360,7 +1365,7 @@ export class PodRigInstantiator {
     const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
     if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
       || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
-      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp)) return refuse("Member source disagrees with the retained seat identity or policy.");
+      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp) || !sameLaunchWrapper(member.launchWrapper, node.launchWrapper)) return refuse("Member source disagrees with the retained seat identity or policy.");
     const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
     if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
     if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
@@ -1391,7 +1396,9 @@ export class PodRigInstantiator {
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
       resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
-    return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
+    // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
+    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved), ...(result.warnings ?? [])];
+    return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
   }
 
   async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
@@ -1406,7 +1413,7 @@ export class PodRigInstantiator {
         name = typeof parsed?.name === "string" ? parsed.name : null;
       } catch { /* the import below reports the parse error */ }
     }
-    if (!name) return this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+    if (!name) return this.instantiateBuilding(rigSpecYaml, rigRoot, opts);
     let inFlight = importsInFlight.get(this.db);
     if (!inFlight) importsInFlight.set(this.db, (inFlight = new Set()));
     if (inFlight.has(name)) {
@@ -1414,9 +1421,24 @@ export class PodRigInstantiator {
     }
     inFlight.add(name);
     try {
-      return await this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+      return await this.instantiateBuilding(rigSpecYaml, rigRoot, opts);
     } finally {
       inFlight.delete(name);
+    }
+  }
+
+  /** {@link instantiateOnce}, with the new rig marked as still being built from its creation until every seat and edge
+   *  has been written (#2871), so a seat that asks who's on its team in between is told the team isn't complete yet. */
+  private async instantiateBuilding(rigSpecYaml: string, rigRoot: string, opts?: Parameters<PodRigInstantiator["instantiate"]>[2]) {
+    const marked: string[] = [];
+    const recordCreated: RecordCreated = (rigId, nodeId) => {
+      if (nodeId === undefined) { markRigBuilding(this.db, rigId); marked.push(rigId); }
+      opts?.recordCreated?.(rigId, nodeId);
+    };
+    try {
+      return await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated });
+    } finally {
+      for (const rigId of marked) unmarkRigBuilding(this.db, rigId);
     }
   }
 
@@ -1690,6 +1712,7 @@ export class PodRigInstantiator {
             claudeTokenRef: member.claudeTokenRef,
             claudeMcp: member.claudeMcp,
             codexPermissions: member.codexPermissions,
+            launchWrapper: member.launchWrapper,
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2084,6 +2107,7 @@ export class PodRigInstantiator {
       claudeTokenRef: input.member.claudeTokenRef,
       claudeMcp: input.member.claudeMcp,
       codexPermissions: input.member.codexPermissions,
+      launchWrapper: input.member.launchWrapper,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2113,6 +2137,7 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
     envOverride?: SeatEnv;
+    resolveResult?: ReturnType<typeof resolveAgentRef>;
   }) {
     return this.launchBinding(input);
   }
@@ -2137,6 +2162,8 @@ export class PodRigInstantiator {
     cwdOverride?: string;
     envOverride?: SeatEnv;
     keepRecordedAdditions?: boolean;
+    /** An agent spec the caller already resolved for this launch. */
+    resolveResult?: ReturnType<typeof resolveAgentRef>;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
@@ -2176,10 +2203,34 @@ export class PodRigInstantiator {
       };
     }
 
-    // The recipe supplies the authored source, while the retained node row is the
-    // latest operator choice. Keep those choices authoritative across a restart.
-    const member = {
-      ...context.member,
+    const member = this.persistedMember(node, context.member);
+
+    // A fresh launch from the recipe runs no rig preflight, so the agent spec it resolves reports its own advisories.
+    // The launch uses this same resolution rather than reading the spec again.
+    const resolveResult = member.agentRef === "builtin:terminal" ? undefined : resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    const launched = await this.launchValidatedMember({
+      rigId,
+      rigSpec: recipe.rigSpec,
+      rigRoot: recipe.rigRoot,
+      pod: context.pod,
+      member,
+      qualifiedId: node.logicalId,
+      nodeId,
+      // Preserve the resolved cwd from materialization, including a prior
+      // --cwd-override, rather than silently falling back to process cwd.
+      cwdOverride: node.cwd ?? undefined,
+      resolveResult,
+    });
+    const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
+    return advisories.length ? { ...launched, warnings: [...advisories, ...(launched.warnings ?? [])] } : launched;
+  }
+
+  /** The recipe supplies the authored source, while the retained node row is the
+   *  latest operator choice. Keep those choices authoritative across a restart. */
+  private persistedMember(node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number], recipeMember: RigSpecPodMember): RigSpecPodMember {
+    return {
+      ...recipeMember,
+      launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
@@ -2194,19 +2245,36 @@ export class PodRigInstantiator {
       ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
       ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
     };
+  }
 
-    return this.launchValidatedMember({
-      rigId,
-      rigSpec: recipe.rigSpec,
-      rigRoot: recipe.rigRoot,
-      pod: context.pod,
-      member,
-      qualifiedId: node.logicalId,
-      nodeId,
-      // Preserve the resolved cwd from materialization, including a prior
-      // --cwd-override, rather than silently falling back to process cwd.
-      cwdOverride: node.cwd ?? undefined,
-    });
+  /**
+   * A seat's skill selection as its spec says today, for a restore that follows skills (`on_restore: follow_source`):
+   * resolved from its launch recipe the way a fresh launch of it would be, with the agent spec read from disk now.
+   * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
+   * can't be resolved, says why; the restore then keeps the saved selection.
+   */
+  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return { ok: false, reason: `node ${nodeId} not found` };
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) return { ok: false, reason: `${node.logicalId} has no launch recipe` };
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return { ok: false, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    const member = this.persistedMember(node, context.member);
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return { ok: false, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
+      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
+    const skills = config.config.selectedResources.skills;
+    return { ok: true, selection: {
+      selected: new Set(skills.map((skill) => skill.effectiveId)),
+      following: skills.filter((skill) => (skill.resource as SkillResource).onRestore === "follow_source").map((skill) => ({
+        id: skill.effectiveId,
+        source: nodePath.resolve(skill.sourcePath, (skill.resource as SkillResource).path),
+      })),
+    } };
   }
 
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */
@@ -2753,6 +2821,12 @@ export class PodRigInstantiator {
     // Apply the authored selection only after accepting the launch and resolving its startup sources.
     // An already-bound seat, failed tmux launch or unresolved source must keep the previous choice.
     if (input.member.runtime === "claude-code") this.deps.rigRepo.setNodeClaudeMcp(input.nodeId, input.member.claudeMcp ?? null);
+    if (isLaunchWrapperRuntime(input.member.runtime) && input.member.launchWrapper !== undefined) {
+      this.deps.rigRepo.setNodeLaunchWrapper(
+        input.nodeId,
+        input.member.launchWrapper.length > 0 ? input.member.launchWrapper : null,
+      );
+    }
 
     const startupResult = await this.deps.startupOrchestrator.startNode({
       rigId: input.rigId,
@@ -3076,6 +3150,16 @@ export class PodRigInstantiator {
     files.push({
       path: "openrig-start.md",
       absolutePath: onboardingPath,
+      ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
+      deliveryHint: "guidance_merge",
+      required: false,
+      appliesOn: ["fresh_start", "restore"],
+    });
+    // The context-entry floor: where skills, help and declared context are. Not gated by the onboarding pack, so every
+    // seat gets it; a restore of a seat saved before it existed gets it beside openrig-start.md (withContextEntryFloor).
+    files.push({
+      path: "openrig-context-entry.md",
+      absolutePath: nodePath.resolve(import.meta.dirname, "../../assets/guidance/openrig-context-entry.md"),
       ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
       deliveryHint: "guidance_merge",
       required: false,

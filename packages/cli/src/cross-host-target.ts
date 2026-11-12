@@ -36,6 +36,8 @@ export interface CrossHostTargetResolution {
   target: string;
   /** The sugar-derived host id (registered suffix), if any. */
   sugarHost: string | undefined;
+  /** The qualifier explicitly names this host, overriding a persisted remote selection. */
+  localHost?: boolean;
   /**
    * Loud-failure hint when the target was 3-part-SHAPED but the suffix
    * matched no registered host. Callers append it to failure surfaces for
@@ -102,7 +104,7 @@ export function resolveCrossHostTarget(
       };
     }
     // Routes home: strip the self-suffix, no cross-host sugarHost (local send).
-    return { ok: true, target: base, sugarHost: undefined, hint: undefined };
+    return { ok: true, target: base, sugarHost: undefined, localHost: true, hint: undefined };
   }
 
   const loader = registryLoader ?? loadHostRegistry;

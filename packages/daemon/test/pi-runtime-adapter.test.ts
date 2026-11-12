@@ -42,6 +42,7 @@ function mockTmux(overrides?: {
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     hasSession: overrides?.hasSession ?? vi.fn(async () => true),
     getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "node"),
+    getSessionEnv: async (_session: string, key: string) => key === "OPENRIG_NODE_ID" ? "node-pi" : undefined,
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -831,4 +832,306 @@ describe("a Pi seat's recorded guidance file that has since become a link (#2432
     expect("/work/AGENTS.md" in fs.files).toBe(false);
     expect(result.warnings?.join("\n")).toMatch(/now a link/);
   });
+});
+
+describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
+  const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+
+  it.each(["fresh", "resume", "fork"] as const)("PiRuntimeAdapter %s resolves launchWrapper on seatLaunchEnvironment, passes --launch-wrapper-arg tokens to runner, and omits launchWrapper from shell command()", async mode => {
+    const fs = memFs({ [SESSION_FILE]: "jsonl" });
+    const commandCalls: Array<{ session: string; cmd: string; target: unknown }> = [];
+    const resolveLaunchWrapper = vi.fn((w: readonly string[]) => [`/resolved/bin/${w[0]}`, ...w.slice(1)]);
+    const seatLaunchEnvironment = {
+      accountHome: () => undefined,
+      resolveLaunchWrapper,
+      command: vi.fn(async (session: string, cmd: string, target: unknown) => {
+        commandCalls.push({ session, cmd, target });
+        return `/usr/bin/env 'OPENRIG_RUNTIME=pi' ${cmd}`;
+      }),
+    } as never;
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+      const childFile = mode === "fork" ? `${STATE_ROOT}/${SESSION}/sessions/forked_child.jsonl` : SESSION_FILE;
+      fs.files[statePath] = readyState(childFile, launchIdFrom(text));
+      return { ok: true as const };
+    });
+    const adapter = new PiRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand }),
+      seatLaunchEnvironment,
+      fsOps: fs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const wrapper = ["my-wrapper", "arg 1", "--leading", "", "--"];
+    const result = await adapter.launchHarness(
+      { tmuxSession: SESSION, nodeId: "node-pi", launchGeneration: "gen-1", cwd: "/work", model: "zai/glm-5.2", launchWrapper: wrapper } as never,
+      {
+        name: SESSION,
+        ...(mode === "resume" ? { resumeToken: SESSION_FILE } : {}),
+        ...(mode === "fork" ? { forkSource: { kind: "native_id", value: SESSION_FILE } } : {}),
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(resolveLaunchWrapper).toHaveBeenCalledWith(wrapper);
+    expect(commandCalls).toHaveLength(1);
+    expect(commandCalls[0]!.target).toEqual({
+      nodeId: "node-pi",
+      generation: "gen-1",
+      runtime: "pi",
+    });
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(
+      "node '/daemon-dist/adapters/pi-runner.js'",
+    );
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(
+      "--launch-wrapper-arg '/resolved/bin/my-wrapper' --launch-wrapper-arg 'arg 1' --launch-wrapper-arg '--leading' --launch-wrapper-arg '' --launch-wrapper-arg '--'",
+    );
+  });
+
+  it("PiRuntimeAdapter refuses selected launchWrapper when seatLaunchEnvironment is absent, runtime is omp, or resolveLaunchWrapper fails (before writing pending sidecar)", async () => {
+    const fs = memFs();
+    const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const piWithoutEnv = new PiRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand }),
+      fsOps: fs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const res1 = await piWithoutEnv.launchHarness(
+      { tmuxSession: SESSION, cwd: "/work", launchWrapper: ["my-wrapper", "--"] } as never,
+      { name: SESSION },
+    );
+    expect(res1).toEqual({ ok: false, error: "launch_wrapper support unavailable; no agent started." });
+    expect(sendShellCommand).not.toHaveBeenCalled();
+    expect(statePath in fs.files).toBe(false);
+
+    const ompWithEnv = new OmpRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand }),
+      seatLaunchEnvironment: {
+        resolveLaunchWrapper: vi.fn((w: readonly string[]) => [...w]),
+        command: vi.fn(async (_s: string, cmd: string) => cmd),
+      } as never,
+      fsOps: fs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const res2 = await ompWithEnv.launchHarness(
+      { tmuxSession: SESSION, cwd: "/work", launchWrapper: ["my-wrapper", "--"] } as never,
+      { name: SESSION },
+    );
+    expect(res2).toEqual({ ok: false, error: "launch_wrapper support unavailable; no agent started." });
+    expect(sendShellCommand).not.toHaveBeenCalled();
+    expect(statePath in fs.files).toBe(false);
+
+    const failingCommand = vi.fn(async (_s: string, cmd: string) => cmd);
+    const piWithFailingResolve = new PiRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand }),
+      seatLaunchEnvironment: {
+        resolveLaunchWrapper: vi.fn(() => { throw new Error("PATH=/secret/token missing wrapper"); }),
+        command: failingCommand,
+      } as never,
+      fsOps: fs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const res3 = await piWithFailingResolve.launchHarness(
+      { tmuxSession: SESSION, cwd: "/work", launchWrapper: ["missing-wrapper", "--"] } as never,
+      { name: SESSION },
+    );
+    expect(res3).toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(JSON.stringify(res3)).not.toContain("/secret/token");
+    expect(failingCommand).not.toHaveBeenCalled();
+    expect(sendShellCommand).not.toHaveBeenCalled();
+    expect(statePath in fs.files).toBe(false);
+  });
+
+  it("PiRuntimeAdapter retains launch_path_too_long bare runner retry when wrapped because the raw runner command carries the exact same --launch-wrapper-arg flags", async () => {
+    const seatLaunchEnvironment = {
+      accountHome: () => undefined,
+      resolveLaunchWrapper: vi.fn((w: readonly string[]) => [`/abs/bin/${w[0]}`, ...w.slice(1)]),
+      command: vi.fn(async (_s: string, cmd: string) => `/usr/bin/env 'OPENRIG_RUNTIME=pi' ${cmd}`),
+    } as never;
+
+    const fs = memFs();
+    let wrappedCalls = 0;
+    const wrappedSend = vi.fn(async (_t: string, text: string): Promise<TmuxResult> => {
+      if (++wrappedCalls === 1) return { ok: false, code: "launch_path_too_long", message: "staged script path too long" };
+      fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
+      return { ok: true };
+    });
+    const wrappedAdapter = new PiRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand: wrappedSend }),
+      seatLaunchEnvironment,
+      fsOps: fs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const wrappedRes = await wrappedAdapter.launchHarness(
+      { tmuxSession: SESSION, cwd: "/work", launchWrapper: ["wrapper", "--flag", "--"] } as never,
+      { name: SESSION },
+    );
+    expect(wrappedRes.ok).toBe(true);
+    expect(wrappedSend).toHaveBeenCalledTimes(2);
+    const expectedFlags = "--launch-wrapper-arg '/abs/bin/wrapper' --launch-wrapper-arg '--flag' --launch-wrapper-arg '--'";
+    expect(wrappedSend.mock.calls[0]![1]).toContain(expectedFlags);
+    expect(wrappedSend.mock.calls[1]![1]).toMatch(/^node '/);
+    expect(wrappedSend.mock.calls[1]![1]).toContain(expectedFlags);
+
+    // Unwrapped (including empty array []): still retries bare cmd on launch_path_too_long without wrapper flags
+    const unwrappedFs = memFs();
+    let calls = 0;
+    const unwrappedSend = vi.fn(async (_t: string, text: string): Promise<TmuxResult> => {
+      if (++calls === 1) return { ok: false, code: "launch_path_too_long", message: "staged script path too long" };
+      unwrappedFs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
+      return { ok: true };
+    });
+    const unwrappedAdapter = new PiRuntimeAdapter({
+      tmux: mockTmux({ sendShellCommand: unwrappedSend }),
+      seatLaunchEnvironment,
+      fsOps: unwrappedFs,
+      stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER,
+      sleep: async () => {},
+    });
+    const unwrappedRes = await unwrappedAdapter.launchHarness(
+      { tmuxSession: SESSION, cwd: "/work", launchWrapper: [] } as never,
+      { name: SESSION },
+    );
+    expect(unwrappedRes.ok).toBe(true);
+    expect(unwrappedSend).toHaveBeenCalledTimes(2);
+    expect(unwrappedSend.mock.calls[1]![1]).toMatch(/^node '/);
+    expect(unwrappedSend.mock.calls[1]![1]).not.toContain("--launch-wrapper-arg");
+  });
+
+  it("PiResumeAdapter resolves launchWrapper before pending sidecar write, passes --launch-wrapper-arg tokens to runner without passing launchWrapper to command(), and retains launch_path_too_long retry with identical flags", async () => {
+    const fs = memFs({ [SESSION_FILE]: "jsonl" });
+    const commandCalls: Array<{ session: string; cmd: string; target: unknown }> = [];
+    const resolveLaunchWrapper = vi.fn((w: readonly string[]) => [`/abs/bin/${w[0]}`, ...w.slice(1)]);
+    const seatLaunchEnvironment = {
+      accountHome: () => undefined,
+      resolveLaunchWrapper,
+      command: vi.fn(async (session: string, cmd: string, target: unknown) => {
+        commandCalls.push({ session, cmd, target });
+        return `/usr/bin/env ${cmd}`;
+      }),
+    } as never;
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+      fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
+      return { ok: true as const };
+    });
+    const resumeAdapter = new PiResumeAdapter(
+      mockTmux({ sendShellCommand }),
+      fs,
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      { seatLaunchEnvironment, pollMs: 1, maxWaitMs: 5, sleep: async () => {} },
+    );
+
+    const wrapper = ["my-wrapper", "--opt", "--"];
+    const okRes = await resumeAdapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work", "zai/glm-5.2", "full_bypass", "high", wrapper);
+    expect(okRes.ok).toBe(true);
+    expect(resolveLaunchWrapper).toHaveBeenCalledWith(wrapper);
+    expect(commandCalls).toEqual([{
+      session: SESSION,
+      cmd: expect.stringContaining("--approve --model 'zai/glm-5.2' --thinking 'high' --session"),
+      target: { runtime: "pi", nodeId: "node-pi", accountHome: undefined },
+    }]);
+    const expectedFlags = "--launch-wrapper-arg '/abs/bin/my-wrapper' --launch-wrapper-arg '--opt' --launch-wrapper-arg '--'";
+    expect(sendShellCommand.mock.calls[0]![1]).toContain("node '/daemon-dist/adapters/pi-runner.js'");
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(expectedFlags);
+
+    // Without seatLaunchEnvironment -> refused before sendShellCommand or sidecar write
+    const noEnvFs = memFs({ [SESSION_FILE]: "jsonl" });
+    const noEnvSend = vi.fn(async () => ({ ok: true as const }));
+    const noEnvAdapter = new PiResumeAdapter(
+      mockTmux({ sendShellCommand: noEnvSend }),
+      noEnvFs,
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      { pollMs: 1, maxWaitMs: 5, sleep: async () => {} },
+    );
+    const noEnvRes = await noEnvAdapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work", undefined, undefined, undefined, wrapper);
+    expect(noEnvRes).toEqual({ ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." });
+    expect(noEnvSend).not.toHaveBeenCalled();
+    expect(statePath in noEnvFs).toBe(false);
+
+    // resolveLaunchWrapper throwing -> sanitized refusal before pending sidecar write
+    const failResolveFs = memFs({ [SESSION_FILE]: "jsonl" });
+    const failResolveSend = vi.fn(async () => ({ ok: true as const }));
+    const failResolveAdapter = new PiResumeAdapter(
+      mockTmux({ sendShellCommand: failResolveSend }),
+      failResolveFs,
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      {
+        seatLaunchEnvironment: {
+          resolveLaunchWrapper: vi.fn(() => { throw new Error("secret-path-value"); }),
+          command: vi.fn(async (_s: string, cmd: string) => cmd),
+        } as never,
+        pollMs: 1, maxWaitMs: 5, sleep: async () => {},
+      },
+    );
+    const failResolveRes = await failResolveAdapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work", undefined, undefined, undefined, wrapper);
+    expect(failResolveRes).toEqual({ ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." });
+    expect(failResolveSend).not.toHaveBeenCalled();
+    expect(statePath in failResolveFs.files).toBe(false);
+
+    // launch_path_too_long when wrapped -> retries raw runner command with exact same wrapper flags
+    const tooLongFs = memFs({ [SESSION_FILE]: "jsonl" });
+    let tooLongCalls = 0;
+    const tooLongSend = vi.fn(async (_t: string, text: string): Promise<TmuxResult> => {
+      if (++tooLongCalls === 1) return { ok: false, code: "launch_path_too_long", message: "too long" };
+      tooLongFs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
+      return { ok: true };
+    });
+    const tooLongAdapter = new PiResumeAdapter(
+      mockTmux({ sendShellCommand: tooLongSend }),
+      tooLongFs,
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      { seatLaunchEnvironment, pollMs: 1, maxWaitMs: 5, sleep: async () => {} },
+    );
+    const tooLongRes = await tooLongAdapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work", undefined, undefined, undefined, wrapper);
+    expect(tooLongRes.ok).toBe(true);
+    expect(tooLongSend).toHaveBeenCalledTimes(2);
+    expect(tooLongSend.mock.calls[0]![1]).toContain(expectedFlags);
+    expect(tooLongSend.mock.calls[1]![1]).toMatch(/^node '/);
+    expect(tooLongSend.mock.calls[1]![1]).toContain(expectedFlags);
+  });
+});
+
+it.each(["selected", "cleared"])("does not bypass a %s Pi account when a wrapped launch cannot be staged", async selection => {
+  const fs = memFs();
+  const accountHome = selection === "cleared" ? null : "/accounts/pi";
+  const sendShellCommand = vi.fn(async (): Promise<TmuxResult> => ({ ok: false, code: "launch_path_too_long", message: "fixture bound" }));
+  const command = vi.fn(async (_session: string, cmd: string) => `/usr/bin/env ${cmd}`);
+  const adapter = new PiRuntimeAdapter({
+    tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER,
+    seatLaunchEnvironment: {
+      accountHome: () => "/accounts/previous", resolveLaunchWrapper: () => ["/wrapper", "--"], command,
+    } as never,
+  });
+  const result = await adapter.launchHarness({ tmuxSession: SESSION, nodeId: "node-pi", cwd: "/work", accountHome, launchWrapper: ["wrapper", "--"] } as never, { name: SESSION });
+  expect(result.ok).toBe(false);
+  expect(command.mock.calls[0]).toEqual([SESSION, expect.stringContaining("--launch-wrapper-arg '/wrapper'"), expect.objectContaining({ accountHome })]);
+  expect(sendShellCommand).toHaveBeenCalledTimes(1);
+});
+
+it("stages a Pi account successor with canonical identity and a separate state directory", async () => {
+  const fs = memFs();
+  const predecessorPath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+  fs.files[predecessorPath] = readyState(SESSION_FILE, "old-launch");
+  const stagedRoot = `${STATE_ROOT}/account-switches/new-generation`;
+  const stagedPath = piSeatPaths(stagedRoot, SESSION).runnerStatePath;
+  const token = `${stagedRoot}/${SESSION}/sessions/new.jsonl`;
+  const sendShellCommand = vi.fn(async (target: string, text: string) => {
+    expect(target).toBe("staging-pane");
+    expect(text).toContain(`--session-name '${SESSION}' --state-root '${stagedRoot}'`);
+    fs.files[stagedPath] = readyState(token, launchIdFrom(text));
+    return { ok: true as const };
+  });
+  const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER });
+  const binding = { tmuxSession: "staging-pane", launchGeneration: "new-generation", cwd: "/work", runtimeSwitchFrom: { runtime: "pi", session: SESSION, pane: "%0", generation: "old-generation" } } as never;
+  expect(await adapter.launchHarness(binding, { name: SESSION })).toMatchObject({ ok: true, resumeToken: token });
+  expect(await adapter.checkReady(binding)).toMatchObject({ ready: true });
+  expect(fs.files[predecessorPath]).toBe(readyState(SESSION_FILE, "old-launch"));
 });

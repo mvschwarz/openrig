@@ -410,7 +410,8 @@ export function findMission(missionsRoot: string, identifier: string): MissionIn
   throw new ScopeCliError({
     fact: `Mission "${identifier}" not found under ${missionsRoot}.`,
     consequence: "Command did not run.",
-    action: "List available missions with: rig scope mission ls",
+    action: "List available missions with: rig scope mission ls. "
+      + "For a mission in another workspace, such as a catalog project, select its tree with the parent option: rig scope --workspace <project root> mission <verb> <mission>",
   });
 }
 
@@ -528,10 +529,15 @@ export function findSlice(
       // Walk up to find the owning mission.
       const owningMissionPath = findOwningMission(missionsRoot, candidate);
       if (!owningMissionPath) {
+        const workspace = workspaceHoldingSlice(missionsRoot, candidate);
         const error = new ScopeCliError({
           fact: `Slice path "${slicePath}" resolved to ${candidate} but no parent mission was found.`,
           consequence: "Cannot determine mission context for this slice.",
-          action: "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/.",
+          action: workspace
+            ? `The slice is in another workspace's missions tree (${workspace.missionsRoot}), not under ${missionsRoot}. `
+              + `Select that tree with the parent --workspace option, for example: rig scope --workspace ${quoteArg(workspace.option)} slice <verb> ${quoteArg(slicePath)}`
+            : "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/. "
+              + "For a slice in another workspace, such as a catalog project, select its tree with the parent option: rig scope --workspace <project root> slice <verb> <slice-path>",
         });
         if (!hintedName) throw error;
         firstContextError ??= error;
@@ -549,6 +555,33 @@ export function findSlice(
     consequence: "Command did not run.",
     action: "Check the path. List slices in a mission with: rig scope slice ls --mission <name>",
   });
+}
+
+/** POSIX single-quoting for a path shown in a command. */
+function quoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * For a slice directory the selected missions root does not hold, the --workspace value that
+ * selects the nearest missions tree that does: the project root when that resolves to the tree,
+ * else the missions folder itself. Each value is checked with resolveMissionsRoot, so the named
+ * option is one that works. Null when no ancestor is a readable missions tree.
+ */
+function workspaceHoldingSlice(selectedRoot: string, sliceDir: string): { option: string; missionsRoot: string } | null {
+  const selected = path.resolve(selectedRoot);
+  const target = path.resolve(sliceDir);
+  for (let root = path.dirname(target); root !== path.dirname(root); root = path.dirname(root)) {
+    if (root === selected || !walkToMission(root, target)) continue;
+    for (const option of [path.dirname(root), root]) {
+      try {
+        if (path.resolve(resolveMissionsRoot({ override: option, strictOverride: true })) === root) return { option, missionsRoot: root };
+      } catch {
+        // Not a workspace for this tree; try the next form.
+      }
+    }
+  }
+  return null;
 }
 
 function findOwningMission(missionsRoot: string, slicePath: string): string | null {

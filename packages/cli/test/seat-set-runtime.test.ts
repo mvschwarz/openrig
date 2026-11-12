@@ -67,6 +67,13 @@ const plan = {
 describe("rig seat set-runtime", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("passes a Pi target and its selected account through the existing dry-run workflow", async () => {
+    const { calls, exitCode } = await run({ status: 200, data: { ...plan, to: "pi", accountHome: "/accounts/pi" } },
+      ["dev.impl@my-rig", "--runtime", "pi", "--account-home", "/accounts/pi", "--reason", "Change runtime", "--dry-run"]);
+    expect(calls[0]!.body).toMatchObject({ runtime: "pi", accountHome: "/accounts/pi", reason: "Change runtime", dryRun: true });
+    expect(exitCode).toBeFalsy();
+  });
+
   it("an older daemon cannot silently ignore the chosen home and execute a switch", async () => {
     const { calls, exitCode } = await run({ status: 200, data: plan }, ["dev.impl@my-rig", "--runtime", "claude-code",
       "--account-home", "/accounts/claude-api", "--reason", "Plan limit", "--json"]);

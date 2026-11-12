@@ -788,6 +788,24 @@ describe("rig seat status", () => {
     else expect(logs.join("\n")).toContain(`Codex rebuild permissions: unverified. ${permissions.detail}`);
   });
 
+  it.each([[false, "chosen-model"], [false, null], [true, "chosen-model"], [true, null]] as const)(
+    "reports rebuild model selection without a native comparison (json=%s, model=%s)", async (json, requested) => {
+      const model = { requested, predecessorCompared: false };
+      const response = { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+        sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [], model } };
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCommand(makeDeps({ status: 200, data: response }, [])).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+          "--source", "rebuild", "--reason", "context wall", ...(json ? ["--json"] : [])]);
+      });
+      expect(exitCode).toBeUndefined();
+      if (json) expect(JSON.parse(logs.join("\n")).sourceOutcome.model).toEqual(model);
+      else {
+        expect(logs.join("\n")).toContain("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
+        expect(logs.join("\n")).toContain(requested ? `Codex rebuild model: requested ${requested}` : "Codex rebuild model: runtime configuration/default");
+        expect(logs.join("\n")).toContain("The predecessor's in-pane model was not compared or carried.");
+      }
+    });
+
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
 
@@ -879,6 +897,56 @@ describe("rig seat status", () => {
     expect(output).toContain("Check the successor's screen before sending the context again");
     expect(output).not.toContain("OpenRig delivered no startup context");
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it.each(["the input box could not be observed", "the prompt still looked staged in the input box"])(
+    "handover rebuild output preserves the unconfirmed receipt and safe guidance (%s)", async reason => {
+    const staged = reason === "the prompt still looked staged in the input box";
+    const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages dev-impl@seat-rig.";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const receipt = {
+      ...HANDOVER_RESULT_FRESH,
+      ...(staged ? { seat: { ...HANDOVER_RESULT_FRESH.seat, runtime: "claude-code" } } : {}),
+      source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: staged ? [{ address: "/fixture-seat/RECAP.md", label: "authored recap" }] : [], gaps: [] },
+      restorePacket: { status: "unconfirmed", reason },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+      ...(staged ? { warnings: [notice] } : {}),
+    };
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: receipt }, paths);
+    const json = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall", "--json",
+    ]).then(() => undefined));
+    expect(json.exitCode).toBeUndefined();
+    expect(json.errors).toEqual([]);
+    expect(JSON.parse(json.logs.join(""))).toEqual(receipt);
+
+    const human = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall",
+    ]).then(() => undefined));
+    const output = human.logs.join("\n");
+    console.info("ISSUE1544_REBUILD_CLI", JSON.stringify({ output, json: JSON.parse(json.logs.join("")), paths }));
+    expect(human.exitCode).toBeUndefined();
+    expect(human.errors).toEqual([]);
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${reason}.`);
+    if (staged) {
+      expect.soft(output).toMatch(/successor.*(?:runs|running)/i);
+      expect.soft(output).toMatch(/(?:inspect|check).*screen/i);
+      expect.soft(output).toMatch(/(?:exact|same).*packet.*still.*staged/i);
+      expect.soft(output).toMatch(/(?:submit|press Enter).*existing packet.*once/i);
+      expect.soft(output).toMatch(/do not.*(?:resend|send).*blindly/i);
+      expect.soft(output).toMatch(/do not.*(?:rerun|repeat).*handover/i);
+      expect.soft(output).not.toMatch(/unwound|rollback|\bprimed\b|(?:packet|context) (?:was|is|has been) consumed|rig send/i);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(`Warning: ${notice}`);
+    } else {
+      expect(output).toContain("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+      expect(warn).not.toHaveBeenCalled();
+    }
+    expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
+    expect(output).not.toMatch(/captured startup context|restore packet|was delivered/);
   });
 
   it("handover human output says the successor started without a required file, not a plain complete (#2456)", async () => {

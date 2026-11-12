@@ -170,6 +170,16 @@ function atxHeading(line: string): { level: number; title: string } | null {
 export function parseMarkdownSections(text: string): MarkdownSection[] {
   const lines = text.split("\n");
   const { hits: headers } = scanHeaders(lines);
+  // Resolve all section ends in one backwards pass. Copying the remaining
+  // header array for every section makes even sibling-only documents quadratic.
+  const fullEnds: number[] = [];
+  const following: HeaderHit[] = [];
+  for (let idx = headers.length - 1; idx >= 0; idx--) {
+    const header = headers[idx]!;
+    while (following.length && following[following.length - 1]!.level > header.level) following.pop();
+    fullEnds[idx] = following[following.length - 1]?.line ?? lines.length;
+    following.push(header);
+  }
   const sections: MarkdownSection[] = [];
   let currentH2: string | null = null;
   for (let idx = 0; idx < headers.length; idx++) {
@@ -186,7 +196,7 @@ export function parseMarkdownSections(text: string): MarkdownSection[] {
     // instead of being silently promoted to top-level addresses.
     const headerPath = h.level === 2 ? [slug] : currentH2 !== null ? [currentH2, slug] : [slug];
     // FULL span: to the next header with level <= this one (same-or-higher).
-    const fullEnd = headers.slice(idx + 1).find((n) => n.level <= h.level)?.line ?? lines.length;
+    const fullEnd = fullEnds[idx]!;
     // OWN text: to the next header of ANY level.
     const ownEnd = headers[idx + 1]?.line ?? lines.length;
     sections.push({

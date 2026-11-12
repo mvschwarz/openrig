@@ -50,6 +50,14 @@ function track(b: TerminalSessionBroker): TerminalSessionBroker {
   liveBrokers.push(b);
   return b;
 }
+it("a default web viewer does not pin or resize the native client's window", async () => {
+  const setWindowOption = vi.fn(async () => ({ ok: true as const }));
+  const resizeWindow = vi.fn(async () => ({ ok: true as const }));
+  const b = track(new TerminalSessionBroker("dev@rig", makeTmux({ setWindowOption, resizeWindow })));
+  await b.attach(makeSub());
+  expect(setWindowOption).not.toHaveBeenCalled();
+  expect(resizeWindow).not.toHaveBeenCalled();
+});
 afterEach(() => {
   for (const b of liveBrokers.splice(0)) b.dispose();
 });
@@ -64,7 +72,7 @@ describe("cursor-safe seed helpers", () => {
 
   it("screenSnapshotEscape paints each row with an ABSOLUTE move (no row drift)", () => {
     const out = screenSnapshotEscape("alpha\nbeta\ngamma", { x: 2, y: 1, height: 24 });
-    expect(out.startsWith("\x1b[2J")).toBe(true);
+    expect(out.startsWith("\x1b[0m\x1b[2J")).toBe(true);
     expect(out).toContain("\x1b[1;1Halpha");
     expect(out).toContain("\x1b[2;1Hbeta");
     expect(out).toContain("\x1b[3;1Hgamma");
@@ -79,8 +87,25 @@ describe("cursor-safe seed helpers", () => {
     expect(out).toContain("\x1b[2;1Hr5");
   });
 
+  it("preserves dim, bold and colour across rows and resets only at paint boundaries", () => {
+    const out = screenSnapshotEscape("\x1b[2msuggestion\n\x1b[1;31mwarning\nplain", null);
+    expect(out).toBe("\x1b[0m\x1b[2J\x1b[1;1H\x1b[2msuggestion\x1b[2;1H\x1b[1;31mwarning\x1b[3;1Hplain\x1b[0m\x1b[H");
+  });
+
+  it.each(["\x1b[2m", "\x1b[44m"])("carries %j across a row with no SGR of its own", (sgr) => {
+    expect(screenSnapshotEscape(`${sgr}first\nsecond\x1b[0m`, null))
+      .toBe(`\x1b[0m\x1b[2J\x1b[1;1H${sgr}first\x1b[2;1Hsecond\x1b[0m\x1b[0m\x1b[H`);
+  });
+
+  it("replays cumulative dim, bold and colour when height cropping drops their rows", () => {
+    const out = screenSnapshotEscape("\x1b[2mold\n\x1b[1;31mmiddle\n\x1b[32mvisible\nlast\x1b[0m", { x: 0, y: 1, height: 2 });
+    expect(out).toBe("\x1b[0m\x1b[2J\x1b[2m\x1b[1;31m\x1b[1;1H\x1b[32mvisible\x1b[2;1Hlast\x1b[0m\x1b[0m\x1b[2;1H");
+    expect(out).not.toContain("old");
+    expect(out).not.toContain("middle");
+  });
+
   it("normalizes CRLF and drops exactly one trailing newline; null cursor homes", () => {
-    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[2J\x1b[1;1Ha\x1b[2;1Hb\x1b[H");
+    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[0m\x1b[2J\x1b[1;1Ha\x1b[2;1Hb\x1b[0m\x1b[H");
   });
 });
 
@@ -233,11 +258,11 @@ describe("TerminalSessionBroker", () => {
     expect(resizeWindow).not.toHaveBeenCalled();
   });
 
-  it("test 7b: canonical geometry is set ONCE at open (window-size manual + 120xN, NOT aggressive-resize)", async () => {
+  it("test 7b: explicitly requested fixed geometry is set ONCE at open (window-size manual + 120xN, NOT aggressive-resize)", async () => {
     const setWindowOption = vi.fn(async () => ({ ok: true as const }));
     const resizeWindow = vi.fn(async () => ({ ok: true as const }));
-    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ setWindowOption, resizeWindow }), {
-      pollMs: 10,
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ setWindowOption, resizeWindow, readWindow: async () => ({ id: "@2", userOption: "" }), getWindowLocalOption: async () => null }), {
+      fixedGeometry: true, pollMs: 10,
       cols: 120,
       rows: 40,
     }));
@@ -245,8 +270,8 @@ describe("TerminalSessionBroker", () => {
     await broker.attach(makeSub());
 
     expect(resizeWindow).toHaveBeenCalledOnce();
-    expect(resizeWindow).toHaveBeenCalledWith("dev@rig", 120, 40);
-    expect(setWindowOption).toHaveBeenCalledWith("dev@rig", "window-size", "manual");
+    expect(resizeWindow).toHaveBeenCalledWith("@2", 120, 40);
+    expect(setWindowOption).toHaveBeenCalledWith("@2", "window-size", "manual");
     // aggressive-resize fights fixed geometry (shrinks to smallest client) — must NOT be set.
     expect(setWindowOption).not.toHaveBeenCalledWith("dev@rig", "aggressive-resize", expect.anything());
   });
@@ -261,7 +286,7 @@ describe("TerminalSessionBroker", () => {
     await broker.attach(a);
 
     expect(a.received[0]).toBe(screenSnapshotEscape("line one\nline two", { x: 3, y: 1, height: 40 }));
-    expect(a.received[0]!.startsWith("\x1b[2J")).toBe(true);
+    expect(a.received[0]!.startsWith("\x1b[0m\x1b[2J")).toBe(true);
   });
 
   it("test 8b: EACH subscriber gets its own seed (2nd subscriber seeded too, no shared pipe)", async () => {
@@ -284,7 +309,7 @@ describe("TerminalSessionBroker", () => {
     const a = makeSub();
     await broker.attach(a);
 
-    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig");
+    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig", { escapeSequences: true });
     const seed = a.received[0]!;
     expect(seed).toContain("\x1b[1;1Hr1");
     expect(seed).toContain("\x1b[3;1Hr3");
@@ -397,6 +422,83 @@ describe("TerminalBrokerRegistry", () => {
     await vi.waitFor(() => {
       expect(reg.size).toBe(0);
     }, { timeout: 1000 });
+  });
+
+  it("reattach during broker teardown creates a fresh broker and does not close with 1011 (#2670)", async () => {
+    let releaseTeardown: () => void = () => {};
+    const teardownGate = new Promise<void>((r) => { releaseTeardown = r; });
+    const stopPipePane = vi.fn(async () => {
+      await teardownGate;
+      return { ok: true as const };
+    });
+    const startPipePane = vi.fn(async () => ({ ok: true as const }));
+    const reg = new TerminalBrokerRegistry(makeTmux({ stopPipePane, startPipePane }), { pollMs: 10 });
+    const sub1 = makeSub();
+    const sub2 = makeSub();
+
+    const broker1 = await reg.attach("dev@rig", sub1);
+    expect(reg.size).toBe(1);
+
+    // sub1 detaches, starting broker1 teardown which awaits stopPipePane
+    broker1.detach(sub1);
+
+    // sub2 immediately reattaches to the same session while broker1 is tearing down
+    const broker2Promise = reg.attach("dev@rig", sub2);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const pipeStartsBeforeRelease = startPipePane.mock.calls.length;
+
+    // Unblock broker1 teardown
+    releaseTeardown();
+
+    const broker2 = await broker2Promise;
+    try {
+      expect(pipeStartsBeforeRelease).toBe(1);
+      expect(startPipePane).toHaveBeenCalledTimes(2);
+      expect(broker2).not.toBe(broker1);
+      expect(sub2.closed).toEqual([]);
+      expect(broker2.subscriberCount).toBe(1);
+    } finally {
+      await broker2.dispose();
+    }
+  });
+
+  it("concurrent reattaches during broker teardown all wait for prior teardown and share replacement (#2670)", async () => {
+    let releaseTeardown: () => void = () => {};
+    const teardownGate = new Promise<void>((r) => { releaseTeardown = r; });
+    const stopPipePane = vi.fn(async () => {
+      await teardownGate;
+      return { ok: true as const };
+    });
+    const startPipePane = vi.fn(async () => ({ ok: true as const }));
+    const reg = new TerminalBrokerRegistry(makeTmux({ stopPipePane, startPipePane }), { pollMs: 10 });
+    const sub1 = makeSub();
+    const sub2 = makeSub();
+    const sub3 = makeSub();
+
+    const broker1 = await reg.attach("dev@rig", sub1);
+    broker1.detach(sub1);
+
+    // Multiple subscribers reattach concurrently while broker1 teardown is blocked
+    const broker2Promise = reg.attach("dev@rig", sub2);
+    const broker3Promise = reg.attach("dev@rig", sub3);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(startPipePane).toHaveBeenCalledTimes(1);
+
+    releaseTeardown();
+
+    const [broker2, broker3] = await Promise.all([broker2Promise, broker3Promise]);
+    try {
+      expect(broker2).toBe(broker3);
+      expect(broker2).not.toBe(broker1);
+      expect(startPipePane).toHaveBeenCalledTimes(2);
+      expect(sub2.closed).toEqual([]);
+      expect(sub3.closed).toEqual([]);
+      expect(broker2.subscriberCount).toBe(2);
+    } finally {
+      await broker2.dispose();
+    }
   });
 });
 
@@ -653,6 +755,61 @@ describe("TerminalSessionBroker - teardown during seed (honest close)", () => {
   });
 });
 
+// The adapter models capture-pane: it returns SGR only when the caller asks for -e.
+describe("terminal snapshot styling (#2598)", () => {
+  const styled = "\x1b[2msuggestion\x1b[0m\nplain";
+  const captureScreen = async (_name: string, opts?: { escapeSequences?: boolean }) =>
+    opts?.escapeSequences ? styled : "suggestion\nplain";
+
+  it("keeps a dim suggestion on every attach", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: captureScreen,
+    })));
+    for (const sub of [makeSub(), makeSub()]) {
+      await broker.attach(sub);
+      expect(sub.received[0]).toContain("\x1b[2msuggestion\x1b[0m");
+    }
+  });
+
+  it("keeps dim text in the selected scroll-back window", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async (_name: string, _lines: number, opts?: { escapeSequences?: boolean }) =>
+        opts?.escapeSequences ? "\x1b[2mhistory\x1b[0m\nplain\nlive" : "history\nplain\nlive",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 1);
+    expect(sub.received.at(-1)).toContain("\x1b[1;1H\x1b[2mhistory\x1b[0m");
+    expect(sub.received.at(-1)).toContain("\x1b[2;1Hplain");
+    expect(sub.received.at(-1)).not.toContain("live");
+  });
+
+  it("replays dim from above the first visible scroll-back row", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async () => "\x1b[2molder\ncontinued\nlast\x1b[0m\nlive\nbottom",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 2);
+    expect(sub.received.at(-1)).toBe("\x1b[0m\x1b[2J\x1b[2m\x1b[1;1Hcontinued\x1b[2;1Hlast\x1b[0m\x1b[0m\x1b[H");
+    expect(sub.received.at(-1)).not.toContain("older");
+  });
+
+  it("keeps a dim suggestion when returning from scroll-back to live", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: captureScreen,
+      capturePaneContent: async () => "history\nplain\nlive",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 1);
+    const beforeReturn = sub.received.length;
+    await broker.scroll(sub, 0);
+    expect(sub.received.length).toBe(beforeReturn + 1);
+    expect(sub.received.at(-1)).toContain("\x1b[2msuggestion\x1b[0m");
+  });
+});
+
 // ---- OPR.0.4.0.39 per-subscriber scroll-back (tmux capture-pane window) ------
 // The live xterm screen is only the current `rows`; scrolling UP must show tmux
 // SCROLLBACK. Because the broker fans ONE pipe out to many viewers, scroll-back is
@@ -684,10 +841,10 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
     // Captures (offset + rows) = 3 + 3 = 6 lines back; the painted window is `rows` (3)
     // lines ending `offset` (3) ABOVE the live bottom: bottom row = L200 - 3 = L197,
     // so the window is L195..L197 (NOT the older top of the capture, NOT the live tail).
-    expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6);
+    expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6, { escapeSequences: true });
     expect(a.received.length).toBe(aBefore + 1);
     const painted = a.received[a.received.length - 1]!;
-    expect(painted.startsWith("\x1b[2J")).toBe(true);
+    expect(painted.startsWith("\x1b[0m\x1b[2J")).toBe(true);
     expect(painted).toContain("\x1b[1;1HL195");
     expect(painted).toContain("\x1b[2;1HL196");
     expect(painted).toContain("\x1b[3;1HL197");
@@ -734,7 +891,7 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
 
     await broker.scroll(a, 0); // back to the live bottom
 
-    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig");
+    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig", { escapeSequences: true });
     expect(a.received.length).toBe(beforeReturn + 1);
     expect(a.received[a.received.length - 1]!).toContain("LIVE SCREEN");
 
@@ -800,9 +957,9 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
   });
 });
 
-// ---- the window's own sizing comes back when the broker lets go -------------
-// While a browser is subscribed the window is pinned (window-size manual). When the last live holder lets go, the window
-// gets back exactly what it had: its own value, or none so it inherits again, and native clients size it as before. The
+// ---- explicit web pins release to inherited sizing --------------------------
+// While a browser explicitly opts into fixed geometry the window is pinned (window-size manual). On last release,
+// the local override is unset, so native clients size it under the inherited policy. The
 // window is named by its id, and the pin is recorded on the window with its holders, so another live broker keeps it
 // and a later broker gives back a pin whose holders are gone.
 
@@ -837,7 +994,7 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
   }
 
   function broker(tmux: BrokerTmux, onEmpty?: () => void): TerminalSessionBroker {
-    return new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, onEmpty });
+    return new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, onEmpty, fixedGeometry: true });
   }
 
   /** A viewer comes and goes; resolves once the broker is evicted. */
@@ -853,7 +1010,7 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
   it.each([
     ["the window's own value", "largest" as string | null],
     ["none (inherited)", null],
-  ])("the last viewer leaving gives back %s to the pinned window, once", async (_, prior) => {
+  ])("last opt-in viewer releases %s to inherited sizing, once", async (_, prior) => {
     const resizeWindow = vi.fn(async () => ({ ok: true as const }));
     const { tmux, calls, window, restoreWindowOption } = sizingTmux(prior, { resizeWindow });
     const evicted: string[] = [];
@@ -871,11 +1028,11 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(calls).toEqual([
       `set:@2:@openrig-window-size-prior=${prior ?? "inherit"} H`,
       "set:@2:window-size=manual",
-      `restore:@2:window-size=${prior}`,
+      "restore:@2:window-size=null",
       "restore:@2:@openrig-window-size-prior=null",
       "empty",
     ]);
-    expect(window).toEqual({ own: prior, recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it.each(["first", "second"])("two brokers on one window: the pin lasts until the last leaves, whichever leaves %s", async (order) => {
@@ -891,7 +1048,7 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(window.own).toBe("manual"); // the other browser still watches: still pinned
     expect(calls.filter((call) => call.startsWith("restore:"))).toEqual([]);
     stays[0].detach(stays[1]);
-    await vi.waitFor(() => expect(window).toEqual({ own: "largest", recorded: "" }));
+    await vi.waitFor(() => expect(window).toEqual({ own: null, recorded: "" }));
   });
 
   it("a pin held by a broker in another live daemon is kept; this broker only drops itself", async () => {
@@ -911,13 +1068,13 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(norm(window.recorded)).toBe(`${record} H`);
     expect(window.own).toBe("manual");
     await visit(tmux);
-    expect(window).toEqual({ own: prior, recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it("a pin whose holder's daemon is gone is given back by the next broker", async () => {
     const { tmux, window } = sizingTmux("manual", {}, `largest ${deadPid}.1`);
     await visit(tmux);
-    expect(window).toEqual({ own: "largest", recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it("a window that no longer lists this broker (a restarted tmux server reusing @2) is left alone", async () => {
@@ -946,20 +1103,39 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(norm(window.recorded)).toBe("largest H");
     const next = sizingTmux("manual", {}, window.recorded); // its holder is no longer live
     await visit(next.tmux);
-    expect(next.window).toEqual({ own: "largest", recorded: "" });
+    expect(next.window).toEqual({ own: null, recorded: "" });
   });
 
-  it("a window whose sizing couldn't be read is left as the broker set it", async () => {
+  it("a window whose sizing could not be read receives no untracked pin", async () => {
     const { tmux, restoreWindowOption } = sizingTmux(undefined);
     await visit(tmux);
     expect(restoreWindowOption).not.toHaveBeenCalled();
   });
 
-  it("without a window id the session's window is pinned as before, and nothing is given back to another window", async () => {
+  it("without a window id no untracked pin is made", async () => {
     const { tmux, calls, restoreWindowOption } = sizingTmux("largest", { readWindow: async () => null });
     await visit(tmux);
-    expect(calls).toEqual(["set:dev@rig:window-size=manual"]);
+    expect(calls).toEqual([]);
     expect(restoreWindowOption).not.toHaveBeenCalled();
+  });
+
+  it("a pin record that cannot be written makes no manual override or resize", async () => {
+    const resizeWindow = vi.fn(async () => ({ ok: true as const }));
+    const { tmux, window } = sizingTmux("largest", {
+      setWindowOption: async () => ({ ok: false, code: "unavailable", message: "busy" }), resizeWindow,
+    });
+    await visit(tmux);
+    expect(resizeWindow).not.toHaveBeenCalled();
+    expect(window).toEqual({ own: "largest", recorded: "" });
+  });
+
+  it("an explicit manual window without an OpenRig pin stays untouched by an opt-in browser", async () => {
+    const resizeWindow = vi.fn(async () => ({ ok: true as const }));
+    const { tmux, calls, window } = sizingTmux("manual", { resizeWindow });
+    await visit(tmux);
+    expect(resizeWindow).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect(window).toEqual({ own: "manual", recorded: "" });
   });
 
   it("a failed open gives the sizing back too", async () => {
@@ -975,13 +1151,13 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
   it("a probe that couldn't reach tmux closes the viewers and still gives the sizing back, before eviction", async () => {
     let probes = 0;
     const { tmux, calls, window } = sizingTmux("largest", { hasSession: async () => probes++ === 0 });
-    const b = new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, livenessMs: 10, onEmpty: () => calls.push("empty") });
+    const b = new TerminalSessionBroker("dev@rig", tmux, { fixedGeometry: true, pollMs: 10, livenessMs: 10, onEmpty: () => calls.push("empty") });
     const a = makeSub();
     await b.attach(a);
     await vi.waitFor(() => expect(calls.at(-1)).toBe("empty"));
     expect(a.closed[0]?.code).toBe(1001);
-    expect(calls.slice(-3)).toEqual(["restore:@2:window-size=largest", "restore:@2:@openrig-window-size-prior=null", "empty"]);
-    expect(window).toEqual({ own: "largest", recorded: "" });
+    expect(calls.slice(-3)).toEqual(["restore:@2:window-size=null", "restore:@2:@openrig-window-size-prior=null", "empty"]);
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it("dispose gives the sizing back before the registry can create a new broker", async () => {
@@ -1032,6 +1208,6 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     await Promise.all([attached, disposed]);
     expect(a.closed[0]?.code).toBe(1011);
     expect(calls.at(-1)).toBe("empty");
-    expect(window).toEqual({ own: "largest", recorded: "" });
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 });

@@ -104,6 +104,8 @@ export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 export type LocalAttachment = { bytes: Uint8Array; filename: string } | { skipped: string };
 const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
 const INVALID_BLOCKS_CLASS = "slack-invalid-blocks";
+/** Slack answered 2xx but its body couldn't be read: the post may be in the channel. */
+export const POSSIBLY_POSTED_CLASS = "possibly-posted";
 const PAYLOAD_ATTEMPT_PREFIX = "::payload-attempt::";
 /** #192: `<decisionId>::channel::<channel>` in the attempted store = the channel this post's first
  *  attempt was decided for (see pinChannel). Keyed like the transport-failure receipt. */
@@ -250,8 +252,11 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       try {
         opts.attempted.mark(`${decision.decisionId}${CHANNEL_DECIDED_PREFIX}${channel}`, "channel-decided");
       } catch (e) {
-        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
-        return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        if (!q.possibleRepeat) {
+          log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
+          return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        }
+        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
       }
     }
     const threadTs = opts.resolveThreadTs?.(q, channel);
@@ -284,9 +289,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // Only render before reconciliation when comparing a known rejection. Other
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
-    const renders = new Map<boolean, ReturnType<typeof buildOutboundMessage>>();
-    const render = (possibleRepeat = false) => {
-      const cached = renders.get(possibleRepeat);
+    const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
+    const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
+      const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
       const built = buildOutboundMessage(
@@ -318,13 +323,18 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // the scan above matches: one identity, same bytes, both sides).
           reconcileMarker: reconcileToken(decision.decisionId),
           possibleRepeat,
+          stateUnconfirmed,
+          quietUnreadable,
         },
       );
-      renders.set(possibleRepeat, built);
+      renders.set(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`, built);
       return built;
     };
-    const postInput = (possibleRepeat = false) => ({ channel, text: render(possibleRepeat).text, blocks: render(possibleRepeat).blocks, thread_ts: threadTs });
-    const payloadHash = () => createHash("sha256").update(JSON.stringify(postInput())).digest("hex");
+    const postInput = (possibleRepeat = false) => {
+      const shown = render(possibleRepeat, q.stateUnconfirmed === true, q.quietUnreadable === true);
+      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
+    };
+    const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
     const hasRejection = [...attempted.keys()].some((key) => {
       if (!key.startsWith(failurePrefix) || key.endsWith(TRANSPORT_FAILURE_RECEIPT_REPAIRED)) return false;
@@ -361,7 +371,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // decisionId in a delimited form). Producer and scanner call the same function: one
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
-    let possibleRepeat = false;
+    let possibleRepeat = q.possibleRepeat === true;
     if (attempted.has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
       const matched = scan.messages.find((m) => m.text.includes(marker));
@@ -411,7 +421,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     const input = postInput(possibleRepeat);
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
-    opts.attempted.mark(decision.decisionId, "attempted");
+    try {
+      opts.attempted.mark(decision.decisionId, "attempted");
+    } catch (e) {
+      // Only a post the gateway already marked as a possible repeat goes on without its attempt record.
+      if (!q.possibleRepeat) throw e;
+      log(`attempt record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
+    }
     if (hasRejection) {
       // Unique ids preserve attempt order in the store's Set, including retries
       // of the same correction. Ordinary posts need no extra record.
@@ -427,7 +443,10 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     );
     if (!res.ok) {
       const permanent = res.status === 200 && res.error === "invalid_blocks";
-      const failureClass = permanent ? INVALID_BLOCKS_CLASS : res.status === 0 ? "transport" : `http-${res.status}`;
+      // An unreadable 2xx may have posted: the replay reconciles by marker before any resend, as for a lost response.
+      const failureClass = permanent ? INVALID_BLOCKS_CLASS
+        : res.responseUnreadable ? POSSIBLY_POSTED_CLASS
+        : res.status === 0 ? "transport" : `http-${res.status}`;
       if (permanent) log(`Slack rejected ${q.qitemId ?? decision.decisionId}: invalid_blocks — permanent failure; this payload will not be reposted`);
       // Persist the receipt input before the row write. A throwing row write
       // stays repairable across restart and blocks any later resend until the
@@ -696,7 +715,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const authored = parts;
     /** The parts a plan renders to, preflighted; with no plan, decide one from the real render. */
     const choose = (kept?: DeliveryPlan) => {
-      const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
+      // A post marked as made without the person's quiet hours never mentions them, whatever a recovered read or a saved
+      // plan would say: it's permission to deliver, not to alert. The plan's cuts and part ids stay as they are.
+      const mention = q.quietUnreadable ? undefined : kept ? kept.mention : opts.resolveMentionUserId?.(q);
       const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
       // A kept plan checks only the parts still to post: delivered parts are acknowledged, never rendered again.
       const delivered = kept ? opts.delivered.load() : new Set<string>();
@@ -758,7 +779,11 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const { planned } = chosen;
     if (!recorded || replanned) {
       try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(chosen.plan)).toString("base64url")}`, "delivery-plan"); }
-      catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` }; }
+      catch (error) {
+        // A post the gateway already marked as a possible repeat keeps its plan in memory for this one attempt.
+        if (!q.possibleRepeat) return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` };
+        (opts.log ?? (() => {}))(`delivery plan record FAILED for ${q.qitemId ?? decision.decisionId}: ${(error as Error).message} — posting once, marked as a possible repeat`);
+      }
     }
     const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
     if (parts.length === 1) return deliverSinglePart(planned)(decision);

@@ -1,0 +1,21 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "layout-select-written-back",
+  "channel": "file",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "path": "<app-home>/layouts/rig.json"
+  },
+  "reply": {
+    "json": {
+      "id": "rig-work",
+      "type": "stack",
+      "active": "main"
+    }
+  },
+  "elapsed_ms": null,
+  "notes": "The stack node in rig.json one second after the select (does the app write the selection back?)."
+}

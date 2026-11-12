@@ -6,7 +6,7 @@ import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync,
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
-import {SessionTransport, CAPTURE_READABLE_BUDGET_MS} from '../src/domain/session-transport.js';
+import {SessionTransport, CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
@@ -41,9 +41,9 @@ function stageMap(f:ReturnType<typeof fixture>,suffix=''){
 }
 const compacts=(f:ReturnType<typeof fixture>)=>f.writes.filter(t=>t.startsWith('/compact'));
 // Real readable capture and managed send, including the adapter's final beforePaste check.
-async function tinyPane(kind:'empty'|'unknown'|'typed'='empty',liveProbe=true){
- const f=fixture();vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
- await f.e.maybeAutoCompact(input);stageMap(f);
+async function tinyPane(kind:'empty'|'unknown'|'typed'='empty',liveProbe=true,manualBudget?:number){
+ const f=fixture(manualBudget);vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
+ if(manualBudget===undefined){await f.e.maybeAutoCompact(input);stageMap(f);}
  const frame=readFileSync(join(import.meta.dirname,'fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt'),'utf8').trimEnd().split('\n');
  const row=frame.findLastIndex(line=>line.startsWith('❯'));
  if(kind==='typed')frame[row]='❯ keep this draft';
@@ -67,6 +67,55 @@ async function tinyPane(kind:'empty'|'unknown'|'typed'='empty',liveProbe=true){
  if(liveProbe)delete(f.transport as any).classifySendReadiness;
  return{...f,tmux,window};
 }
+// Exercise the real hook freshness, pane classifier, final composer check and transport wait.
+// Only the activity-store read and tmux I/O are fixtures; no readiness result is injected.
+function exhaustedPrompt(f:Awaited<ReturnType<typeof tinyPane>>){
+ const screen=f.tmux.capturePaneScreen.getMockImplementation()!;
+ f.tmux.capturePaneScreen.mockImplementation(async()=>(await screen()).replace(/^▎.*$/m,'Context left until auto-compact: 0%'));
+ f.tmux.capturePaneContent.mockImplementation(f.tmux.capturePaneScreen.getMockImplementation()!);
+}
+function preparationHook(f:ReturnType<typeof fixture>){
+ const hook={state:'running',reason:'user_prompt_submit',evidenceSource:'runtime_hook',stale:false,eventAt:new Date(f.clock()).toISOString()};
+ (f.transport as any).agentActivityStore={getLatestForNode:()=>hook};
+}
+it('fresh preparation hook ages out before the guarded compact send on a visibly idle pane',async()=>{
+ const f=await tinyPane();exhaustedPrompt(f);preparationHook(f);const start=f.clock();
+ await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(1);
+ expect(f.clock()-start).toBeGreaterThan(15_000);
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+});
+for(const budget of [40_000,9_000])it(`manual skip-map final send keeps its original ${budget}ms deadline with a delayed preparation hook`,async()=>{
+ const f=await tinyPane('empty',true,budget);f.window.width=120;f.window.height=40;
+ exhaustedPrompt(f);
+ // The prep hook can arrive between the initial idle observation and final guarded send.
+ const wait=f.transport.waitUntilIdle.bind(f.transport);
+ f.transport.waitUntilIdle=async(...args)=>{const result=await wait(...args);preparationHook(f);return result;};
+ const start=f.clock(),result=await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true});
+ expect(f.writes.filter(text=>!text.startsWith('/compact'))).toHaveLength(1);
+ expect(result).toMatchObject({triggered:budget>15_000});
+ expect(compacts(f)).toHaveLength(budget>15_000?1:0);
+ expect(f.clock()-start).toBeLessThanOrEqual(budget);
+ expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(start+budget);
+});
+for(const pane of ['running','permission','unknown'] as const)it(`an aged preparation hook still cannot compact a ${pane} pane`,async()=>{
+ const f=await tinyPane(pane==='unknown'?'unknown':'empty');
+ if(pane==='running'||pane==='permission'){
+  const screen=pane==='running'
+   ?readFileSync(join(import.meta.dirname,'fixtures/input-box/claude-code-2.1.296/after-enter-0.4s.J.txt'),'utf8')
+   :'Allow this command?\n❯ 1. Yes, continue\n  2. No, cancel\nPress enter to continue';
+  f.tmux.capturePaneScreen.mockImplementation(async()=>screen);f.tmux.capturePaneContent.mockImplementation(async()=>screen);
+ }
+ preparationHook(f);const start=f.clock();await f.e.maybeAutoCompact(input);
+ expect(f.clock()-start).toBeGreaterThan(15_000);
+ expect(compacts(f)).toHaveLength(0);
+});
+for(const stop of ['cancel','replacement'] as const)it(`fresh-hook final wait still honors ${stop}`,async()=>{
+ const f=await tinyPane();preparationHook(f);
+ (f.transport as any).sleep=async(ms:number)=>{f.advance(ms);if(stop==='cancel')f.e.cancelPreparation(seat);else f.generation('generation-two');};
+ await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(0);
+});
 it.each(['live-pane','final-composer'])('submits managed /compact from an 11x20 pane through the %s readable read and restores the window',async gate=>{
  const f=await tinyPane('empty',gate==='live-pane');
  // The pre-existing readable path can classify this fixture and give the inherited sizing back.
@@ -75,14 +124,14 @@ it.each(['live-pane','final-composer'])('submits managed /compact from an 11x20 
  await f.e.maybeAutoCompact(input);
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
  expect(compacts(f)).toHaveLength(1);
- expect(f.tmux.sendText).toHaveBeenCalledWith(seat,expect.stringMatching(/^\/compact/),expect.any(Function),expect.objectContaining({beforePaste:expect.any(Function)}));
+ expect(f.tmux.sendText).toHaveBeenCalledWith(seat,expect.stringMatching(/^\/compact/),expect.any(Function));
 });
-it.each(['unknown','typed'] as const)('keeps a readable %s composer from authorizing /compact and gives its window back',async kind=>{
+it.each(['unknown','typed'] as const)('a readable %s pane follows ordinary draft defaults and gives its window back',async kind=>{
  const f=await tinyPane(kind);
  const box=(await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox;
  expect(box?.status).toBe(kind==='typed'?'typed':'no-input-box');
  await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(0);
+ expect(compacts(f)).toHaveLength(kind==='typed'?1:0);
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
 });
 it('submits managed /compact when readable redraw settling exceeds the ordinary one-second idle wait',async()=>{
@@ -98,13 +147,21 @@ it('submits managed /compact when readable redraw settling exceeds the ordinary 
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
  expect(compacts(f)).toHaveLength(1);
 });
-it.each(['incomplete-map','completed-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
+it('holds a completed map past its deadline instead of ending it (#2682), and persists the hold',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);f.e.reconcilePreparations();
+ const state=f.e.getPreparationState(seat)!;
+ expect(state).toMatchObject({status:'waiting',prepared:true,preparedReason:'map_complete_seat_never_idle'});
+ const record=JSON.parse(readFileSync(join(dirname(state.mapPath),COMPACTION_RECORD_FILE),'utf8'));
+ expect(record).toMatchObject({phase:'preparing',prepared:true,preparedReason:'map_complete_seat_never_idle'});expect(record.reason).toBeUndefined();
+});
+it.each(['incomplete-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
  const f=fixture();await f.e.maybeAutoCompact(input);
  if(end!=='incomplete-map')stageMap(f);
  if(end==='cancel-after-compact'){await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);f.e.cancelPreparation(seat);}
- else{f.advance(AUTO_PREP_WAIT_MS_DEFAULT+(end==='completed-map'?AUTO_RETRY_AFTER_STOP_MS_DEFAULT:0)+1);f.e.reconcilePreparations();}
+ else{f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.e.reconcilePreparations();}
  const state=f.e.getPreparationState(seat)!;
- const reason=end==='incomplete-map'?'preparation_incomplete':end==='completed-map'?'map_complete_seat_never_idle':'compaction_cancelled';
+ const reason=end==='incomplete-map'?'preparation_incomplete':'compaction_cancelled';
  expect(state).toMatchObject({status:'stopped',reason});
  const record=JSON.parse(readFileSync(join(dirname(state.mapPath),COMPACTION_RECORD_FILE),'utf8'));
  expect(record.phase).toBe('ended');expect(record.reason).toBe(reason);
@@ -862,7 +919,7 @@ for(const fresh of [false,null,"below","high"] as const)it(`an armed completed m
  const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
  const beforeBusyPoll=f.clock();
  await monitor.pollOnce();expect(compacts(f)).toHaveLength(0);
- expect(f.clock()-beforeBusyPoll).toBeLessThanOrEqual(1_000+CAPTURE_READABLE_BUDGET_MS);
+ expect(f.clock()-beforeBusyPoll).toBeLessThanOrEqual(SEND_READINESS_FRESHNESS_MS+CAPTURE_READABLE_BUDGET_MS);
  expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
  f.activity('idle');await monitor.pollOnce();
  expect(compacts(f)).toHaveLength(fresh==='below'?0:1);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);

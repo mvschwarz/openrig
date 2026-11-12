@@ -1,0 +1,15 @@
+workflow:
+  id: wf-validate-ro-invalid-key
+  version: 1
+  bogus_top_level_key: true
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@rig
+  steps:
+    - id: produce
+      actor_role: producer
+      allowed_exits:
+        - done

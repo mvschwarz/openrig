@@ -75,7 +75,7 @@ describe("P5.3 shared topology event hub", () => {
 
     await waitFor(() => {
       expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events");
+      expect(instances[0]!.url).toBe("/api/events?replay=100");
     });
     await waitFor(() => {
       expect(screen.getByTestId("hub-connected").textContent).toBe("true");

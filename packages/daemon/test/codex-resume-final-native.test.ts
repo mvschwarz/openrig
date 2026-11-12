@@ -21,7 +21,7 @@ async function finalObservation(output: string) {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\n` +
     `const fs = require("node:fs");\n` +
-    `if (process.argv.slice(2).join(" ") !== "-s workspace-write -c check_for_update_on_startup=false resume fixture-id") process.exit(2);\n` +
+    `if (process.argv.slice(2).join(" ") !== "-s workspace-write -c check_for_update_on_startup=false -c allow_login_shell=false resume fixture-id") process.exit(2);\n` +
     `process.stdout.write("\\n".repeat(36) + "fixture waiting for final observation\\n");\n` +
     `const tick = setInterval(() => { if (fs.existsSync(${JSON.stringify(gate)})) {\n` +
     `process.stdout.write(fs.readFileSync(${JSON.stringify(gate)}, "utf8") + "\\n"); clearInterval(tick);\n` +
@@ -39,14 +39,16 @@ async function finalObservation(output: string) {
       return (await run(`tmux -S ${shellQuote(socket)} ${cmd.slice(5)}`, { env })).stdout;
     });
     const nativeCapture = adapter.capturePaneContent.bind(adapter);
+    const sleep = vi.fn(async () => {});
     let captures = 0;
     const capture = vi.spyOn(adapter, "capturePaneContent").mockImplementation(async (target, lines) => {
       captures++;
       if (captures === 1) {
         await expect.poll(() => nativeCapture(target, lines), { timeout: 5000 }).toContain("fixture waiting for final observation");
       }
-      if (captures === 27) {
-        // The default budget has 26 loop observations plus one final read.
+      if (captures === 3) {
+        // Two loop observations exercise a retry before the final read.
+        expect(sleep).toHaveBeenCalledExactlyOnceWith(200);
         // Release output only at that final boundary, avoiding timer races.
         fs.writeFileSync(gate, output);
         await expect.poll(() => nativeCapture(target, lines), { timeout: 5000 }).toContain(output);
@@ -55,12 +57,13 @@ async function finalObservation(output: string) {
     });
     const resume = new CodexResumeAdapter(adapter, {
       launchPath: `${bin}:/usr/bin:/bin`, codexHome: path.join(home, "private-codex"),
-      // Preserve the default observation count; this tests classification at
-      // the final read, not the wall-clock duration of the production timeout.
-      sleep: async () => {},
+      // Default-budget arithmetic is covered in codex-resume-final-budget.test.ts.
+      // Keep real terminal/process observations here, including the final read.
+      pollMs: 200, maxWaitMs: 200, sleep,
     });
     const result = await resume.resume("fixture", "codex_id", "fixture-id", home);
-    expect(capture).toHaveBeenCalledTimes(27);
+    expect(capture).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(200);
     return result;
   } finally {
     await tmux(["kill-server"]).catch(() => {});

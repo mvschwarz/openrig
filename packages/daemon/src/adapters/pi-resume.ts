@@ -29,6 +29,9 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  /** Resolve the persisted/configured account without relying on live tmux metadata. */
+  accountHomeForSession?: (session: string) => string | undefined;
+  stateRootForSession?: (session: string) => string;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   pollMs?: number;
   maxWaitMs?: number;
@@ -67,9 +70,14 @@ export class PiResumeAdapter {
     resolvedPosture?: "floor" | "full_bypass" | "auto",
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
+    launchWrapper?: readonly string[],
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
+    }
+    const wrapped = launchWrapper?.length ? launchWrapper : undefined;
+    if (wrapped && (this.runtime !== "pi" || !this.options.seatLaunchEnvironment)) {
+      return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
     const sessionFile = resumeToken!;
 
@@ -79,7 +87,16 @@ export class PiResumeAdapter {
       return { ok: false, code: "retry_fresh", message: `${this.label} resume failed: the persisted session file no longer exists` };
     }
 
-    const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
+    let resolvedWrapper: string[] | undefined;
+    if (wrapped) {
+      try {
+        resolvedWrapper = this.options.seatLaunchEnvironment!.resolveLaunchWrapper(wrapped);
+      } catch {
+        return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." };
+      }
+    }
+
+    const seat = piSeatPaths(this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot, tmuxSessionName);
     this.fs.mkdirp(seat.agentDir);
     this.fs.mkdirp(seat.sessionsDir);
 
@@ -100,11 +117,23 @@ export class PiResumeAdapter {
     const appliedLaunch = this.runtime === "omp"
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
+    let nodeId: string | undefined;
+    if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
+      try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
+      catch { /* Account-free resume retains best-effort identity correction. */ }
+    }
+    const accountHome = this.runtime === "pi" ? this.options.accountHomeForSession?.(tmuxSessionName)
+      ?? (nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined) : undefined;
+    if (!nodeId && this.runtime === "pi" && (accountHome || this.fs.exists(`${seat.agentDir}/.openrig-account`))) {
+      return { ok: false, code: "resume_failed", message: "Pi resume needs seat identity to preserve its selected account; restore identity and retry resume." };
+    }
+    if (!nodeId && this.runtime === "pi" && this.options.seatLaunchEnvironment) console.warn("[pi-resume] Seat identity unavailable; account-free resume continues with best-effort routing.");
     const cmd = buildPiRunnerCommand({
+      accountHome,
       runtime: this.runtime,
       runnerEntryPath: this.paths.runnerEntryPath,
       sessionName: tmuxSessionName,
-      stateRoot: this.paths.stateRoot,
+      stateRoot: this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot,
       cwd,
       // The model declaration must survive resume: the runner's provider-key
       // allowlist keys off the declared provider (VM leg finding).
@@ -117,16 +146,17 @@ export class PiResumeAdapter {
       launchId,
       usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
       openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
+      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
+    const fallback = cmd;
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
-      : cmd;
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome })
+      : fallback;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
-    // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
-      textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined) {
+      textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
@@ -147,7 +177,7 @@ export class PiResumeAdapter {
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
 
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const { runnerStatePath } = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
+      const { runnerStatePath } = piSeatPaths(this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot, tmuxSessionName);
       const state = this.fs.exists(runnerStatePath) ? parsePiRunnerState(this.readSafe(runnerStatePath)) : null;
 
       if (state?.launchId === launchId) {

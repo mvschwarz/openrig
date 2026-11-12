@@ -1,4 +1,5 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
+import { formatCheckIn } from "../lib/check-in.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -43,7 +44,7 @@ interface PsEntry {
   isArchived?: boolean;
 }
 
-interface NodeEntry {
+export interface NodeEntry {
   /** Served daemon attention, never re-derived here. Missing on an older daemon. */
   needsAttention?: boolean;
   arbitratedNeedsInput?: boolean | null;
@@ -88,6 +89,8 @@ interface NodeEntry {
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
+  launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -217,6 +220,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "nodeKind",
   "runtime",
   "communityHarness",
+  "launchWrapper",
   "model",
   "modelObservation",
   "sessionStatus",
@@ -713,6 +717,26 @@ function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
+/** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
+ *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
+export function attentionReason(n: NodeEntry): string {
+  return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
+    ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
+    ?? questionReason(n) ?? "reason unavailable";
+}
+
+/** Whether the daemon serves a live question for the seat, with its own precedence: the arbitrated needs-input answer,
+ *  and the hook only when there's none. A served "no" beats a stale hook. */
+export function servesQuestion(n: NodeEntry): boolean {
+  return n.arbitratedNeedsInput ?? (n.agentActivity?.state === "needs_input");
+}
+
+/** The served question's reason, with the daemon's precedence: the arbitrated answer, and the hook only without one. */
+export function questionReason(n: NodeEntry): string | null {
+  return n.arbitratedNeedsInput === true ? n.activityState?.needsInput.reason ?? null
+    : n.arbitratedNeedsInput == null && n.agentActivity?.state === "needs_input" ? n.agentActivity.reason : null;
+}
+
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const keepDiagnostics = n.needsAttention !== false;
@@ -733,6 +757,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
       ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
+      ...(n.launchWrapper?.length ? { launchWrapper: n.launchWrapper } : {}),
       model: n.model ?? null,
       // Compact tuple: [literal model, evidence source, native record time].
       // Full JSON / --fields retain the complete labelled object and occupant generation.
@@ -930,7 +955,7 @@ contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
@@ -1148,6 +1173,8 @@ Exit codes:
         } else {
           console.log("No rigs");
         }
+        // A host can have connected assistants and no terminal rigs at all.
+        await printConnectedAssistants(client, opts.rig);
         return;
       }
 
@@ -1219,9 +1246,41 @@ Exit codes:
         const remaining = filtered.length - (limit ?? 0);
         console.log(`... and ${remaining} more rig${remaining === 1 ? "" : "s"} (--limit ${limit}).`);
       }
+      await printConnectedAssistants(client, opts.rig);
     });
 
   return cmd;
+}
+
+/** Connected assistants (roster members outside any terminal) and whether each is checking its queue. They're on the
+ *  team but aren't nodes, so the human view lists them in their own short section, every one it's given; `--json` output
+ *  is unchanged (read `/api/queue/hosted-members` for them). The local rig and node views print it, empty or not, and so
+ *  does an HTTP host's node view; an SSH host runs its own `rig ps`. An HTTP host's rig view and the multi-host fan-out
+ *  leave it out. Nothing when there are none. A list that can't be read isn't an empty one, so it gets one line saying
+ *  check-in is unavailable, and the view's exit status stays as it was. */
+async function printConnectedAssistants(client: DaemonClient, rig?: string, requestHeaders?: Record<string, string>): Promise<void> {
+  let members: Array<Record<string, unknown>>;
+  let unavailable: string | null = null;
+  try {
+    const res = await client.get<{ members?: unknown }>("/api/queue/hosted-members", requestHeaders ? { headers: requestHeaders } : undefined);
+    if (res.status === 404) unavailable = "this daemon doesn't serve it";
+    else if (res.status >= 400) unavailable = `the read failed: HTTP ${res.status}`;
+    else if (!Array.isArray(res.data?.members)) unavailable = "the daemon's answer couldn't be read";
+    members = unavailable ? [] : (res.data.members as unknown[]).filter((m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as Record<string, unknown>).seat === "string");
+  } catch (err) {
+    unavailable = `the read failed: ${(err as Error).message}`;
+    members = [];
+  }
+  if (unavailable) {
+    console.log("");
+    console.log(`Connected assistants: check-in unavailable (${unavailable})`);
+    return;
+  }
+  if (rig) members = members.filter((m) => (m.seat as string).endsWith(`@${rig}`));
+  if (members.length === 0) return;
+  console.log("");
+  console.log("Connected assistants (outside the terminal; each checks its own queue):");
+  for (const m of members) console.log(`  ${m.seat as string}  ${formatCheckIn(m)}`);
 }
 
 async function handleNodes(
@@ -1357,6 +1416,8 @@ async function handleNodes(
     } else {
       console.log("No nodes");
     }
+    // A rig with no terminal seats can still have connected assistants.
+    await printConnectedAssistants(client, opts.rig, requestHeaders);
     return;
   }
 
@@ -1366,8 +1427,12 @@ async function handleNodes(
   if (useCompact) {
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
+      // With the daemon's attention flag set, a live question shows its own reason rather than a recorded error. Without
+      // that flag (an older daemon), the order stays as it was, so a startup failure isn't hidden by a hook. The question's
+      // reason is shown whole, as the activity reason always was: it's what a person reads to know what to answer.
       const reason = missingSessionGuidance(n) ?? (n.needsAttention !== false || hasCurrentUsageLimit(n)
-        ? (n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
+        ? (n.needsAttention === true && servesQuestion(n) ? questionReason(n) ?? "reason unavailable"
+          : n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
           : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(
@@ -1420,6 +1485,7 @@ async function handleNodes(
   for (const n of humanList as NodeEntry[]) {
     if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
   }
+  await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
   }

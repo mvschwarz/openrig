@@ -34,6 +34,7 @@ import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-cl
 import { daemonStartArgs } from "./crash-cart/start-daemon.js";
 import { readLocal } from "./local-reading.js";
 import { replyAct, opensOnDefaultFeed, actingAs, answerRequest } from "./attention/attention-model.js";
+import { decidePairRequest } from "./config/pairing.js";
 import type { AttentionRead } from "@openrig/daemon/attention";
 import { StartupController } from "./startup.js";
 import { dirname, join } from "node:path";
@@ -73,13 +74,17 @@ async function run(): Promise<void> {
   });
   const view = createViewState({ instanceId, getSnapshot: () => snapshot, timeZoneWarning: "Reading configured timezone…" });
   let startupHeaders: () => Record<string, string> = () => ({});
+  let actionHeaders: () => Record<string, string> = () => ({});
   if (cliEntry) {
     try {
       const cli = await import(pathToFileURL(join(dirname(cliEntry), "client.js")).href);
       startupHeaders = cli.terminalAuthHeaders;
+      // Answering an ask is operator-gated: the daemon's operator bearer when one is configured, else the terminal
+      // credential as before (a CLI without the helper keeps that).
+      actionHeaders = typeof cli.operatorAuthHeaders === "function" ? () => cli.operatorAuthHeaders() : cli.terminalAuthHeaders;
     } catch { /* the startup read will expose an unavailable/unauthorized prerequisite */ }
   }
-  const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders });
+  const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders, actionHeaders });
   let startup: StartupController | null = null;
   let nativeAttached = false;
   let launching = false;
@@ -459,12 +464,15 @@ async function run(): Promise<void> {
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
+      } else if (action.act === "pair-decision") {
+        view.dispatch({ type: "notice", message: await decidePairRequest(client, action) });
       } else if (action.act === "answer") {
         const result = await client.missionControlAction(answerRequest(action));
         const actor = actingAs(snapshot.attentionRead, action.actorSession);
         view.dispatch({ type: "notice", message: action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
           : action.verb === "approve"
-          ? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
+          // A runner's permission request says what became of the answer: handed to its receiving agent, or kept.
+          ? result.answer?.message ?? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
           : result.answer?.message ?? (result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
           : `Answered ${action.qitemId} as ${actor}: the answer went back to the asker, and the request is closed.`) });
       }

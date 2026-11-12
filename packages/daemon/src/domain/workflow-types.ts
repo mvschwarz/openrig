@@ -174,6 +174,12 @@ export interface WorkflowExceptionRoutingSpec {
   classes?: Record<string, WorkflowExceptionDialPosition>;
 }
 
+/** #2607: the spec an instance started with, and the file that spec came from. */
+export interface StartedWorkflowSpec {
+  sourcePath: string;
+  spec: WorkflowSpec;
+}
+
 export interface WorkflowSpec {
   id: string;
   version: string;
@@ -261,6 +267,15 @@ export interface WorkflowInstance {
   lifecycleOperationKey: string | null;
   compiledInputDigest: string | null;
   lifecycleBinding: Record<string, unknown> | null;
+  /**
+   * #2607 (migration 152): the spec this instance started with (rig placeholders resolved) and the file it came from.
+   * The instance reads the cache row for its id and version while that row still comes from this file, so an edit to
+   * the file reaches it; once another file with the same id and version has replaced the row, it runs this copy.
+   * null for instances from before it, and after a lifecycle revision: they read the cache row.
+   */
+  startedSpec?: StartedWorkflowSpec | null;
+  /** #2730 (migration 154): the root objective it was started with. null for instances from before it: not recorded. */
+  rootObjective?: string | null;
 }
 
 export interface WorkflowFrontierBinding {

@@ -16,7 +16,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
@@ -24,7 +24,8 @@ import { parseSessionName } from "../session-name.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
-export const HUMAN_CONNECTOR_KINDS = new Set(["slack"]);          // M1's only kind
+export const HUMAN_CONNECTOR_KINDS = new Set(["slack", "relay"]);
+export type HumanConnectorKind = "slack" | "relay";
 export const HUMAN_BINDING_ROLES = new Set(["primary", "secondary"]);
 export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
 // entityId is the fragment key + filename: a stable slug that survives platform
@@ -109,7 +110,7 @@ function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string 
 }
 
 export interface HumanConnectorBinding {
-  kind: "slack";
+  kind: HumanConnectorKind;
   connectorRef: string;
   /** POINTER at the connector's vault (secrets-on-connector) — NEVER the secret. */
   secretsRef: string;
@@ -118,9 +119,22 @@ export interface HumanConnectorBinding {
   /** A6 v3: the platform-native id of this human on the connector (e.g. Slack user id).
    *  OPTIONAL — a handle-less binding is OUTBOUND-ONLY (delivery works; it is NOT
    *  inbound-resolvable, so an inbound event on it fails admission LOUDLY). REQUIRED to be
-   *  inbound-resolvable. UNIQUE per kind across ALL bindings of ALL humans (one platform id =
-   *  exactly one human; a duplicate is a registration conflict, REFUSED). */
+   *  inbound-resolvable. UNIQUE per kind (Slack) or per connectorRef (relay) across ALL
+   *  bindings of ALL humans (one platform id = one human; a duplicate is a registration
+   *  conflict, REFUSED). */
   handle?: string;
+}
+
+function handleScopeKey(binding: Pick<HumanConnectorBinding, "kind" | "connectorRef"> & { handle: string }): string {
+  return binding.kind === "relay"
+    ? JSON.stringify(["relay", binding.connectorRef, binding.handle])
+    : `${binding.kind}:${binding.handle}`;
+}
+
+function handleScopeLabel(binding: Pick<HumanConnectorBinding, "kind" | "connectorRef"> & { handle: string }): string {
+  return binding.kind === "relay"
+    ? `relay (${binding.connectorRef}) handle "${binding.handle}"`
+    : `${binding.kind} handle "${binding.handle}"`;
 }
 
 export interface HumanPrefs {
@@ -214,7 +228,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
         return { ok: false, error: `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
       }
     }
-    const binding: HumanConnectorBinding = { kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
+    const binding: HumanConnectorBinding = { kind: b.kind as HumanConnectorKind, connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
     if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
     bindings.push(binding);
   }
@@ -222,15 +236,20 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (bindings.length > 0 && primaryCount !== 1) {
     return { ok: false, error: `exactly one connectorBinding must have role "primary" (found ${primaryCount}) — it is the default delivery channel` };
   }
-  // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind across this human's bindings —
-  // one human must not claim the same platform id twice. (Cross-fragment uniqueness is enforced
-  // in projectHumans, which sees every human at once.)
+  // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind (Slack) or per connectorRef
+  // (relay) across this human's bindings — one human must not claim the same platform id twice.
+  // (Cross-fragment uniqueness is enforced in projectHumans, which sees every human at once.)
   const seenHandles = new Set<string>();
   for (const b of bindings) {
     if (b.handle === undefined) continue;
-    const key = `${b.kind}:${b.handle}`;
+    const key = handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle });
     if (seenHandles.has(key)) {
-      return { ok: false, error: `duplicate ${b.kind} handle "${b.handle}" across this human's bindings — a handle is unique per kind (one platform id = one human)` };
+      return {
+        ok: false,
+        error: b.kind === "relay"
+          ? `duplicate relay (${b.connectorRef}) handle "${b.handle}" across this human's bindings — a relay handle is unique per connectorRef`
+          : `duplicate ${b.kind} handle "${b.handle}" across this human's bindings — a handle is unique per kind (one platform id = one human)`,
+      };
     }
     seenHandles.add(key);
   }
@@ -321,10 +340,10 @@ function validateEntityCollection(entities: readonly HumanFragment[]): string | 
     entityIds.add(entity.entityId);
     for (const binding of entity.connectorBindings) {
       if (binding.handle === undefined) continue;
-      const key = `${binding.kind}:${binding.handle}`;
+      const key = handleScopeKey({ kind: binding.kind, connectorRef: binding.connectorRef, handle: binding.handle });
       const prior = handleOwner.get(key);
       if (prior !== undefined && prior !== entity.entityId) {
-        return `${binding.kind} handle "${binding.handle}" is claimed by both "${prior}" and "${entity.entityId}" — a handle maps to exactly one human (registration conflict)`;
+        return `${handleScopeLabel({ kind: binding.kind, connectorRef: binding.connectorRef, handle: binding.handle })} is claimed by both "${prior}" and "${entity.entityId}" — a handle maps to exactly one human (registration conflict)`;
       }
       handleOwner.set(key, entity.entityId);
     }
@@ -403,6 +422,41 @@ export function resolveSlackHandle(
   };
 }
 
+export type RelayHandleResolution =
+  | { kind: "registered"; entityId: string; address: string; connectorRef: string; handle: string }
+  | { kind: "unregistered"; connectorRef: string; handle: string; error: string };
+
+/** Resolve an INBOUND relay handle scoped to the authenticated relay `connectorRef`.
+ *  Unlike Slack (where user IDs are globally unique across kind=slack), relay aliases are
+ *  scoped to `(kind="relay", connectorRef, handle)` so an authenticated relay can assert
+ *  only its own bindings while allowing multiple registered people on the same relay to
+ *  answer with their own entity address. Handle-less relay bindings remain outbound-only. */
+export function resolveRelayHandle(
+  connectorRef: string,
+  handle: string,
+  entities: readonly HumanFragment[],
+): RelayHandleResolution {
+  if (connectorRef.length > 0 && handle.length > 0) {
+    for (const e of entities) {
+      for (const b of e.connectorBindings) {
+        if (b.kind === "relay" && b.connectorRef === connectorRef && b.handle !== undefined && b.handle === handle) {
+          return { kind: "registered", entityId: e.entityId, address: e.address, connectorRef, handle };
+        }
+      }
+    }
+  }
+  return {
+    kind: "unregistered",
+    connectorRef,
+    handle,
+    error:
+      `inbound relay (${connectorRef}) sender "${handle}" is not a registered human (no relay binding for "${connectorRef}" with handle "${handle}"). ` +
+      `Register the human + their handle first: rig gateway human add <entityId> --display-name … ` +
+      `--binding relay:${connectorRef}:file:<absolute-env-file>:primary:handle=${handle} --delivery-class …; ` +
+      `until then this message is REFUSED (it was NOT landed as a fabricated human seat).`,
+  };
+}
+
 export function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -451,20 +505,8 @@ export function addHumanFragment(
   }
   // A6 v3 pin-1: reject a handle already claimed by a DIFFERENT human BEFORE writing (never leave a
   // conflicting fragment on disk with a failed re-projection). projectHumans is the load-time backstop.
-  const existing = projectHumans(home);
-  if (!existing.ok) return { ok: false, error: `cannot validate handle uniqueness — existing registry is invalid: ${existing.error}` };
-  const claimed = new Map<string, string>();
-  for (const e of existing.entities) {
-    if (e.entityId === v.fragment.entityId) continue; // a replace of the same human is fine
-    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
-  }
-  for (const b of v.fragment.connectorBindings) {
-    if (b.handle === undefined) continue;
-    const owner = claimed.get(`${b.kind}:${b.handle}`);
-    if (owner !== undefined) {
-      return { ok: false, error: `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)` };
-    }
-  }
+  const conflict = handleConflict(v.fragment, home);
+  if (conflict) return { ok: false, error: conflict };
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
   // A new or replaced record may author any availability: it's a change of its own.
@@ -539,9 +581,25 @@ export type ShowHumanResult =
   | { ok: true; record: EffectiveHumanRecord }
   | { ok: false; error: string };
 
+export interface RemainingHumanBindingSummary {
+  slot: string;
+  kind: HumanConnectorKind;
+  connectorRef: string;
+  role: "primary" | "secondary";
+  handle?: string;
+  inboundResolvable: boolean;
+}
+
 export type SetHumanFieldResult =
   /** changeId: the availability change record this write left, when it left one. */
-  | { ok: true; path: string; fragment: HumanFragment; changeId?: string }
+  | {
+      ok: true;
+      path: string;
+      fragment: HumanFragment;
+      changeId?: string;
+      remainingBindings?: RemainingHumanBindingSummary[];
+      note?: string;
+    }
   /** changeId: set when the fragment and its change record were written but something after them failed. */
   | { ok: false; error: string; changeId?: string };
 
@@ -569,6 +627,12 @@ export function parseBindingSpec(spec: string):
   const secretsRef = parts.slice(2, -1).join(":");
   if (!kind || !connectorRef || !secretsRef || !role) {
     return { ok: false, error: `binding spec fields must be non-empty: kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
+  }
+  if (kind === "relay" && secretsRef.startsWith("file:")) {
+    const filePath = secretsRef.slice("file:".length);
+    if (!filePath || filePath.startsWith("//") || !isAbsolute(filePath)) {
+      return { ok: false, error: `binding file secretsRef must be file:<absolute-path> (got "${spec}")` };
+    }
   }
   return { ok: true, binding: handle !== undefined ? { kind, connectorRef, secretsRef, role, handle } : { kind, connectorRef, secretsRef, role } };
 }
@@ -657,7 +721,31 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec, or unset to remove that binding)";
+
+function formatRemainingBindingSlot(b: RemainingHumanBindingSummary): string {
+  return `${b.slot}: ${b.kind}:${b.connectorRef} role=${b.role}${b.handle ? ` handle=${b.handle}` : " [outbound-only]"}`;
+}
+
+export function describeBindingUnsetNote(
+  entityId: string,
+  removedSlot: string,
+  removed: HumanConnectorBinding | undefined,
+  remainingBindings: RemainingHumanBindingSummary[],
+): string {
+  const removedLabel = removed ? `${removedSlot} (${removed.kind}:${removed.connectorRef} role=${removed.role})` : removedSlot;
+  const remainingText =
+    remainingBindings.length > 0
+      ? `Remaining binding(s): ${remainingBindings.map(formatRemainingBindingSlot).join(", ")}.`
+      : "Remaining bindings: none (this person now has no connector binding and is reached in the Feed and Steering only).";
+  return (
+    `Removed ${removedLabel}. ${remainingText} ` +
+    `Binding slot indexes shift after removal, so do not blindly retry ${removedSlot} unset; check remainingBindings, the operation receipt, or rig gateway human show ${entityId} before retrying. ` +
+    `Removing a binding keeps the person, their preferences, their other bindings and their open questions. ` +
+    `Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain); the current delivery-outcome display may disappear too, while historical receipt notes remain. ` +
+    `It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.`
+  );
+}
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -667,13 +755,17 @@ function handleConflict(fragment: HumanFragment, home: string): string | undefin
   const claimed = new Map<string, string>();
   for (const e of existing.entities) {
     if (e.entityId === fragment.entityId) continue;
-    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
+    for (const b of e.connectorBindings) {
+      if (b.handle !== undefined) {
+        claimed.set(handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle }), e.entityId);
+      }
+    }
   }
   for (const b of fragment.connectorBindings) {
     if (b.handle === undefined) continue;
-    const owner = claimed.get(`${b.kind}:${b.handle}`);
+    const owner = claimed.get(handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle }));
     if (owner !== undefined) {
-      return `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)`;
+      return `${handleScopeLabel({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle })} is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)`;
     }
   }
   return undefined;
@@ -728,6 +820,7 @@ export function setHumanField(
   const raw = f.raw;
   const rawPrefs = isObj(raw.prefs) ? (raw.prefs as Record<string, unknown>) : {};
 
+  const priorBindings = f.fragment.connectorBindings;
   if (field === "display-name") {
     if (value.length === 0) return { ok: false, error: "display-name must be a non-empty string" };
     raw.displayName = value;
@@ -757,15 +850,36 @@ export function setHumanField(
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);
     const idx = /^\d+$/.test(idxRaw) ? Number.parseInt(idxRaw, 10) : NaN;
-    const bindings = Array.isArray(raw.connectorBindings) ? (raw.connectorBindings as unknown[]) : [];
+    const bindings = Array.isArray(raw.connectorBindings) ? [...(raw.connectorBindings as unknown[])] : [];
     if (!Number.isInteger(idx) || idx < 0 || idx >= bindings.length) {
       const valid = bindings.map((_, i) => `binding.${i}`).join(", ");
       return { ok: false, error: `"${field}" is out of range — this human has ${bindings.length} binding(s): ${valid || "(none)"}` };
     }
-    const parsed = parseBindingSpec(value);
-    if (!parsed.ok) return parsed;
-    bindings[idx] = parsed.binding;
-    raw.connectorBindings = bindings;
+    if (value === "unset") {
+      const remaining = bindings.filter((_, i) => i !== idx);
+      if (remaining.length > 0 && !remaining.some((b) => isObj(b) && b.role === "primary")) {
+        const otherSlots = bindings
+          .map((_, i) => i)
+          .filter((i) => i !== idx)
+          .map((i) => `binding.${i}`)
+          .join(", ");
+        return {
+          ok: false,
+          error:
+            `cannot unset ${field} (role "primary") while ${remaining.length} other binding(s) remain (${otherSlots}): ` +
+            `exactly one connectorBinding must have role "primary" (found 0), and no replacement is chosen silently. ` +
+            `To replace the primary, set ${field} to the new primary spec: rig gateway human set ${entityId} ${field} "<kind:connectorRef:secretsRef:primary[:handle=<id>]>". ` +
+            `To promote one of the other bindings (${otherSlots}), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ${entityId} --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ${entityId} --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary). ` +
+            `To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ${entityId}, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).`,
+        };
+      }
+      raw.connectorBindings = remaining;
+    } else {
+      const parsed = parseBindingSpec(value);
+      if (!parsed.ok) return parsed;
+      bindings[idx] = parsed.binding;
+      raw.connectorBindings = bindings;
+    }
   } else {
     return { ok: false, error: `unknown field "${field}" — ${SETTABLE_FIELDS_TEACHING}` };
   }
@@ -793,6 +907,26 @@ export function setHumanField(
   }
   const proj = writeProjection(home);
   if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}`, ...(changeId ? { changeId } : {}) };
+  if (field.startsWith("binding.") && value === "unset") {
+    const removedIdx = Number.parseInt(field.slice("binding.".length), 10);
+    const remainingBindings: RemainingHumanBindingSummary[] = v.fragment.connectorBindings.map((b, i) => ({
+      slot: `binding.${i}`,
+      kind: b.kind,
+      connectorRef: b.connectorRef,
+      role: b.role,
+      ...(b.handle !== undefined ? { handle: b.handle } : {}),
+      inboundResolvable: b.handle !== undefined,
+    }));
+    const note = describeBindingUnsetNote(entityId, field, priorBindings[removedIdx], remainingBindings);
+    return {
+      ok: true,
+      path: f.path,
+      fragment: v.fragment,
+      ...(changeId ? { changeId } : {}),
+      remainingBindings,
+      note,
+    };
+  }
   return { ok: true, path: f.path, fragment: v.fragment, ...(changeId ? { changeId } : {}) };
 }
 
@@ -864,7 +998,7 @@ export function pendingConversationsFor(entityId: string, home: string = getOpen
 
 /** The refusal when nobody is registered yet; the wording `rig gateway human list` uses for an empty registry. */
 export const NO_HUMAN_CONFIGURED =
-  "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …";
+  "no human configured yet — register one: rig gateway human add <entityId> --display-name … --delivery-class B [--default] (a connector --binding is optional)";
 
 export type LoadResult =
   | { ok: true; entities: HumanFragment[] }

@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -143,12 +144,8 @@ describe("workflow routes (PL-004 Phase D)", () => {
   it("POST /instantiate resolves a seeded spec BY NAME (AC-3 reachability), not just a literal path", async () => {
     // Seed the spec into the cache the way the starter-spec-loader does at seed
     // time: a readThrough caches `routes-fixture` by name with its sourcePath.
-    const seed = await app.request("/api/workflow/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specPath }),
-    });
-    expect(seed.status).toBe(200);
+    // (POST /validate no longer seeds: it is read-only since #2726.)
+    runtime.specCache.readThrough(specPath);
     // Instantiate by the discovered NAME (no path).
     const res = await app.request("/api/workflow/instantiate", {
       method: "POST",
@@ -586,7 +583,7 @@ describe("workflow routes — WF-2 structured error boundaries", () => {
     migrate(db, [
       outboxEntriesSchema,
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,

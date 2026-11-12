@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import ts from "typescript";
 import fs from "node:fs";
 import os from "node:os";
+import module from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
@@ -13,6 +16,40 @@ describe("bin-wrapper", () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+  });
+
+  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache).each([
+    { args: [], interactive: false, explicitCache: false, expected: false },
+    { args: ["--version"], interactive: false, explicitCache: false, expected: true },
+    { args: [], interactive: false, explicitCache: true, expected: true },
+    { args: [], interactive: true, explicitCache: false, expected: true },
+  ])("compile cache for args=$args, interactive=$interactive, explicitCache=$explicitCache", ({ args, interactive, explicitCache, expected }) => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
+    const dist = path.join(tempDir, "dist");
+    fs.mkdirSync(dist);
+    fs.writeFileSync(path.join(tempDir, "package.json"), '{ "type": "module" }');
+    const wrapper = path.join(dist, "bin-wrapper.js");
+    const source = fs.readFileSync(new URL("../src/bin-wrapper.ts", import.meta.url), "utf8");
+    const { outputText } = ts.transpileModule(source, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    });
+    fs.writeFileSync(wrapper, outputText);
+    const report = `import { getCompileCacheDir } from "node:module";
+export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir() })); }
+`;
+    fs.writeFileSync(path.join(dist, "index.js"), report + "export function createProgram() { return {}; }\n");
+    fs.writeFileSync(path.join(dist, "lazy-program.js"), report + "export async function createLazyProgram() { return {}; }\n");
+    const env = { ...process.env, TMPDIR: tempDir };
+    delete env.NODE_DISABLE_COMPILE_CACHE;
+    delete env.NODE_COMPILE_CACHE;
+    if (explicitCache) env.NODE_COMPILE_CACHE = path.join(tempDir, "explicit-cache");
+    // Set stream flags before the wrapper loads; front-door.test.ts covers a real PTY launch.
+    const nodeArgs = interactive
+      ? ["--import", "data:text/javascript,process.stdin.isTTY=true;process.stdout.isTTY=true"]
+      : [];
+    const result = spawnSync(process.execPath, [...nodeArgs, wrapper, ...args], { env, encoding: "utf8", timeout: 5000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ enabled: expected });
   });
 
   it("resolves the real dist entry from a symlinked wrapper path", () => {

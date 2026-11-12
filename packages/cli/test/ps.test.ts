@@ -80,6 +80,10 @@ describe("Ps CLI", () => {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: `Rig "${rigId}" not found` }));
         }
+      } else if (req.url === "/api/queue/hosted-members" && req.method === "GET") {
+        // A current daemon with no connected assistants.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ hostId: "host-a", members: [] }));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -1017,6 +1021,56 @@ describe("Ps CLI", () => {
       expect(parsed.truncated).toBe(true);
       expect(parsed.hint).toContain("--nodes");
       expect(parsed.hint).toContain("--full");
+    });
+
+    it("ps --nodes --json, --full, and --fields project launchWrapper array when configured and omit when absent without adding table columns", async () => {
+      psData = [
+        { rigId: "rig-1", name: "test-rig", rigName: "test-rig", nodeCount: 2, runningCount: 2, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+      ];
+      nodesData["rig-1"] = [
+        {
+          rigId: "rig-1", rigName: "test-rig", logicalId: "dev.pi", podId: "pod-1", podNamespace: "dev",
+          canonicalSessionName: "dev-pi@test-rig", nodeKind: "agent", runtime: "pi",
+          launchWrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"],
+          sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "running",
+          tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+        },
+        {
+          rigId: "rig-1", rigName: "test-rig", logicalId: "dev.codex", podId: "pod-1", podNamespace: "dev",
+          canonicalSessionName: "dev-codex@test-rig", nodeKind: "agent", runtime: "codex",
+          sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "running",
+          tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+        },
+      ];
+
+      const { logs: compactLogs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
+      });
+      const compactParsed = JSON.parse(compactLogs.join(""));
+      expect(compactParsed[0].launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+      expect("launchWrapper" in compactParsed[1]).toBe(false);
+
+      const { logs: fullLogs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
+      });
+      const fullParsed = JSON.parse(fullLogs.join(""));
+      expect(fullParsed[0].launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+      expect("launchWrapper" in fullParsed[1]).toBe(false);
+
+      const { logs: fieldsLogs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--fields", "logicalId,launchWrapper"]);
+      });
+      expect(exitCode).toBeUndefined();
+      const fieldsParsed = JSON.parse(fieldsLogs.join(""));
+      expect(fieldsParsed.entries).toEqual([
+        { logicalId: "dev.pi", launchWrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"] },
+        { logicalId: "dev.codex" },
+      ]);
+
+      const { logs: tableLogs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
+      });
+      expect(tableLogs.join("\n")).not.toContain("WRAPPER");
     });
   });
 });

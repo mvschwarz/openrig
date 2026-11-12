@@ -20,7 +20,7 @@ import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import { resolveStartupProof } from "./startup-resolver.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
@@ -54,6 +54,9 @@ import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/communi
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { recordedProcessStillRunning } from "./reconciler.js";
+import { readProcessTable, type ProcessTableRow } from "./process-table.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -70,6 +73,33 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
+/**
+ * The supported route for a session registered as adopted (origin=claimed): `rig unclaim` releases
+ * it and leaves its process running, so ending that process and its tmux session ends only this seat. Closing only
+ * a viewing window detaches from the tmux session and leaves it running.
+ * `rig down` stops only a session carrying the seat's OpenRig marker, which OpenRig sets on the sessions
+ * it starts and an adopted, bound or self-attached session lacks, so it isn't a route here and the
+ * guidance says why. Only the guidance names the route; the refusal stands. A seat handed over before
+ * 0.7.9 gets earlierHandoverRefusal instead. A seat joined with `rig attach` as an external CLI has no
+ * tmux session that `rig down` stops.
+ */
+export function claimedSessionRoutes(rigName: string, sessionName: string, externalCli = false): string {
+  const session = shellQuote(sessionName);
+  const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
+  if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
+  return `To end this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
+    + `then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. `
+    + `${VIEWER_LEAVES_IT} ${rigDownLeavesIt(rigName)}`;
+}
+
+/** Closing a viewer detaches; the tmux session, its shell and the seat's name stay. */
+const VIEWER_LEAVES_IT = "Closing only its viewing window leaves the tmux session running.";
+
+/** Why `rig down <rig>` isn't the route for an adopted session. */
+function rigDownLeavesIt(rigName: string): string {
+  return `rig down ${shellQuote(rigName)} leaves a session OpenRig didn't start running.`;
+}
+
 /** Terminal session statuses — rows the clean verb must NOT touch (they already
  *  record an ended tenancy; the vocabulary is shared with seat-handover-service
  *  and the watchdog's TERMINAL_SESSION_STATUSES). */
@@ -82,6 +112,8 @@ export interface SeatLifecycleDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: NativeProcessLister;
+  /** The OS process table, read before reopening a released seat's tmux server; injectable for tests. */
+  readProcesses?: () => Promise<ProcessTableRow[]>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
@@ -310,6 +342,7 @@ export class SeatLifecycleService {
   private readonly eventBus: EventBus;
   private readonly tmuxAdapter: TmuxAdapter;
   private readonly listProcesses?: NativeProcessLister;
+  private readonly readProcesses: () => Promise<ProcessTableRow[]>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
@@ -332,6 +365,7 @@ export class SeatLifecycleService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses;
+    this.readProcesses = deps.readProcesses ?? readProcessTable;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
@@ -1086,11 +1120,11 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${input.seatRef}" has no session to stop (checked: latest sessions row for node ${seat.logicalId}).` };
     }
     if (session.origin === "claimed") {
-      return {
+      return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? {
         ok: false,
         code: "claimed_session",
         message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`,
-        guidance: "Release an adopted session with: rig unclaim",
+        guidance: this.claimedRoutes(seat, session.session_name),
       };
     }
 
@@ -1136,7 +1170,7 @@ export class SeatLifecycleService {
         if ("code" in resolved) return { ok: false, code: "selection_changed", message: "The selected seat changed." };
         const seat = this.describe(resolved);
         const session = this.latestSession(resolved.nodeId)!;
-        if (session.origin === "claimed") return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
+        if (session.origin === "claimed") return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: this.claimedRoutes(seat, session.session_name) };
         const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
         if ("code" in probed) return probed;
         const afterProbe = selection();
@@ -1179,7 +1213,7 @@ export class SeatLifecycleService {
     const mutationTargets = nonTerminal;
     for (const row of mutationTargets) {
       if (row.origin === "claimed") {
-        return {
+        return this.earlierHandoverRefusal(resolved.nodeId, row, "clean refuses to touch adopted state") ?? {
           ok: false,
           code: "claimed_session",
           message: `Session "${row.session_name}" was adopted (origin=claimed) — clean refuses to touch adopted state.`,
@@ -1358,6 +1392,8 @@ export class SeatLifecycleService {
         ok: false,
         code: "unmanaged_session_collision",
         message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
+        guidance: "If you released this session with rig unclaim, end that underlying tmux session, including any remaining shell, "
+          + "then launch again. Closing only its viewing window doesn't end the session.",
       };
     }
     if (!stop) {
@@ -1392,13 +1428,19 @@ export class SeatLifecycleService {
    * before any stop. Null means no historical blocker was observed; the caller must
    * still validate the canonical occupant and recheck absence before launching.
    */
-  private async validateFreshHistory(nodeId: string, canonicalSessionName: string, seatRef: string): Promise<SeatRefusal | null> {
+  private async validateFreshHistory(seat: SeatDescriptor, canonicalSessionName: string, seatRef: string): Promise<SeatRefusal | null> {
+    const nodeId = seat.nodeId;
     const rows = this.nonTerminalSessions(nodeId);
-    if (rows.some(row => row.origin === "claimed")) {
+    const claimed = rows.find(row => row.origin === "claimed");
+    if (claimed) {
+      const externalCli = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType)) === "external";
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
+        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), `
+          + (externalCli
+            ? "end that process and close its terminal, then launch fresh."
+            : `end that process and the underlying tmux session, including any remaining shell, then launch fresh. ${VIEWER_LEAVES_IT} ${rigDownLeavesIt(seat.rigName)}`),
       };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);
@@ -1452,7 +1494,7 @@ export class SeatLifecycleService {
         blockers.push({ code: error.code, message: error.message, guidance: error.guidance });
       } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
     };
-    const history = await this.validateFreshHistory(node.id, canonicalSessionName, input.seatRef);
+    const history = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (history) record(history);
     const probe = await this.probeLiveness(canonicalSessionName, "preview does not repair tmux");
     const currentOccupant = "code" in probe ? "unknown" : probe.state;
@@ -1519,7 +1561,7 @@ export class SeatLifecycleService {
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return prepared;
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
-    const historyRefusal = await this.validateFreshHistory(resolved.nodeId, canonicalSessionName, input.seatRef);
+    const historyRefusal = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (historyRefusal) return historyRefusal;
     const retiringRows = this.nonTerminalSessions(node.id);
     // Detached is terminal for process cleanup, but remains a reboot candidate.
@@ -1539,17 +1581,34 @@ export class SeatLifecycleService {
     // probe sees unavailable transport instead of positive absence. Reopen an
     // empty server only when the persisted state proves this seat's managed
     // occupant was deliberately stopped and no other managed row remains live.
+    // `rig unclaim` is as deliberate for an adopted session: it marks the row
+    // detached and clears the binding, and the person ends the process and its
+    // tmux session, which can be the server's last session too.
     // The probe below still decides absence; a recreated session or failed
     // transport remains a refusal.
     if ("code" in canonicalProbe) {
       const latest = this.latestSession(node.id);
       const hasCurrentBinding = this.sessionRegistry.getBindingForNode(node.id) !== null;
+      const released = latest?.status === "detached" && latest.origin === "claimed";
       const stoppedManagedOccupant = latest !== null
         && latest.session_name === canonicalSessionName
-        && latest.status === "exited"
-        && latest.origin !== "claimed"
+        && ((latest.status === "exited" && latest.origin !== "claimed") || released)
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
+      // Unclaim doesn't end the process. While the released session's recorded process still runs, its server may
+      // only have lost its socket: a server started there would read the session absent and launch a second occupant
+      // beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
+      const stillRuns = stoppedManagedOccupant && released
+        ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
+          () => this.readProcesses().catch(() => null))
+        : null;
+      if (stillRuns) {
+        return {
+          ...canonicalProbe,
+          guidance: `This seat's released session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+            + "on a tmux server this daemon can't reach. End that process, then launch again.",
+        };
+      }
       if (stoppedManagedOccupant) {
         try {
           const restored = await this.tmuxAdapter.startServer();
@@ -1632,6 +1691,8 @@ export class SeatLifecycleService {
     if (!launch.ok) {
       return { ok: false, code: "launch_failed", message: launch.message, warnings: viewWarnings };
     }
+    // #2426: the launch's own notes (such as what became of openrig-core's earlier skill copies) reach the result.
+    const launchWarnings = launch.warnings ?? [];
     const observedGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
     const generation = observedGeneration && observedGeneration !== retiringGeneration
       ? observedGeneration
@@ -1652,8 +1713,8 @@ export class SeatLifecycleService {
         errors: ["new occupant generation was not persisted"],
       });
       return compensation === "zero"
-        ? { ok: false, code: "startup_failed", status: "failed", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
-        : { ok: false, code: "attention_required", status: "attention_required", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
+        ? { ok: false, code: "startup_failed", status: "failed", warnings: [...launchWarnings, ...viewWarnings], message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
+        : { ok: false, code: "attention_required", status: "attention_required", warnings: [...launchWarnings, ...viewWarnings], message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
     }
     this.activityOracle?.declareOccupantSwap(node.id, generation);
 
@@ -1683,7 +1744,8 @@ export class SeatLifecycleService {
       allowFreshFallback: false,
     });
 
-    const warnings = viewWarnings.length ? [...(startupResult.warnings ?? []), ...viewWarnings] : startupResult.warnings;
+    const warnings = launchWarnings.length || viewWarnings.length
+      ? [...launchWarnings, ...(startupResult.warnings ?? []), ...viewWarnings] : startupResult.warnings;
 
     if (!startupResult.ok && startupResult.startupStatus === "failed") {
       const compensation = await this.compensateFailedFreshLaunch({
@@ -1871,8 +1933,9 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${seatRef}" has no live managed session to restart (checked: latest sessions row).` };
     }
     if (session.origin === "claimed") {
-      return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
-        guidance: "Release an adopted session with: rig unclaim" };
+      return this.earlierHandoverRefusal(node.id, session, "in-place restart refuses it")
+        ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
+          guidance: this.claimedRoutes(seat, session.session_name) };
     }
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
@@ -1903,6 +1966,7 @@ export class SeatLifecycleService {
         ...(node.model ? { model: node.model } : {}),
         ...(savedEffort.effective ? { effort: savedEffort.effective } : {}),
         ...(node.codexConfigProfile ? { codexConfigProfile: node.codexConfigProfile } : {}),
+        ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
         ...(permissionOverride.codexPermissions ? { codexPermissions: permissionOverride.codexPermissions } : {}),
         launchPosture, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault,
         nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
@@ -2112,7 +2176,10 @@ export class SeatLifecycleService {
       return this.malformedStartupContext(nodeId, (err as Error).message);
     }
 
-    const startupFiles = resolvedStartupFiles.map((file) => ({
+    // The plan and the delivery share one list, so a selection saved before the context-entry floor gets it delivered
+    // and then recorded by the launch. Reading the saved row doesn't change it.
+    const deliveredFiles = withContextEntryFloor(resolvedStartupFiles);
+    const startupFiles = deliveredFiles.map((file) => ({
       kind: file.kind,
       path: file.path,
       deliveryHint: file.deliveryHint,
@@ -2131,7 +2198,7 @@ export class SeatLifecycleService {
     const hash = createHash("sha256")
       .update(JSON.stringify([row.projection_entries_json, row.resolved_files_json, row.startup_actions_json, row.runtime]))
       .digest("hex");
-    return { ok: true, context: { plan, resolvedStartupFiles, startupActions, runtime: row.runtime, hash } };
+    return { ok: true, context: { plan, resolvedStartupFiles: deliveredFiles, startupActions, runtime: row.runtime, hash } };
   }
 
   private malformedStartupContext(
@@ -2247,6 +2314,12 @@ export class SeatLifecycleService {
     return null;
   }
 
+  /** The claimed-session routes for this seat's rig (see claimedSessionRoutes). */
+  private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
+    return claimedSessionRoutes(seat.rigName, sessionName,
+      seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
+  }
+
   private describe(resolved: ResolvedSeat): SeatDescriptor {
     return {
       rigId: resolved.entry.rigId,
@@ -2261,6 +2334,24 @@ export class SeatLifecycleService {
       `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
+  }
+
+  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
+   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
+    if (this.latestSession(nodeId)?.id !== session.id) return null;
+    const handover = this.db.prepare(
+      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
+    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+    if (!handover) return null;
+    return {
+      ok: false,
+      code: "claimed_session",
+      message: `Session "${session.session_name}" is recorded as adopted (origin=claimed). The seat's last handover `
+        + `(${handover.continuity_outcome}${handover.handover_at ? ` at ${handover.handover_at}` : ""}) is one OpenRig launches, but a `
+        + `successor from before OpenRig 0.7.9 keeps the adopted origin — ${refuses}.`,
+      guidance: "It keeps that origin until its next launched handover or managed launch.",
+    };
   }
 
   private settingTargetLabel(target: SeatSettingTarget): string {

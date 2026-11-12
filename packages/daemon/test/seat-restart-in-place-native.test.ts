@@ -23,6 +23,7 @@ import nodePath from "node:path";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const pexec = promisify(execFile);
@@ -99,7 +100,9 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
 
   async function setup(shape: "shell_backed" | "direct_native", opts: { running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; quiet?: boolean; prelude?: string;
     /** Shell-backed: type the launch the way OpenRig does (tmux adapter's staged `/bin/sh <script>`). */
-    staged?: boolean } = {}) {
+    staged?: boolean;
+    /** Persisted launch_wrapper for wrapped in-place restart coverage against real tmux. */
+    launchWrapper?: string[] } = {}) {
     // One seat at a time: end the previous test's session and wait for its stub to exit.
     for (const name of sessions) await tmux(`kill-session -t ${q(name)}`).catch(() => {});
     for (let i = 0; i < 50 && stubPids().length > 0; i++) await sleep(100);
@@ -110,6 +113,16 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
       fs.writeFileSync(nodePath.join(root, "codex.c"), STUB_C);
       execFileSync("cc", ["-o", nodePath.join(bin, "codex"), nodePath.join(root, "codex.c")], { env: cleanEnv });
     }
+    const wrapperLog = nodePath.join(root, "wrapper-invocations.log");
+    if (opts.launchWrapper) {
+      fs.rmSync(wrapperLog, { force: true });
+      fs.writeFileSync(nodePath.join(bin, "rig"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      fs.writeFileSync(
+        nodePath.join(bin, "mtn"),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${q(wrapperLog)}\nwhile [ "$#" -gt 0 ]; do\n  arg="$1"\n  shift\n  [ "$arg" = "--" ] && break\ndone\nexec "$@"\n`,
+        { mode: 0o755 },
+      );
+    }
     const stub = nodePath.join(bin, "codex");
     const resolved = execFileSync("/bin/sh", ["-c", "command -v codex"], { env: { PATH: launchPath }, encoding: "utf8" }).trim();
     if (resolved !== stub) throw new Error(`Refusing to run: codex on the pinned PATH is ${resolved}, not the stub.`);
@@ -118,8 +131,12 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     sessions.push(seat);
     const db = createFullTestDb();
     const realTmux = new TmuxAdapter(exec);
+    const seatLaunchEnvironment = opts.launchWrapper
+      ? new SeatLaunchEnvironment(realTmux, { PATH: launchPath, OPENRIG_HOME: root }, work, nodePath.join(bin, "rig"), home)
+      : undefined;
     const adapter = new CodexRuntimeAdapter({
       tmux: realTmux, launchPath,
+      ...(seatLaunchEnvironment ? { seatLaunchEnvironment } : {}),
       fsOps: { readFile: (p) => fs.readFileSync(p, "utf8"), writeFile: () => {}, exists: (p) => fs.existsSync(p), mkdirp: () => {}, homedir: root },
       // #1524 (b): the stub keeps no Codex records, so stand in for them: the conversation, for a running stub process only.
       readResumeEvidence: (pid) => stubPids().includes(pid) ? { threadId: TOKEN } : { reason: "no_log_row" },
@@ -128,7 +145,11 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
       appDeps: { seatActivityService: { getSeatState: () => ({ seatNodeId: "", activity: "working", needsInput: { count: 0, reason: null },
         needsInputEvidence: null, decidedBy: null, seq: 1, changedAt: "", rungs: [], lastSwap: null }) } as never } });
     const rig = setupApp.rigRepo.createRig(seat.split("@")[1]!);
-    const node = setupApp.rigRepo.addNode(rig.id, "dev.codex", { runtime: "codex", cwd: work });
+    const node = setupApp.rigRepo.addNode(rig.id, "dev.codex", {
+      runtime: "codex",
+      cwd: work,
+      ...(opts.launchWrapper ? { launchWrapper: opts.launchWrapper } : {}),
+    });
     const session = setupApp.sessionRegistry.registerSession(node.id, seat);
     setupApp.sessionRegistry.updateStatus(session.id, "running");
     setupApp.sessionRegistry.updateResumeToken(session.id, "codex_id", TOKEN, "scrape");
@@ -143,7 +164,7 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     }, { name: seat, resumeToken: TOKEN, ...(opts.running ? { running: opts.running } : {}) });
     if (!built.ok) throw new Error(built.error);
     // Session env for respawns; the pane processes themselves start from env -i, non-login.
-    const env = `-e ${q(`PATH=${launchPath}`)} -e ${q(`CODEX_HOME=${home}`)} -e ${q(`HOME=${root}`)}`;
+    const env = `-e ${q(`PATH=${launchPath}`)} -e ${q(`CODEX_HOME=${home}`)} -e ${q(`HOME=${root}`)}${opts.launchWrapper ? ` -e ${q(`OPENRIG_NODE_ID=${node.id}`)} -e ${q(`OPENRIG_SESSION_NAME=${seat}`)} -e ${q("OPENRIG_RUNTIME=codex")}` : ""}`;
     const cleanStart = ["env", "-i", `PATH=${launchPath}`, `HOME=${root}`, `CODEX_HOME=${home}`, "TERM=screen", ...(opts.quiet ? ["STUB_QUIET=1"] : []), "/bin/sh"];
     const preflight = `[ "$(command -v codex)" = ${q(stub)} ] && [ "$CODEX_HOME" = ${q(home)} ]`;
     if (shape === "shell_backed") {
@@ -173,7 +194,7 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       return { status: res.status, body: await res.json() as Record<string, any> };
     };
-    return { seat, pane, post };
+    return { seat, pane, post, realTmux, wrapperLog };
   }
 
   it("shell-backed: the same conversation resumes in the same pane under the same shell, with the running choices", async () => {
@@ -273,4 +294,39 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     const verified = await post("restart-verify", { expectAccount: "me@example.com" });
     expect(verified.body).toMatchObject({ ok: true, outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
   }, 60_000);
+
+  it.each(["shell_backed", "direct_native"] as const)(
+    "%s: wrapped in-place restart builds and executes the wrapped resume command against real tmux while stub codex is the pane foreground",
+    async (shape) => {
+      const wrapper = ["mtn", "sandbox", "--profile=dev team", "--"];
+      const { seat, pane, post, realTmux, wrapperLog } = await setup(shape, { launchWrapper: wrapper });
+      const [oldStub] = stubPids();
+      expect(await realTmux.getPaneCommand(seat), "running stub codex is the real pane foreground before restart").toBe("codex");
+      if (shape === "direct_native") {
+        expect(await realTmux.getDefaultShell()).toMatch(/\/(ba|z|da|k|mk)?sh$/);
+      }
+
+      const plan = await post("restart-plan");
+      expect(plan.status, JSON.stringify(plan.body)).toBe(200);
+      expect(plan.body).toMatchObject({ ok: true, planOnly: true, paneShape: shape, oldProcess: { pid: oldStub } });
+
+      const result = await post("restart", { reason: `native wrapped ${shape}` });
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(result.body).toMatchObject({
+        ok: true,
+        outcome: "restarted_account_unverified",
+        pane,
+        paneShape: shape,
+        oldProcess: { pid: oldStub },
+        newProcess: { sameExecutable: true },
+      });
+      for (const pid of stubPids()) pids.add(pid);
+      expect(stubPids(), "only the replacement stub runs").toEqual([result.body.newProcess.pid]);
+      expect(result.body.newProcess.pid).not.toBe(oldStub);
+      const logged = fs.readFileSync(wrapperLog, "utf8").trim();
+      expect(logged).toContain(`sandbox --profile=dev team -- ${nodePath.join(bin, "codex")}`);
+      expect(logged).toContain(`resume ${TOKEN}`);
+    },
+    60_000,
+  );
 });

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { Command } from "commander";
 import { SystemPreflight } from "../src/system-preflight.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -75,7 +76,7 @@ describe("SystemPreflight", () => {
   it("Node version below 22 → ready: false with guidance", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
     const pf = createPreflight();
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const nodeCheck = result.checks.find((c) => c.name === "node_version");
     expect(nodeCheck!.ok).toBe(false);
@@ -103,7 +104,7 @@ describe("SystemPreflight", () => {
   // Test 3
   it("tmux missing → ready: false with guidance", async () => {
     const pf = createPreflight({ tmuxMode: "missing" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
     expect(tmuxCheck!.ok).toBe(false);
@@ -113,7 +114,7 @@ describe("SystemPreflight", () => {
 
   it("tmux installed but default control socket unhealthy → ready: false with guidance", async () => {
     const pf = createPreflight({ tmuxMode: "unhealthy" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
 
     expect(result.ready).toBe(false);
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
@@ -134,7 +135,7 @@ describe("SystemPreflight", () => {
       getDaemonStatus: makeStatus(),
       riggedHome: join(readonlyDir, "nested"),
     });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const homeCheck = result.checks.find((c) => c.name === "writable_home");
     expect(homeCheck!.ok).toBe(false);
@@ -161,14 +162,43 @@ describe("SystemPreflight", () => {
     expect(portCheck!.fix).toContain("rig config set daemon.port");
   });
 
+  it.each(["EPERM", "EACCES"])("does not say a blocked port probe is available (%s)", async (code) => {
+    const socket = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn(), destroy: vi.fn(),
+      connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("blocked"), { code }))); },
+    });
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    try {
+      const result = await createPreflight().run({ port: 7433 });
+      expect(result.ready).toBe(true);
+      expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining(code) });
+      expect(result.checks.find((c) => c.name === "port_available")!.warning).toContain("could not be checked");
+    } finally { constructor.mockRestore(); }
+  });
+
+  it("warns when a recorded daemon on the same endpoint has a blocked probe", async () => {
+    const pf = createPreflight({ daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", probeErrorCode: "EPERM" } });
+    const result = await pf.run({ port: 7433, host: "127.0.0.1" });
+    expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining("EPERM") });
+  });
+
   // Test 6
   it("port check skipped when daemon running on same host:port", async () => {
     const pf = createPreflight({
       daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", healthy: true },
     });
-    const result = await pf.run({ port: 7433, host: "127.0.0.1" });
-    const portCheck = result.checks.find((c) => c.name === "port_available");
-    expect(portCheck!.ok).toBe(true);
+    // A regressed skip would fail at construction before it could reach any socket.
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => {
+      throw new Error("same-endpoint preflight must not construct a probe socket");
+    });
+    try {
+      const result = await pf.run({ port: 7433, host: "127.0.0.1" });
+      const portCheck = result.checks.find((c) => c.name === "port_available");
+      expect(portCheck).toMatchObject({ ok: true });
+      expect(constructor).not.toHaveBeenCalled();
+    } finally {
+      constructor.mockRestore();
+    }
   });
 
   // Test 7
@@ -177,18 +207,33 @@ describe("SystemPreflight", () => {
     const pf = createPreflight({
       daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", healthy: true },
     });
-    // Use a port that's actually available, but the skip rule should not apply
-    const result = await pf.run({ port: 7433, host: "10.0.0.5" });
-    const portCheck = result.checks.find((c) => c.name === "port_available");
-    // Should have attempted the check (not skipped)
-    expect(portCheck).toBeDefined();
+    // A deterministic refusal proves the requested endpoint without dialing it.
+    const socket = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn(),
+      destroy: vi.fn(),
+      connect: vi.fn((_port: number, _host: string) => {
+        queueMicrotask(() => socket.emit("error", Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })));
+      }),
+    });
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    try {
+      const result = await pf.run({ port: 7433, host: "10.0.0.5" });
+      const portCheck = result.checks.find((c) => c.name === "port_available");
+      expect(portCheck).toMatchObject({ ok: true });
+      expect(constructor).toHaveBeenCalledTimes(1);
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(socket.connect).toHaveBeenCalledWith(7433, "10.0.0.5");
+      expect(socket.destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      constructor.mockRestore();
+    }
   });
 
   // Test 8
   it("multiple failures reported together (additive)", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
     const pf = createPreflight({ tmuxMode: "missing" });
-    const result = await pf.run();
+    const result = await pf.run({ port: 0 });
     expect(result.ready).toBe(false);
     const failedChecks = result.checks.filter((c) => !c.ok);
     expect(failedChecks.length).toBeGreaterThanOrEqual(2);
@@ -322,9 +367,12 @@ describe("Preflight CLI", () => {
   it("rig preflight with failure prints three-part error and exits 1", async () => {
     const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: 0 } }));
     const cmd = preflightCommand({
       exec: makeExec("missing"),
-      configPath: join(tmpDir, "config.json"),
+      configPath,
       riggedHome: homeDir,
       getDaemonStatus: makeStatus(),
     });

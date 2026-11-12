@@ -7,7 +7,7 @@
 // wrong bearer, admitted (200) with the correct bearer, and loopback (null
 // token) pass-through with NO header.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
 
@@ -19,18 +19,18 @@ const TOKEN = "secret-terminal-token-abc123";
 function stubDeps() {
   return {
     // reconcile → convergeOp(reconcile_session) calls claimService.reconcileSession
-    claimService: { reconcileSession: async () => ({ ok: true, sessionName: "dev1-impl@test-rig", projectionDrift: [], continuity: "unverified" }) },
+    claimService: { reconcileSession: vi.fn(async () => ({ ok: true, sessionName: "dev1-impl@test-rig", projectionDrift: [], continuity: "unverified" })) },
     podInstantiator: {}, // presence-checked only
     // clear-attention
-    seatAttentionReconciler: { clearAttention: async () => ({ ok: true, from: "attention_required", clearedBy: "evidence" }) },
+    seatAttentionReconciler: { clearAttention: vi.fn(async () => ({ ok: true, from: "attention_required", clearedBy: "evidence" })) },
     // unclaim
-    rigLifecycleService: { unclaimSession: async () => ({ ok: true, sessionName: "dev1-impl@test-rig", logicalId: "dev1.impl", rigId: "rig-1" }) },
+    rigLifecycleService: { unclaimSession: vi.fn(async () => ({ ok: true, sessionName: "dev1-impl@test-rig", logicalId: "dev1.impl", rigId: "rig-1" })) },
   };
 }
 
 // Mount sessionAdminRoutes behind a context middleware that sets the terminal
 // bearer token (null = loopback/no-token mode) plus the stubbed deps.
-function mountApp(bearerToken: string | null): { request: (p: string, init?: RequestInit) => Promise<Response> } {
+function mountApp(bearerToken: string | null) {
   const deps = stubDeps();
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -42,7 +42,8 @@ function mountApp(bearerToken: string | null): { request: (p: string, init?: Req
     await next();
   });
   app.route("/api/sessions", sessionAdminRoutes);
-  return app;
+  return Object.assign(app, { effects: [deps.claimService.reconcileSession,
+    deps.seatAttentionReconciler.clearAttention, deps.rigLifecycleService.unclaimSession] });
 }
 
 function post(app: { request: (p: string, init?: RequestInit) => Promise<Response> }, path: string, headers?: Record<string, string>) {
@@ -63,22 +64,30 @@ describe("session-admin mutation auth guard (OPR.0.4.3.02)", () => {
   describe("with a bearer token configured (non-loopback)", () => {
     for (const route of ROUTES) {
       describe(`POST .../${route.name}`, () => {
-        it("401 without the Authorization header", async () => {
+        it.each([
+          ["missing", undefined, "missing Authorization header"],
+          ["malformed", { Authorization: "Basic SYNTHETIC_HEADER_SECRET" }, "Authorization header must be 'Bearer <token>'"],
+          ["wrong", { Authorization: "Bearer SYNTHETIC_OTHER_TOKEN" }, "bearer token does not match"],
+        ] as const)("identifies the terminal gate for a %s credential without disclosing secrets or acting", async (_case, headers, reason) => {
           const app = mountApp(TOKEN);
-          const res = await post(app, route.path);
+          const res = await post(app, route.path, headers);
           expect(res.status).toBe(401);
-        });
-
-        it("401 with a WRONG bearer token", async () => {
-          const app = mountApp(TOKEN);
-          const res = await post(app, route.path, { Authorization: "Bearer wrong-token" });
-          expect(res.status).toBe(401);
+          for (const effect of app.effects) expect(effect).not.toHaveBeenCalled();
+          const body = await res.json();
+          expect(Object.keys(body).sort()).toEqual(["error", "message", "what_failed", "what_to_do", "why_it_matters"]);
+          expect(body.error).toBe("unauthorized");
+          expect(body.what_failed).toBe(reason);
+          expect.soft(body.message).toBe(`Terminal auth failed: ${reason}`);
+          expect.soft(body.why_it_matters).toBe("Terminal and transport requests require the configured terminal bearer token to protect terminal access and input.");
+          expect.soft(body.what_to_do).toBe("Use the daemon's terminal bearer token with `Authorization: Bearer <token>`: OPENRIG_TERMINAL_BEARER_TOKEN, or OPENRIG_AUTH_BEARER_TOKEN when terminal auth falls back to it.");
+          for (const secret of [TOKEN, "SYNTHETIC_HEADER_SECRET", "SYNTHETIC_OTHER_TOKEN"]) expect(JSON.stringify(body)).not.toContain(secret);
         });
 
         it("200 (admitted) with the correct bearer token", async () => {
           const app = mountApp(TOKEN);
           const res = await post(app, route.path, { Authorization: `Bearer ${TOKEN}` });
           expect(res.status).toBe(200);
+          expect(app.effects.flatMap(effect => effect.mock.calls)).toHaveLength(1);
         });
       });
     }
@@ -91,6 +100,7 @@ describe("session-admin mutation auth guard (OPR.0.4.3.02)", () => {
         const res = await post(app, route.path);
         expect(res.status).not.toBe(401);
         expect(res.status).toBe(200);
+        expect(app.effects.flatMap(effect => effect.mock.calls)).toHaveLength(1);
       });
     }
   });

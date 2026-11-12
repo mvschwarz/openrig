@@ -1,9 +1,20 @@
+import { piAccountSwitchesSchema } from "../../src/db/migrations/151_pi_account_switches.js";
+import { eventsRetentionMarksSchema } from "../../src/db/migrations/153_events_retention_marks.js";
+import { queueErasureSchema } from "../../src/db/migrations/155_queue_erasure.js";
+import { queueErasureBatchesSchema } from "../../src/db/migrations/157_queue_erasure_batches.js";
+import { queueInboxCheckinsSchema } from "../../src/db/migrations/158_queue_inbox_checkins.js";
+import { queueItemsHandedOffFromIndexSchema } from "../../src/db/migrations/159_queue_items_handed_off_from_index.js";
+import { networkBindingsSchema } from "../../src/db/migrations/160_network_bindings.js";
+import { networkReceiptsSchema } from "../../src/db/migrations/161_network_receipts.js";
+import { networkInstallationsSchema } from "../../src/db/migrations/163_network_installations.js";
+import { queueItemsReplyToIndexSchema } from "../../src/db/migrations/164_queue_items_reply_to_index.js";
 import { activityGrantsSchema } from "../../src/db/migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "../../src/db/migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "../../src/db/migrations/145_node_permissions_to.js";
 import { nodeStartupGuidanceFileSchema } from "../../src/db/migrations/146_node_startup_guidance_file.js";
 import { managedBlockWritesSchema } from "../../src/db/migrations/147_managed_block_writes.js";
 import { streamIntakeCursorSchema } from "../../src/db/migrations/149_stream_intake_cursor.js";
+import { nodeLaunchWrapperSchema } from "../../src/db/migrations/150_node_launch_wrapper.js";
 import { nodeAccountHomeSchema } from "../../src/db/migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "../../src/db/migrations/126_escalation_target_refs.js";
 import { nodeClaudePermissionsSchema } from "../../src/db/migrations/139_node_claude_permissions.js";
@@ -99,6 +110,7 @@ import { humanQuestionsSchema } from "../../src/db/migrations/091_human_question
 import { nodeEffortSchema } from "../../src/db/migrations/092_node_effort.js";
 import { rigPolicySchema } from "../../src/db/migrations/041_rig_policy.js";
 import { rigArchiveSchema } from "../../src/db/migrations/042_rig_archive.js";
+import { sessionAddressReadIndexesSchema } from "../../src/db/migrations/162_session_address_read_indexes.js";
 import { resumeProvenanceSchema } from "../../src/db/migrations/043_resume_provenance.js";
 import { resumeVerificationSchema } from "../../src/db/migrations/045_resume_verification.js";
 import { seatIdentityVerdictsSchema } from "../../src/db/migrations/046_seat_identity_verdicts.js";
@@ -159,7 +171,7 @@ import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, rigNonInterruptiveSchema, rigInstallRootSchema, threadPartMapSchema, queueTransitionsQitemIdOrderSchema, queueItemsRecoveryTagsSchema, resumeRotationSchema, sessionStopIntentSchema, nodeEffortChoiceSchema, modePostureCoexistSchema, seatEnvSchema, appliedLaunchDaemonOptOutSchema, sessionCommunityHarnessSchema, threadSeatMapChannelKeySchema, queueItemWakeInputBoxSchema, providerAccountReadingsSchema, humanQuietWindowsSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema, rigStartupLayersSchema, humanOperatingModesSchema, queueDelegatedDecisionSchema, nodeAdvisorSchema, operationCorrelationSchema, terminalPolicySchema, seatRuntimeSwitchesSchema, claudeTokenReadingsSchema, nodeLaunchRecipeSchema, nodeClaudeTokenRefSchema, nodeClaudePermissionsSchema, nodeCodexPermissionsSchema, escalationTargetRefsSchema, sessionAgentRunnerSchema, nodeAccountHomeSchema, nodeClaudeMcpSchema, activityGrantsSchema, environmentBindingsSchema, nodePermissionsToSchema, nodeStartupGuidanceFileSchema, managedBlockWritesSchema, streamIntakeCursorSchema];
+export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, rigNonInterruptiveSchema, rigInstallRootSchema, threadPartMapSchema, queueTransitionsQitemIdOrderSchema, queueItemsRecoveryTagsSchema, resumeRotationSchema, sessionStopIntentSchema, nodeEffortChoiceSchema, modePostureCoexistSchema, seatEnvSchema, appliedLaunchDaemonOptOutSchema, sessionCommunityHarnessSchema, threadSeatMapChannelKeySchema, queueItemWakeInputBoxSchema, providerAccountReadingsSchema, humanQuietWindowsSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema, rigStartupLayersSchema, humanOperatingModesSchema, queueDelegatedDecisionSchema, nodeAdvisorSchema, operationCorrelationSchema, terminalPolicySchema, seatRuntimeSwitchesSchema, claudeTokenReadingsSchema, nodeLaunchRecipeSchema, nodeClaudeTokenRefSchema, nodeClaudePermissionsSchema, nodeCodexPermissionsSchema, escalationTargetRefsSchema, sessionAgentRunnerSchema, nodeAccountHomeSchema, nodeClaudeMcpSchema, activityGrantsSchema, environmentBindingsSchema, nodePermissionsToSchema, nodeStartupGuidanceFileSchema, managedBlockWritesSchema, streamIntakeCursorSchema, nodeLaunchWrapperSchema, piAccountSwitchesSchema, eventsRetentionMarksSchema, queueErasureSchema, queueErasureBatchesSchema, queueInboxCheckinsSchema, queueItemsHandedOffFromIndexSchema, networkBindingsSchema, networkReceiptsSchema, sessionAddressReadIndexesSchema, networkInstallationsSchema, queueItemsReplyToIndexSchema];
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -176,6 +188,7 @@ export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, even
  * its exclusion); the guard's redundant-exclusion check then keeps the two in sync.
  */
 export const migrationsForFullTestDbExclusions: Record<string, string> = {
+  "156_queue_erasure_link_indexes.sql": "indexes outbox_entries, inbox_entries and the stream tables (all excluded from the core edge) for queue erasure's lookups; erasure tests migrate the canonical full schema.",
   "082_archive_identity_provenance.sql": "archive extension; 054 is excluded from this core fixture. Archive identity regressions use ALL_MIGRATIONS.",
   "026_inbox_entries.sql": "inbox subsystem table — not on the shared core edge (inbox suites migrate it inline).",
   "027_outbox_entries.sql": "outbox subsystem table — not on the shared core edge (outbox suites migrate it inline).",
@@ -216,6 +229,8 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "107_pi_usage_entries.sql": "Pi usage-facts table for the cost view; its tests migrate the canonical full schema.",
   "108_pi_usage_charges.sql": "OpenRouter charges for Pi entries, for the cost view; its tests migrate the canonical full schema.",
   "110_workflow_instance_scope.sql": "adds scope_json to workflow_instances (034 is excluded); workflow suites migrate the canonical workflow schema inline.",
+  "152_workflow_instance_spec.sql": "adds spec_source_path and spec_json to workflow_instances (034 is excluded); workflow suites migrate the canonical workflow schema inline.",
+  "154_workflow_instance_root_objective.sql": "adds root_objective to workflow_instances (034 is excluded); workflow suites migrate the canonical workflow schema inline.",
   "065_identity_provenance.sql": "P21 additive era-stamp column on 037_mission_control_actions (itself excluded) — mission-control / review-freeze / scope suites migrate it inline where they assert provenance.",
   "067_i3_identity_provenance.sql": "P21 additive era-stamp columns; it ALTERs inbox_entries + outbox_entries (both excluded from the core edge) alongside queue_transitions/stream_items, so it cannot ride the core-edge list — queue / inbox / outbox / stream suites asserting provenance migrate it inline.",
   "140_identity_principal.sql": "the MCP adapter's principal beside 067's stamp (itself excluded); it ALTERs inbox_entries, outbox_entries and queue_transitions_archive (all excluded from the core edge) alongside queue_transitions/stream_items — suites asserting the principal migrate ALL_MIGRATIONS.",

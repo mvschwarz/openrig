@@ -402,6 +402,31 @@ describe("Send CLI", () => {
     expect(logs.join("\n")).not.toContain("typed, never submitted");
   });
 
+  it("fan-out text output keeps each recipient's own advisory, such as unreadable input", async () => {
+    const unreadable = "Input could not be read and was not cleared; this send may join or submit existing text.";
+    const client = {
+      post: async (path: string) => {
+        if (path === "/api/transport/broadcast") return { status: 200, data: {
+          total: 2, sent: 2, failed: 0, results: [
+            { sessionName: "worker@test", ok: true, existingInput: { classification: "unreadable", fullContentsVisible: false }, warning: unreadable },
+            { sessionName: "sibling@test", ok: true, existingInput: { classification: "unreadable", fullContentsVisible: false }, warning: `${unreadable} No trailing Enter.` },
+          ],
+        } };
+        throw new Error("unexpected request");
+      },
+    } as unknown as DaemonClient;
+    const { logs } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "worker@test,sibling@test", "1", "--dangerously-interact", "--reason", "fixture",
+      ]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`worker@test: Advisory: ${unreadable}`);
+    expect(output).toContain(`sibling@test: Advisory: ${unreadable} No trailing Enter.`);
+    expect(output).toContain("worker@test: Existing input: unreadable");
+    expect(output).toContain("2/2 delivered");
+  });
+
   it("reports a fan-out refusal as unconfirmed alongside a successful recipient", async () => {
     let submits = 0;
     const client = {
@@ -1315,6 +1340,7 @@ describe("Send CLI", () => {
     expect(output).toContain("a@r: sent\nNotice: a@r was mid-restore (as recorded). This doesn't mean the restore has finished.\nb@r: sent\n");
     expect(output).toContain("c@r: FAILED — paste failed\nNotice: c@r was mid-restore");
     expect(output).toContain("d@r: retained, not delivered; inspect with rig seat held-messages\nNotice: d@r was mid-restore");
+    expect(output).toContain("2/4 delivered, 1 held");
     expect(output.match(/^Notice: /gm)).toHaveLength(3); // none for b@r
     expect(exitCode).toBe(1); // a failed recipient, as before
   });

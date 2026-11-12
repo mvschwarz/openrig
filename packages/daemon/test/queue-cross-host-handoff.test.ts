@@ -16,7 +16,7 @@
 //   - /handoff closes the source `handed-off`; /handoff-and-complete closes
 //     it `done` — same choreography, one mechanism.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
@@ -846,5 +846,199 @@ describe("cross-host source close records the sender's provenance", () => {
     expect(closes(h.db, "qitem-source-1")).toEqual([]);
     expect(closes(h.db, "qitem-source-1", "queue_transitions_archive"))
       .toEqual([{ actor: HANDOFF.fromSession, provenance: "transport:v1", note: `cross-host handoff to ${HANDOFF.toSession}` }]);
+  });
+});
+
+// #2631 item 2: a cross-host handoff reads its source, waits for the successor's create on the other host, then closes
+// the source. A claim the owner makes during that wait is overridden by the close. The close still happens, because the
+// successor exists, and it says so on the transition and wakes the claimer.
+describe("#2631 a claim made while a cross-host handoff is forwarded", () => {
+  const dbs: Database.Database[] = [];
+  afterEach(() => dbs.splice(0).forEach((db) => db.close()));
+
+  type SendResult = { ok: boolean; verified?: boolean; error?: string };
+  /** A transport that records each send and answers with the next scripted result (then verified sends). */
+  function recordingTransport(results: SendResult[] = []) {
+    const sends: string[] = [];
+    return { sends, transport: { send: async (destination: string) => { sends.push(destination); return results.shift() ?? { ok: true, verified: true }; } } as never };
+  }
+  function repository(db: Database.Database, bus: EventBus, transport?: never) {
+    const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }), ...(transport ? { transport } : {}) });
+    repo.attachOutbox(new OutboxHandler(db));
+    return repo;
+  }
+  function harness(fetchImpl?: typeof fetch, transport?: never) {
+    const db = createDb();
+    dbs.push(db);
+    migrate(db, ALL_MIGRATIONS);
+    const bus = new EventBus(db);
+    const repo = repository(db, bus, transport);
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      const set = c.set.bind(c) as (k: string, v: unknown) => void;
+      set("eventBus", bus);
+      set("queueRepo", repo);
+      set("hostRegistryLoader", () => ({ ok: true, registry: REGISTRY }));
+      if (fetchImpl) set("remoteFetchImpl", fetchImpl);
+      await next();
+    });
+    app.route("/api/queue", queueRoutes());
+    return { db, bus, repo, app };
+  }
+  /** An origin whose forward to the other host waits until released. With no transport, nothing is sent after commit. */
+  function origin(transport?: never) {
+    const remote = harness();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let reached!: () => void;
+    const forwarding = new Promise<void>((resolve) => { reached = resolve; });
+    const h = harness((async (url, init) => {
+      reached();
+      await released;
+      return remote.app.request(new URL(String(url)).pathname, init);
+    }) as typeof fetch, transport);
+    return { ...h, forwarding, release };
+  }
+  const RELAY = { fromSession: "relay@rig-a", toSession: "dev@rig-b", hostId: "vps-b", nudge: false };
+  const successor = deriveCrossHostSuccessorId("qitem-source-1", RELAY.toSession, "vps-b");
+  const closeNote = (db: Database.Database) => (db.prepare(
+    "SELECT transition_note AS note FROM queue_transitions WHERE qitem_id = 'qitem-source-1' AND closure_reason = 'handed_off_to' ORDER BY transition_id LIMIT 1",
+  ).get() as { note: string }).note;
+  const overrideWakes = (db: Database.Database) => db.prepare(
+    "SELECT destination_session AS destination, body, delivery_state AS state, tags FROM outbox_entries WHERE outbox_id LIKE 'wake-intent-claim-overridden-%'",
+  ).all() as Array<{ destination: string; body: string; state: string; tags: string | null }>;
+  /** The handoff, with the owner's claim landing while it's forwarded. */
+  async function handOffOverClaim(h: ReturnType<typeof origin>) {
+    await seedSource(h.repo);
+    const handoff = post(h.app, "/api/queue/qitem-source-1/handoff", RELAY);
+    await h.forwarding;
+    const claimed = h.repo.claim({ qitemId: "qitem-source-1", destinationSession: "worker@rig-a" });
+    h.release();
+    expect((await handoff).status).toBe(201);
+    return claimed;
+  }
+
+  it("the close still happens, records the overridden claim, and wakes the claimer with the successor", async () => {
+    const sent = recordingTransport();
+    const h = origin(sent.transport);
+    const claimed = await handOffOverClaim(h);
+
+    expect(h.repo.getById("qitem-source-1")).toMatchObject({ state: "handed-off", handedOffTo: RELAY.toSession, closureTarget: `${successor}@vps-b` });
+    expect(closeNote(h.db)).toBe(`cross-host handoff to dev@rig-b (this overrode worker@rig-a's claim made at ${claimed.claimedAt}, while the handoff was forwarded)`);
+    const wakes = overrideWakes(h.db);
+    expect(wakes.map((w) => w.destination)).toEqual(["worker@rig-a"]);
+    expect(wakes[0]!.body).toContain(`qitem-source-1 was handed off to dev@rig-b as ${successor} while you claimed it, so your claim is superseded`);
+    // BR-1: neither durable carrier gains the host-qualified successor key.
+    expect(`${closeNote(h.db)} ${wakes[0]!.body}`).not.toContain(`${successor}@vps-b`);
+    await vi.waitFor(() => expect(sent.sends).toEqual(["worker@rig-a"]));
+  });
+
+  it.each([
+    ["stays pending", false],
+    ["was claimed before the handoff read it", true],
+  ])("when the source %s through the forward, the close and its note are as before and nobody is woken", async (_label, claimedFirst) => {
+    const sent = recordingTransport();
+    const h = origin(sent.transport);
+    await seedSource(h.repo);
+    if (claimedFirst) h.repo.claim({ qitemId: "qitem-source-1", destinationSession: "worker@rig-a" });
+    const handoff = post(h.app, "/api/queue/qitem-source-1/handoff", RELAY);
+    await h.forwarding;
+    h.release();
+    expect((await handoff).status).toBe(201);
+
+    expect(h.repo.getById("qitem-source-1")).toMatchObject({ state: "handed-off", handedOffTo: RELAY.toSession });
+    expect(closeNote(h.db)).toBe("cross-host handoff to dev@rig-b");
+    expect(overrideWakes(h.db)).toEqual([]);
+    expect(sent.sends).toEqual([]);
+  });
+
+  it("a notice committed with the close but never sent before the daemon stopped is delivered once by recovery", async () => {
+    const h = origin();
+    await handOffOverClaim(h);
+    expect(overrideWakes(h.db).map((w) => w.state)).toEqual(["pending"]);
+
+    const sent = recordingTransport();
+    const restarted = repository(h.db, h.bus, sent.transport);
+    // Counted and recorded as delivered: recovery doesn't retire a current notice as superseded first.
+    expect(await restarted.drainPendingWakeIntents()).toMatchObject({ delivered: 1, failed: 0 });
+    expect(sent.sends).toEqual(["worker@rig-a"]);
+    expect(overrideWakes(h.db)[0]!.tags ?? "").not.toContain("queue:wake-superseded");
+    // Delivered is final: a later recovery pass doesn't send it again.
+    await restarted.drainPendingWakeIntents();
+    expect(sent.sends).toEqual(["worker@rig-a"]);
+  });
+
+  it.each([
+    ["failed", { ok: false, error: "transport error" }],
+    ["indeterminate", { ok: true, verified: false }],
+  ])("a notice whose first send ended %s is delivered by the next recovery", async (state, first) => {
+    const firstSend = recordingTransport([first]);
+    const h = origin(firstSend.transport);
+    await handOffOverClaim(h);
+    await vi.waitFor(() => expect(overrideWakes(h.db).map((w) => w.state)).toEqual([state]));
+
+    const sent = recordingTransport();
+    await repository(h.db, h.bus, sent.transport).drainPendingWakeIntents();
+    expect(sent.sends).toEqual(["worker@rig-a"]);
+  });
+
+  it("a notice refused at a prompt is sent again when the claimer's prompt clears", async () => {
+    const sent = recordingTransport([{ ok: false, error: "target_needs_input" }]);
+    const h = origin(sent.transport);
+    await handOffOverClaim(h);
+    await vi.waitFor(() => expect(overrideWakes(h.db).map((w) => w.state)).toEqual(["failed"]));
+
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "needs_input");
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "idle");
+    await vi.waitFor(() => expect(sent.sends).toEqual(["worker@rig-a", "worker@rig-a"]));
+  });
+
+  it("the prompt-clear pass reaches a closed row only through its notice, never by reading other failed history", async () => {
+    const sent = recordingTransport();
+    const h = origin(sent.transport);
+    // Closed rows whose own wakes to this seat failed at a prompt, and no override notice among them.
+    const outbox = new OutboxHandler(h.db);
+    for (let i = 0; i < 200; i++) {
+      await h.repo.create({ qitemId: `qitem-old-${i}`, sourceSession: "orch@rig-a", destinationSession: "worker@rig-a", body: "old work", nudge: false });
+      outbox.record({ outboxId: `wake-intent-qitem-old-${i}`, senderSession: "orch@rig-a", destinationSession: "worker@rig-a", body: "old wake", auditPointer: `qitem-old-${i}` });
+    }
+    h.db.prepare("UPDATE outbox_entries SET delivery_state = 'failed' WHERE outbox_id LIKE 'wake-intent-qitem-old-%'").run();
+    h.db.prepare("UPDATE queue_items SET state = 'done', last_nudge_result = 'failed:target_needs_input' WHERE qitem_id LIKE 'qitem-old-%'").run();
+    const prepared: string[] = [];
+    const prepare = h.db.prepare.bind(h.db);
+    vi.spyOn(h.db, "prepare").mockImplementation(((sql: string) => { prepared.push(sql); return prepare(sql); }) as never);
+
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "needs_input");
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "idle");
+    expect(sent.sends).toEqual([]);
+
+    const sql = prepared.find((s) => s.includes("UNION") && s.includes("last_nudge_result"));
+    expect(sql).toBeDefined();
+    const plan = (prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array<string>((sql!.match(/\?/g) ?? []).length).fill("x")) as Array<{ detail: string }>)
+      .map((row) => row.detail);
+    expect(plan.filter((detail) => /\bSCAN\b/.test(detail))).toEqual([]);
+    expect(plan).toContainEqual(expect.stringMatching(/^SEARCH o USING INDEX sqlite_autoindex_outbox_entries_1 \(outbox_id>\? AND outbox_id<\?\)$/));
+  });
+
+  it("after a reopen and another close elsewhere, the first notice is no longer current: it names the earlier successor", async () => {
+    const h = origin();
+    await handOffOverClaim(h);
+    const notices = h.db.prepare(`SELECT outbox_id AS outboxId, audit_pointer AS auditPointer, destination_session AS destinationSession
+      FROM outbox_entries WHERE outbox_id LIKE 'wake-intent-claim-overridden-%'`).all() as Array<{ outboxId: string; auditPointer: string; destinationSession: string }>;
+    // A send already under way asks this, just before it writes into the claimer's pane.
+    let applicable!: (entries: typeof notices) => boolean;
+    const sent = recordingTransport();
+    const restarted = repository(h.db, h.bus);
+    restarted.attachTransport({ ...(sent.transport as object), configureGuardedWakes: (check: typeof applicable) => { applicable = check; } } as never);
+    expect(applicable(notices)).toBe(true);
+
+    expect((await post(h.app, "/api/queue/qitem-source-1/update", { actorSession: "worker@rig-a", state: "pending", reopen: true, transitionNote: "rerouting" })).status).toBe(200);
+    expect((await post(h.app, "/api/queue/qitem-source-1/handoff", { ...RELAY, toSession: "dev2@rig-b" })).status).toBe(201);
+    expect(h.repo.getById("qitem-source-1")).toMatchObject({ state: "handed-off", handedOffTo: "dev2@rig-b" });
+    expect(applicable(notices)).toBe(false);
+
+    await restarted.drainPendingWakeIntents();
+    expect(sent.sends).toEqual([]);
+    expect(overrideWakes(h.db)).toEqual([expect.objectContaining({ state: "failed", tags: expect.stringContaining("queue:wake-superseded") })]);
   });
 });

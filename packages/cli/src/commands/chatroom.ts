@@ -4,7 +4,8 @@ import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
 
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
@@ -193,8 +194,11 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         const sessionName = `chatroom@${rig}`;
         try {
           // The name tmux used, which differs from sessionName when tmux changed it (a `.` in a rig name, for example).
-          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-            .trim() || sessionName;
+          const command = tmuxServerStartCommand("tmux", chatroomWatchTmuxArgs(rig));
+          const result = spawnSync(command.file, command.args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          reportTmuxServerLimit(result.stderr);
+          if (result.error || result.status !== 0) throw result.error ?? new Error("tmux session creation failed");
+          const created = result.stdout.trim() || sessionName;
           console.log(`Started watch in tmux session: ${created}`);
           console.log(`Attach with: tmux attach -t ${created}`);
         } catch {

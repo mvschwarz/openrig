@@ -4,21 +4,24 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
 import { terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
+import { findLiveHerdrWorkspace, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
-interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
   session?: string;
   tmux?: { mode: "inherit" | "isolated" };
   status: { launch?: { socketPath: string; session?: string } };
   composed: { id: string; localTmuxServer?: readonly string[]; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; spaceLabel?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+  /** The composed view's remote tiles, complete; an older daemon's preview omits it, so their hosts are unknown. */
+  remote?: Array<{ seat: string; host: string }>;
 }
 
 export interface WindowDeps {
@@ -41,7 +44,17 @@ export function defaultWindowDeps(): WindowDeps {
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
-    exec: async (file, args, timeoutMs = 10_000) => (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
+    exec: async (file, args, timeoutMs = 10_000) => {
+      const command = path.basename(file) === "tmux" ? tmuxServerStartCommand(file, args) : { file, args };
+      try {
+        const result = await run(command.file, command.args, { env, encoding: "utf8", timeout: timeoutMs });
+        reportTmuxServerLimit(result.stderr);
+        return result.stdout;
+      } catch (error) {
+        reportTmuxServerLimit((error as { stderr?: unknown }).stderr);
+        throw error;
+      }
+    },
     launch: (file, args) => new Promise((resolve, reject) => {
       const child = spawn(file, args, { env, detached: true, stdio: "ignore" });
       child.once("error", reject);
@@ -204,57 +217,6 @@ function failure(provider: string, error: string): OpenViewResult {
   return { provider, ok: false, opened: [], absent: [], degraded: [], pages: 0, error, code: "terminal_window_failed" };
 }
 
-/** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
-async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps, serverArgs: readonly string[]): Promise<boolean> {
-  try {
-    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
-    if (!path.isAbsolute(tmux)) return false;
-    const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "list", "--workspace", existing.workspace_id]));
-    const panes = listed?.result?.panes as Array<{ workspace_id: string; tab_id: string; pane_id: string }> | undefined;
-    if (!Array.isArray(panes) || !panes.every(pane => pane && pane.workspace_id === existing.workspace_id && typeof pane.tab_id === "string" && typeof pane.pane_id === "string" && pane.pane_id)) return false;
-    const clients = new Map<string, string[]>();
-    // Match view-composer's serialization (these strings are compared, never executed).
-    const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
-    const server = serverArgs.map((arg, index) => index % 2 ? quote(arg) : arg).join(" ");
-    const inventory = await deps.exec(tmux, [...serverArgs, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
-    for (const line of inventory.trim().split("\n")) {
-      const [pid, session, readOnly] = line.split("\t");
-      if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
-      // Compare the composer's exact command, including session aliases and read-only mode.
-      // SSH/custom commands cannot be confirmed from this local client inventory.
-      const flags = readOnly === "1" ? ["-r "] : ["", "-f ignore-size "];
-      clients.set(pid, ["tmux", quote(tmux)].flatMap(binary => flags.map(flag => `${binary}${server ? ` ${server}` : ""} attach ${flag}-t ${quote(session)}`)));
-    }
-    const used = new Set<string>();
-    for (const [index, page] of pages.entries()) {
-      const label = pageLabel(index);
-      const matches = tabs.filter(tab => tab.workspace_id === existing.workspace_id && tab.label === label);
-      if (matches.length !== 1) return false;
-      const remaining = page.map(pane => pane.recoveryCommand ?? pane.paneCommand);
-      for (const pane of panes.filter(pane => pane.tab_id === matches[0]!.tab_id)) {
-        if (remaining.length === 0) break;
-        const result = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "process-info", "--pane", pane.pane_id]));
-        const info = result?.result?.process_info;
-        if (info?.pane_id !== pane.pane_id || (info.foreground_processes !== undefined && !Array.isArray(info.foreground_processes))) return false;
-        for (const process of info.foreground_processes ?? []) {
-          const pid = String(process?.pid);
-          if (used.has(pid)) continue;
-          const found = remaining.findIndex(command => clients.get(pid)?.includes(command));
-          if (found < 0) continue;
-          remaining.splice(found, 1);
-          used.add(pid);
-          break; // One Herdr pane can satisfy only one expected tile.
-        }
-      }
-      if (remaining.length) return false;
-    }
-    return pages.length > 0;
-  } catch {
-    // Read failures prevent reuse, not opening. Never type into or close an unverified pane.
-    return false;
-  }
-}
-
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string, requestedSession?: string, following?: FollowControls): Promise<OpenViewResult> {
   const session = requestedSession?.trim();
@@ -300,7 +262,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failed("The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.");
     }
     const launchTarget = preview.data.status.launch;
-    let { composed, planId } = preview.data;
+    let { composed, planId, remote } = preview.data;
     await assertLocalTmux(client, preview.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
     const tmuxServer = readTmuxServerArgs(composed.localTmuxServer);
     if (expectedPlan !== undefined && expectedPlan !== planId) {
@@ -320,7 +282,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         if (JSON.stringify(readTmuxServerArgs(next.data.composed.localTmuxServer)) !== JSON.stringify(tmuxServer)) {
           throw new Error("The daemon's tmux server changed while opening the window; refresh the preview before retrying.");
         }
-        ({ composed, planId } = next.data);
+        ({ composed, planId, remote } = next.data);
         if (!composed.opened.length) throw new Error("No conversations are attachable after opening the terminal.");
       }
       if (composed.kernelLayout) windowNotes.push(viewportColumns === undefined
@@ -417,25 +379,11 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         return { ...answer.data, window, notes: [...(answer.data.notes ?? []), ...windowNotes] };
       }
       const closeCommand = (id: string) => `${session === undefined ? "herdr" : `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`} workspace close ${shellQuote(id)}`;
-      let tabs: HerdrTab[] = [];
-      const spaceLabels = new Map<string, string>();
+      let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [] };
       try {
-        const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "workspace", "list"]));
-        const workspaces = listed?.result?.workspaces as Array<{ workspace_id: string; label?: string }> | undefined;
-        if (!Array.isArray(workspaces) || !workspaces.every(ws => ws && typeof ws.workspace_id === "string" && ws.workspace_id)) {
-          throw new Error("Herdr returned no usable workspace inventory.");
-        }
-        for (const workspace of workspaces) {
-          if (typeof workspace.label === "string") spaceLabels.set(workspace.workspace_id, workspace.label);
-          const listedTabs = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "tab", "list", "--workspace", workspace.workspace_id]));
-          const scoped = listedTabs?.result?.tabs as typeof tabs | undefined;
-          if (!Array.isArray(scoped) || !scoped.every(tab => tab && typeof tab.label === "string" && typeof tab.tab_id === "string" && tab.tab_id && tab.workspace_id === workspace.workspace_id)) {
-            throw new Error(`Herdr returned no usable tab inventory for workspace ${workspace.workspace_id}.`);
-          }
-          tabs.push(...scoped);
-        }
+        found = await findLiveHerdrWorkspace({ id: composed.id, planId, pages: composed.pages, ...(composed.spaceLabel ? { spaceLabel: composed.spaceLabel } : {}) },
+          { herdr: args => deps.exec("/usr/bin/env", [...herdrArgs, ...args]), exec: (file, args) => deps.exec(file, args), serverArgs: tmuxServer });
       } catch (err) {
-        tabs = [];
         windowNotes.push(`Could not check existing Herdr workspaces: ${(err as Error).message} Creating a fresh workspace; existing workspaces are kept.`);
       }
       // In the person's own Herdr, its focused space is what they are looking at.
@@ -449,29 +397,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         } catch { /* Unconfirmed: say so below. */ }
         return currentHerdr ? "Herdr did not confirm the view's space is focused; ask the person whether they see it." : "Check the new terminal shows the intended view; window creation alone is not visual confirmation.";
       };
-      const viewMarker = `openrig:${composed.id}`;
-      const planMarker = `${viewMarker}#${planId.slice(0, 16)}`;
-      const marker = (label: string) => label.includes("#") ? label.slice(0, label.lastIndexOf("#")) : "";
-      // A named view's tabs carry its panes' names; the attachment check below decides reuse.
-      const named = composed.spaceLabel ? composed.pages.map(page => page.map(pane => pane.label).join(" · ")) : undefined;
-      const pageLabel = (existing: HerdrTab) => (index: number) => named ? named[index]!
-        : composed.pages.length > 1 ? `${existing.label.slice(0, -2)}/${index + 1}` : existing.label;
-      const candidates = named
-        ? tabs.filter(tab => tab.label === named[0] && spaceLabels.get(tab.workspace_id)?.replace(/ \(\d+\)$/, "") === composed.spaceLabel && named.every(label => tabs.filter(other => other.workspace_id === tab.workspace_id && other.label === label).length === 1))
-        : tabs.filter(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
-      const stale = tabs.filter(tab => {
-        const value = marker(tab.label);
-        return value !== planMarker && (value === viewMarker ||
-          (value.startsWith(`${viewMarker}#`) && /^[a-f0-9]{16}$/.test(value.slice(viewMarker.length + 1))));
-      });
-      for (const id of new Set(stale.map(tab => tab.workspace_id))) {
+      for (const id of found.stale) {
         windowNotes.push(`Workspace ${id} has an older or different plan for this view and was kept. After inspecting it, close it if no longer needed: ${closeCommand(id)}`);
       }
-      let existing: HerdrTab | undefined;
-      for (const candidate of candidates) {
-        if (await hasLiveAttachments(candidate, tabs, composed.pages, pageLabel(candidate), herdrArgs, deps, tmuxServer)) { existing = candidate; break; }
-        windowNotes.push(`Could not confirm live attachments in workspace ${candidate.workspace_id}. Its contents were kept. After inspecting it, close it if no longer needed: ${closeCommand(candidate.workspace_id)}`);
+      for (const id of found.unconfirmed) {
+        windowNotes.push(`Could not confirm live attachments in workspace ${id}. Its contents were kept. After inspecting it, close it if no longer needed: ${closeCommand(id)}`);
       }
+      const existing = found.live;
       if (existing) {
         const focused = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "tab", "focus", existing.tab_id])) as {
           result?: { tab?: { tab_id?: string; workspace_id?: string } };
@@ -520,25 +452,27 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         pane = placeholder;
       } else pane = (await runTmux([...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
       // Nested source clients on this server can make a new window too narrow to split.
-      // Use the viewer's configured detached size, then restore normal client resizing.
+      // Use the viewer's detached size only while splitting; always release to inherited client sizing.
       const [width, height] = (await runTmux(["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
-      const sizing = (await runTmux(["show-options", "-Awv", "-t", pane, "window-size"])).trim();
-      await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
-      await runTmux(["select-pane", "-t", pane, "-T", first.label]);
-      for (const item of page.slice(1)) {
-        pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
-        await runTmux(["select-pane", "-t", pane, "-T", item.label]);
-        await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+      try {
+        await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
+        await runTmux(["select-pane", "-t", pane, "-T", first.label]);
+        for (const item of page.slice(1)) {
+          pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
+          await runTmux(["select-pane", "-t", pane, "-T", item.label]);
+          await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+        }
+        await runTmux(["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
+      } finally {
+        await runTmux(["set-option", "-wu", "-t", `${viewer}:${name}`, "window-size"]);
       }
-      await runTmux(["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
-      await runTmux(["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
     }
     await runTmux(["select-window", "-t", `${viewer}:view-1`]);
     if (!window) {
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
     }
-    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), ...(Array.isArray(remote) ? { remote } : {}), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {
     if (windowAttempted && /-1743\b/.test(`${(err as Error).message} ${(err as { stderr?: string }).stderr ?? ""}`)) {
       windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");

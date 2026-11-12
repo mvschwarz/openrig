@@ -3,12 +3,22 @@ import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
+import { mayStartTmuxServer, reportTmuxServerLimit, TMUX_SERVER_LIMIT_PREFIX, tmuxServerStartCommand } from "../tmux-server-start.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 // exec's 1 MiB default holds about a dozen 1000-line panes; a batched capture chains 24 (#161). A bound, not an allocation.
 export const TMUX_MAX_BUFFER = 64 * 1024 * 1024;
 export const TMUX_EXEC_TIMEOUT_MS = 30_000;
+
+// The first client seeds tmux's global environment. Seat credentials still arrive through
+// the explicit per-session config channel, never through the daemon's ambient credentials.
+function tmuxClientEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of ["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_AUTH_BEARER_TOKEN",
+    "OPENRIG_TERMINAL_BEARER_TOKEN", "OPENRIG_RELAY_INBOUND_TOKEN", "OPENRIG_RELAY_OUTBOUND_TOKEN"]) delete env[key];
+  return env;
+}
 
 const tmuxExecOptions = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER, timeout: TMUX_EXEC_TIMEOUT_MS, killSignal: "SIGKILL" as const };
 
@@ -84,19 +94,31 @@ function withExecOutput(err: unknown): unknown {
  */
 export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
   try {
-    const { stdout } = await execAsync(cmd);
+    const { stdout, stderr } = await execAsync(tmuxStartShell(cmd), { env: /^tmux(?:\s|$)/.test(cmd) ? tmuxClientEnvironment() : process.env });
+    reportTmuxServerLimit(stderr);
     return stdout;
   } catch (err) {
+    reportTmuxServerLimit((err as { stderr?: unknown }).stderr);
     throw withExecOutput(err);
   }
 };
+
+function tmuxStartShell(cmd: string, replaceShell = false): string {
+  const creating = process.platform !== "win32" && /^tmux\s/.test(cmd)
+    && /(?:^|\s)(?:new-session|start-server|attach-session|-D)(?:\s|$)/.test(cmd.replaceAll("'", ""))
+    ? TMUX_SERVER_LIMIT_PREFIX : "";
+  return creating + (replaceShell && /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd);
+}
 
 /** Replace the shell only for tmux clients; other adapter commands keep shell builtins such as kill. */
 export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
   const started = performance.now();
   try {
-    return (await execFileAsync("/bin/sh", ["-c", /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd], tmuxExecOptions)).stdout;
+    const result = await execFileAsync("/bin/sh", ["-c", tmuxStartShell(cmd, true)], { ...tmuxExecOptions, env: tmuxClientEnvironment() });
+    reportTmuxServerLimit(result.stderr);
+    return result.stdout;
   } catch (err) {
+    reportTmuxServerLimit((err as { stderr?: unknown }).stderr);
     // Tokens are diagnostic labels only; the command is executed by the shell without rewriting its arguments.
     const labels = (cmd.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(word => word.replace(/^(['"])(.*)\1$/, "$2"));
     warnTmuxDeadline(err, started, labels);
@@ -106,10 +128,10 @@ export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
 
 /**
  * Production ArgvExecFn for TmuxAdapter.
- * Runs argv[0] directly via execFile: no shell, no quoting layer. On POSIX
- * argv[0] is started by its resolved path: with a bare name, libuv tries each
- * PATH entry with a spawn on the event loop. psmux ships a `tmux` alias on
- * PATH, so Windows passes the bare name to the spawn.
+ * Ordinary commands run directly via execFile. Server-creating POSIX commands
+ * use a child shell to raise only their inherited soft file limit, then exec the
+ * unchanged argv. Other POSIX commands use a resolved path to avoid libuv's
+ * repeated PATH spawns on the event loop. Windows keeps the psmux alias on PATH.
  */
 export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<string> => {
   const [bin, ...args] = argv;
@@ -117,8 +139,15 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
   const started = performance.now();
   // Nothing ran when no file was found: a shell also finds tmux through an entry the lookup skips, such as a literal
   // `~/bin`, and reports a missing one as the shell transport does.
-  const opts = tmuxExecOptions;
-  const run = (file: string | null) => file ? execFileAsync(file, args, opts) : execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts);
+  const opts = { ...tmuxExecOptions, env: tmuxClientEnvironment() };
+  const run = async (file: string | null) => {
+    const command = tmuxServerStartCommand(mayStartTmuxServer(args) ? bin : file ?? bin, args);
+    const result = command.file !== "/bin/sh" && !file
+      ? await execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts)
+      : await execFileAsync(command.file, command.args, opts);
+    reportTmuxServerLimit(result.stderr);
+    return result;
+  };
   try {
     if (process.platform === "win32") return (await execFileAsync(bin, args, opts)).stdout;
     const file = resolvedOnPath(bin);
@@ -132,6 +161,7 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
       return (await run(null)).stdout;
     }
   } catch (err) {
+    reportTmuxServerLimit((err as { stderr?: unknown }).stderr);
     warnTmuxDeadline(err, started, argv);
     throw withExecOutput(err);
   }
@@ -143,9 +173,18 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
  * and rejects with the spawn error when even the shell could not start. POSIX only, as control mode is.
  */
 export async function spawnTmuxClient(args: string[]): Promise<ChildProcessWithoutNullStreams> {
-  const opts = { stdio: "pipe" as const, windowsHide: true };
+  const opts = { stdio: "pipe" as const, windowsHide: true, env: tmuxClientEnvironment() };
   const started = (file: string | null) => new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
-    const child = file ? spawn(file, args, opts) : spawn("/bin/sh", ["-c", 'exec "$0" "$@"', "tmux", ...args], opts);
+    const command = tmuxServerStartCommand(mayStartTmuxServer(args) ? "tmux" : file ?? "tmux", args);
+    const child = command.file !== "/bin/sh" && !file
+      ? spawn("/bin/sh", ["-c", 'exec "$0" "$@"', "tmux", ...args], opts) : spawn(command.file, command.args, opts);
+    if (mayStartTmuxServer(args)) {
+      let notice = "";
+      child.stderr.on("data", data => {
+        notice = (notice + String(data)).slice(-512);
+        reportTmuxServerLimit(notice);
+      });
+    }
     child.once("error", reject);
     child.once("spawn", () => {
       child.off("error", reject);

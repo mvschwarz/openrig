@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
+import {
+  QueueTransitionLog,
+  formatRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
+} from "../src/domain/queue-transition-log.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -115,5 +121,227 @@ describe("archived audit identity — real migration, writer and history readers
     expect(() => archiveAgedTerminalTransitions(db, { nowIso: NOW })).toThrow(/identity_provenance/);
     expect(db.prepare("SELECT * FROM queue_transitions").all()).toEqual(before);
     expect(db.prepare("SELECT * FROM queue_transitions_archive").all()).toEqual([]);
+  });
+
+  it("records and reads relay owner notification acceptance separately from Slack posted receipts across live and archive", async () => {
+    const db = database();
+    const repo = new QueueRepository(db, new EventBus(db), {
+      loadHumanRegistry: () => ({
+        ok: true as const,
+        entities: [
+          {
+            entityId: "human-founder",
+            class: "human" as const,
+            displayName: "Founder",
+            address: "human-founder@external",
+            connectorBindings: [
+              {
+                kind: "slack" as const,
+                connectorRef: "primary",
+                secretsRef: "env:SLACK_BOT_TOKEN",
+                role: "primary" as const,
+                handle: "UFOUNDER",
+              },
+            ],
+            prefs: { deliveryClass: "A" as const },
+          },
+        ],
+      }),
+    } as never);
+    const log = new QueueTransitionLog(db);
+    const ask = await repo.create({
+      sourceSession: "sender@rig-a",
+      destinationSession: "human-founder@external",
+      body: "Relay ask",
+      summary: "Ask?",
+      nudge: false,
+    });
+    const qitemId = ask.qitemId;
+    const episode = log.latestOwnerNotificationForQitem(ask.qitemId)!;
+    const key = `${ask.qitemId}:${episode.transitionId}`;
+
+    expect(log.activeOwnerNotificationEpisodes(false).some((e) => e.qitemId === qitemId)).toBe(true);
+
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId,
+      notificationKey: key,
+      deliveryId: "del-1",
+      connectorRef: "tg-main",
+      replyRef: "tg:msg:99",
+      revision: "dr1-abc",
+      episodeKey: key,
+      level: "ALERT",
+      kind: "human-required",
+      digest: "sha256:111",
+    });
+
+    // Verify full 64-hex sha256 derivation when replyRefHash is not explicitly passed
+    const rawReplyRef = "tg:msg:99";
+    const expectedFullSha256 = createHash("sha256").update(rawReplyRef).digest("hex");
+    expect(expectedFullSha256).toHaveLength(64);
+
+    expect(log.getOwnerNotificationReceipt(qitemId, key)).toBeNull();
+    const expectedReceipt = {
+      notificationKey: key,
+      deliveryId: "del-1",
+      connectorRef: "tg-main",
+      replyRef: rawReplyRef,
+      replyRefHash: expectedFullSha256,
+      revision: "dr1-abc",
+      episodeKey: key,
+      level: "ALERT",
+      kind: "human-required",
+      digest: "sha256:111",
+    };
+    expect(log.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
+    expect(repo.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(repo.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef("tg:msg:unknown")).toBeNull();
+    expect(log.hasRelayOwnerNotificationReceipt(qitemId, key)).toBe(true);
+    expect(log.hasRelayOwnerNotificationReceipt(qitemId, "other:key")).toBe(false);
+    expect(log.hasOwnerNotificationReceipt(qitemId, key)).toBe(true);
+    expect(log.activeOwnerNotificationEpisodes(false).some((e) => e.qitemId === qitemId)).toBe(false);
+    expect(log.activeOwnerNotificationEpisodes(true).find((e) => e.qitemId === qitemId)).toMatchObject({
+      qitemId,
+      posted: true,
+    });
+    const outcome = repo.deliveryOutcomeFor(qitemId);
+    expect(outcome).toEqual({
+      outcome: "accepted",
+      detail: expect.stringContaining("relay-owner-notification-accepted"),
+    });
+    expect(outcome.outcome).not.toBe("posted");
+    expect(outcome.outcome).not.toBe("never-posted");
+
+    // Archive and verify readers still work across archive
+    db.prepare("UPDATE queue_items SET state = 'done', ts_updated = ? WHERE qitem_id = ?").run(OLD, qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(OLD, qitemId);
+    expect(archiveAgedTerminalTransitions(db, { nowIso: NOW }).archivedQitems).toBe(1);
+    expect(log.getOwnerNotificationReceipt(qitemId, key)).toBeNull();
+    expect(log.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(repo.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(log.hasRelayOwnerNotificationReceipt(qitemId, key)).toBe(true);
+    expect(log.hasOwnerNotificationReceipt(qitemId, key)).toBe(true);
+
+    // Lossless connectorRef round-trip across whitespace, underscore, and delimiter punctuation without altering literal notification_key
+    const distinctConnectorRefs = [
+      "bridge one",
+      "bridge_one",
+      "bridge=one:two/three?four#five&six%25seven\teight",
+    ];
+    for (const [idx, connectorRef] of distinctConnectorRefs.entries()) {
+      const distinctKey = `${qitemId}:distinct-${idx}`;
+      const distinctReplyRef = `replyRef_${idx}`;
+      const distinctFullHash = createHash("sha256").update(distinctReplyRef).digest("hex");
+      const formatted = formatRelayOwnerNotificationAccepted({
+        notificationKey: distinctKey,
+        deliveryId: `del-${idx}`,
+        connectorRef,
+        replyRef: distinctReplyRef,
+        revision: "dr1-abc",
+        episodeKey: distinctKey,
+        level: "ALERT",
+        kind: "human-required",
+      });
+      // SQL activeOwnerNotificationEpisodes relies on literal ' notification_key=<qitemId>:<transitionId> '
+      expect(` ${formatted} `).toContain(` notification_key=${distinctKey} `);
+      const parsed = parseRelayOwnerNotificationAccepted(formatted);
+      expect(parsed?.connectorRef).toBe(connectorRef);
+      expect(parsed?.notificationKey).toBe(distinctKey);
+      expect(parsed?.replyRef).toBe(distinctReplyRef);
+      expect(parsed?.replyRefHash).toBe(distinctFullHash);
+      expect(parsed?.replyRefHash).toHaveLength(64);
+    }
+    const noteWithSpaces = formatRelayOwnerNotificationAccepted({
+      notificationKey: `${qitemId}:space`,
+      connectorRef: "bridge one",
+    });
+    const noteWithUnderscore = formatRelayOwnerNotificationAccepted({
+      notificationKey: `${qitemId}:space`,
+      connectorRef: "bridge_one",
+    });
+    expect(noteWithSpaces).not.toBe(noteWithUnderscore);
+    expect(parseRelayOwnerNotificationAccepted(noteWithSpaces)?.connectorRef).toBe("bridge one");
+    expect(parseRelayOwnerNotificationAccepted(noteWithUnderscore)?.connectorRef).toBe("bridge_one");
+
+    // Relay transport-failed note with connector_ref, dedupe, and queue-repository readers
+    const failedAsk = await repo.create({
+      sourceSession: "sender@rig-a",
+      destinationSession: "human-founder@external",
+      body: "Relay ask that fails transport",
+      summary: "Fail ask?",
+      nudge: false,
+    });
+    const failedEpisode = log.latestOwnerNotificationForQitem(failedAsk.qitemId)!;
+    const failedKey = `${failedAsk.qitemId}:${failedEpisode.transitionId}`;
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "tg-main",
+      failureClass: "relay-http-503",
+      detail: "bridge unavailable",
+    });
+    const countAfterFirstFailure = repo.listTransitions(failedAsk.qitemId).length;
+    // Duplicate failure for the same episode and same connector is deduplicated
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "tg-main",
+      failureClass: "relay-http-503",
+      detail: "bridge unavailable",
+    });
+    expect(repo.listTransitions(failedAsk.qitemId)).toHaveLength(countAfterFirstFailure);
+    expect(repo.deliveryOutcomeFor(failedAsk.qitemId)).toEqual({
+      outcome: "transport-failed",
+      detail: `relay-owner-notification-transport-failed notification_key=${failedKey} connector_ref=tg-main class=relay-http-503 error=bridge unavailable`,
+    });
+    expect(repo.getById(failedAsk.qitemId)).toMatchObject({
+      deliveryOutcome: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+    });
+    expect(repo.findUndelivered().find((q) => q.qitemId === failedAsk.qitemId)).toMatchObject({
+      qitemId: failedAsk.qitemId,
+      deliveryOutcome: "transport-failed",
+      deliveryFailureClass: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("connector_ref=tg-main"),
+    });
+
+    // Failure under a changed relay connectorRef must record a new note naming the new connector rather than suppressing
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "wa-backup",
+      failureClass: "relay-http-502",
+      detail: "backup bridge bad gateway",
+    });
+    expect(repo.listTransitions(failedAsk.qitemId)).toHaveLength(countAfterFirstFailure + 1);
+    const parsedFailures = repo
+      .listTransitions(failedAsk.qitemId)
+      .map((t) => parseRelayOwnerNotificationTransportFailed(t.transitionNote))
+      .filter((f): f is NonNullable<typeof f> => f !== null);
+    expect(parsedFailures.at(-1)).toMatchObject({
+      notificationKey: failedKey,
+      connectorRef: "wa-backup",
+      failureClass: "relay-http-502",
+      error: "backup bridge bad gateway",
+    });
+    expect(repo.deliveryOutcomeFor(failedAsk.qitemId)).toEqual({
+      outcome: "transport-failed",
+      detail: `relay-owner-notification-transport-failed notification_key=${failedKey} connector_ref=wa-backup class=relay-http-502 error=backup bridge bad gateway`,
+    });
   });
 });

@@ -160,8 +160,9 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   `:780`; if `status === "restoring"` the node is skipped with a warning and
   reported as `fresh`, `:783–785`; `degraded` only adds a warning).
 - Reuses the seat's durably bound tmux session name when the prior binding
-  has a usable one (`:840`), and otherwise falls back to the derived name
-  with a warning (`:869`).
+  has a usable one, and otherwise falls back to the derived name. A missing
+  binding after the latest session's recorded intentional exit is quiet;
+  unclean/legacy missing bindings and incomplete or invalid binding rows still warn.
 - Replays restore-safe startup using persisted startup context;
   prefilters missing optional artifacts into warnings; **hard-fails a node if
   a required startup file is missing** (`:1161` — status `"failed"`, error

@@ -29,6 +29,28 @@ function mockExec(responses: Record<string, { stdout?: string; error?: Error }>)
   };
 }
 
+describe("TmuxAdapter.listSessionClientTerminals", () => {
+  it("lists each attached client's terminal and its reported type", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { stdout: "/dev/ttys011|rex 0.0.1793890641-gaf0c20\n/dev/ttys012|\n" } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toEqual([
+      { tty: "/dev/ttys011", termtype: "rex 0.0.1793890641-gaf0c20" },
+      { tty: "/dev/ttys012", termtype: "" },
+    ]);
+  });
+
+  it("is empty when the session or the server is gone, so the caller can stop looking", async () => {
+    for (const error of [new Error("can't find session: op@kernel"), NO_SERVER_ERROR,
+      new Error("error connecting to /private/tmp/tmux-501/x (No such file or directory)")]) {
+      expect(await adapterFor(mockExec({ "list-clients": { error } })).listSessionClientTerminals("op@kernel")).toEqual([]);
+    }
+  });
+
+  it("is null when tmux fails for another reason", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { error: new Error("command timed out") } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toBeNull();
+  });
+});
+
 describe("TmuxAdapter", () => {
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;
@@ -332,6 +354,17 @@ describe("TmuxAdapter", () => {
       exec.mockResolvedValueOnce("RIGGED_PORT=7433");
       expect(await adapter.hasSessionEnvBatch("seat@rig", ["OPENRIG_URL", "RIGGED_PORT"])).toEqual({ OPENRIG_URL: false, RIGGED_PORT: true });
       expect(exec).toHaveBeenCalledTimes(2);
+    });
+
+    it("compares launch variables once and returns differing names without their values", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("MATCH=kept\nNPM_TOKEN=pane-value\nCLAUDE_CONFIG_DIR=/pane\n");
+      const adapter = new TmuxAdapter(exec);
+      const names = await adapter.differingSessionEnv("seat@rig", { MATCH: "kept", NPM_TOKEN: "synthetic-unrelated-secret-2853", MISSING: "also-private", CLAUDE_CONFIG_DIR: "/running" });
+      expect(names).toEqual(["MISSING", "NPM_TOKEN"]);
+      expect(JSON.stringify(names)).not.toMatch(/pane-value|synthetic-unrelated-secret|also-private/);
+      expect(exec).toHaveBeenCalledTimes(1);
+      exec.mockRejectedValueOnce(new Error("private failure"));
+      expect(await adapter.differingSessionEnv("seat@rig", { NPM_TOKEN: "private" })).toBeNull();
     });
 
     it("makes every requested name unknown when the one listing fails, and lets no error text through", async () => {
@@ -916,11 +949,75 @@ describe("TmuxAdapter", () => {
   });
 
   describe("cancelPaneMode", () => {
-    it("sends -X cancel to the pane", async () => {
+    it("leaves every mode the pane is in with one copy-mode -q", async () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
       expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
-      expect(exec).toHaveBeenCalledWith("tmux send-keys -t '%0' '-X' 'cancel'");
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec).toHaveBeenCalledWith("tmux copy-mode -q -t %0");
+    });
+
+    it("falls back to send-keys -X cancel where copy-mode has no -q (tmux before 3.1a)", async () => {
+      const exec = vi.fn(async (command: string) => {
+        if (command.startsWith("tmux copy-mode")) throw new Error("unknown flag -q");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec as unknown as ExecFn);
+      expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
+      expect(exec.mock.calls.map(([command]) => command)).toEqual(["tmux copy-mode -q -t %0", "tmux send-keys -t '%0' '-X' 'cancel'"]);
+    });
+
+    it("keeps both reasons when copy-mode -q and the fallback both fail", async () => {
+      const exec = vi.fn(async (command: string) => {
+        throw new Error(command.startsWith("tmux copy-mode") ? "unknown flag -q" : "not in a mode");
+      });
+      const result = await new TmuxAdapter(exec as unknown as ExecFn).cancelPaneMode("%0");
+      expect(result).toMatchObject({ ok: false, message: "copy-mode -q: unknown flag -q; send-keys -X cancel: not in a mode" });
+    });
+
+    describe("under the input guard", () => {
+      const TARGET = { nodeId: "n1", session: "dev@rig", occupant: "o1", pane: "%1" };
+      const HUMAN = "Human input arrived during this delivery. No further automatic input was written.";
+
+      // copy-mode -q waits until released, then fails (as on tmux before 3.1a); the guard refuses once a person has typed.
+      function guarded() {
+        let human = false;
+        let release!: () => void;
+        const pending = new Promise<void>((done) => { release = done; });
+        const exec = vi.fn<ExecFn>(async (cmd: string) => {
+          if (cmd.startsWith("tmux list-panes")) return "%1|0|/w|80|24|1\n";
+          if (cmd.startsWith("tmux copy-mode")) { await pending; throw new Error(`Command failed: ${cmd}\nunknown flag -q`); }
+          return "";
+        });
+        const checkInput = vi.fn(() => { if (human) throw new DeliveryGuardError("draft_input_changed", HUMAN); });
+        const adapter = new TmuxAdapter(exec);
+        adapter.deliveryGuard = {
+          maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false, needsInputCheck: () => false, checkInput,
+          input: (_name: string, fn: () => Promise<unknown>) => fn(), attachInputInspection: () => {},
+        } as unknown as SeatDeliveryGuard;
+        const cmds = () => exec.mock.calls.map(([cmd]) => cmd).filter((cmd) => !cmd.startsWith("tmux list-panes"));
+        return { adapter, checkInput, cmds, release, type: () => { human = true; } };
+      }
+
+      it("input that arrives while copy-mode -q is pending stops the -X cancel fallback", async () => {
+        const g = guarded();
+        const result = g.adapter.cancelPaneMode("dev@rig");
+        await vi.waitFor(() => expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1"]));
+        g.type();
+        g.release();
+        expect(await result).toEqual({ ok: false, code: "draft_input_changed", message: HUMAN });
+        expect(g.checkInput).toHaveBeenCalledTimes(2);
+        expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1"]);
+      });
+
+      it("with no input meanwhile, the fallback goes out after the guard is checked again", async () => {
+        const g = guarded();
+        const result = g.adapter.cancelPaneMode("dev@rig");
+        g.release();
+        expect(await result).toEqual({ ok: true });
+        expect(g.checkInput).toHaveBeenCalledTimes(2);
+        expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1", "tmux send-keys -t '%1' '-X' 'cancel'"]);
+      });
     });
   });
 
@@ -1357,17 +1454,18 @@ describe("TmuxAdapter", () => {
   // Seat-handover cutover (plan 411c43de): the successor RESUMES INTO THE SAME PANE via respawn-pane,
   // so native scrollback survives (predecessor history stays above the successor boot).
   describe("parent-session identity on a tmux server that already carries it", () => {
-    const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
+    const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nHC_SCOPE=s-9\nHC_SESSION=work\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
     // new-session reports the pane it created (-P -F '#{pane_id}'); only that pane is restarted.
     const execWithGlobal = (global: string) =>
       vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : cmd.startsWith("tmux new-session") ? "%9\n" : ""));
 
     it("createSession marks only the listed names removed for this session, keeps explicit seat values, and restarts the fresh pane", async () => {
       const exec = execWithGlobal(POLLUTED);
-      expect(await adapterFor(exec).createSession("dev-impl@rig", "/w", { HERDR_PANE_ID: "explicit" })).toEqual({ ok: true });
+      expect(await adapterFor(exec).createSession("dev-impl@rig", "/w", { HERDR_PANE_ID: "explicit", HC_SESSION: "seat-core" })).toEqual({ ok: true });
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual([
         "tmux show-environment -g",
         "tmux set-environment -t =dev-impl@rig -r CLAUDECODE",
+        "tmux set-environment -t =dev-impl@rig -r HC_SCOPE",
         "tmux set-environment -t =dev-impl@rig -r CLAUDE_EFFORT",
         "tmux respawn-pane -k -t %9 -c /w",
       ]);
@@ -1396,6 +1494,7 @@ describe("TmuxAdapter", () => {
         "tmux show-environment -g",
         "tmux set-environment -t %3 -r CLAUDECODE",
         "tmux set-environment -t %3 -r HERDR_PANE_ID",
+        "tmux set-environment -t %3 -r HC_SCOPE",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
         "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
       ]);

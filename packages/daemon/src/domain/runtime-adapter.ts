@@ -12,6 +12,7 @@ export interface NodeBinding extends Binding {
   cwd: string;
   /** In-place Claude continuation only: executable observed before the old process exits. */
   claudeExecutable?: string;
+  claudeLaunch?: import("./claude-continuation-launch.js").ClaudeContinuationLaunch;
   model?: string;
   effort?: string;
   /** Claude-only, session-scoped Advisor model. */
@@ -28,6 +29,7 @@ export interface NodeBinding extends Binding {
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
+  launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Rebuild only: a process/conversation-bound native predecessor policy. */
@@ -113,6 +115,8 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "login_required",
   "mcp_gate",
   "bypass_consent_gate",
+  // Claude's gated-grants backstop (#2820 item 2): approving the folder's pre-approved tool permissions is the person's call.
+  "claude_gated_grants_gate",
   // Claude's resume chooser or picker waits for a person to choose a conversation; startup stops waiting and says so.
   "claude_resume_selection_prompt",
   // Codex auth refusal (stored OAuth token can no longer be refreshed).
@@ -129,7 +133,13 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
 
 /** `resumeRotation`: the rotation recorded with `resumeToken` (#1077), as `rig seat clear-attention` passes it, so a
  *  seat whose Claude continued its conversation under a new id is proved by the process that recorded the rotation. */
-export interface ReadinessOptions { resumeToken?: string | null; resumeRotation?: ClaudeResumeRotation | null }
+export interface ReadinessOptions {
+  resumeToken?: string | null;
+  resumeRotation?: ClaudeResumeRotation | null;
+  /** The poll this check belongs to. An adapter that honours it takes its process listings from the pass, so the
+   *  agents checked in one poll share them; an adapter that doesn't reads for itself, as before. */
+  observationPass?: import("./process-observation-pass.js").ObservationPass;
+}
 
 // -- Harness launch result --
 
@@ -246,7 +256,13 @@ export interface RuntimeAdapter {
   skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
   /** #875: where this seat's managed guidance should go, decided at a fresh launch and recorded with its startup context.
    *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
-  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
+  /** `resuming`: a resume, fork or startup continuation. `resumingConversation`: of those, a resume of the seat's own
+   *  conversation (a restore or `rig up --existing`), which launches and can carry guidance as a fresh launch does. */
+  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
+
+  /** #3039: the guidance block ids the last launch in this tmux session sent as developer instructions, once (the record is
+   *  cleared when read, and when a later projection carries guidance). Undefined when that launch sent none or the adapter doesn't carry any. */
+  launchGuidanceSent?(tmuxSession: string): string[] | undefined;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

@@ -61,6 +61,8 @@ export interface EnvelopeMeta {
   /** Twin of pane-envelope's field: the row a person's (@external) message delivers, named in the
    *  reply hint with --reply-to so the answer joins its Slack thread. ABSENT ⇒ the plain hint. */
   replyToQitem?: string;
+  /** Twin of pane-envelope's field (#2895 (a)): false ⇒ the reply line names no `rig send`. ABSENT or true ⇒ today's hint. */
+  senderReachable?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -108,7 +110,9 @@ export function wrapSendBody(
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
-      : `↩ Reply: rig send ${senderLabel} "..."`;
+      : meta?.senderReachable === false
+        ? `↩ No reply by rig send: ${senderLabel} has no session.`
+        : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
 
@@ -242,11 +246,11 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--to <sessions>", "Multi-recipient: comma-list or repeated (--to a,b or --to a --to b)", collectSessions, [] as string[])
     .option("--pod <name>", "Send to every seat in a pod (fan-out, per-recipient results)")
     .option("--rig <name>", "Send to every seat in a rig (fan-out, per-recipient results)")
-    .option("--verify", "Verify pane only delivery by checking content after send")
+    .option("--verify", "Verify pane only delivery by checking content after send. Exit 1 can mean unconfirmed, not failed: the message may have arrived, so inspect with rig capture before any resend")
     .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
     .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending. If it's still busy, or its activity is unknown, when the wait ends, nothing is sent (exit 1) and nothing is kept to send later; put separate work in a queue row (rig queue create)")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
-    .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added only for the complete visibly staged answer.")
+    .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added for the complete visibly staged answer, or away from a recognized prompt when the input box can't be found or read.")
     .option("--type-without-checking", "With --dangerously-interact: type without reading or clearing existing input; may join or submit that text")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--urgent", "Mark this message urgent: it types at seats whose interruption level holds other messages. Anyone may mark one; the recipient sees who did")
@@ -322,8 +326,10 @@ would run the envelope lines; the output says so. Use
 --dangerously-interact --reason "<why>" to DELIBERATELY drive a prompt (select an
 option or approve a permission) — the only override of the prompt guard; it
 implies --raw and is audit-logged. The answer is typed as keystrokes: letters may
-be menu shortcuts, and CR/ESC act as keys. An Enter is added only when the complete
-answer is visibly staged in a recognized text input. Combining --verify with
+be menu shortcuts, and CR/ESC act as keys. An Enter is added when the complete
+answer is visibly staged in a recognized text input, and, away from a recognized
+prompt or menu, when the input box can't be found or read (the result says so).
+Combining --verify with
 --dangerously-interact never adds an automatic submit retry, even when the daemon
 did not detect a prompt or did not report its disposition. Unknown consumption
 is not a send failure. On a managed seat with the delivery guard attached, a
@@ -332,7 +338,10 @@ pasted text stops the send and is shown only to you, separately from recognized
 dim suggestions. Collapsed paste contents and unrecognized inputs are not known.
 Inspect the native terminal, deliberately clear its prompt with native/tmux
 controls, then retry. Manual clearing runs outside OpenRig's lease and observation
-checks and is not recorded. --type-without-checking explicitly skips this read;
+checks and is not recorded. An input that can't be read doesn't stop the send:
+the answer is typed, nothing is cleared, the result says the input couldn't be
+read, and the answer may join or submit what is there.
+--type-without-checking explicitly skips this read;
 it does not clear anything and may join or submit existing text. Human typing
 can still race a capture and paste; the check is not atomic.
 
@@ -391,10 +400,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
       const isFanOut = fanModes.length === 1;
 
-      // Slice-03 Atom 6b: --context is single-seat LOCAL in v1 (fan-out and
-      // cross-host --context are follow-ons). Reject loudly rather than silently
-      // dropping the requested context.
-      if (opts.context && (isFanOut || opts.host)) {
+      // --context is single-seat LOCAL in v1. Reject fan-out here; the
+      // cross-host check follows target resolution so a self-qualified target
+      // can override a persisted remote selection.
+      if (opts.context && isFanOut) {
         console.error("--context is supported on a single-seat LOCAL send in v1 (not with --to/--pod/--rig or --host).");
         process.exitCode = 1;
         return;
@@ -467,14 +476,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       session = targetResolution.target;
       const crossHostHint = targetResolution.hint;
       if (targetResolution.warning) console.error(targetResolution.warning);
-      opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
+      opts.host = targetResolution.localHost ? undefined : explicitHost ?? targetResolution.sugarHost ?? opts.host;
 
-      // Atom 6b QA fix (root cause): re-reject --context on the cross-host path
-      // AFTER the agent@rig@host sugar host folds into opts.host. The early guard
-      // runs before resolveCrossHostTarget, so it cannot see the sugar host — the
-      // hole that let a sugar-form --context reach the remote argv (shipping a
-      // literal null with no message, or silently dropping the context with one).
-      // --context is single-seat LOCAL in v1; it is never handed to a remote send.
+      // Reject --context after resolving the target, before a remote send can
+      // silently drop the context or forward an empty message.
       if (opts.context && opts.host) {
         console.error("--context is supported on a LOCAL send in v1 (not with --host or an agent@rig@host cross-host target).");
         process.exitCode = 1;
@@ -1138,9 +1143,11 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; existingInput?: unknown }>) ?? [];
-  // Context beside a recipient's own result: it was in a managed compaction or restore when the send ran.
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
+  // Context beside a recipient's own result: its own advisory (such as unreadable input), and whether
+  // it was in a managed compaction or restore when the send ran.
   const printNotice = (r: (typeof results)[number]) => {
+    if (r.warning) console.log(`${r.sessionName}: Advisory: ${r.warning}`);
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
   };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
@@ -1172,7 +1179,7 @@ async function runFanOutSend(params: {
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
-  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}`);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}${heldSuffix(results)}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
@@ -1183,6 +1190,12 @@ async function runFanOutSend(params: {
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }
+}
+
+/** The summary's held count, when any target was held: held work is retained, not delivered and not failed. */
+export function heldSuffix(results: Array<{ outcome?: string }>): string {
+  const held = results.filter((r) => r.outcome === "retained").length;
+  return held > 0 ? `, ${held} held` : "";
 }
 
 function parseWaitForIdleMs(value: string | undefined): number | undefined | null {

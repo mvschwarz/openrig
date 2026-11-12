@@ -34,6 +34,7 @@ import type { GatewayCommandDeps } from "./commands/gateway.js";
 import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { acpCommand } from "./commands/acp.js";
+import { execCommand, type ExecDeps } from "./commands/exec.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
@@ -90,6 +91,7 @@ import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-pla
 import { compactCommand, type CompactDeps } from "./commands/compact.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
+import { networkCommand, type NetworkDeps } from "./commands/network.js";
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
@@ -120,6 +122,7 @@ export interface ProgramDeps {
   psDeps?: StatusDeps;
   mcpDeps?: StatusDeps;
   acpDeps?: StatusDeps;
+  execDeps?: ExecDeps;
   agentDeps?: AgentDeps;
   rigDeps?: RigDeps;
   transcriptDeps?: StatusDeps;
@@ -166,6 +169,7 @@ export interface ProgramDeps {
   compactDeps?: CompactDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
+  networkDeps?: NetworkDeps;
   rigModeDeps?: RigModeDeps;
   startupProofDeps?: StartupProofDeps;
   healthDeps?: HealthDeps;
@@ -206,6 +210,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(rosterCommand());
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(acpCommand(depsOverride?.acpDeps));
+  program.addCommand(execCommand(depsOverride?.execDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
@@ -266,6 +271,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
   program.addCommand(handoverCommand(depsOverride?.seatDeps));
+  program.addCommand(networkCommand(depsOverride?.networkDeps));
   program.addCommand(startupProofCommand(depsOverride?.startupProofDeps));
   // release-0.3.2 slice 12 — rig scope CLI primitive.
   program.addCommand(scopeCommand());
