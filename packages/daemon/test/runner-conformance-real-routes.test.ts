@@ -277,6 +277,69 @@ describe("run-bound native channel custody", () => {
     expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ receipts: [expect.objectContaining({ payload: {}, erasedAt: expect.any(String) })], unresolved: [] });
     expect(JSON.stringify(f.outbox.runnerReceipt("erase-me"))).not.toContain("revived text");
   });
+  it.each([
+    ["native", "typed", false], ["typed", "native", false], ["typed", "native", true],
+  ] as const)("a held %s request cannot become %s after preference change (legacy=%s)", async (initial, selected, legacy) => {
+    const f = await fixture();
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const effects: string[] = [];
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), runnerChannel: f.channel,
+      tmuxAdapter: { deliveryGuard: f.guard, getPaneCommand: async () => "pi", probeSession: async () => ({ state: "present" }),
+        capturePaneContent: async () => "", sendText: async (_seat: string, text: string) => { effects.push(text); return { ok: true }; },
+        sendKeys: async () => ({ ok: true }) } as never, sleep: async () => {} });
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.db.prepare("UPDATE nodes SET input_route=? WHERE id=?").run(initial, f.node.id);
+    await f.guard.set(f.node.id, { mode: "hold" }, "person", "hold");
+    const options = { deliveryId: "held-route", actorSession: "sender", identityProvenance: "transport:v1" };
+    expect(await transport.send("dev@channel", "immutable", options)).toMatchObject({ outcome: "retained", sent: false });
+    if (legacy) f.db.prepare("UPDATE outbox_entries SET guard_delivery=NULL WHERE outbox_id='held-route'").run();
+    f.db.prepare("UPDATE nodes SET input_route=? WHERE id=?").run(selected, f.node.id);
+    await f.guard.set(f.node.id, { mode: "off" }, "person", "release");
+    expect(await transport.send("dev@channel", "immutable", options)).toMatchObject({ ok: false, sent: false, reason: "delivery_identity_conflict" });
+    expect(effects).toEqual([]);
+    expect(f.outbox.runnerReceipt("held-route")).toBeNull();
+    expect(f.outbox.getById("held-route")?.deliveryState).toBe("retained");
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT identity_provenance AS source FROM outbox_entries").get()).toEqual({ source: "transport:v1" });
+    const fresh = await transport.send("dev@channel", "new explicit request", { ...options, deliveryId: "new-route-id" });
+    expect(fresh.ok).toBe(true);
+    if (selected === "typed") expect(effects).toEqual(["new explicit request"]);
+    else expect(fresh.runnerReceipt).toMatchObject({ inputRoute: "native", sequence: 1 });
+  });
+  it("legacy unmarked held input still uses the typed default when the preference stays typed", async () => {
+    const f = await fixture(); const effects: string[] = [];
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db),
+      tmuxAdapter: { deliveryGuard: f.guard, getPaneCommand: async () => "pi", probeSession: async () => ({ state: "present" }), capturePaneContent: async () => "",
+        sendText: async (_seat: string, text: string) => { effects.push(text); return { ok: true }; }, sendKeys: async () => ({ ok: true }) } as never, sleep: async () => {} });
+    await f.guard.set(f.node.id, { mode: "hold" }, "person", "hold");
+    const options = { deliveryId: "legacy", actorSession: "sender" };
+    expect(await transport.send("dev@channel", "legacy text", options)).toMatchObject({ outcome: "retained" });
+    f.db.prepare("UPDATE outbox_entries SET guard_delivery=NULL WHERE outbox_id='legacy'").run();
+    await f.guard.set(f.node.id, { mode: "off" }, "person", "release");
+    expect((await transport.send("dev@channel", "legacy text", options)).ok).toBe(true);
+    expect(effects).toEqual(["legacy text"]);
+    expect(f.outbox.runnerReceipts(f.node.id, "run-one")).toEqual([]);
+  });
+  it("a held native group cannot cross into typed delivery, including after capability loss", async () => {
+    const f = await fixture(); const effects: string[] = [];
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), runnerChannel: f.channel,
+      tmuxAdapter: { deliveryGuard: f.guard, getPaneCommand: async () => "pi", probeSession: async () => ({ state: "present" }), capturePaneContent: async () => "",
+        sendText: async (_seat: string, text: string) => { effects.push(text); return { ok: true }; }, sendKeys: async () => ({ ok: true }) } as never, sleep: async () => {} });
+    f.channel.post(f.grant.token, f.hello); const disconnect = f.channel.connect(f.grant.token); cleanups.push(disconnect);
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    for (const id of ["held-a", "held-b"]) f.outbox.record({ outboxId: id, senderSession: "sender", destinationSession: "dev@channel", body: id });
+    await f.guard.set(f.node.id, { mode: "hold" }, "person", "hold");
+    const options = { committedOutboxIds: ["held-a", "held-b"], actorSession: "sender", queueWake: true };
+    expect(await transport.send("dev@channel", "composed", options)).toMatchObject({ outcome: "retained" });
+    await f.guard.set(f.node.id, { mode: "off" }, "person", "release"); disconnect();
+    expect(await transport.send("dev@channel", "composed", options)).toMatchObject({ ok: false, reason: "runner_unavailable", sent: false });
+    f.db.prepare("UPDATE nodes SET input_route='typed' WHERE id=?").run(f.node.id);
+    expect(await transport.send("dev@channel", "composed", options)).toMatchObject({ ok: false, reason: "delivery_identity_conflict", sent: false });
+    expect(effects).toEqual([]);
+    expect(f.outbox.runnerReceipts(f.node.id, "run-one")).toEqual([]);
+  });
   it("queue recovery never retypes a native wake intent after offer/uncertainty", async () => {
     const f = await fixture();
     const repo = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });

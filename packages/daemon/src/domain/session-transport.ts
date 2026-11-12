@@ -2912,6 +2912,15 @@ export class SessionTransport {
         return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict", error: "This request ID names different input or target." };
       return this.nativeResult(sessionName, previous);
     }
+    // Preferences select new requests. Retained IDs keep their recorded route; a legacy unmarked held row is typed.
+    const checkRetainedRoutes = (selected: "typed" | "native", selectedIds: readonly string[]) => {
+      for (const id of selectedIds) {
+        const entry = history.getById(id);
+        const saved = history.inputRoute(id) ?? (entry && ["retained", "retired"].includes(entry.deliveryState) ? "typed" : null);
+        if (saved && saved !== selected) throw new DeliveryGuardError("delivery_identity_conflict",
+          `This delivery ID selects ${saved} input; use a new request ID to select ${selected} input.`);
+      }
+    };
     const guard = this.tmuxAdapter.deliveryGuard;
     const targetNode = guard?.maybeTarget(sessionName)?.nodeId;
     if (opts?.nativeWake && (!targetNode || this.inputRoute(targetNode) !== "native"))
@@ -2920,6 +2929,12 @@ export class SessionTransport {
       return { ok: false, sessionName, sent: false, reason: "guard_unavailable", error: "Native admission requires the delivery guard." };
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
+      try {
+        const nodeId = this.getSessionMeta(sessionName).nodeId;
+        checkRetainedRoutes(nodeId ? this.inputRoute(nodeId) : "typed", opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []));
+      } catch (error) {
+        return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+      }
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       const result = await this.sendUnguarded(sessionName, text, opts);
@@ -2987,6 +3002,7 @@ export class SessionTransport {
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
         const currentIds = memberOpts?.committedOutboxIds ?? ids;
         const route = this.inputRoute(guard.target(sessionName).nodeId);
+        checkRetainedRoutes(route, currentIds);
         if (route === "native") return this.admitNative(sessionName, memberText, memberOpts, currentIds);
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
@@ -3000,6 +3016,7 @@ export class SessionTransport {
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         const members = recheck(true);
         if (members) ids = members.outboxIds;
+        checkRetainedRoutes(this.inputRoute(target.nodeId), ids);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;

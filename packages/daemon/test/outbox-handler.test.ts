@@ -167,6 +167,14 @@ describe("native runner receipts", () => {
     for (const change of [{ body: "other" }, { senderSession: "eve@rig" }, { runId: "other" }, { nodeId: "other" }, { payload: { text: "other" } }])
       expect(() => outbox.admitRunner({ ...input(), ...change })).toThrow(/different/);
   });
+  it("a missing primary cannot be recreated by direct native admission of its surviving member", () => {
+    for (const id of ["owner", "member"]) outbox.record({ ...input(id), body: id });
+    outbox.admitRunner({ ...input("owner"), body: "owner", memberIds: ["owner", "member"] });
+    db.prepare("DELETE FROM outbox_entries WHERE outbox_id='owner'").run();
+    expect(() => outbox.admitRunner({ ...input("member"), body: "member" })).toThrow(/different|unavailable/);
+    expect(() => outbox.admitRunner({ ...input("owner"), body: "owner" })).toThrow(/unavailable/);
+    expect(outbox.runnerReceipt("member")).toBeNull();
+  });
   it("an admitted native ID cannot gain a different original-conversation constraint on retry", () => {
     outbox.admitRunner(input());
     expect(() => outbox.bindExpectedIdentity(input(), { nodeId: "node-1", sessionName: "bob@rig", runtime: "pi", nativeId: "other" })).toThrow(/different/);

@@ -240,6 +240,8 @@ export class OutboxHandler {
     if (!this.hasGuardDeliveryColumn) throw new OutboxHandlerError("runner_receipt_unavailable", "Native receipt schema unavailable.");
     return this.db.transaction(() => {
       const entry = this.getById(input.outboxId), primary = this.runnerPrimary(input.outboxId), prior = this.runnerReceipt(input.outboxId);
+      if (primary && !prior || !entry && this.db.prepare("SELECT 1 FROM outbox_entries WHERE json_extract(guard_delivery,'$.nativeRequestId')=? LIMIT 1").get(input.outboxId))
+        throw new OutboxHandlerError("runner_receipt_unavailable", "Native custody evidence is unavailable; no input offered.");
       if (prior?.erasedAt) throw new OutboxHandlerError(prior.bindingHash === runnerBindingHash(input) ? "runner_receipt_erased" : "delivery_identity_conflict",
         prior.bindingHash === runnerBindingHash(input) ? "This native receipt was erased; no input offered." : "This ID names different erased input.");
       if (primary && primary !== input.outboxId) throw new OutboxHandlerError("delivery_identity_conflict", "This member belongs to a different native operation.");
@@ -330,14 +332,28 @@ export class OutboxHandler {
    * The existing erasure transaction calls this before its ordinary body/delete effects. Other members' bodies stay
    * under the existing erasure scope, while the composed native payload/result for the whole group disappears. */
   eraseRunner(id: string, at: string): boolean {
-    const primary = this.runnerPrimary(id);
+    const primary = this.runnerPrimary(id) ?? (this.inputRoute(id) === "native" ? id : null);
     if (!primary) return false;
     const receipt = this.runnerReceipt(id);
-    if (!receipt) return true; // A missing primary is unavailable, never a new executable request.
-    const tombstone: RunnerReceipt = { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
+    const source = this.getById(id)!;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null };
+    const retained = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
+    const tombstone: RunnerReceipt | null = receipt ? { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
       sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: {},
-      ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at };
+      ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
     this.db.transaction(() => {
+      // Every erasure entry point removes this selected source's content/endpoints. Other group source histories
+      // stay governed by their own scope; the composed native payload/result is always sanitized for the whole group.
+      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL WHERE outbox_id=?").run(id);
+      if (!receipt || !tombstone) {
+        // A native request held before run admission has no run or sequence to invent. Keep its opaque erased-route
+        // identity; the same unavailable shape also fences a surviving pointer whose primary evidence is missing.
+        const erased = { ids: retained.ids ?? [id], inputRoute: "native", nativeRequestId: primary,
+          erasedAt: retained.erasedAt ?? at, bindingHash: retained.bindingHash ?? createHash("sha256")
+            .update(stable({ id, sender: source.senderSession, destination: source.destinationSession, body: source.body, inputRoute: "native" })).digest("hex") };
+        this.db.prepare("UPDATE outbox_entries SET guard_delivery=?,delivery_state='indeterminate' WHERE outbox_id=?").run(JSON.stringify(erased), id);
+        return;
+      }
       for (const member of receipt.memberIds ?? [primary]) {
         const saved = member === primary ? { ids: receipt.memberIds ?? [primary], inputRoute: "native", runner: tombstone }
           : { ids: receipt.memberIds, inputRoute: "native", nativeRequestId: primary, erasedAt: tombstone.erasedAt };
