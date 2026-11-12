@@ -2387,6 +2387,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // seat the name addresses, not the newest row with that name: an archived generation of the same
       // seat can hold a newer one, and a context watchdog would then read that node's telemetry.
       resolveTargetGeneration: (s) => resolveGuardTarget(db, s)?.occupant ?? null,
+      targetNameCarried: (s) => sessionRegistry.currentOccupantGenerationForSession(s) !== null,
       // Issue #1180 — sampled context use for token/percent context watchdogs,
       // generation-guarded against a predecessor's frozen telemetry.
       resolveContextUsage: (s, occupantGeneration) =>

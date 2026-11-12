@@ -19,6 +19,8 @@ describe("(i-c) wiring pin — startup injects the real target-generation resolv
 
   it("passes resolveTargetGeneration to the WatchdogPolicyEngine, wired to the live occupant-generation", () => {
     expect(src).toMatch(/resolveTargetGeneration:\s*\(s\)\s*=>\s*resolveGuardTarget\(db,\s*s\)\?\.occupant\s*\?\?\s*null/);
+    // Without it a context watch on an ambiguous name ends for good instead of measuring again once it resolves.
+    expect(src).toMatch(/targetNameCarried:\s*\(s\)\s*=>\s*sessionRegistry\.currentOccupantGenerationForSession\(s\)\s*!==\s*null/);
   });
 
   it("passes the queue's terminal-timer resolver to the pre-delivery seam", () => {

@@ -39,10 +39,11 @@ export function makeContextUsageThresholdPolicy(
       }
       // A name that names no single seat right now (an archived generation of it restored for a moment, say)
       // has no generation to measure. Skip and say so; the watch stays active and is measured again once
-      // the name resolves, never from another node's numbers.
+      // the name resolves, never from another node's numbers. A name nothing carries any more is a seat
+      // that's gone (its rig or node removed): the watch ends.
       if (!job.occupantGeneration) {
         return {
-          action: "skip",
+          action: job.occupantGenerationAmbiguous ? "skip" : "terminal",
           reason: "occupant_generation_unresolved",
           notes: { targetSession: job.target.session },
         };
