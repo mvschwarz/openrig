@@ -48,6 +48,8 @@ export interface SlowOperationInstrumentation {
     classify?: (value: T) => "ok" | "failed",
   ): Promise<T>;
   recordRequest?(site: string, durationMs: number): void;
+  /** A synchronous site's duration, recorded only at or above the slow threshold (runSyncSiteWhenSlow). */
+  recordSlowSync?(site: string, durationMs: number, outcome: "ok" | "failed"): void;
   /** Bounded nonblocking diagnostic append; false means observation was dropped. */
   recordDiagnostic?(record: Record<string, unknown>): boolean;
   snapshot?(): SlowOperationSnapshot;
@@ -260,6 +262,11 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
   recordRequest(site: string, durationMs: number): void {
     if (!Number.isFinite(durationMs) || durationMs < this.slowThresholdMs) return;
     this.recordMeasurement(`request:${site}`, durationMs);
+  }
+
+  recordSlowSync(site: string, durationMs: number, outcome: "ok" | "failed" = "ok"): void {
+    if (!Number.isFinite(durationMs) || durationMs < this.slowThresholdMs) return;
+    this.recordMeasurement(site, durationMs, outcome);
   }
 
   recordDiagnostic(record: Record<string, unknown>): boolean {
