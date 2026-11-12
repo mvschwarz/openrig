@@ -86,6 +86,22 @@ export function caseContext(cell, { caseId, kind }) {
       return null;
     },
 
+    /** Wait until the screen matches any of `patterns` (regexes); returns { frame, pattern } or null. */
+    async waitScreenAny(patterns, { timeoutMs = 30_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const last = screen.last();
+        const hit = last && patterns.find((p) => p.test(last.screen));
+        if (hit) return { frame: last, pattern: String(hit) };
+        await sleep(100);
+      }
+      return null;
+    },
+    /** Keys a person presses (tmux key names, such as Escape or Enter), not literal text. */
+    async personKeys(...keys) {
+      cell.record({ step: "person-keys", caseId, keys });
+      await cell.tmux(["send-keys", "-t", cell.session, ...keys]);
+    },
     composer: () => composerText(kind, screen.last()?.screen ?? ""),
     composerOf: (text) => composerText(kind, text ?? ""),
 
