@@ -209,7 +209,10 @@ and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
 reason and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. The reasons are:
+retry is scheduled. `rig send` to several seats and `rig broadcast` print a held
+recipient as `retained, not delivered; inspect with rig seat held-messages`, never
+as sent, and their summary adds the held count (`1/3 delivered, 1 held`). A held
+recipient alone doesn't make the command fail. The reasons are:
 
 - `typing_guard_enabled`: the seat's mode holds this send (`hold`, or a level that
   holds this kind of message).
