@@ -224,7 +224,19 @@ describe("the conformance check's test double against OpenRig's real permission 
 
 
 describe("run-bound native channel custody", () => {
-  async function fixture(enabled = true, runtime = "pi", runner = 2, file?: string,
+  it.each([["omp", 0], ["arbitrary-rpc", 2]] as const)("the production %s/%i family supports only implemented input even after a blanket hello", async (runtime, runner) => {
+    const f = await fixture(true, runtime, runner);
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const production = new RunnerChannel(f.grants, f.outbox);
+    expect(production.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: false, cancel: false } });
+    cleanups.push(production.connect(f.grant.token));
+    expect(production.capable(f.node.id, "input")).toBe(true);
+    expect(() => production.admit(f.node.id, { outboxId: "unsupported", senderSession: "sender", destinationSession: "dev@channel", body: "question", kind: "wake", inputRoute: "native", payload: { question: "question" } })).toThrow(/capable/);
+    expect(f.outbox.runnerReceipt("unsupported")).toBeNull();
+    expect(f.db.prepare("SELECT agent_app,agent_runner FROM sessions WHERE node_id=?").get(f.node.id))
+      .toMatchObject(runtime === "omp" ? { agent_app: null } : { agent_app: runtime, agent_runner: 2 });
+  });
+  async function fixture(enabled = true, runtime = "pi", runner = 0, file?: string,
     retained?: { node: { id: string }; grant: import("../src/domain/activity-grants.js").ActivityGrant & { token: string } }) {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
@@ -1819,7 +1831,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
   });
   it.each([["pi", 0], ["arbitrary-preset", 1], ["arbitrary-rpc", 2]] as const)("recognizes Core-selected %s runner code %i without changing session provenance", async (runtime, runner) => {
     const f = await fixture(true, runtime, runner);
-    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: true, cancel: true } });
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: runner !== 2, cancel: runner !== 2 } });
   });
   it("raw builtins do not become managed native runners by sharing runner code zero", async () => {
     const { runnerChannelKind } = await import("../src/domain/runner-channel.js");
@@ -1901,7 +1913,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     expect(f.outbox.runnerReceipt("unowned")).toMatchObject({ stage: "completed", reconciliation: "native_ownership_unknown", result: { answer: null } });
     expect(f.outbox.getById("unowned")?.deliveryState).toBe("indeterminate");
     expect((await f.transport.sendNativeWake("dev@channel", "question", "unowned", "sender")).sent).toBeUndefined();
-    const recovered = new RunnerChannel(f.grants, new OutboxHandler(f.db), new Set(["hosted-pi-rpc"]));
+    const recovered = new RunnerChannel(f.grants, new OutboxHandler(f.db), new Set(["managed-pi"]));
     recovered.post(f.grant.token, { ...f.hello, retained: false });
     cleanups.push(recovered.connect(f.grant.token));
     expect(recovered.capable(f.node.id, "wake")).toBe(false);
@@ -1995,7 +2007,7 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',me
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const f = await fixture(true, runtime, runner);
     const production = new RunnerChannel(f.grants, f.outbox);
-    expect(production.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: enabled, wake: enabled, cancel: enabled } });
+    expect(production.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: true, wake: enabled, cancel: enabled } });
     expect(f.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(f.node.id)).toEqual({ input_route: "typed" });
   });
   it("an explicitly disabled implementation never grants native input or cancellation", async () => {
@@ -2016,7 +2028,7 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',me
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
     const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
-    const restarted = new RunnerChannel(new ActivityGrantStore(f.db), new OutboxHandler(f.db), new Set(["hosted-pi-rpc"]));
+    const restarted = new RunnerChannel(new ActivityGrantStore(f.db), new OutboxHandler(f.db), new Set(["managed-pi"]));
     expect(restarted.post(f.grant.token, f.hello)).toMatchObject({ unresolved: [expect.objectContaining({ requestId: "one", stage: "accepted" }), expect.anything()] });
     expect(restarted.frames(f.grant.token, 1).map(frame => frame.requestId)).toEqual(["two"]);
     expect(() => f.channel.frames(f.grant.token, 3)).toThrow(/cursor/);
