@@ -290,8 +290,11 @@ export class SeatColdStarter {
 
     // The rig must be up: another seat of the same rig must be live in tmux. A down
     // rig keeps whole-rig restore semantics (the operator's/autoscaler's job).
-    const peers = this.deps.db.prepare(`SELECT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
-      WHERE n.rig_id = ? AND n.id != ? AND s.status = 'running' ORDER BY s.id DESC LIMIT 5`)
+    const peers = this.deps.db.prepare(`SELECT DISTINCT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.rig_id = ? AND n.id != ? AND s.status = 'running'
+        AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+      ORDER BY s.id DESC`)
       .all(seat.rigId, seat.nodeId) as Array<{ session_name: string }>;
     for (const peer of peers) {
       try { if (await this.deps.hasSession(peer.session_name)) return true; } catch { /* try the next peer */ }

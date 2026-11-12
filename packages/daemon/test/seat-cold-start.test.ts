@@ -362,6 +362,22 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  it("finds a live sixth peer after five stale running peers", async () => {
+    const f = fixture();
+    for (let i = 3; i <= 7; i++) {
+      f.db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES (?,'r1',?,'pi')").run(`n${i}`, `dev.peer${i}`);
+      f.db.prepare("INSERT INTO sessions(id,node_id,session_name,status) VALUES (?,?,?,'running')")
+        .run(`s${i}`, `n${i}`, `dev-peer${i}@fleet`);
+    }
+    const probe = vi.fn(f.deps.hasSession);
+    f.deps.hasSession = probe;
+    f.starter.notify("dev.impl@fleet");
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    expect(probe).toHaveBeenCalledTimes(7);
+    expect(probe).toHaveBeenLastCalledWith("dev-rev@fleet");
+    f.db.close();
+  });
+
   it("stops after repeated failed attempts (failed starts do not loop)", async () => {
     const f = fixture();
     f.deps.launchSingleNode = async () => ({ ok: false, code: "no_usable_snapshot", message: "no snapshot" });
