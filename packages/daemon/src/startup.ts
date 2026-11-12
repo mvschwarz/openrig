@@ -845,10 +845,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // #2829 slice 1 — queue-driven seat cold start: the queue's positive no-receiver
   // evidence hands dormant opted-in seats of running rigs to the existing single-seat
   // launch door (launchSingleNode), which holds the delivery-guard lifecycle lease.
-  // Late-wired here because the restore orchestrator is constructed after the queue.
+  // Late-wired here because the restore orchestrator is constructed after the queue;
+  // the launcher itself is assigned once the runtime adapters map exists (a resume
+  // needs the adapter to verify and relaunch the harness — without it the door fails
+  // closed to awaiting-decision).
+  let coldStartLaunch: ((rigId: string, logicalId: string) => Promise<{ ok: boolean; code?: string; message?: string }>) | undefined;
   const seatColdStarter = new SeatColdStarter({
     db,
-    launchSingleNode: (rigId, logicalId) => restoreOrchestrator.launchSingleNode(rigId, logicalId),
+    launchSingleNode: (rigId, logicalId) => coldStartLaunch
+      ? coldStartLaunch(rigId, logicalId)
+      : Promise.resolve({ ok: false, code: "launcher_not_ready", message: "cold-start launcher is not ready" }),
     hasSession: (sessionName) => tmuxAdapter.hasSession(sessionName),
     getNodeLaunchRecipe: (nodeId) => rigRepo.getNodeLaunchRecipe(nodeId),
   });
@@ -1295,6 +1301,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
   }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup });
+  // #2829 slice 1 — the cold-start launcher, now that the runtime adapters exist:
+  // a resume needs its adapter to verify continuity and relaunch the harness (the
+  // door fails closed to awaiting-decision without one), as the HTTP launch routes do.
+  coldStartLaunch = (rigId, logicalId) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+    adapters: runtimeAdaptersMap,
+    fsOps: { exists: (path: string) => fs.existsSync(path) },
+  });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
