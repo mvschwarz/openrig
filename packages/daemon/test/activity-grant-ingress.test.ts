@@ -1,3 +1,4 @@
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { piUsageEntriesSchema } from "../src/db/migrations/107_pi_usage_entries.js";
 import { piUsageChargesSchema } from "../src/db/migrations/108_pi_usage_charges.js";
@@ -507,6 +508,107 @@ describe("credential-bound observation-only reports", () => {
       expect(read).toMatchObject(current ? { report: { sequence: 1 }, reason: null } : { report: null, reason: "session_mismatch" });
       expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: "core-A" });
     }
+  });
+
+  it("projects runner context through existing single and batch reads without trusting a cache", async () => {
+    const f = runner();
+    const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedTokens: 25, windowTokens: 100, inputTokens: 1000, outputTokens: 50 } }))).status).toBe(200);
+    const usage = context.getForNode(f.guest.id, GUEST);
+    expect(usage).toMatchObject({ availability: "known", reason: null, source: "runner_reported", usedPercentage: 25,
+      remainingPercentage: 75, contextWindowSize: 100, totalInputTokens: 1000, totalOutputTokens: 50, fresh: true, transcriptPath: null });
+    expect(context.getForNodes([{ nodeId: f.guest.id, currentSessionName: GUEST }]).get(f.guest.id)).toEqual(usage);
+    context.persist(f.guest.id, usage);
+    const replacement = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "relaunch",
+      run: { runId: "new-run", sessionId: f.row.id, binding: f.grant.binding! } });
+    expect(f.grants.activate(replacement.grantId)).toBe(true);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason: "no_data", usedPercentage: null });
+    expect(context.getForNodes([{ nodeId: f.guest.id, currentSessionName: GUEST }]).get(f.guest.id)?.availability).toBe("unknown");
+  });
+
+  it.each([
+    { raw: { usedTokens: 10 }, reason: "window_capacity_unknown" },
+    { raw: { inputTokens: 1000, outputTokens: 100 }, reason: "window_capacity_unknown" },
+    { raw: { windowTokens: 100 }, reason: "no_data" },
+    { raw: { inputTokens: 1000, outputTokens: 100, windowTokens: 100 }, reason: "no_data" },
+  ])("retains raw context with unknown occupancy: $raw", async ({ raw, reason }) => {
+    const f = runner(); const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: raw }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason, source: "runner_reported",
+      usedPercentage: null, remainingPercentage: null, totalInputTokens: "inputTokens" in raw ? raw.inputTokens : null });
+  });
+
+  it("keeps explicit percentages runner-reported and expires omitted context independently", async () => {
+    const f = runner(); const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedPercentage: 80 } }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "known", source: "runner_reported", usedPercentage: 80, contextWindowSize: null });
+    f.clock.now += 600_000;
+    expect((await f.post(f.grant.token, f.report(2, { model: { id: "new-model" } }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason: "stale", usedPercentage: null });
+  });
+
+  it("persists a current native reference as hook origin without verification or duplicate identity effects", async () => {
+    const f = runner();
+    const body = f.report(1, { session: { nativeRef: "provider:会話/abc?x=1" } });
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    expect(f.db.prepare("SELECT resume_type,resume_token,resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_type: "community:synth", resume_token: "provider:会話/abc?x=1", resume_provenance: "hook", resume_last_verified: null, resume_last_probe_status: null });
+    const identities = () => f.db.prepare("SELECT payload FROM events WHERE type='agent.session_identity'").all();
+    expect(identities()).toHaveLength(1);
+    expect(JSON.parse((identities()[0] as { payload: string }).payload)).toMatchObject({ provenance: "hook", sessionId: "provider:会話/abc?x=1" });
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(identities()).toHaveLength(1);
+    expect(new SeatIdentityStore(f.db).getForNode(f.guest.id)?.verdict).not.toBe("verified");
+    expect((await f.post(f.grant.token, f.report(2, { session: { nativeRef: "conflicting" } }))).status).toBe(200);
+    expect((f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id) as { resume_token: string }).resume_token).toBe("provider:会話/abc?x=1");
+    expect(identities()).toHaveLength(1);
+  });
+
+  it("rolls back the report and native reference together if the identity event cannot commit", async () => {
+    const f = runner(); const published: string[] = [];
+    f.eventBus.subscribe(event => { published.push(event.type); });
+    f.app.onError((error, c) => {
+      if (error.message !== "fixture rejects identity") throw error;
+      return c.json({ ok: false }, 500);
+    });
+    f.db.exec("CREATE TEMP TRIGGER reject_identity BEFORE INSERT ON events WHEN NEW.type='agent.session_identity' BEGIN SELECT RAISE(ABORT,'fixture rejects identity'); END;");
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "uncommitted" } }))).status).toBe(500);
+    expect(f.reports()).toHaveLength(0);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect(published).toEqual([]);
+  });
+
+  it.each(["future", "stale", "lower-sequence"])("does not persist an unusable %s session claim", async kind => {
+    const f = runner();
+    if (kind === "lower-sequence") {
+      expect((await f.post(f.grant.token, { ...f.report(2, { session: { nativeRef: "future-session" } }), occurredAt: new Date(f.clock.now + 60_000).toISOString() })).status).toBe(200);
+    }
+    const occurredAt = new Date(f.clock.now + (kind === "future" ? 60_000 : kind === "stale" ? -600_000 : 1000)).toISOString();
+    expect((await f.post(f.grant.token, { ...f.report(1, { session: { nativeRef: "unusable" } }), occurredAt })).status).toBe(200);
+    expect(f.db.prepare("SELECT resume_token,resume_last_verified FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null, resume_last_verified: null });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
+  });
+
+  it("preserves independent verification on an already known matching reference", async () => {
+    const f = runner();
+    f.db.prepare("UPDATE sessions SET resume_type='community:synth',resume_token='known',resume_provenance='operator',resume_last_verified='2026-10-30 02:59:00',resume_last_probe_status='resumable' WHERE id=?").run(f.row.id);
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "known" } }))).status).toBe(200);
+    expect(f.db.prepare("SELECT resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_provenance: "operator", resume_last_verified: "2026-10-30 02:59:00", resume_last_probe_status: "resumable" });
+  });
+
+  it("projects retained context after same-process adoption and reconstruction, then refuses revoked history", async () => {
+    const f = runner();
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedTokens: 30, windowTokens: 100 } }))).status).toBe(200);
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.guest.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: "process_identity_unconfirmed",
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null }, sessionName: GUEST, observedAt: new Date(f.clock.now).toISOString() });
+    f.sessions.registerClaimedSession(f.guest.id, GUEST, "adopt");
+    const reconstructed = new AgentActivityStore({ db: f.db, eventBus: f.eventBus, now: () => new Date(f.clock.now) });
+    const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: reconstructed });
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ source: "runner_reported", usedPercentage: 30, fresh: true });
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", usedPercentage: null });
   });
 
   it.each(["revoked", "replaced"])("refuses a body that arrives after its run was %s", async change => {

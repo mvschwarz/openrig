@@ -18,6 +18,12 @@ describe("rig ps — model lines", () => {
     ]);
   });
 
+  it("labels accepted runner models as reported samples, including the existing community identifier grammar", () => {
+    const lines = modelLines([seat("runner@k", "synth", "configured", { status: "observed", model: "provider/会話?model=1", source: "runner_reported",
+      observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null })] as never);
+    expect(lines).toEqual(["Model (runner@k): configured configured; last observed provider/会話?model=1 (runner-reported; sample 2026-10-21T10:00:00Z)"]);
+  });
+
   it("keeps one line per seat for a lone seat, and for seats whose runtime has a model reader", () => {
     const observed = { status: "observed", model: "claude-opus-5-5", source: "claude-assistant-response", observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null };
     const lines = modelLines([

@@ -450,16 +450,6 @@ export function createTestApp(
   const selfAttachService = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
   const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, queueRepo, tmuxAdapter: tmux });
-  const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
-  const healthProjection = new HealthProjectionService(new LiveContextHealthSource({
-    db,
-    rigRepo,
-    sessionRegistry,
-    contextUsageStore,
-  }));
-  const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
-  const cmuxTmux = { ...tmux, hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
-  const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmux, cmuxTmux);
   const agentActivityStore = new AgentActivityStore({
     db,
     eventBus,
@@ -471,6 +461,16 @@ export function createTestApp(
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
   });
+  const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test", runnerObservations: agentActivityStore });
+  const healthProjection = new HealthProjectionService(new LiveContextHealthSource({
+    db,
+    rigRepo,
+    sessionRegistry,
+    contextUsageStore,
+  }));
+  const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
+  const cmuxTmux = { ...tmux, hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
+  const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmux, cmuxTmux);
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry,
     eventBus,

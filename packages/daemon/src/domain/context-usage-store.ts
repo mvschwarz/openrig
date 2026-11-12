@@ -1,3 +1,4 @@
+import type { AgentActivityStore } from "./agent-activity-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 
 export interface ContextUsageStoreOpts {
   stateDir: string;
+  runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
   codexHomeDir?: string | null;
   /** Explicit CODEX_HOME. codexHomeDir above is the legacy OS-home input. */
   codexHome?: string;
@@ -94,9 +96,11 @@ export class ContextUsageStore {
   private codexHomeDir: string | null;
   private codexHome?: string;
 
+  private readonly runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
+    this.runnerObservations = opts.runnerObservations;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
     this.codexHome = opts.codexHome;
@@ -325,13 +329,37 @@ export class ContextUsageStore {
     );
   }
 
+  /** Accepted runner events own current facts. The context table cannot revive a prior run or omitted component. */
+  private runnerUsage(nodeId: string, sessionName: string): ContextUsage | null {
+    if (!this.runnerObservations) return null;
+    const seat = this.db.prepare(`SELECT n.runtime,s.session_name FROM nodes n JOIN sessions s ON s.node_id=n.id
+      WHERE n.id=? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { runtime: string | null; session_name: string } | undefined;
+    // Preserve all existing built-in collectors; Pi has no native context collector here.
+    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "terminal", "stub"].includes(seat.runtime)) return null;
+    if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
+    const read = this.runnerObservations.getRunnerObservation(nodeId, "context", { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: seat.runtime });
+    if (!read.report) return this.unknownUsage(read.reason === "stale" || read.reason === "session_mismatch" ? read.reason : "no_data");
+    const report = read.report, context = report.observations.context!;
+    const percent = context.usedPercentage ?? (context.usedTokens !== undefined && context.windowTokens !== undefined
+      ? context.usedTokens / context.windowTokens * 100 : null);
+    return { ...this.unknownUsage("window_capacity_unknown"),
+      availability: percent === null ? "unknown" : "known",
+      reason: percent === null ? (context.windowTokens === undefined ? "window_capacity_unknown" : "no_data") : null,
+      source: "runner_reported", usedPercentage: percent, remainingPercentage: percent === null ? null : 100 - percent,
+      contextWindowSize: context.windowTokens ?? null, totalInputTokens: context.inputTokens ?? null,
+      totalOutputTokens: context.outputTokens ?? null, currentUsage: context.usedTokens === undefined ? null : String(context.usedTokens),
+      sessionId: report.observations.session?.nativeRef ?? null, sessionName, sampledAt: report.occurredAt, fresh: true };
+  }
+
   /** Get context usage for a single node. Session-aware: mismatched session returns unknown. */
   getForNode(nodeId: string, currentSessionName: string | null): ContextUsage {
     if (!currentSessionName) return this.unknownUsage("not_managed");
     currentSessionName = physicalSessionName(this.db, currentSessionName);
+    const reported = this.runnerUsage(nodeId, currentSessionName);
+    if (reported) return reported;
 
     const row = this.db.prepare("SELECT * FROM context_usage WHERE node_id = ?").get(nodeId) as ContextUsageRow | undefined;
-    if (!row) return this.unknownUsage("no_data");
+    if (!row || row.source === "runner_reported") return this.unknownUsage("no_data");
 
     // Session mismatch guard: prevent stale cross-session inheritance
     if (row.session_name && row.session_name !== currentSessionName) {
@@ -369,8 +397,10 @@ export class ContextUsageStore {
         continue;
       }
 
+      const reported = this.runnerUsage(entry.nodeId, entry.currentSessionName);
+      if (reported) { result.set(entry.nodeId, reported); continue; }
       const row = rowMap.get(entry.nodeId);
-      if (!row) {
+      if (!row || row.source === "runner_reported") {
         result.set(entry.nodeId, this.unknownUsage("no_data"));
         continue;
       }

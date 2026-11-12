@@ -17,8 +17,10 @@ export function modelObservation(value: unknown, running = true): ModelObservati
   if (!value || typeof value !== "object") return unknownModelObservation("observer-unavailable");
   const v = value as Record<string, unknown>;
   const generation = typeof v.generation === "string" ? v.generation : null;
-  if (v.status === "observed" && typeof v.model === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(v.model)
-    && ["claude-assistant-response", "codex-turn-context", "codex-world-state", "pi-assistant-response"].includes(String(v.source))
+  if (v.status === "observed" && typeof v.model === "string" && (v.source === "runner_reported"
+      ? v.model.length > 0 && v.model.length <= 512 && !/[\s\x00-\x1f\x7f]/.test(v.model)
+      : /^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(v.model))
+    && ["claude-assistant-response", "codex-turn-context", "codex-world-state", "pi-assistant-response", "runner_reported"].includes(String(v.source))
     && typeof v.observedAt === "string" && Number.isFinite(Date.parse(v.observedAt)) && generation) {
     return { status: "observed", model: v.model, source: String(v.source), observedAt: v.observedAt, generation, reason: null };
   }
@@ -29,6 +31,8 @@ export function modelObservation(value: unknown, running = true): ModelObservati
 
 export function formatModelObservation(value: ModelObservation): string {
   return value.status === "observed"
-    ? `${value.model} (${value.source}; native record ${value.observedAt})`
+    ? value.source === "runner_reported"
+      ? `${value.model} (runner-reported; sample ${value.observedAt})`
+      : `${value.model} (${value.source}; native record ${value.observedAt})`
     : `UNKNOWN (${value.reason})`;
 }

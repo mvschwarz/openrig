@@ -1679,6 +1679,7 @@ export type ContextAvailability = "known" | "unknown";
 
 export type ContextUnknownReason =
   | "unsupported_runtime"
+  | "window_capacity_unknown"
   | "not_managed"
   | "missing_sidecar"
   | "parse_error"
@@ -1690,7 +1691,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

@@ -1,3 +1,6 @@
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,14 +45,41 @@ function fixture(runtime = "claude-code") {
   const getPanePid = vi.fn(async (): Promise<number | null> => 10);
   const thread = vi.fn(async () => id);
   const readAllPaneProcesses = vi.fn(async (): Promise<Map<string, { pid: number; command: string | null }> | null> => new Map([["%1", { pid: 10, command: "claude" }]]));
-  const reader = new CurrentModelReader({ sessions, identities,
+  const reports = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => new Date(boot + 60_000) });
+  const reader = new CurrentModelReader({ sessions, identities, runnerObservations: reports,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
     codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
     readAllPaneProcesses, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
-  return { db, dir, rigs, rig, node, sessions, identities, session, tenure, boot, stamp, path, id, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
+  return { db, dir, rigs, rig, node, sessions, identities, reports, session, tenure, boot, stamp, path, id, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
 }
+
+it.each([["observe", "revoke"], ["observeInventory", "revoke"], ["observe", "replace"], ["observeInventory", "replace"]] as const)("projects only current accepted community model facts via %s with %s fencing", async (method, change) => {
+  const f = fixture("synth");
+  f.sessions.recordCommunityHarnessSelection(f.session.id, "synth", true);
+  const grants = new ActivityGrantStore(f.db, () => new Date(f.boot + 1000));
+  const grant = grants.issue({ nodeId: f.node.id, generation: f.tenure.generationUuid, issuedBy: "Core",
+    run: { runId: "actual-model-run", sessionId: f.session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 10 } } });
+  expect(grants.activate(grant.grantId)).toBe(true);
+  expect(f.reports.recordRunnerObservation(grant, { runId: grant.runId, sequence: 1, occurredAt: f.stamp, observations: { model: { id: "reported/model" } } }).ok).toBe(true);
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: "reported/model", source: "runner_reported", observedAt: f.stamp, generation: f.tenure.generationUuid });
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ status: "observed", model: "reported/model", source: "runner_reported" }]);
+  expect(f.getPanePid).not.toHaveBeenCalled(); expect(f.list).not.toHaveBeenCalled();
+  expect(f.rigs.getRig(f.rig.id)!.nodes[0]?.model).toBe("configured-model");
+  const pending = method === "observe" ? f.reader.observe(f.input) : f.reader.observeInventory([f.input]);
+  if (change === "revoke") grants.revoke({ grantId: grant.grantId }, "stopped");
+  else {
+    const replacement = grants.issue({ nodeId: f.node.id, generation: f.tenure.generationUuid, issuedBy: "Core",
+      run: { runId: "replacement-model-run", sessionId: f.session.id, binding: grant.binding! } });
+    expect(grants.activate(replacement.grantId)).toBe(true);
+    expect(f.reports.recordRunnerObservation(replacement, { runId: replacement.runId, sequence: 1, occurredAt: f.stamp,
+      observations: { model: { id: "replacement/model" } } }).ok).toBe(true);
+  }
+  const completed = await pending;
+  expect(Array.isArray(completed) ? completed[0] : completed).toMatchObject({ status: "unknown", model: null });
+  expect(await f.reader.observe(f.input)).toMatchObject(change === "revoke" ? { status: "unknown", model: null } : { status: "observed", model: "replacement/model" });
+});
 
 it("reports assistant-response evidence separately from the pin, with native time and no record contents", async () => {
   const f = fixture(); const result = await f.reader.observe(f.input);

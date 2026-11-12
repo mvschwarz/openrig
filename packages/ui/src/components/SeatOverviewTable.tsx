@@ -94,7 +94,7 @@ export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOv
   const contextPercentage =
     data.contextUsage?.availability === "known" &&
     typeof data.contextUsage.usedPercentage === "number"
-      ? `${data.contextUsage.usedPercentage}%`
+      ? `${data.contextUsage.usedPercentage}%${data.contextUsage.source === "runner_reported" ? " (runner-reported)" : ""}`
       : null;
   const tokenTotal = sumTokenCounts(
     data.contextUsage?.totalInputTokens,

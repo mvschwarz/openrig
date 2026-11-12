@@ -610,7 +610,8 @@ export class SessionRegistry {
   /** A community harness's conversation for this launch: one its launcher reported (`launcher`), or one OpenRig named and
    *  passed to it (`passed`). Recorded with no verification stamp: neither is a verification, so the session doesn't read
    *  as resumable. */
-  recordLauncherReportedToken(sessionId: string, type: string, token: string, provenance: "launcher" | "passed" = "launcher"): boolean {
+  // Accepted runner observations use hook as persistence origin only; this report-only path never verifies identity.
+  recordLauncherReportedToken(sessionId: string, type: string, token: string, provenance: "launcher" | "passed" | "hook" = "launcher"): boolean {
     if (typeof token !== "string" || token.trim().length === 0) return false;
     this.db
       .prepare(

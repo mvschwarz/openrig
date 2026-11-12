@@ -11,7 +11,8 @@
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
 > - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
->   This credential does not qualify new native input or cancellation behavior.
+>   Optional run-bound observations retain receipts and project current runner-reported context/community model facts.
+>   Credentials and reports do not qualify new native input, cancellation or independently verified program identity.
 > - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
@@ -166,7 +167,20 @@ or verified identity. Core stores a receipt with the authenticated run/session b
 retrying the same observation sequence and payload returns that receipt, while conflicting reuse returns 409.
 Observation ordering is separate from activity/turn ordering. Omitted components keep their own ages; a new run
 cannot inherit an earlier run's reports. Counts without capacity or an explicit percentage remain reported counts,
-not an inferred context occupancy. These retained facts alone do not change the existing model/context displays.
+not an inferred context occupancy (`availability: unknown`, `reason: window_capacity_unknown`). A valid
+`usedTokens/windowTokens` pair or explicit percentage supplies reported occupancy. The current context reader
+uses accepted events, rechecking run/binding, sequence and the existing ten-minute freshness policy; it never
+revives a runner sample from the context cache. Community model reads use the same current-report boundary.
+Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
+readers retain their evidence paths and labels. Omitted components retain their own sample times.
+
+A fresh current session component can fill an absent resume reference through the existing report-only
+persistence path, with `hook` meaning origin only. It emits the existing session-identity event once after
+commit; it does not stamp independent verification or resumability. A known conflicting Core reference stays
+unchanged and makes current observations unknown. A retry returns its original receipt without repeating
+identity effects. Community process identity remains unconfirmed without independent Core evidence.
+Runner context does not provision a collector or enable legacy watchdog/compaction enforcement; that
+watchdog's raw cache path excludes runner-reported entries.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.

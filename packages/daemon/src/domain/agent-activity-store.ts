@@ -1,8 +1,9 @@
+import { FRESHNESS_THRESHOLD_MS } from "./context-usage-store.js";
 import { ActivityGrantStore, type ActivityGrant } from "./activity-grants.js";
 import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
 import { validateSessionFileFormat } from "./resume-token-validation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
-import { AGENT_RUNNER_HOSTED_PI_RPC, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
@@ -202,7 +203,7 @@ export class AgentActivityStore {
   }
 
   /** Observation-only ingress. The receipt and dedup decision share the existing event transaction;
-   * no activity, resume token, model/context cache or independent identity verdict is invented here. */
+   * no activity, model/context cache or independent identity verdict is invented here. */
   recordRunnerObservation(grant: ActivityGrant, input: Record<string, unknown>): RecordRunnerObservationResult {
     const invalid = (): RecordRunnerObservationResult => ({ ok: false, code: "invalid_runner_observation", error: "Invalid observation report." });
     const occurredAt = runnerTimestamp(input.occurredAt);
@@ -234,17 +235,30 @@ export class AgentActivityStore {
         receivedAt: this.now().toISOString(), observations };
       const event = this.eventBus.persistWithinTransaction({ type: "agent.runner_observation", rigId: session.rigId, ...report });
       register(event);
+      if (observations.session && this.getRunnerObservation(grant.nodeId, "session", { freshnessMs: FRESHNESS_THRESHOLD_MS }).report?.sequence === sequence) {
+        const row = this.db.prepare("SELECT session_name,resume_token FROM sessions WHERE id=?").get(session.sessionId) as
+          { session_name: string; resume_token: string | null };
+        // Known Core references are never replaced or re-verified by a runner claim, including matching repeats.
+        if (!row.resume_token) {
+          const runtime = grant.binding!.runtime;
+          const resumeType = runtime === "pi" ? "pi_session_file" : `community:${runtime}`;
+          new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef, "hook");
+          register(this.eventBus.persistWithinTransaction({ type: "agent.session_identity", rigId: session.rigId,
+            nodeId: grant.nodeId, sessionName: row.session_name, runtime, sessionId: observations.session.nativeRef, provenance: "hook" }));
+        }
+      }
       return { ok: true, observation: receipt(report, event.seq) };
     });
   }
 
   /** Latest supplied component in the current authenticated run. A bad newest sample never selects an older one.
    * The reader supplies its existing freshness policy; rotation/adoption can retain facts, a new run cannot. */
-  getRunnerObservation(nodeId: string, component: keyof RunnerObservations, policy: { freshnessMs: number }): RunnerObservationRead {
+  getRunnerObservation(nodeId: string, component: keyof RunnerObservations, policy: { freshnessMs: number; runtime?: string }): RunnerObservationRead {
     const unknown = (reason: RunnerObservationRead["reason"]): RunnerObservationRead => ({ report: null, reason });
     try {
       const grants = new ActivityGrantStore(this.db), active = grants.activeForNode(nodeId);
       if (!active?.runId) return unknown("no_data");
+      if (policy.runtime !== undefined && active.binding?.runtime !== policy.runtime) return unknown("binding_changed");
       if (grants.standing(active.grantId) !== "current") return unknown("binding_changed");
       const latest = (key: keyof RunnerObservations): RunnerObservation | null => {
         const row = this.db.prepare(`SELECT payload FROM events WHERE node_id=? AND type='agent.runner_observation'

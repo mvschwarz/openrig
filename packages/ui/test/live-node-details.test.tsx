@@ -135,6 +135,14 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     return <div data-testid="activity-warmup" />;
   }
 
+  it("labels runner context samples in the existing overview and detail", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, contextUsage: { ...NODE_DETAIL.contextUsage, source: "runner_reported" } });
+    renderDetails();
+    expect((await screen.findByTestId("seat-overview-cell-context-percent")).textContent).toContain("42% (runner-reported)");
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    expect((await screen.findByTestId("detail-context-usage")).textContent).toContain("runner-reported");
+  });
+
   // HG-1 — default tab is Overview.
   it("HG-1: default tab is Overview on landing", async () => {
     mockNodeDetail(NODE_DETAIL);
