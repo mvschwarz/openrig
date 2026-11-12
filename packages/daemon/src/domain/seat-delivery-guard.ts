@@ -1,3 +1,4 @@
+import { inputReadDiagnostic, type InputReadDiagnostic } from "./input-read-diagnostic.js";
 import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAddress } from "./session-registry.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -28,7 +29,7 @@ interface Lease {
 }
 
 export class DeliveryGuardError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
+  constructor(readonly code: string, message: string, readonly inputReadFailure?: InputReadDiagnostic) { super(message); }
 
   // Hono's error protocol also preserves this typed refusal on lifecycle routes.
   getResponse(): Response {
@@ -440,14 +441,14 @@ export class SeatDeliveryGuard {
       this.checkInput(name);
       return observed;
     };
-    const unknown = () => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.");
+    const unknown = (reading: ComposerInput | null) => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.", inputReadDiagnostic("draft-aware", reading));
     let input = await read();
     // Claude may still be redrawing this lease's own paste: one bounded re-read before refusing its Enter.
     if (submit && lease.staged && (!input || input.state === "unknown")) { await this.sleep(OWN_INPUT_REREAD_MS); input = await read(); }
     if (!input || input.state === "unknown") {
       // No Enter was sent, so the paste stays there unsubmitted, and the next delivery may recognize it as OpenRig's.
       if (submit && lease.staged) this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged });
-      throw unknown();
+      throw unknown(input);
     }
     if (leftover === "recognize" && !submit && this.ownsLeftover(target, input)) { lease.ownLeftover = "recognized"; return; }
     if (typeof leftover === "object" && lease.ownLeftover === "recognized") {
@@ -466,7 +467,7 @@ export class SeatDeliveryGuard {
           lease.ownLeftover = "submitted";
           await this.sleep(OWN_INPUT_REREAD_MS);
           const after = await read();
-          if (!after || after.state === "unknown") throw unknown();
+          if (!after || after.state === "unknown") throw unknown(after);
           input = after;
         }
       }
@@ -489,7 +490,7 @@ export class SeatDeliveryGuard {
           : uncertainty === "long"
             ? "OpenRig couldn't confirm ownership of Codex's collapsed long paste. Send a shorter message; nothing was pasted. Turning this seat's typing guard off explicitly disables draft protection."
             : "OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted.";
-        throw new DeliveryGuardError("draft_input_unknown", message);
+        throw new DeliveryGuardError("draft_input_unknown", message, inputReadDiagnostic("draft-aware", input, `paste_${uncertainty}`));
       }
       lease.inputFrame = input.frame;
     }

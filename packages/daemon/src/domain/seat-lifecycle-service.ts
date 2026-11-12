@@ -55,6 +55,8 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { recordedProcessStillRunning } from "./reconciler.js";
+import { readProcessTable, type ProcessTableRow } from "./process-table.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -110,6 +112,8 @@ export interface SeatLifecycleDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: NativeProcessLister;
+  /** The OS process table, read before reopening a released seat's tmux server; injectable for tests. */
+  readProcesses?: () => Promise<ProcessTableRow[]>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
@@ -338,6 +342,7 @@ export class SeatLifecycleService {
   private readonly eventBus: EventBus;
   private readonly tmuxAdapter: TmuxAdapter;
   private readonly listProcesses?: NativeProcessLister;
+  private readonly readProcesses: () => Promise<ProcessTableRow[]>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
@@ -360,6 +365,7 @@ export class SeatLifecycleService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses;
+    this.readProcesses = deps.readProcesses ?? readProcessTable;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
@@ -1575,17 +1581,34 @@ export class SeatLifecycleService {
     // probe sees unavailable transport instead of positive absence. Reopen an
     // empty server only when the persisted state proves this seat's managed
     // occupant was deliberately stopped and no other managed row remains live.
+    // `rig unclaim` is as deliberate for an adopted session: it marks the row
+    // detached and clears the binding, and the person ends the process and its
+    // tmux session, which can be the server's last session too.
     // The probe below still decides absence; a recreated session or failed
     // transport remains a refusal.
     if ("code" in canonicalProbe) {
       const latest = this.latestSession(node.id);
       const hasCurrentBinding = this.sessionRegistry.getBindingForNode(node.id) !== null;
+      const released = latest?.status === "detached" && latest.origin === "claimed";
       const stoppedManagedOccupant = latest !== null
         && latest.session_name === canonicalSessionName
-        && latest.status === "exited"
-        && latest.origin !== "claimed"
+        && ((latest.status === "exited" && latest.origin !== "claimed") || released)
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
+      // Unclaim doesn't end the process. While the released session's recorded process still runs, its server may
+      // only have lost its socket: a server started there would read the session absent and launch a second occupant
+      // beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
+      const stillRuns = stoppedManagedOccupant && released
+        ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
+          () => this.readProcesses().catch(() => null))
+        : null;
+      if (stillRuns) {
+        return {
+          ...canonicalProbe,
+          guidance: `This seat's released session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+            + "on a tmux server this daemon can't reach. End that process, then launch again.",
+        };
+      }
       if (stoppedManagedOccupant) {
         try {
           const restored = await this.tmuxAdapter.startServer();

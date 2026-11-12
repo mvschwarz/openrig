@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { codexNonLoginShellArg } from "../src/domain/native-resume-probe.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -256,6 +257,38 @@ describe("Codex runtime adapter", () => {
       { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
     ] });
     expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "returned_to_shell" });
+  });
+
+  it("checkReady called for several seats in one observation pass reads the process table fewer times than seat by seat (#161)", async () => {
+    const paneContent = fs.readFileSync(new URL("./fixtures/codex-api-key-login-no-daemon.txt", import.meta.url), "utf8");
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    // Seats 1 and 3 sit in an idle shell; seat 2 has a command in the foreground between the idle-shell samples.
+    const run = async (shared: boolean) => {
+      let listings = 0;
+      const listProcesses = vi.fn(() => {
+        listings++;
+        return [
+          { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt },
+          { pid: 910, ppid: 1, command: "/bin/bash", pgid: 910, tpgid: listings % 2 === 0 ? 911 : 910, executableName: "bash", startedAt },
+          { pid: 920, ppid: 1, command: "/bin/bash", pgid: 920, tpgid: 920, executableName: "bash", startedAt },
+        ];
+      });
+      const pass = new ObservationPass();
+      const results = [];
+      for (const pid of [900, 910, 920]) {
+        const tmux = mockTmux({ getPaneCommand: vi.fn(async () => "bash"), getPanePid: vi.fn(async () => pid),
+          capturePaneContent: vi.fn(async () => paneContent) });
+        const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+        results.push(await adapter.checkReady(makeBinding(), shared ? { observationPass: pass } : undefined));
+      }
+      return { results, listings };
+    };
+    const alone = await run(false);
+    const together = await run(true);
+    expect(together.results).toEqual(alone.results);
+    expect(together.results.map((r) => ("code" in r ? r.code : "ready"))).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
+    expect(alone.listings).toBe(9);
+    expect(together.listings).toBe(6);
   });
 
   it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {
@@ -2832,6 +2865,9 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
     expect(await adapterFor(mockFs(), mockTmux(), "0.165.2").guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
     expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding(), { resuming: true })).toEqual({ file: null });
+    // A resume of the seat's own conversation (a restore, `rig up --existing`) chooses as a fresh launch does; a fork doesn't.
+    expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding(), { resuming: true, resumingConversation: true })).toEqual({ file: null, launchInstructions: true });
+    expect(await adapterFor(mockFs(), mockTmux(), "0.163.9").guidanceFileFor(makeBinding(), { resuming: true, resumingConversation: true })).toEqual({ file: null });
     expect(await adapterFor(mockFs(), mockTmux(), "0.163.9").guidanceFileFor(makeBinding())).toEqual({ file: null });
     expect(await adapterFor(mockFs(), mockTmux(), null).guidanceFileFor(makeBinding())).toEqual({ file: null });
   });
@@ -2882,6 +2918,31 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(text).not.toContain("Seat skills line.");
     // Still read as a fresh launch by the process-lineage readers.
     expect(codexCommandResumeToken(sent)).toBeUndefined();
+  });
+
+  it("a resume with the choice carries the guidance as developer instructions and leaves the person's tracked AGENTS.md as it is", async () => {
+    const own = "# Our repository\n\nRun the tests with make test.\n";
+    const fs = mockFs({ "/spec/SOP.md": "How work flows here.", "/project/AGENTS.md": own }) as CodexAdapterFsOps & { _store: Record<string, string> };
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: fs, codexHome: HOME, listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
+      sleep: async () => {}, resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }) });
+    const binding = { ...makeBinding(), guidanceFile: null, guidanceLaunchInstructions: true } as NodeBinding;
+    await adapter.project(plan([]), binding);
+    await adapter.deliverStartup([{ ...startupFile("SOP.md", "/spec/SOP.md"), appliesOn: ["restore"] },
+      { ...startupFile("gone.md", "/spec/gone.md"), required: false }], binding);
+    expect(fs._store["/project/AGENTS.md"]).toBe(own);
+    expect((await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" })).ok).toBe(true);
+    const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1] as string).find((call) => call.includes("sess-456"))!;
+    // Still a resume of that conversation to the process-lineage readers, which read the codex process's own command line
+    // (no shell quotes, and no `env CODEX_HOME=…` prefix).
+    expect(codexCommandResumeToken(sent.replace(/^env \S+ /, "").replace(/'/g, ""))).toBe("sess-456");
+    expect(sent.indexOf(" resume 'sess-456'")).toBeLessThan(sent.indexOf("developer_instructions="));
+    expect(instructionsIn(sent)).toContain("How work flows here.");
+    expect(fs._store["/project/AGENTS.md"]).toBe(own);
+    // #3039: its record names what the launch sent, once; an optional file it couldn't read isn't in it.
+    expect(adapter.launchGuidanceSent("r01-qa")).toEqual(["SOP.md"]);
+    expect(adapter.launchGuidanceSent("r01-qa")).toBeUndefined();
   });
 
   it("a launch without the choice (a resume, a restore, an older Codex) sends no developer instructions and merges into AGENTS.md as before", async () => {

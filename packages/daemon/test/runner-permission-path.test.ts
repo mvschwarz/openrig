@@ -642,6 +642,10 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(handed).toMatchObject({ destinationSession: DECIDER, state: "pending" });
     expect(handed.body).toContain(`${PERSON} answered ${SEAT}'s permission request ${askId}: they chose "Allow" (option allow).`);
     expect(handed.body).toContain(`Decide with: rig seat decide-permission ${askId} --option <id>`);
+    // The receiver reads who to ask back (the person who answered), and that closing without a decision permits nothing.
+    expect(handed.body).toContain(`ask them back with an ask to ${PERSON} that names request ${askId}`);
+    expect(handed.body).toContain("Closing this item without deciding permits nothing: the person's answer stays kept and the runner keeps waiting");
+    expect(handed.body).not.toContain("is how OpenRig records any answer typed at this machine's terminal");
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { ok: true, state: "answered", optionId: "allow" } });
     expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
@@ -649,6 +653,25 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(note).toContain(`runner-permission-decided by ${DECIDER}, an agent, not the person: allow, because they said so`);
     // Deciding again changes nothing: the request isn't pending any more.
     expect(await f.decide(askId, "reject")).toMatchObject({ status: 200, body: { state: "answered", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("an answer typed at the terminal reaches the agent with what it means, who's who, and the asked person to ask back", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const asked = f.queueRepo.getById(askId)!.destinationSession;
+    await f.contract.act({ verb: "answer", qitemId: askId, actorSession: "human@host", authority: "primary-user",
+      questionId: "permission", optionId: "allow" } as never);
+    const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
+    expect(handed).toMatchObject({ destinationSession: DECIDER, state: "pending" });
+    // Provenance stays truthful: the answerer is human@host, never a registered person.
+    expect(handed.body).toContain(`human@host answered ${SEAT}'s permission request ${askId}: they chose "Allow" (option allow).`);
+    expect(handed.body).toContain(`- **Who's who:** ${SEAT} is the agent asking to run the tool; ${asked} is the person it asked; human@host answered.`);
+    expect(handed.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
+    expect(handed.body).toContain(`ask them back with an ask to ${asked} that names request ${askId}`);
+    expect(handed.body).toContain("Don't write to human@host: nothing is delivered there.");
+    expect(handed.body).toContain("Closing this item without deciding permits nothing");
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
   });
 

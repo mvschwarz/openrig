@@ -1063,7 +1063,7 @@ describe("StartupOrchestrator", () => {
       opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
     const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
     expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false, resumingConversation: false });
     const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
     expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
@@ -1071,8 +1071,29 @@ describe("StartupOrchestrator", () => {
     expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
     vi.mocked(adapter.project).mockClear();
     expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
+  });
+
+  // A restore or `rig up --existing` resumes the seat's own conversation: with a saved repository choice it learns only
+  // whether its launch carries the guidance, so a supported Codex keeps it out of the tracked AGENTS.md. The saved file
+  // never changes, and a fork or a continuation isn't asked.
+  it("a resume with a saved repository choice asks only whether its launch carries the guidance, and keeps the saved file", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }) =>
+      opts?.resuming && !opts.resumingConversation ? { file: null } : { file: "/elsewhere/AGENTS.md", launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    const saved = { ...makeBinding(), guidanceFile: null } as NodeBinding;
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
+    for (const call of [vi.mocked(adapter.project).mock.calls[0]?.[1], vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1], vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]]) {
+      expect(call).toMatchObject({ guidanceFile: null, guidanceLaunchInstructions: true });
+    }
+    // A fork, or a seat whose saved choice is its own file, isn't asked.
+    guidanceFileFor.mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: { ...saved, guidanceFile: "/state/agent/AGENTS.md" } as NodeBinding }))).ok).toBe(true);
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, forkSource: { kind: "native_id", value: "parent-1" }, binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {

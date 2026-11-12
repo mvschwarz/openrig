@@ -1340,6 +1340,7 @@ describe("Send CLI", () => {
     expect(output).toContain("a@r: sent\nNotice: a@r was mid-restore (as recorded). This doesn't mean the restore has finished.\nb@r: sent\n");
     expect(output).toContain("c@r: FAILED — paste failed\nNotice: c@r was mid-restore");
     expect(output).toContain("d@r: retained, not delivered; inspect with rig seat held-messages\nNotice: d@r was mid-restore");
+    expect(output).toContain("2/4 delivered, 1 held");
     expect(output.match(/^Notice: /gm)).toHaveLength(3); // none for b@r
     expect(exitCode).toBe(1); // a failed recipient, as before
   });
