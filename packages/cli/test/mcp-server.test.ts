@@ -1590,4 +1590,25 @@ describe("MCP host routing", () => {
     expect(result.isError).toBe(true);
     expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("host_not_http");
   });
+
+  it("a blank host is an error, never a quiet local read", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: " " });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("invalid_host");
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an omitted host keeps reading the local daemon", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf(),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", {});
+    expect(result.isError).toBeFalsy();
+    expect(local.get).toHaveBeenCalledWith("/api/ps");
+  });
 });

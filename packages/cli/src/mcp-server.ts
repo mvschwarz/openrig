@@ -765,6 +765,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one. */
   const hostTarget = (host: string | undefined): { client: DaemonClient; headers: Record<string, string>; remote: boolean } | TextResult => {
     const name = host?.trim();
+    if (host !== undefined && !name) {
+      const message = "A host name can't be blank: omit host to act on this daemon, or name a registered host (rig host list shows them).";
+      return errorResult(message, "invalid_host", message);
+    }
     if (!name || name === "local") return { client, headers: {}, remote: false };
     if (access && !access.owner) {
       const message = "Naming a host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant; a granted connection reaches only the daemon serving it.";
