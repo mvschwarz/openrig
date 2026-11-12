@@ -540,7 +540,8 @@ function deliveryResolutionEvidence(
   if (kind === "unclaimed-obligation" && !quiet && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
     return "informational update to a registered human requires no claim";
   }
-  if (kind !== "undelivered-human-notice" && row.lastNudgeResult === "retained:typing_guard") {
+  // A temporary hold resolves a failed wake, but unclaimed work still needs its existing standing finding.
+  if (kind === "undelivered-wake" && row.lastNudgeResult === "retained:typing_guard") {
     return "source wake held by the seat typing guard";
   }
   return null;
@@ -1765,7 +1766,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`)
           .all(seat, onlyFrom, onlyFrom, STUCK_SWEEP_FINDING_TAG) as Array<{ qitem_id: string }>).map((r) => r.qitem_id));
         // #2988: rows this notice lets go of only because something else stands for them now (a finding of their own,
-        // another parent's or the seat's own notice, or this pass's route for them). Nothing resolved them, so a notice the
+        // another parent's or the seat's own notice, a temporary typing hold, or this pass's route for them). Nothing resolved them, so a notice the
         // sweep closes doesn't hold them back: they leave its list before it closes.
         const routedAway = new Set<string>();
         // Read within the sweep's bounded yield (a rebuilt list can be long); a notice changed meanwhile is left for the next pass.
@@ -1778,7 +1779,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           }
           const row = indexed(() => deps.queueRepo.getById(id, { waiting: false }));
           // Gone, someone else's now, or resolved at its source.
-          if (!row || row.destinationSession !== seat || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) continue;
+          if (!row || row.destinationSession !== seat) continue;
+          // A typing hold is temporary custody, not a dismissal of this work. Let the closed notice release the row:
+          // when the hold clears, it can qualify again even without a newer pending timestamp or wake attempt.
+          if (row.state === "pending" && !row.claimedAt && row.lastNudgeResult === "retained:typing_guard") {
+            routedAway.add(id);
+            continue;
+          }
+          if (deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) continue;
           // Held by a finding or recovery of its own (one actually written, so a create that failed this pass leaves the row
           // here): that finding holds it back from now on, a dismissed one too. The notice lets go of it rather than also
           // holding it once closed: a fold into a parent's notice (#2988) can release that finding's custody, and the row
@@ -1821,8 +1829,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             state: "done",
             closureReason: "no-follow-on",
             transitionNote: parent
-              ? `stuck-sweep resolved: unclaimed-backlog on ${seat} for ${parent}: every row it stood for is claimed, parked, closed, has its own finding or no longer goes to ${parent}`
-              : `stuck-sweep resolved: unclaimed-backlog on ${seat}: every row it stood for is claimed, parked, closed, has its own finding or is in its delegation parent's notice`,
+              ? `stuck-sweep resolved: unclaimed-backlog on ${seat} for ${parent}: every row it stood for is claimed, parked, closed, temporarily held, has its own finding or no longer goes to ${parent}`
+              : `stuck-sweep resolved: unclaimed-backlog on ${seat}: every row it stood for is claimed, parked, closed, temporarily held, has its own finding or is in its delegation parent's notice`,
           });
           othersMayHaveRun();
           findings.push({ kind: "unclaimed-backlog", qitemId: key, findingQitemId: last.qitem_id, action: "closed" });
