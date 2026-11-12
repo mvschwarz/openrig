@@ -18,7 +18,16 @@ node packages/test-system/delivery/run.mjs run --installs ~/delivery-installs --
   --claude 2.1.322,2.1.311 --codex 0.167.2,0.167.1 --out ~/delivery-run [--cases D01,D09]
 ```
 
-It writes `RESULT.json` and `RESULT.md`: every cell's PASS, FAIL or NOT RUN, its evidence level, every check with what was seen, and the pins. The pins name the exact OpenRig, Claude Code and Codex (each version as it reports itself, plus the sha256 of what ran), tmux, node, the OS, and the sha256 of `cases/expected.yaml`. A cell that can't run is NOT RUN with its reason, never left out.
+It writes `RESULT.json` and `RESULT.md`: every cell's PASS, FAIL or NOT RUN, its evidence level, every check with what was seen, and the pins. The pins name the exact OpenRig, Claude Code and Codex, tmux, node, the OS, and the sha256 of `cases/expected.yaml`. They're read when the run starts, before any cell. For each program they give:
+- its version as it reports itself;
+- `entryPointSha256` for the file on PATH (a launcher, for Codex and OpenRig);
+- `payloads`, its native executables;
+- `packageTree`, a digest of the whole installed package;
+- `lockfileIntegrity`, npm's integrity, written at install.
+
+A cell that can't run is NOT RUN with its reason, never left out. So is a cell whose evidence wasn't banked, whose bank holds credential-shaped text, whose stand-in failed, or whose seat conversation couldn't be identified: no credit without evidence. Each `--out` holds one run, and each cell has a time limit (`--cell-timeout`, 15 minutes by default) after which it closes itself and the parent reaps anything left.
+
+**Program transforms.** A program can rewrite pasted input itself: Claude Code 2.1.322 turns a pasted tab into four spaces. Quality lists each such rewrite in `expected.yaml` (`program_transforms`), pinned to the versions it was seen on. A cell applies one only as its exact inverse: undoing it must restore bytes OpenRig itself recorded writing. The cell then reports `PASS (program transform: <id>)`, so the content limit stays visible. Any other difference, or a new unlisted rewrite, is a FAIL.
 
 Every cell here is at the **native-standin** level: the real program, on a local stand-in model. A real-model sample and a PTY or container run are separate levels and aren't produced by this command.
 

@@ -6,7 +6,7 @@
 // through ctx (harness/case-context.mjs) and records checks on ctx.verdict. A check states what was seen, so a FAIL
 // reads as evidence, not a bare verdict.
 
-import { conversation, markersIn, orderAndMerge, partWith } from "../harness/oracle.mjs";
+import { arrivedAs, conversation, markersIn, orderAndMerge, partWith } from "../harness/oracle.mjs";
 
 const ACK = "ack {{marker}}";
 const MARK = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
@@ -21,8 +21,15 @@ async function deliveredOnce(ctx, marker, body, { label = marker, alone = true }
     { thread: final.thread, items: final.turns.map((t) => ({ index: t.index, firstSeq: t.seq, kind: t.kind, carriedBy: t.carriedBy })) });
   const turn = final.turns[0] ?? seen.turns[0];
   if (!turn) return null;
-  const { part, intact } = partWith(turn, marker, body);
-  verdict.check(`${label}: arrived byte for byte`, intact, { bytes: part?.bytes, sha256: part?.sha256, expectedBytes: Buffer.byteLength(body) });
+  const { part } = partWith(turn, marker, body);
+  const wireSha256s = ctx.writtenSince("1970-01-01T00:00:00Z").map((w) => w.wireSha256);
+  const arrived = arrivedAs(part, body, { kind: ctx.kind, version: ctx.version, wireSha256s });
+  const intact = arrived.intact;
+  if (arrived.transform) {
+    ctx.verdict.transformed(arrived.transform);
+    verdict.info(`${label}: a listed program transform explains the difference, and its inverse restores OpenRig's written bytes`, arrived);
+  }
+  verdict.check(`${label}: arrived byte for byte${arrived.transform ? ` (after undoing ${arrived.transform})` : ""}`, intact, { bytes: part?.bytes, sha256: part?.sha256, expectedBytes: Buffer.byteLength(body) });
   // OpenRig's own record of the same bytes. Best effort: a missing record isn't proof nothing was written.
   if (part) {
     const records = ctx.evidenceFor(part.sha256);

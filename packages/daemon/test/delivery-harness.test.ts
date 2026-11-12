@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // packages/daemon/test -> packages/test-system/delivery/harness
-import { conversation, deliveriesOf, markersIn, orderAndMerge, partWith, seatThread, Verdict } from "../../test-system/delivery/harness/oracle.mjs";
+import { arrivedAs, conversation, deliveriesOf, markersIn, orderAndMerge, partWith, seatThread, sha256, Verdict } from "../../test-system/delivery/harness/oracle.mjs";
 import { containedArgv } from "../../test-system/delivery/harness/contain.mjs";
 import { composerText } from "../../test-system/delivery/harness/screen.mjs";
 import { ownsEnviron, parseStat } from "../../test-system/delivery/harness/world.mjs";
@@ -122,6 +122,27 @@ describe("delivery harness: the receiver-side oracle", () => {
     const mergedRun = orderAndMerge([codexReq([...start, both])], ["DLV-D09-one-1", "DLV-D09-two-2"], MARK);
     expect(mergedRun.merged).toHaveLength(1);
     expect(mergedRun.inOrder).toBe(false);
+  });
+
+  it("credits a listed program transform only when its exact inverse restores OpenRig's written bytes, on a listed version", () => {
+    const body = "line one\n\tindented with a tab DLV-D15-t-1";
+    const wire = `From: x\n---\n${body}\n---`;
+    const part = { text: wire.replace("\t", "    ") };
+    const known = { kind: "claude", version: "2.1.322", wireSha256s: [sha256(wire)] };
+    expect(arrivedAs(part, body, known)).toMatchObject({ intact: true, transform: "claude-code-tab-expansion", restoredSha256: sha256(wire) });
+    // Exact bytes need no transform.
+    expect(arrivedAs({ text: wire }, body, known)).toEqual({ intact: true, transform: null });
+    // Not without OpenRig's record of what it wrote, not on another version or program, not for another difference.
+    expect(arrivedAs(part, body, { ...known, wireSha256s: [] }).intact).toBe(false);
+    expect(arrivedAs(part, body, { ...known, version: "2.1.311" }).intact).toBe(false);
+    expect(arrivedAs(part, body, { ...known, kind: "codex" }).intact).toBe(false);
+    expect(arrivedAs({ text: wire.replace("\t", "  ") }, body, known).intact).toBe(false);
+    const v = new Verdict();
+    v.check("a", true, null);
+    v.transformed("claude-code-tab-expansion");
+    expect(v.result).toBe("PASS (program transform: claude-code-tab-expansion)");
+    v.check("b", false, null);
+    expect(v.result).toBe("FAIL");
   });
 
   it("judges PASS only when every check holds, and keeps NOT RUN's reason", () => {

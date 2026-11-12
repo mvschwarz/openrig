@@ -10,13 +10,13 @@ import { deliveryEvents } from "./evidence.mjs";
 import { composerText, recordScreen } from "./screen.mjs";
 import { RIG, sleep } from "./world.mjs";
 
-export function caseContext(cell, { caseId, kind }) {
+export function caseContext(cell, { caseId, kind, version }) {
   const verdict = new Verdict();
   const screen = recordScreen(cell, join(cell.logs, "screen-frames.jsonl"));
   const used = new Set();
 
   const ctx = {
-    cell, kind, caseId, verdict, screen, sleep,
+    cell, kind, version, caseId, verdict, screen, sleep,
 
     /** A marker no other send in this run carries, of the stand-in's default pattern: DLV-<case>-<label>-<random>. */
     mark(label = "m") {

@@ -209,7 +209,7 @@ async function cellMain(specPath) {
   }
   if (cell) {
     try {
-      ctx = caseContext(cell, { caseId: c.id, kind: spec.kind });
+      ctx = caseContext(cell, { caseId: c.id, kind: spec.kind, version: spec.version });
       await c.run(ctx);
       outcome = ctx.verdict.toJSON();
     } catch (error) {

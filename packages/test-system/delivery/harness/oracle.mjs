@@ -101,6 +101,28 @@ export function partWith(turn, marker, body) {
   return { part, intact: part !== null && body !== undefined && part.text.includes(body) };
 }
 
+/** Program transforms Quality has ruled to be the program's own rewrite of pasted input, as expected.yaml lists them
+ *  under program_transforms: each pinned to the versions it was observed on, and applied only as its exact inverse. */
+export const PROGRAM_TRANSFORMS = [
+  { id: "claude-code-tab-expansion", program: "claude", versions: ["2.1.322"], rewrite: (text) => text.replaceAll("\t", "    ") },
+];
+
+/** Whether `body` arrived intact in `part`, exactly or through one listed transform. A transform counts only when the
+ *  part holds the rewritten body AND undoing it restores bytes OpenRig itself recorded writing (one of `wireSha256s`).
+ *  Any other difference is a mismatch: a new, unlisted rewrite fails until Quality lists it. */
+export function arrivedAs(part, body, { kind, version, wireSha256s = [] }) {
+  if (!part) return { intact: false, transform: null };
+  if (part.text.includes(body)) return { intact: true, transform: null };
+  for (const t of PROGRAM_TRANSFORMS) {
+    if (t.program !== kind || !t.versions.includes(version)) continue;
+    const rewritten = t.rewrite(body);
+    if (rewritten === body || !part.text.includes(rewritten)) continue;
+    const restored = part.text.replace(rewritten, body);
+    if (wireSha256s.includes(sha256(restored))) return { intact: true, transform: t.id, restoredSha256: sha256(restored) };
+  }
+  return { intact: false, transform: null };
+}
+
 /** Every marker of the case pattern in an item's typed parts: two in one item is a merge. */
 export function markersIn(turn, pattern) {
   const re = new RegExp(pattern, "g");
@@ -109,13 +131,16 @@ export function markersIn(turn, pattern) {
 
 /** A judged cell. `checks` keep every assertion with what was seen, so a reader sees why, not only the verdict. */
 export class Verdict {
-  constructor() { this.checks = []; this.notRun = null; }
+  constructor() { this.checks = []; this.notRun = null; this.transforms = new Set(); }
   check(name, ok, seen) { this.checks.push({ name, ok: !!ok, seen }); return !!ok; }
   info(name, seen) { this.checks.push({ name, ok: null, seen }); }
   skip(reason) { this.notRun = reason; }
+  /** A listed program transform this cell needed: the PASS names it, so the content limit stays visible. */
+  transformed(id) { this.transforms.add(id); }
   get result() {
     if (this.notRun) return "NOT RUN";
-    return this.checks.every((c) => c.ok !== false) ? "PASS" : "FAIL";
+    if (!this.checks.every((c) => c.ok !== false)) return "FAIL";
+    return this.transforms.size ? `PASS (program transform: ${[...this.transforms].join(", ")})` : "PASS";
   }
   toJSON() {
     return { result: this.result, ...(this.notRun ? { reason: this.notRun } : {}),
