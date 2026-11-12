@@ -181,6 +181,15 @@ unchanged and makes current observations unknown. A retry returns its original r
 identity effects. Community process identity remains unconfirmed without independent Core evidence.
 Runner context does not provision a collector or enable legacy watchdog/compaction enforcement; that
 watchdog's raw cache path excludes runner-reported entries.
+
+Core observes launch-recorded community runners independently of session reports. Once the existing startup
+readiness is committed, a concrete foreground shell with no live child can establish the existing process
+mismatch and end only the sampled run credential, even before any native reference was reported. A shell
+wrapper with a live descendant, incomplete/unreadable census or changed pane/binding stays unconfirmed;
+unknown evidence never ends a run. Pending launch remains unconfirmed until readiness. Explicit same-process
+adoption retains the observed pane anchor and its existing ready state. Native Claude/Codex/Pi checks and
+Pi-RPC report routing keep their existing paths. A report plus a live Node process does not independently
+verify the native conversation.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.

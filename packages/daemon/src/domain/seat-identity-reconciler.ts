@@ -1,6 +1,8 @@
 import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
+import { basename } from "node:path";
+import { readProcessTable } from "./process-table.js";
 import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
-import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
+import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation, type NativeProcessRow } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
@@ -10,7 +12,7 @@ import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
-import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect, recordedRunner } from "./session-registry.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
@@ -77,6 +79,7 @@ interface RunningSeatRow {
   node_id: string;
   runtime: string | null;
   session_name: string;
+  session_id: string;
   tmux_pane: string | null;
   resume_token?: string | null;
   resume_provenance?: string | null;
@@ -84,6 +87,8 @@ interface RunningSeatRow {
   resume_rotated_process?: string | null;
   resume_launch_process?: string | null;
   community_harness?: string | null;
+  community_runner?: number | null;
+  startup_status?: string | null;
 }
 
 type PaneObservation = { pid: number | null; command: string | null; dead?: boolean };
@@ -114,6 +119,7 @@ export class SeatIdentityReconciler {
   private readonly store: SeatIdentityStore;
   private readonly listProcesses: NativeProcessLister;
   private readonly readPiRunnerState?: SeatIdentityReconcilerDeps["readPiRunnerState"];
+  private readonly listRunnerProcesses: NativeProcessLister;
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
   private generation = 0;
@@ -125,17 +131,20 @@ export class SeatIdentityReconciler {
     this.store = new SeatIdentityStore(deps.db);
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.readPiRunnerState = deps.readPiRunnerState;
+    // Unlike the native best-effort recognizer, absence proof must not turn a census failure into an empty table.
+    this.listRunnerProcesses = deps.listProcesses ?? readProcessTable;
   }
 
   private runningSeats(): RunningSeatRow[] {
     return this.db.prepare(`
       SELECT n.id as node_id, n.runtime as runtime,
-             s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
+             s.id as session_id, s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
              s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from,
              s.resume_rotated_process as resume_rotated_process,
              s.resume_launch_process as resume_launch_process,
-             ${sessionCommunityHarnessSelect(this.db)} as community_harness
+             ${sessionCommunityHarnessSelect(this.db)} as community_harness,
+             ${sessionCommunityRunnerSelect(this.db)} as community_runner, s.startup_status as startup_status
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -289,9 +298,11 @@ export class SeatIdentityReconciler {
       panes = await readPanes();
       if (generation !== this.generation) return;
     }
+    let runnerProcesses: Promise<NativeProcessRow[]> | undefined;
+    const readRunnerProcesses = () => runnerProcesses ??= Promise.resolve().then(() => this.listRunnerProcesses());
     for (const seat of seats) {
       try {
-        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes);
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes, readRunnerProcesses);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
         const observedGrant = observedGrants.get(seat.node_id);
@@ -326,6 +337,7 @@ export class SeatIdentityReconciler {
     observedAt: string,
     native: NativeProcessObservation | null,
     panes: Map<string, PaneObservation> | null = null,
+    readRunnerProcesses: () => Promise<NativeProcessRow[]>,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -419,15 +431,35 @@ export class SeatIdentityReconciler {
       };
     }
 
-    // A community harness's process doesn't prove which session it is: the pane is live, its identity unconfirmed.
+    // Core can observe a runner's exit without any native reference, but a live process never verifies its conversation.
     if (communityHarnessOf(seat.community_harness, seat.runtime)) {
-      return {
-        ...base,
-        verdict: "unconfirmed",
-        evidenceSource: "pane_process",
+      const unconfirmed: SeatIdentityVerdict = { ...base, verdict: "unconfirmed", evidenceSource: "pane_process",
         reason: "process_identity_unconfirmed",
-        evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: null },
-      };
+        evidence: { registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: pid, observedCommand: command, matchedLayer: null } };
+      if (!recordedRunner(seat.community_runner) || seat.startup_status !== "ready"
+        || !isShellForeground(command?.trim().toLowerCase() ?? "")) return unconfirmed;
+      let rows: NativeProcessRow[] | null = null;
+      try { rows = await readRunnerProcesses(); } catch { /* Unreadable census cannot establish absence. */ }
+      const [finalPid, finalCommand, membership] = await Promise.all([
+        this.tmux.getPanePid(seat.tmux_pane), this.tmux.getPaneCommand(seat.tmux_pane),
+        this.tmux.listPanes?.(seat.session_name, true).catch(() => null) ?? null,
+      ]);
+      const selected = this.db.prepare(`SELECT s.id AS session_id,s.startup_status,n.runtime,b.tmux_session,b.tmux_pane FROM sessions s
+        JOIN nodes n ON n.id=s.node_id LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=? ORDER BY s.id DESC LIMIT 1`)
+        .get(seat.node_id) as { session_id: string; startup_status: string | null; runtime: string | null; tmux_session: string | null; tmux_pane: string | null } | undefined;
+      if (finalPid !== pid || finalCommand !== command || !membership?.some(pane => pane.id === seat.tmux_pane)
+        || selected?.session_id !== seat.session_id || selected.startup_status !== "ready" || selected.runtime !== seat.runtime
+        || selected.tmux_session !== seat.session_name || selected.tmux_pane !== seat.tmux_pane) {
+        return { ...unconfirmed, evidence: { ...unconfirmed.evidence, observedPanePid: null, observedPid: null } };
+      }
+      const root = rows?.find(row => row.pid === pid);
+      if (!root) return unconfirmed;
+      // Any live child makes this a wrapper/ambiguous subtree. Its argv cannot prove native identity and is never persisted.
+      const child = rows!.find(row => row.ppid === pid && row.pid !== pid);
+      if (child) return { ...unconfirmed, evidence: { ...unconfirmed.evidence, observedPid: child.pid } };
+      const shell = root.executableName ?? basename(root.command.trim().split(/\s+/)[0] ?? "");
+      if (!isShellForeground(shell.toLowerCase()) || !root.pgid || root.pgid <= 0 || root.tpgid !== root.pgid) return unconfirmed;
+      return { ...unconfirmed, verdict: "mismatch", reason: "process_identity_mismatch" };
     }
 
     return {

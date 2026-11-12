@@ -1,3 +1,8 @@
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 // OPR.0.4.3.19 — SeatIdentityReconciler unit tests.
@@ -730,5 +735,152 @@ describe("definitive Core exit ends exact run authority", () => {
       expect(grants.standing(first.grantId)).toBe("revoked");
       if (successor) expect(grants.standing(successor.grantId)).toBe("current");
     } finally { db.close(); }
+  });
+});
+
+
+describe("launch-recorded community runner Core process evidence", () => {
+  const databases: Database.Database[] = [];
+  afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+
+  function fixture(runner = 1, startup = "ready", command: string | null = "bash") {
+    const db = createFullTestDb(); databases.push(db);
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "synth", pane: "%1" });
+    db.prepare("DELETE FROM sessions WHERE node_id='n1'").run();
+    const registry = new SessionRegistry(db);
+    const session = registry.registerSession("n1", "s1@rig"); registry.updateStatus(session.id, "running");
+    registry.recordCommunityHarnessSelection(session.id, "synth", runner === 2 ? "pi-rpc" : runner === 1);
+    db.prepare("UPDATE sessions SET startup_status=? WHERE id=?").run(startup, session.id);
+    const grants = new ActivityGrantStore(db);
+    const grant = grants.issue({ nodeId: "n1", generation: registry.currentOccupantTenure("n1")!.generationUuid, issuedBy: "Core",
+      run: { runId: "recorded-run", sessionId: session.id, binding: { runtime: "synth", runner, pane: "%1", panePid: 101 } } });
+    if (runner) expect(grants.activate(grant.grantId)).toBe(true);
+    const tmux = { ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": command } }),
+      listPanes: vi.fn(async () => [{ id: "%1" }] as never) };
+    const root = { pid: 101, ppid: 1, pgid: 101, tpgid: 101, executableName: "bash", command: "bash -c PRIVATE_ARG_IS_NOT_IDENTITY", startedAt: "shell-start" };
+    const listProcesses = vi.fn(async () => [root]);
+    const rec = new SeatIdentityReconciler({ db, tmux, listProcesses });
+    const verdict = () => new SeatIdentityStore(db).getForNode("n1");
+    return { db, registry, session, grants, grant, tmux, root, listProcesses, rec, verdict };
+  }
+
+  it.each([1, 2])("detects a ready recorded runner's bare shell before native identity, kind=%s", async runner => {
+    const f = fixture(runner);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.session.id)).toEqual({ resume_token: null });
+    await f.rec.reconcileAll();
+    expect(f.verdict()).toMatchObject({ verdict: "mismatch", reason: "process_identity_mismatch", evidence: { observedPanePid: 101 } });
+    expect(f.grants.standing(f.grant.grantId)).toBe("revoked");
+    expect(f.listProcesses).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(f.verdict())).not.toContain("PRIVATE_ARG");
+  });
+
+  it.each(["child", "empty", "unreadable", "foreground-unknown", "changed-pane", "changed-command", "wrong-membership", "readiness-changed"])("keeps %s evidence unconfirmed and preserves exact run authority", async kind => {
+    const f = fixture();
+    if (kind === "child") f.listProcesses.mockResolvedValue([{ ...f.root, tpgid: 202 },
+      { pid: 202, ppid: 101, pgid: 202, tpgid: 202, executableName: "node", command: "node PRIVATE_CHILD_ARGUMENT", startedAt: "child-start" }]);
+    if (kind === "empty") f.listProcesses.mockResolvedValue([]);
+    if (kind === "unreadable") f.listProcesses.mockRejectedValue(new Error("unreadable"));
+    if (kind === "foreground-unknown") f.listProcesses.mockResolvedValue([{ ...f.root, tpgid: -1 }]);
+    if (kind === "changed-pane") vi.mocked(f.tmux.getPanePid).mockResolvedValueOnce(101).mockResolvedValue(303);
+    if (kind === "changed-command") vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("bash").mockResolvedValue("node");
+    if (kind === "wrong-membership") f.tmux.listPanes.mockResolvedValue([{ id: "%2" }] as never);
+    if (kind === "readiness-changed") f.listProcesses.mockImplementation(async () => { f.db.prepare("UPDATE sessions SET startup_status='pending' WHERE id=?").run(f.session.id); return [f.root]; });
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+    if (kind === "child") expect(f.verdict()?.evidence).toMatchObject({ observedPid: 202, observedPanePid: 101 });
+    expect(JSON.stringify(f.verdict())).not.toContain("PRIVATE_CHILD");
+  });
+
+  it.each(["pending", "failed", "attention_required"])("cannot call a %s startup shell an exited runner", async startup => {
+    const f = fixture(1, startup);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+  });
+
+  it("does not reinterpret plain presets or ambiguous commands as verified native identity", async () => {
+    for (const [runner, command] of [[0, "bash"], [1, "node"], [1, null], [1, "python"]] as const) {
+      const f = fixture(runner, "ready", command);
+      await f.rec.reconcileAll();
+      expect(f.verdict()?.verdict).toBe("unconfirmed");
+      expect(f.listProcesses).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a credential-bound native reference plus a live Node process never verifies the native conversation", async () => {
+    const f = fixture(1, "ready", "node");
+    const reports = new AgentActivityStore({ db: f.db, eventBus: new EventBus(f.db) });
+    expect(reports.recordRunnerObservation(f.grant, { runId: f.grant.runId, sequence: 1,
+      occurredAt: new Date().toISOString(), observations: { session: { nativeRef: "claimed/conversation" } } }).ok).toBe(true);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    expect(f.db.prepare("SELECT resume_token,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.session.id))
+      .toEqual({ resume_token: "claimed/conversation", resume_last_verified: null, resume_last_probe_status: null });
+    expect(f.grants.standing(f.grant.grantId)).toBe("current");
+  });
+
+  it("retains observed pane continuity for explicit same-process adoption without verifying the conversation", async () => {
+    const f = fixture(1, "ready", "node");
+    await f.rec.reconcileAll();
+    expect(f.verdict()).toMatchObject({ verdict: "unconfirmed", evidence: { observedPanePid: 101 } });
+    const adopted = f.registry.registerClaimedSession("n1", "s1@rig", "adopt");
+    expect(adopted.id).not.toBe(f.session.id);
+    expect(f.grants.get(f.grant.grantId)?.sessionId).toBe(f.session.id);
+    expect(f.grants.standing(f.grant.grantId)).toBe("current");
+    expect(adopted.startupStatus).toBe("ready");
+    vi.mocked(f.tmux.getPaneCommand).mockResolvedValue("bash");
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("mismatch");
+    expect(f.grants.standing(f.grant.grantId)).toBe("revoked");
+  });
+
+  it("does not classify a pane whose Core binding changes during the census", async () => {
+    const f = fixture();
+    f.listProcesses.mockImplementation(async () => { f.registry.updateBinding("n1", { tmuxPane: "%2" }); return [f.root]; });
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+  });
+
+  it.runIf(process.platform === "linux")("uses the actual Core process census to retain a shell wrapper with a live child", async () => {
+    const f = fixture();
+    const childScript = 'process.stdout.write(String(process.pid)+"\\n"); setInterval(()=>{},1000)';
+    const wrapper = spawn("/bin/sh", ["-c", `${shellQuote(process.execPath)} -e ${shellQuote(childScript)} & wait`],
+      { env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "pipe"] });
+    const exited = once(wrapper, "exit");
+    let childPid: number | undefined;
+    try {
+      const [ready] = await once(wrapper.stdout!, "data");
+      childPid = Number(String(ready).trim());
+      expect(Number.isSafeInteger(childPid)).toBe(true);
+      expect(childPid).toBeGreaterThan(0);
+      vi.mocked(f.tmux.getPanePid).mockResolvedValue(wrapper.pid!);
+      const grant = f.grants.issue({ nodeId: "n1", generation: f.grant.generation, issuedBy: "Core fixture",
+        run: { runId: "real-wrapper", sessionId: f.session.id, binding: { ...f.grant.binding!, panePid: wrapper.pid! } } });
+      expect(f.grants.activate(grant.grantId)).toBe(true);
+      await new SeatIdentityReconciler({ db: f.db, tmux: f.tmux }).reconcileAll();
+      expect(f.verdict()).toMatchObject({ verdict: "unconfirmed", evidence: { observedPid: childPid, observedPanePid: wrapper.pid } });
+      expect(f.grants.standing(grant.grantId)).toBe("current");
+    } finally {
+      if (childPid) { try { process.kill(childPid, "SIGTERM"); } catch { /* already exited */ } }
+      wrapper.kill("SIGTERM");
+      await exited;
+    }
+  });
+
+  it("a delayed shell completion revokes its sampled grant without revoking a replacement", async () => {
+    const f = fixture();
+    let replacement: ReturnType<ActivityGrantStore["issue"]> | undefined;
+    f.listProcesses.mockImplementation(async () => {
+      replacement = f.grants.issue({ nodeId: "n1", generation: f.grant.generation, issuedBy: "Core replacement",
+        run: { runId: "replacement", sessionId: f.session.id, binding: f.grant.binding! } });
+      expect(f.grants.activate(replacement.grantId)).toBe(true);
+      return [f.root];
+    });
+    await f.rec.reconcileAll();
+    expect(f.grants.standing(f.grant.grantId)).toBe("revoked");
+    expect(replacement).toBeDefined();
+    expect(f.grants.standing(replacement!.grantId)).toBe("current");
   });
 });
