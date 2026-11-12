@@ -1,4 +1,5 @@
 import { OutboxHandler } from "./outbox-handler.js";
+import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { resolveWakeRetryCap, resolveWakeRetryIntervalSeconds } from "./queue-wake-ladder.js";
 import type { DeliveryFn, DeliveryOutcome, WatchdogDeliverySource } from "./watchdog-policy-engine.js";
 
@@ -11,6 +12,7 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
   outbox: OutboxHandler; now?: () => Date; retryIntervalSeconds?: number; retryCap?: number;
 }): DeliveryFn {
   const { outbox } = deps;
+  const wakes = new QueueWakeRepository(outbox.db);
   const now = deps.now ?? (() => new Date());
   const interval = deps.retryIntervalSeconds ?? resolveWakeRetryIntervalSeconds();
   const cap = deps.retryCap ?? resolveWakeRetryCap();
@@ -92,14 +94,17 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
       for (const member of selected) {
         const receipt = read(member.id)!;
         let retryAt: string | undefined, nextAction: string | undefined, terminalReason: string | undefined;
-        const exhausted = receipt.attempts > cap;
+        // No input reached the seat: keep this park's same occurrence owed until delivery or the park ends.
+        const owedParkWake = noInput && wakes.hasOwedOneShotParkWake(member.jobId);
+        const exhausted = receipt.attempts > cap && !owedParkWake;
+        const unavailable = permanent && !owedParkWake;
         const state = result.status === "ok" ? "delivered" : result.status === "retained" ? "retained"
           : noInput ? "failed" : "indeterminate";
         if (result.status === "retained") {
           nextAction = `Retained by existing input protection; inspect held messages ${(result.outboxIds ?? []).join(", ")}. Nothing was delivered.`;
         }
         if (result.status === "failed") {
-          if (noInput && permanent) {
+          if (noInput && unavailable) {
             terminalReason = "watchdog_delivery_unavailable";
             nextAction = `Inspect outbox ${member.id}: ${result.error ?? result.transportReason ?? "delivery failed"}. Fix the destination and register a replacement reminder.`;
           } else if (noInput && exhausted) {
@@ -111,7 +116,7 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
             nextAction = `Inspect outbox ${member.id} and the recipient before any manual replay; input is unconfirmed. This occurrence ends; the next regular cycle is a new occurrence.`;
           }
         }
-        const ended = result.status === "failed" && (!noInput || permanent || exhausted);
+        const ended = result.status === "failed" && (!noInput || unavailable || exhausted);
         outbox.finalizeDelivery(member.id, state);
         save(member.id, { ...receipt, ...(ended ? { ended: true, error: result.error } : {}), ...(result.status === "retained" ? { heldIds: result.outboxIds ?? [] } : {}),
           ...(retryAt ? { retryAt } : {}), ...(nextAction ? { nextAction } : {}),
