@@ -102,8 +102,9 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(): SeatHandoverService {
+  function newService(extra: Partial<ConstructorParameters<typeof SeatHandoverService>[0]> = {}): SeatHandoverService {
     return new SeatHandoverService({
+      ...extra,
       db,
       rigRepo,
       sessionRegistry,
@@ -652,6 +653,32 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
     expect(liveSessionId(node.id)).toBe(sessionId);
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it.each(["fresh", "rebuild"])("%s hands the invalidator the handed-over seat's own generation, not a newer same-name row's", async (source) => {
+    // Re-running a spec archives a stopped rig and makes a new one with its name; the old one, unarchived and restored
+    // while the new one is stopped, records a newer session under the seat's name, and is then archived again.
+    const old = rigRepo.createRig("seat-rig");
+    const oldNode = rigRepo.addNode(old.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(oldNode.id, "dev-impl@seat-rig").id, "exited");
+    rigRepo.archiveRig(old.id);
+    const { node, sessionId } = seedSeat();
+    sessionRegistry.updateStatus(sessionId, "exited");
+    const retiring = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    rigRepo.unarchiveRig(old.id);
+    await new Promise((resolve) => setTimeout(resolve, 2)); // a later millisecond, so its row sorts newer
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(oldNode.id, "dev-impl@seat-rig").id, "exited");
+    rigRepo.archiveRig(old.id);
+    const newer = sessionRegistry.currentOccupantTenure(oldNode.id)!.generationUuid;
+    expect(newer).not.toBe(retiring);
+    expect(sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig")).toBe(newer);
+    const invalidations: Array<{ retiringGeneration?: string }> = [];
+    service = newService({ occupantInvalidator: { invalidateRetiringOccupant: (input) => { invalidations.push(input); } } });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true } });
+    expect(invalidations).toEqual([expect.objectContaining({ retiringSessionName: "dev-impl@seat-rig", retiringGeneration: retiring })]);
   });
 
   it.each([false, true])("a foreign pane claim refuses with a running session present=%s (#237 holds)", async (runningSession) => {
