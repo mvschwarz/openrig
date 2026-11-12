@@ -681,13 +681,63 @@ describe("#2727 rig scope slice close --in-place", () => {
     const beforeEvidence = fs.readFileSync(unfinishedEvidencePath, "utf8");
     const beforeAcceptedJudgment = fs.readFileSync(acceptedJudgmentPath, "utf8");
 
-    // 1. Persistent node write failure: every writeFileSync to SPEC.md fails (both forward update and catch-block restore).
+    // 0. Unreadable existing PROGRESS.md aborts pre-mutation before applyMissionCompositionEdits touches any file.
+    const origReadFileSync = fs.readFileSync.bind(fs);
     const origWriteFileSync = fs.writeFileSync.bind(fs);
+    let progressReadAttempts = 0;
+    let preMutationWrites = 0;
+    const unreadableProgressReadSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((file, options) => {
+      if (path.resolve(String(file)) === path.resolve(unfinishedProgressPath)) {
+        progressReadAttempts++;
+        throw Object.assign(new Error("EACCES: persistent simulated progress read refusal"), { code: "EACCES" });
+      }
+      return origReadFileSync(file, options as BufferEncoding);
+    }) as typeof fs.readFileSync);
+    const preMutationWriteSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+      preMutationWrites++;
+      return origWriteFileSync(file, data, options as fs.WriteFileOptions);
+    }) as typeof fs.writeFileSync);
+
+    let abortedUnreadableClose: CaptureResult;
+    try {
+      abortedUnreadableClose = await runScope(
+        ["slice", "close", unfinishedName, "--mission", "m-rollback", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+    } finally {
+      unreadableProgressReadSpy.mockRestore();
+      preMutationWriteSpy.mockRestore();
+    }
+
+    expect(abortedUnreadableClose.exitCode).toBe(1);
+    expect(progressReadAttempts).toBe(1);
+    expect(preMutationWrites).toBe(0);
+    expect(abortedUnreadableClose.stderr).toContain("EACCES: persistent simulated progress read refusal");
+    expect(abortedUnreadableClose.stderr).not.toContain("rollback failure");
+    expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
+    expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
+    expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
+    expect(fs.readFileSync(unfinishedEvidencePath, "utf8")).toBe(beforeEvidence);
+    expect(fs.readFileSync(acceptedJudgmentPath, "utf8")).toBe(beforeAcceptedJudgment);
+    expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
+
+    // 1. Persistent node write failure with distinct forward vs restore errors:
+    //    proves original error survives alongside rollback diagnostics, PROGRESS.md is not spuriously rewritten,
+    //    and mission.yaml membership rolls back.
     let specWriteAttempts = 0;
+    let progressWritesDuringNodeFail = 0;
     const specWriteSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
-      if (path.resolve(String(file)) === path.resolve(unfinishedSpecPath)) {
+      const resolved = path.resolve(String(file));
+      if (resolved === path.resolve(unfinishedSpecPath)) {
         specWriteAttempts++;
-        throw Object.assign(new Error("EACCES: persistent simulated node write refusal"), { code: "EACCES" });
+        const msg =
+          specWriteAttempts === 1
+            ? "EIO: forward simulated node write failure"
+            : "EROFS: persistent simulated node restore failure";
+        throw Object.assign(new Error(msg), { code: specWriteAttempts === 1 ? "EIO" : "EROFS" });
+      }
+      if (resolved === path.resolve(unfinishedProgressPath)) {
+        progressWritesDuringNodeFail++;
       }
       return origWriteFileSync(file, data, options as fs.WriteFileOptions);
     }) as typeof fs.writeFileSync);
@@ -703,26 +753,34 @@ describe("#2727 rig scope slice close --in-place", () => {
     }
 
     expect(failedNodeClose.exitCode).toBe(1);
-    expect(specWriteAttempts).toBeGreaterThanOrEqual(2);
-    expect(failedNodeClose.stderr).toContain("EACCES: persistent simulated node write refusal");
+    expect(specWriteAttempts).toBe(2);
+    expect(progressWritesDuringNodeFail).toBe(0);
+    expect(failedNodeClose.stderr).toContain("EIO: forward simulated node write failure");
+    expect(failedNodeClose.stderr).toContain("EROFS: persistent simulated node restore failure");
+    expect(failedNodeClose.stderr).toContain("rollback failure");
     expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
     expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
     expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
     expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
     expect(fs.readFileSync(unfinishedEvidencePath, "utf8")).toBe(beforeEvidence);
     expect(fs.readFileSync(acceptedJudgmentPath, "utf8")).toBe(beforeAcceptedJudgment);
-    expect(failedNodeClose.stderr).toContain("rollback failure");
 
-    // 2. Persistent PROGRESS.md write failure after SPEC.md write succeeded: both SPEC.md and mission.yaml roll back.
+    // 2. Persistent PROGRESS.md write failure (distinct forward vs restore errors) after SPEC.md write succeeded:
+    //    both SPEC.md and mission.yaml roll back while original + rollback errors are retained.
     let progressWriteAttempts = 0;
     let specWritesObserved = 0;
     const progressWriteSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
-      if (path.resolve(String(file)) === path.resolve(unfinishedSpecPath)) {
+      const resolved = path.resolve(String(file));
+      if (resolved === path.resolve(unfinishedSpecPath)) {
         specWritesObserved++;
       }
-      if (path.resolve(String(file)) === path.resolve(unfinishedProgressPath)) {
+      if (resolved === path.resolve(unfinishedProgressPath)) {
         progressWriteAttempts++;
-        throw Object.assign(new Error("EACCES: persistent simulated progress write refusal"), { code: "EACCES" });
+        const msg =
+          progressWriteAttempts === 1
+            ? "ENOSPC: forward simulated progress write failure"
+            : "EACCES: persistent simulated progress restore failure";
+        throw Object.assign(new Error(msg), { code: progressWriteAttempts === 1 ? "ENOSPC" : "EACCES" });
       }
       return origWriteFileSync(file, data, options as fs.WriteFileOptions);
     }) as typeof fs.writeFileSync);
@@ -738,20 +796,78 @@ describe("#2727 rig scope slice close --in-place", () => {
     }
 
     expect(failedProgressClose.exitCode).toBe(1);
-    expect(specWritesObserved).toBeGreaterThanOrEqual(2);
-    expect(progressWriteAttempts).toBeGreaterThanOrEqual(2);
-    expect(failedProgressClose.stderr).toContain("EACCES: persistent simulated progress write refusal");
+    expect(specWritesObserved).toBe(2);
+    expect(progressWriteAttempts).toBe(2);
+    expect(failedProgressClose.stderr).toContain("ENOSPC: forward simulated progress write failure");
+    expect(failedProgressClose.stderr).toContain("EACCES: persistent simulated progress restore failure");
     expect(failedProgressClose.stderr).toContain("rollback failure");
     expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
     expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
     expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
     expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
+
+    // 3. Persistent node write/restore failure PLUS persistent mission.yaml rollbackComposition failure:
+    //    all independent rollback attempts execute and report their distinct errors without falsely claiming recovery.
+    let compoundSpecWrites = 0;
+    let missionTmpWriteAttempts = 0;
+    const resolvedManifestTmpPrefix = `${path.resolve(missionManifestPath)}.openrig-`;
+    const compoundFailSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+      const resolved = path.resolve(String(file));
+      if (resolved.startsWith(resolvedManifestTmpPrefix)) {
+        missionTmpWriteAttempts++;
+        if (missionTmpWriteAttempts >= 2) {
+          throw Object.assign(new Error("EPERM: persistent simulated mission manifest rollback failure"), {
+            code: "EPERM",
+          });
+        }
+      }
+      if (resolved === path.resolve(unfinishedSpecPath)) {
+        compoundSpecWrites++;
+        const msg =
+          compoundSpecWrites === 1
+            ? "EIO: forward node write failure before composition rollback"
+            : "EROFS: persistent node restore failure";
+        throw Object.assign(new Error(msg), { code: compoundSpecWrites === 1 ? "EIO" : "EROFS" });
+      }
+      return origWriteFileSync(file, data, options as fs.WriteFileOptions);
+    }) as typeof fs.writeFileSync);
+
+    let failedCompoundClose: CaptureResult;
+    try {
+      failedCompoundClose = await runScope(
+        ["slice", "close", unfinishedName, "--mission", "m-rollback", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+    } finally {
+      compoundFailSpy.mockRestore();
+    }
+
+    expect(failedCompoundClose.exitCode).toBe(1);
+    expect(compoundSpecWrites).toBe(2);
+    expect(missionTmpWriteAttempts).toBe(2);
+    expect(failedCompoundClose.stderr).toContain("EIO: forward node write failure before composition rollback");
+    expect(failedCompoundClose.stderr).toContain("EROFS: persistent node restore failure");
+    expect(failedCompoundClose.stderr).toContain(
+      "rollback mission composition: EPERM: persistent simulated mission manifest rollback failure",
+    );
+    expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
+    expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
+    expect(fs.readFileSync(unfinishedEvidencePath, "utf8")).toBe(beforeEvidence);
+    expect(fs.readFileSync(acceptedJudgmentPath, "utf8")).toBe(beforeAcceptedJudgment);
+    // Because forward mission.yaml staging succeeded and rollbackComposition's write was persistently refused,
+    // mission.yaml honestly retains the un-rolled-back active=false edit rather than pretending atomic recovery.
+    const postCompoundManifest = YAML.parse(fs.readFileSync(missionManifestPath, "utf8")) as {
+      composition: { slices: Array<{ ref: string; active: boolean }> };
+    };
+    expect(
+      postCompoundManifest.composition.slices.find((entry) => entry.ref === `slices/${unfinishedName}/slice.yaml`)?.active,
+    ).toBe(false);
   });
 
   it("reconciles preexisting PROGRESS.md frontmatter status across CLI, SliceIndexer, and GET /api/slices for delivered and non-delivery in-place closures while preserving unrelated PROGRESS content and default moving close", async () => {
     const delivered = await seedAcceptedSlice("m-progress-sync", "active-to-delivered");
     const deliveredProgressPath = path.join(delivered.sliceDir, "PROGRESS.md");
-    writeFile(
+      writeFile(
       deliveredProgressPath,
       [
         "---",
@@ -759,6 +875,8 @@ describe("#2727 rig scope slice close --in-place", () => {
         "# current cursor comment",
         "status: active",
         "rail-item: PL-2727",
+        "checks:",
+        "  verdict: pass",
         "---",
         "# Progress — active-to-delivered",
         "",
@@ -875,8 +993,10 @@ describe("#2727 rig scope slice close --in-place", () => {
         doc: "slice-progress",
         status: "done",
         "rail-item": "PL-2727",
+        checks: { verdict: "pass" },
       });
       expect(updatedDeliveredProgress).toContain("# current cursor comment");
+      expect(updatedDeliveredProgress).toContain("checks:\n  verdict: pass");
       expect(updatedDeliveredProgress).toContain("- Kept author progress note.");
       expect(fs.readFileSync(plainProgressPath, "utf8")).toBe(beforePlainProgress);
       expect(fs.readFileSync(noStatusFmProgressPath, "utf8")).toBe(beforeNoStatusFmProgress);
@@ -884,6 +1004,163 @@ describe("#2727 rig scope slice close --in-place", () => {
         YAML.parse(beforeMissionManifest).metadata.status,
       );
       expect(fs.readFileSync(path.join(delivered.sliceDir, "proof", "judgments", "00000001.md"), "utf8")).toBe(beforeDeliveredJudgment);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses in-place close before any mutation when PROGRESS.md frontmatter has nested-only or later-nested status: entries that line-based slice readers would treat as slice status", async () => {
+    const nestedOnly = await seedAcceptedSlice("m-ambiguous-progress", "nested-only-status");
+    const nestedOnlyProgressPath = path.join(nestedOnly.sliceDir, "PROGRESS.md");
+    writeFile(
+      nestedOnlyProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "checks:",
+        "  status: active",
+        "---",
+        "# Progress — nested-only status",
+        "",
+        "- Nested check status only.",
+        "",
+      ].join("\n"),
+    );
+
+    const createdTopPlusNested = await runScope(
+      ["slice", "create", "m-ambiguous-progress", "top-plus-later-nested", "--json"],
+      missionsRoot,
+    );
+    const topPlusNestedDir = JSON.parse(createdTopPlusNested.stdout).slice.path as string;
+    const topPlusNestedName = path.basename(topPlusNestedDir);
+    const topPlusNestedSpecPath = path.join(topPlusNestedDir, "SPEC.md");
+    const topPlusNestedProgressPath = path.join(topPlusNestedDir, "PROGRESS.md");
+    const topPlusNestedEvidencePath = path.join(topPlusNestedDir, "evidence.txt");
+    const topPlusNestedId = String(readFrontmatter(topPlusNestedSpecPath).id ?? "OPR.1.0.1.2");
+    writeFile(
+      topPlusNestedSpecPath,
+      [
+        "---",
+        `id: ${topPlusNestedId}`,
+        "status: active",
+        "---",
+        "# top-plus-later-nested",
+        "",
+        "## Intent",
+        "Verify pre-mutation refusal when later nested status overrides top-level status in line-based readers.",
+        "",
+        "## Mini-requirements",
+        "1. Preserve every file byte-for-byte on refusal.",
+        "",
+        "## Proof contract",
+        "- [x] Verified pre-mutation refusal <!-- proof-item: nested-refusal-item -->",
+        "",
+      ].join("\n"),
+    );
+    writeFile(topPlusNestedEvidencePath, "Evidence for top-plus-later-nested.\n");
+    writeFile(
+      topPlusNestedProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "status: active",
+        "checks:",
+        "  status: active",
+        "---",
+        "# Progress — top-level plus later nested status",
+        "",
+        "- Both top-level and nested status keys.",
+        "",
+      ].join("\n"),
+    );
+    const preTopPlusNestedReadiness = readSliceReadiness(topPlusNestedDir);
+    recordJudgment(
+      missionsRoot,
+      {
+        scope: `m-ambiguous-progress/slices/${topPlusNestedName}`,
+        item: preTopPlusNestedReadiness.items[0]!.id,
+        verdict: "accept",
+        reason: "Verified baseline",
+        evidence: ["evidence.txt"],
+        expectedRevision: preTopPlusNestedReadiness.items[0]!.revision,
+        expectedPrevious: null,
+      },
+      "judge@trial",
+      "transport:v1",
+    );
+    expect(readSliceReadiness(topPlusNestedDir).state).toBe("ready");
+
+    commitAll(projectRoot, "seed ambiguous nested progress status slices");
+
+    const missionManifestPath = path.join(nestedOnly.missionDir, "mission.yaml");
+    const nestedOnlySpecPath = path.join(nestedOnly.sliceDir, "SPEC.md");
+    const nestedOnlyEvidencePath = path.join(nestedOnly.sliceDir, "proof", "evidence.md");
+    const nestedOnlyJudgmentPath = path.join(nestedOnly.sliceDir, "proof", "judgments", "00000001.md");
+    const topPlusNestedJudgmentPath = path.join(topPlusNestedDir, "proof", "judgments", "00000001.md");
+
+    const beforeManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeNestedOnlySpec = fs.readFileSync(nestedOnlySpecPath, "utf8");
+    const beforeNestedOnlyProgress = fs.readFileSync(nestedOnlyProgressPath, "utf8");
+    const beforeNestedOnlyEvidence = fs.readFileSync(nestedOnlyEvidencePath, "utf8");
+    const beforeNestedOnlyJudgment = fs.readFileSync(nestedOnlyJudgmentPath, "utf8");
+    const beforeTopSpec = fs.readFileSync(topPlusNestedSpecPath, "utf8");
+    const beforeTopProgress = fs.readFileSync(topPlusNestedProgressPath, "utf8");
+    const beforeTopEvidence = fs.readFileSync(topPlusNestedEvidencePath, "utf8");
+    const beforeTopJudgment = fs.readFileSync(topPlusNestedJudgmentPath, "utf8");
+
+    const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
+    try {
+      const closeNestedOnly = await runScope(
+        ["slice", "close", nestedOnly.sliceName, "--mission", "m-ambiguous-progress", "--in-place", "--reason", "delivered", "--json"],
+        missionsRoot,
+      );
+      expect(closeNestedOnly.exitCode).toBe(1);
+      const nestedOnlyError = JSON.parse(closeNestedOnly.stdout) as {
+        ok: boolean;
+        error: { fact: string; consequence: string; action: string };
+      };
+      expect(nestedOnlyError.ok).toBe(false);
+      expect(nestedOnlyError.error.fact).toContain(nestedOnlyProgressPath);
+      expect(nestedOnlyError.error.fact).toContain('nested "status:" entry');
+      expect(nestedOnlyError.error.consequence).toContain("before any file was modified");
+      expect(nestedOnlyError.error.action).toContain("top-level scalar");
+
+      const closeTopPlusNested = await runScope(
+        ["slice", "close", topPlusNestedName, "--mission", "m-ambiguous-progress", "--in-place", "--reason", "deferred"],
+        missionsRoot,
+      );
+      expect(closeTopPlusNested.exitCode).toBe(1);
+      expect(closeTopPlusNested.stdout).toBe("");
+      expect(closeTopPlusNested.stderr).toContain(topPlusNestedProgressPath);
+      expect(closeTopPlusNested.stderr).toContain('nested "status:" entry');
+      expect(closeTopPlusNested.stderr).toContain("before any file was modified");
+
+      // Exact byte-equality across mission.yaml, SPEC.md, PROGRESS.md, evidence, and proof judgment receipts:
+      expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeManifest);
+      expect(fs.readFileSync(nestedOnlySpecPath, "utf8")).toBe(beforeNestedOnlySpec);
+      expect(fs.readFileSync(nestedOnlyProgressPath, "utf8")).toBe(beforeNestedOnlyProgress);
+      expect(fs.readFileSync(nestedOnlyEvidencePath, "utf8")).toBe(beforeNestedOnlyEvidence);
+      expect(fs.readFileSync(nestedOnlyJudgmentPath, "utf8")).toBe(beforeNestedOnlyJudgment);
+      expect(fs.readFileSync(topPlusNestedSpecPath, "utf8")).toBe(beforeTopSpec);
+      expect(fs.readFileSync(topPlusNestedProgressPath, "utf8")).toBe(beforeTopProgress);
+      expect(fs.readFileSync(topPlusNestedEvidencePath, "utf8")).toBe(beforeTopEvidence);
+      expect(fs.readFileSync(topPlusNestedJudgmentPath, "utf8")).toBe(beforeTopJudgment);
+
+      // Proof readiness and CLI / SliceIndexer / GET /api/slices status remain 100% consistent ("active"):
+      expect(readSliceReadiness(nestedOnly.sliceDir).state).toBe("ready");
+      expect(readSliceReadiness(topPlusNestedDir).state).toBe("ready");
+
+      const activeApi = (await (await app.request("/api/slices?filter=active&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      expect(activeApi.slices.map((s) => s.name).sort()).toEqual([nestedOnly.sliceName, topPlusNestedName]);
+      expect(indexer.get(nestedOnly.sliceName)?.status).toBe("active");
+      expect(indexer.get(topPlusNestedName)?.status).toBe("active");
+
+      const cliActive = JSON.parse(
+        (await runScope(["slice", "ls", "--mission", "m-ambiguous-progress", "--state", "active", "--json"], missionsRoot)).stdout,
+      ).slices as Array<{ name: string }>;
+      expect(cliActive.map((s) => s.name).sort()).toEqual([nestedOnly.sliceName, topPlusNestedName]);
     } finally {
       db.close();
     }
