@@ -77,6 +77,32 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
+/** Check whether a markdown document's YAML frontmatter defines `key` at the
+ *  top level (falling back to line-based key inspection when invalid YAML
+ *  prevents full mapping parse, matching `SliceIndexer.parseFrontmatter`).
+ *  Returns `false` when the document has no frontmatter block. */
+export function frontmatterHasKey(content: string, key: string): boolean {
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
+  if (!match) return false;
+  const block = match[1]!;
+  try {
+    const parsed = YAML.parse(block);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.prototype.hasOwnProperty.call(parsed, key);
+    }
+    return false;
+  } catch {
+    for (const line of block.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const colonIdx = trimmed.indexOf(":");
+      if (colonIdx === -1) continue;
+      if (trimmed.slice(0, colonIdx).trim() === key) return true;
+    }
+    return false;
+  }
+}
+
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
  *  those keys in valid mappings, preserving inline comments and unowned bytes.
  *  Invalid mappings retain the legacy line-based update with a warning. Valid

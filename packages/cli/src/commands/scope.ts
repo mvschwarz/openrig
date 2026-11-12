@@ -44,6 +44,7 @@ import {
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
+  frontmatterHasKey,
   resolveNodeFile,
   findSlice,
   listMissions,
@@ -620,7 +621,18 @@ function buildSliceCloseCommand(): Command {
             reason === "delivered",
           );
           const edits = compositionEdit ? [compositionEdit] : [];
-          const originalNode = fs.readFileSync(slice.readmePath, "utf8");
+          const nodePath = slice.readmePath;
+          const originalNode = fs.readFileSync(nodePath, "utf8");
+          const progressPath = path.join(slice.absPath, "PROGRESS.md");
+          let originalProgress: string | null = null;
+          try {
+            originalProgress = fs.readFileSync(progressPath, "utf8");
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
+          const shouldReconcileProgressStatus =
+            originalProgress !== null && frontmatterHasKey(originalProgress, "status");
+
           applyMissionCompositionEdits(edits);
           try {
             const updates: Record<string, unknown> = {
@@ -628,10 +640,51 @@ function buildSliceCloseCommand(): Command {
               "closed-on": todayDateISO(),
             };
             if (opts.note) updates["closure-note"] = opts.note;
-            updateFrontmatter(slice.readmePath, updates);
+            updateFrontmatter(nodePath, updates);
+            if (shouldReconcileProgressStatus) {
+              updateFrontmatter(progressPath, { status: targetStatus });
+            }
           } catch (error) {
-            fs.writeFileSync(slice.readmePath, originalNode, "utf8");
-            rollbackComposition(edits);
+            const rollbackFailures: string[] = [];
+            try {
+              fs.writeFileSync(nodePath, originalNode, "utf8");
+            } catch (rbErr) {
+              rollbackFailures.push(
+                `restore ${nodePath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+              );
+            }
+            if (shouldReconcileProgressStatus && originalProgress !== null) {
+              try {
+                fs.writeFileSync(progressPath, originalProgress, "utf8");
+              } catch (rbErr) {
+                rollbackFailures.push(
+                  `restore ${progressPath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+                );
+              }
+            }
+            if (edits.length > 0) {
+              try {
+                rollbackComposition(edits);
+              } catch (rbErr) {
+                rollbackFailures.push(
+                  `rollback mission composition: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+                );
+              }
+            }
+            if (rollbackFailures.length > 0) {
+              if (error instanceof ScopeCliError) {
+                throw new ScopeCliError({
+                  fact: error.fact,
+                  consequence: `${error.consequence} (rollback failure(s): ${rollbackFailures.join("; ")})`,
+                  action: error.action,
+                });
+              }
+              const origMessage = error instanceof Error ? error.message : String(error);
+              throw new Error(
+                `${origMessage} (rollback failure(s): ${rollbackFailures.join("; ")})`,
+                { cause: error },
+              );
+            }
             throw error;
           }
           emit(out, {
@@ -647,7 +700,10 @@ function buildSliceCloseCommand(): Command {
               path: slice.absPath,
               git: { usedGit: false, repoRoot: null },
               proofApplicability: {
-                changed: false,
+                evaluated: false,
+                changed: null,
+                pathPreserved: true,
+                receiptFilesPreserved: true,
                 judgmentCount,
               },
             },
@@ -657,7 +713,7 @@ function buildSliceCloseCommand(): Command {
             `  status: ${targetStatus}`,
             `  path: ${slice.absPath}`,
             ...(judgmentCount > 0
-              ? [`  proof: ${judgmentCount} recorded judgment(s) preserved in place`]
+              ? [`  proof: ${judgmentCount} recorded judgment file(s) kept in place (applicability not evaluated; run rig proof show to check current readiness)`]
               : []),
           ]);
           return;
@@ -710,7 +766,10 @@ function buildSliceCloseCommand(): Command {
             path: destAbs,
             git: { usedGit, repoRoot },
             proofApplicability: {
+              evaluated: false,
               changed: judgmentCount > 0,
+              pathPreserved: false,
+              receiptFilesPreserved: true,
               judgmentCount,
             },
           },
@@ -719,7 +778,7 @@ function buildSliceCloseCommand(): Command {
           `  reason: ${reason}`,
           `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
           ...(judgmentCount > 0
-            ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep accepted proof applicable in place)`]
+            ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)`]
             : []),
         ]);
       } catch (err) {
