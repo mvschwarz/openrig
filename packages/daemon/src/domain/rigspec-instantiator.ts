@@ -551,7 +551,7 @@ export class PodRigInstantiator {
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string; recordCreated?: RecordCreated },
   ): Promise<MaterializeOutcome> {
     let raw: unknown;
     try {

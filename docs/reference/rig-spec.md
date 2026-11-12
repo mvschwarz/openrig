@@ -193,6 +193,10 @@ edges:
 ### Starting one materialized seat
 
 `rig import ./team.yaml --materialize-only` records the team without starting its harnesses.
+For an automated preparation that may retry, save a UUID first and pass
+`--operation-id <uuid> --json`; keep that same UUID, spec text, source root and other options on a retry.
+Both receipts identify the original rig and nodes through `operation`; see
+[HTTP operation correlation](operation-correlation.md#cli-no-launch-preparation) for capability checks and incomplete receipts.
 For a seat that has never started, use its positional logical ID:
 
 ```bash
