@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { baselineNotice, launcherMismatches, openrigPluginMismatches, packRelease, releaseBaseline } from './pack-release.mjs';
+import { baselineNotice, installTagMismatches, launcherMismatches, openrigPluginMismatches, packRelease, releaseBaseline } from './pack-release.mjs';
 import { snapshotPlugins } from './check-packaged-plugin-versions.mjs';
 
 const sha256 = file => createHash('sha256').update(readFileSync(file)).digest('hex');
@@ -13,8 +13,10 @@ const MANIFESTS = ['plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/p
 
 /** A repo with an assembled CLI at `version` and a launcher whose four pins are `pins`. Its openrig plugin carries
  *  `plugin.source` in source and `plugin.assembled` in the assembled CLI (both `version` by default), and its baseline is
- *  the published `baseline.release` (0.7.10 by default) with openrig-core's `baseline.core` bytes. */
-function fixture(t, version, pins = {}, { assembled = true, plugin = {}, baseline = {} } = {}) {
+ *  the published `baseline.release` (0.7.10 by default) with openrig-core's `baseline.core` bytes. Its install pages
+ *  link the rigs skill and the install script at `pages.tag` in source and `pages.assembled` in the assembled CLI (both
+ *  this release's tag by default). */
+function fixture(t, version, pins = {}, { assembled = true, plugin = {}, baseline = {}, pages = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pack-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const write = (rel, text) => { mkdirSync(join(root, rel, '..'), { recursive: true }); writeFileSync(join(root, rel), text); };
@@ -29,6 +31,16 @@ function fixture(t, version, pins = {}, { assembled = true, plugin = {}, baselin
   json('packages/acp/registry/agent.json', { id: 'openrig', version: pins.listing ?? version,
     distribution: { npx: { package: pins.npx ?? `@openrig/acp@${version}` } } });
   write('packages/acp/registry/icon.svg', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"/>\n');
+  const skill = tag => `npx skills add https://github.com/mvschwarz/openrig/tree/${tag}/skills/rigs --skill rigs --agent codex\n`;
+  const script = tag => `curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/${tag}/scripts/install.sh | sh\n`;
+  const reference = (dir, tag) => {
+    write(`${dir}/getting-started.md`, `# Getting started\n\n${skill(tag).replace(/(https:\S+)/, '"$1"')}${script(tag)}`);
+    write(`${dir}/quickstart.md`, `# Quickstart\n\n${skill(tag)}`);
+  };
+  const tag = pages.tag ?? `v${version}`;
+  write('README.md', `# OpenRig\n\n${skill(tag)}${script(tag)}`);
+  reference('docs/reference', tag);
+  if (assembled) reference('packages/cli/daemon/docs/reference', pages.assembled ?? tag);
   const plugins = (dir, openrig, core) => {
     for (const rel of MANIFESTS) json(`${dir}/openrig/${rel}`, { name: 'openrig', version: openrig });
     write(`${dir}/openrig/skills/team/SKILL.md`, '# team\n');
@@ -109,6 +121,36 @@ test("the openrig plugin's four manifests must carry the CLI version, in source 
     assert.equal(existsSync(join(missing, 'out')), false);
   }
   assert.deepEqual(openrigPluginMismatches(fixture(t, '0.7.13'), '0.7.13'), []);
+});
+
+test("the install pages must link this release's tag, and every other link is named by file and line", t => {
+  const root = fixture(t, '0.7.13', {}, { pages: { tag: '<release-tag>', assembled: 'v0.7.13' } });
+  assert.deepEqual(installTagMismatches(root, '0.7.13'), [
+    'README.md:3 links skills/rigs at "<release-tag>", not "v0.7.13"',
+    'README.md:4 links scripts/install.sh at "<release-tag>", not "v0.7.13"',
+    'docs/reference/getting-started.md:3 links skills/rigs at "<release-tag>", not "v0.7.13"',
+    'docs/reference/getting-started.md:4 links scripts/install.sh at "<release-tag>", not "v0.7.13"',
+    'docs/reference/quickstart.md:3 links skills/rigs at "<release-tag>", not "v0.7.13"',
+  ]);
+  const dest = join(root, 'out');
+  assert.throws(() => packRelease(root, dest), /The install pages must link this release's tag, v0\.7\.13, in source and in the assembled CLI; set them in the release preparation/);
+  assert.equal(existsSync(dest), false);
+  // The last release's tag and main's unreleased skill are refused the same way.
+  for (const tag of ['v0.7.12', 'main']) assert.equal(installTagMismatches(fixture(t, '0.7.13', {}, { pages: { tag } }), '0.7.13').length, 8);
+  // npm packs the assembled copies: current source over a stale assembly is refused, with the rebuild step.
+  const stale = fixture(t, '0.7.13', {}, { pages: { assembled: 'v0.7.12' } });
+  assert.deepEqual(installTagMismatches(stale, '0.7.13'), [
+    'packages/cli/daemon/docs/reference/getting-started.md:3 links skills/rigs at "v0.7.12", not "v0.7.13"',
+    'packages/cli/daemon/docs/reference/getting-started.md:4 links scripts/install.sh at "v0.7.12", not "v0.7.13"',
+    'packages/cli/daemon/docs/reference/quickstart.md:3 links skills/rigs at "v0.7.12", not "v0.7.13"',
+  ]);
+  assert.throws(() => packRelease(stale, join(stale, 'out')), /then run npm run build:package again/);
+  assert.equal(existsSync(join(stale, 'out')), false);
+  // A page that links no rigs skill is named, rather than passing with nothing checked.
+  const bare = fixture(t, '0.7.13');
+  writeFileSync(join(bare, 'docs/reference/quickstart.md'), '# Quickstart\n');
+  assert.deepEqual(installTagMismatches(bare, '0.7.13'), ['docs/reference/quickstart.md has no rigs-skill install link']);
+  assert.deepEqual(installTagMismatches(fixture(t, '0.7.13'), '0.7.13'), []);
 });
 
 test('the baseline must be an earlier published release with its archive hash, never the candidate', t => {
