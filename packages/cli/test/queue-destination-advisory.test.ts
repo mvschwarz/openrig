@@ -3,13 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createDaemon } from "../../daemon/src/startup.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
-import { queueRoutes } from "../../daemon/src/routes/queue.js";
+import { deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../../daemon/src/domain/queue-repository.js";
+import { crossHostProvenanceTags, queueRoutes } from "../../daemon/src/routes/queue.js";
 import { getSelfHostId, setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 import { deriveCurrentWork, resolveWorkNodeDirs } from "../../daemon/src/domain/current-work.js";
 import { queueCommand, type QueueDeps } from "../src/commands/queue.js";
 import { DaemonResponseError } from "../src/client.js";
+import { createMcpServer } from "../src/mcp-server.js";
 
 describe("queue destination advisory through CLI and route", () => {
   it("prints the accepted typo unchanged for create and both handoffs", async () => {
@@ -77,6 +81,8 @@ describe("queue create scope advisories preserve admission and output", () => {
   let responseHeaders: Headers[];
   let createResponses: Array<{ status: number; data: Record<string, unknown> }>;
   let handoffResponses: Array<{ status: number; data: Record<string, unknown> }>;
+  let handoffTransportHeaders: Record<string, string> | undefined;
+  let handoffRequestBody: Record<string, unknown> | undefined;
   let savedHost: string | null;
   let savedExit: typeof process.exitCode;
 
@@ -136,6 +142,8 @@ describe("queue create scope advisories preserve admission and output", () => {
     responseHeaders = [];
     createResponses = [];
     handoffResponses = [];
+    handoffTransportHeaders = undefined;
+    handoffRequestBody = undefined;
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { stdout.push(args.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { stderr.push(args.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
@@ -200,9 +208,11 @@ describe("queue create scope advisories preserve admission and output", () => {
     stderr.length = 0;
     handoffResponses = [];
     const client = {
-      post: async (url: string, body: unknown) => {
+      post: async (url: string, body: unknown, options?: { headers?: Record<string, string> }) => {
+        handoffTransportHeaders = options?.headers;
+        handoffRequestBody = body as Record<string, unknown>;
         const response = await app.request(url, { method: "POST",
-          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope", ...(options?.headers ?? {}) },
           body: JSON.stringify(body) });
         const data = await response.json() as Record<string, unknown>;
         handoffResponses.push({ status: response.status, data });
@@ -221,18 +231,6 @@ describe("queue create scope advisories preserve admission and output", () => {
     await queueCommand(deps).parseAsync(args, { from: "user" });
   }
 
-  function cliHandoffProjection(data: Record<string, unknown>): Record<string, unknown> {
-    const projected = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
-    const advisories = Array.isArray(projected.advisories) ? projected.advisories as Array<Record<string, unknown>> : null;
-    if (!advisories) return projected;
-    const scopeCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
-      "scope_check_unavailable", "scope_check_skipped"]);
-    const preserved = advisories.filter(advisory => !scopeCodes.has(String(advisory.code)));
-    if (preserved.length > 0) projected.advisories = preserved;
-    else delete projected.advisories;
-    return projected;
-  }
-
   function handoffScopeAdvisories(data: Record<string, unknown>): Array<Record<string, unknown>> {
     const advisories = Array.isArray(data.advisories) ? data.advisories as Array<Record<string, unknown>> : [];
     const scopeCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
@@ -240,9 +238,156 @@ describe("queue create scope advisories preserve admission and output", () => {
     return advisories.filter(advisory => scopeCodes.has(String(advisory.code)));
   }
 
-  function expectHandoffJsonProjection(data: Record<string, unknown>): void {
-    expect(stdout).toEqual([JSON.stringify(cliHandoffProjection(data))]);
+  function expectHandoffJsonProjection(data: Record<string, unknown>, space?: number): void {
+    const closedId = (data.closed as { qitemId: string }).qitemId;
+    const closed = source.daemon.deps.queueRepo.getById(closedId);
+    expect(closed).toBeTruthy();
+    // These baseline cases use a registered destination, whose unchanged response had no
+    // destination advisory. Derive the expected stdout from the committed source row and
+    // the actual successor result (which may carry receiver-owned advice on a forward).
+    expect(stdout).toEqual([JSON.stringify({ closed: JSON.parse(JSON.stringify(closed)), created: data.created }, null, space)]);
   }
+
+  const handoffVerbs = [
+    { verb: "handoff" as const, closedState: "handed-off" },
+    { verb: "handoff-and-complete" as const, closedState: "done" },
+  ];
+
+  it.each(handoffVerbs)("keeps the default HTTP $verb response at its prior row-and-destination-advice shape", async ({ verb }) => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const destination = "missing-worker@scope";
+    const destinationAdvice = source.daemon.deps.queueRepo.destinationAdvisory(destination);
+    expect(destinationAdvice).toMatchObject({ code: "unmatched_destination_seat", destinationSession: destination });
+    const response = await source.app.request(`/api/queue/${encodeURIComponent(original.qitemId)}/${verb}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+      body: JSON.stringify({ toSession: destination, summary: "HTTP default contract", nudge: false }),
+    });
+    const actual = await response.json() as Record<string, unknown>;
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const createdId = (actual.created as { qitemId: string }).qitemId;
+    const created = source.daemon.deps.queueRepo.getById(createdId);
+    expect(response.status).toBe(201);
+    expect(actual).toEqual({ closed: JSON.parse(JSON.stringify(closed)), created: JSON.parse(JSON.stringify(created)), advisories: [destinationAdvice] });
+  });
+
+  it.each(handoffVerbs)("keeps the default cross-host HTTP $verb response free of a new top-level scope field", async ({ verb }) => {
+    const receiver = await fixture("default-http-receiver");
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const { app, observation } = forwardingApp(receiver);
+    setSelfHostId(source.hostId);
+    const response = await app.request(`/api/queue/${encodeURIComponent(original.qitemId)}/${verb}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+      body: JSON.stringify({ toSession: "worker@scope", hostId: "remote-fixture", summary: "cross-host default contract", nudge: false }),
+    });
+    const actual = await response.json() as Record<string, unknown>;
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    expect(response.status).toBe(201);
+    expect(observation.forwards).toBe(1);
+    expect(observation.receiverPayloads).toHaveLength(1);
+    expect(actual).toEqual({ closed: JSON.parse(JSON.stringify(closed)), created: observation.receiverPayloads[0] });
+  });
+
+  it("keeps MCP handoff structured and text output at the default HTTP contract", async () => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const destination = "missing-worker@scope";
+    const destinationAdvice = source.daemon.deps.queueRepo.destinationAdvisory(destination);
+    let requestOptions: unknown;
+    let routedData: Record<string, unknown> | undefined;
+    const daemonClient = {
+      post: async (url: string, body: unknown, options?: unknown) => {
+        requestOptions = options;
+        const response = await source.app.request(url, { method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+          body: JSON.stringify(body) });
+        routedData = await response.json() as Record<string, unknown>;
+        return { status: response.status, data: routedData };
+      },
+    };
+    const server = createMcpServer(daemonClient as never);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcpClient = new Client({ name: "2725-contract-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcpClient.connect(clientTransport);
+    try {
+      const result = await mcpClient.callTool({ name: "rig_queue_handoff", arguments: {
+        qitemId: original.qitemId, to: destination, summary: "MCP default contract",
+      } });
+      const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+      const text = (result.content as Array<{ type: string; text: string }>).find(item => item.type === "text")?.text;
+      const parsed = JSON.parse(text ?? "null");
+      const expected = { closed: JSON.parse(JSON.stringify(closed)), created: routedData?.created, advisories: [destinationAdvice] };
+      expect(requestOptions).toBeUndefined();
+      expect(parsed).toEqual(expected);
+      expect(result.structuredContent).toEqual(expected);
+      expect(result.isError).toBeFalsy();
+    } finally {
+      await mcpClient.close();
+      await server.close();
+    }
+  });
+
+  it.each(handoffVerbs)("keeps the CLI $verb JSON rows and destination advice while scope advice goes to stderr", async ({ verb }) => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const destination = "missing-worker@scope";
+    const destinationAdvice = source.daemon.deps.queueRepo.destinationAdvisory(destination);
+    expect(destinationAdvice).toMatchObject({ code: "unmatched_destination_seat", destinationSession: destination });
+
+    await handoff(source.app, original.qitemId, verb, { json: true, destination });
+
+    const data = handoffResponses[0]!.data;
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const createdId = (data.created as { qitemId: string }).qitemId;
+    const created = source.daemon.deps.queueRepo.getById(createdId);
+    expect(data.advisories).toEqual([destinationAdvice, expect.objectContaining({ code: "unresolved_scope" })]);
+    expect(handoffTransportHeaders).toEqual({ "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" });
+    expect(handoffRequestBody).not.toHaveProperty("X-OpenRig-CLI-Handoff-Scope-Advisory");
+    expect(scopeLines()).toContain("Warning:");
+    expect(scopeLines()).toContain("mission:missing-mission");
+    expect(stdout).toEqual([JSON.stringify({ closed: JSON.parse(JSON.stringify(closed)),
+      created: JSON.parse(JSON.stringify(created)), advisories: [destinationAdvice] })]);
+    expect(closed).toMatchObject({ state: verb === "handoff" ? "handed-off" : "done", closureReason: "handed_off_to" });
+    expect(created).toMatchObject({ destinationSession: destination, tags: ["mission:missing-mission", "project:alpha"] });
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it.each(handoffVerbs)("keeps skipped-scope advice on an opted-in self-id $verb re-drive without sender reads", async ({ verb, closedState }) => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const selfHostId = source.hostId;
+    expect(selfHostId).toEqual(expect.any(String));
+    const successorId = deriveCrossHostSuccessorId(original.qitemId, "worker@scope", selfHostId!);
+    const successorTags = crossHostProvenanceTags(original.tags ?? undefined);
+    const successor = await source.daemon.deps.queueRepo.create({
+      qitemId: successorId,
+      sourceSession: stampSelfHostSuffix("writer@scope"),
+      destinationSession: "worker@scope",
+      body: original.body,
+      summary: "preexisting self-forward successor",
+      priority: original.priority,
+      tags: successorTags,
+      chainOfRecord: [original.qitemId],
+      nudge: false,
+      identityProvenance: "claimed:v1",
+    });
+    const before = JSON.parse(JSON.stringify(successor));
+    const senderReads = observeSenderScopeReads();
+    const response = await source.app.request(`/api/queue/${encodeURIComponent(original.qitemId)}/${verb}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope",
+        "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+      body: JSON.stringify({ toSession: "worker@scope", hostId: selfHostId, summary: "self-id re-drive", nudge: false }),
+    });
+    const data = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(201);
+    expect(data.advisories).toEqual([expect.objectContaining({ code: "scope_check_skipped" })]);
+    expect(senderReads).toEqual([]);
+    expect(data.created).toEqual(before);
+    expect(source.daemon.deps.queueRepo.getById(successorId)).toEqual(successor);
+    expect(data.closed).toMatchObject({ qitemId: original.qitemId, state: closedState, closureReason: "handed_off_to" });
+    expect(source.daemon.deps.queueRepo.getById(original.qitemId)).toMatchObject({ state: closedState, handedOffTo: "worker@scope" });
+  });
 
   function committed(f: Fixture, id: string, tags: string[] | null): void {
     const stored = f.daemon.deps.queueRepo.getById(id);
@@ -260,11 +405,6 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   const scopeLines = () => stderr.join("\n").split("\n")
     .filter(line => /\bscope\b|mission:|slice:/i.test(line)).join("\n");
-
-  const handoffVerbs = [
-    { verb: "handoff" as const, closedState: "handed-off" },
-    { verb: "handoff-and-complete" as const, closedState: "done" },
-  ];
 
   const inheritedHandoffScopeCases = [
     { name: "unresolved mission", tags: ["mission:missing-mission", "project:alpha"], code: "unresolved_scope", text: /unresolved|resolves to 0/i },
@@ -365,7 +505,7 @@ describe("queue create scope advisories preserve admission and output", () => {
 
     expect(handoffScopeAdvisories(data)).toHaveLength(1);
     expect(scopeLines()).toContain("Warning:");
-    expect(stdout).toEqual([JSON.stringify(cliHandoffProjection(data), null, 2)]);
+    expectHandoffJsonProjection(data, 2);
   });
 
   it.each(handoffVerbs)("queue handoff scope reports cross-host $verb as skipped without sender scope reads", async ({ verb, closedState }) => {
@@ -378,6 +518,8 @@ describe("queue create scope advisories preserve admission and output", () => {
 
     expect(observation.forwards).toBe(1);
     expect(observation.committedStatuses).toEqual([201]);
+    expect(observation.forwardedDiagnosticHeaders).toEqual([null]);
+    expect(observation.forwardedBodies[0]).not.toHaveProperty("X-OpenRig-CLI-Handoff-Scope-Advisory");
     expect(handoffResponses[0]!.status).toBe(201);
     const data = handoffResponses[0]!.data;
     const [advisory] = handoffScopeAdvisories(data);
@@ -393,6 +535,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(closed?.state).toBe(closedState);
     expect(created.tags).toEqual(expect.arrayContaining(["mission:missing-mission", "slice:MISSING.SLICE", "cross-host"]));
     expect(receiver.daemon.deps.queueRepo.getById(created.qitemId)?.tags).toEqual(created.tags);
+    expect(created.tags).not.toContain("X-OpenRig-CLI-Handoff-Scope-Advisory");
     expect(process.exitCode ?? 0).toBe(0);
     // The new internal daemon diagnostic is intentionally absent from stdout; the forwarded row remains intact.
     expectHandoffJsonProjection(data);
@@ -622,7 +765,9 @@ describe("queue create scope advisories preserve admission and output", () => {
   }
 
   function forwardingApp(receiver: Fixture, loseResponse = false, remoteResponse?: () => Response) {
-    const observation = { forwards: 0, committedStatuses: [] as number[] };
+    const observation = { forwards: 0, committedStatuses: [] as number[],
+      forwardedDiagnosticHeaders: [] as Array<string | null>, forwardedBodies: [] as Array<Record<string, unknown>>,
+      receiverPayloads: [] as Array<Record<string, unknown>> };
     const app = new Hono();
     app.use("*", async (c, next) => {
       const set = c.set.bind(c) as (key: string, value: unknown) => void;
@@ -633,7 +778,9 @@ describe("queue create scope advisories preserve admission and output", () => {
       ] } }));
       set("remoteFetchImpl", async (_url: unknown, init: RequestInit) => {
         observation.forwards++;
-        const body = JSON.parse(String(init.body));
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        observation.forwardedBodies.push(body);
+        observation.forwardedDiagnosticHeaders.push(new Headers(init.headers).get("X-OpenRig-CLI-Handoff-Scope-Advisory"));
         const previous = getSelfHostId();
         setSelfHostId(receiver.hostId);
         try {
@@ -642,6 +789,7 @@ describe("queue create scope advisories preserve admission and output", () => {
             : await receiver.app.request("/api/queue/create", { ...init,
               headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
           observation.committedStatuses.push(response.status);
+          if (!remoteResponse && response.status < 400) observation.receiverPayloads.push(await response.clone().json() as Record<string, unknown>);
           if (loseResponse) {
             await response.text();
             return new Response(new ReadableStream({ start(controller) {

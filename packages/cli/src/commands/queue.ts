@@ -473,9 +473,18 @@ function remoteHostOf(hostId: string | undefined): string | undefined {
  *  (`QUEUE_FORWARD_TIMEOUT_MS` in the daemon's routes/queue.ts), so waiting only the client's 5 s default
  *  turns a slow remote's answer into an unknown outcome. */
 const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
 function crossHostWriteOptions(hostId: string | undefined): { timeoutMs: number } | undefined {
   return remoteHostOf(hostId) ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : undefined;
+}
+
+/** The daemon returns handoff scope advice only to this CLI diagnostic request; it is not in the write body. */
+function handoffScopeDiagnosticOptions(hostId: string | undefined) {
+  return {
+    ...(crossHostWriteOptions(hostId) ?? {}),
+    headers: { [CLI_HANDOFF_SCOPE_ADVISORY_HEADER]: "1" },
+  };
 }
 
 /** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
@@ -1716,7 +1725,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         const output = emitHandoffScopeAdvisories(res.status, res.data);
@@ -1819,7 +1828,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         const output = emitHandoffScopeAdvisories(res.status, res.data);

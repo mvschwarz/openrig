@@ -66,6 +66,8 @@ import { feedPerspective } from "../domain/feed-perspective.js";
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
+/** Private transport opt-in for CLI stderr diagnostics; the marker is not a body field and is never forwarded. */
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -593,7 +595,9 @@ export function queueRoutes(): Hono {
     // `created` is the origin daemon's row, verbatim. The origin can also report
     // that its own scope check was skipped, without pretending the forwarding
     // daemon inspected remote filesystem state.
-    const scopeCheck = skippedCreateScopeAdvisory(effectiveTags);
+    const scopeCheck = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1"
+      ? skippedCreateScopeAdvisory(effectiveTags)
+      : null;
     const scopeAdvisory = scopeCheck ? toCreateScopeAdvisory(scopeCheck, {
       verb: terminalState === "done" ? "handoff-and-complete" : "handoff",
       tagSource: body.tags == null ? "inherited" : "explicit",
@@ -1018,10 +1022,12 @@ export function queueRoutes(): Hono {
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const destination = destinationAdvisory(c, result.created.destinationSession);
-      const scope = createScopeAdvisory(c, result.created.tags, {
-        verb: "handoff",
-        tagSource: body.tags == null ? "inherited" : "explicit",
-      });
+      const scope = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1"
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
       const advisories = [destination, scope].filter(Boolean);
       return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}) }, 201);
     } catch (err) {
@@ -1108,10 +1114,12 @@ export function queueRoutes(): Hono {
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       const destination = destinationAdvisory(c, result.created.destinationSession);
-      const scope = createScopeAdvisory(c, result.created.tags, {
-        verb: "handoff-and-complete",
-        tagSource: body.tags == null ? "inherited" : "explicit",
-      });
+      const scope = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1"
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff-and-complete",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
       const advisories = [destination, scope].filter(Boolean);
       return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}) }, 201);
     } catch (err) {
