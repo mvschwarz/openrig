@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "./input-read-diagnostic.js";
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
@@ -425,6 +426,7 @@ type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_
 
 /** Safe delivery diagnostics: never retain pane contents or an exception message. */
 export interface RestoreDeliveryAttempt {
+  inputReadFailure?: InputReadDiagnostic;
   stage: PendingPostCompactStage;
   at: string;
   ok: boolean;
@@ -461,6 +463,7 @@ export interface ObservedCompaction {
   detail: string;
 }
 export interface PreparationState {
+  inputReadFailure?: InputReadDiagnostic & { stage: "preparation" | "compact" };
   /** The reading that held this preparation send; never includes draft text. */
   inputBox?: SendResult["heldInputBoxReading"];
   policyActor?: TerminalActor;
@@ -565,6 +568,7 @@ interface PreparationFailureRun {
 }
 
 interface CompactionRecord {
+  inputReadFailure?: PreparationState["inputReadFailure"];
   preparationFailures?: PreparationFailureRun;
   inputBox?: PreparationState["inputBox"];
   /** The daemon process that last wrote it. */
@@ -1000,6 +1004,7 @@ export class ClaudeCompactionEnforcer {
     } catch (error) {
       this.recordRestoreFailure(input.sessionName, stage, record, {
         ok: false, reason: error instanceof DeliveryGuardError ? error.code : "send_failed",
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
       }, error instanceof Error ? error.name : typeof error);
       if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
       throw error;
@@ -1027,7 +1032,7 @@ export class ClaudeCompactionEnforcer {
   private recordRestoreFailure(
     session: string, stage: PendingPostCompactStage | undefined,
     record: { file: string; record: CompactionRecord } | undefined,
-    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox">, errorClass?: string,
+    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox" | "inputReadFailure">, errorClass?: string,
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
@@ -1042,6 +1047,7 @@ export class ClaudeCompactionEnforcer {
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
       ...(result.outcome ? { outcome: result.outcome } : {}),
+      ...(result.inputReadFailure ? { inputReadFailure: result.inputReadFailure } : {}),
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
       ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
@@ -1598,7 +1604,7 @@ export class ClaudeCompactionEnforcer {
       if (error instanceof DeliveryGuardError) {
         const written = (error as { inputWritten?: boolean }).inputWritten === true;
         const attempted = (error as { inputAttempted?: boolean }).inputAttempted === true;
-        prep = { ok: false, sent: written, reason: error.code,
+        prep = { ok: false, sent: written, reason: error.code, inputReadFailure: error.inputReadFailure,
           inputPhase: written ? "written" as const : attempted ? "attempted" as const : "not_reached" as const };
       } else prep = null;
     }
@@ -1611,7 +1617,8 @@ export class ClaudeCompactionEnforcer {
     // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
     attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
     attempt.inputBox = prep?.heldInputBoxReading;
-    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox });
+    if (prep?.inputReadFailure) attempt.inputReadFailure = { stage: "preparation", ...prep.inputReadFailure };
+    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox, inputReadFailure: attempt.inputReadFailure });
     // The replacement request went out (or may have): the ended attempt's gate is used up.
     if (!notSent && attempt.afterEnded !== undefined && this.pendingPreCompactPrep.get(input.sessionName) === attempt) this.lastEnded.delete(input.sessionName);
     if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
@@ -1661,7 +1668,7 @@ export class ClaudeCompactionEnforcer {
       return this.sessionTransport.send(input.sessionName, composed.command,
         { openrigNotice: true, allowDraftWhileIdle: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: attempt.prepared ? idleWait : Math.max(1, Math.min(idleWait, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
-    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase" | "activity" | "heldInputBox">;
+    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase" | "activity" | "heldInputBox" | "inputReadFailure">;
     let guardRefused = false;
     try {
       const guard = this.sessionTransport.deliveryGuard;
@@ -1672,11 +1679,16 @@ export class ClaudeCompactionEnforcer {
       const attempted = (error as { inputAttempted?: boolean } | null)?.inputAttempted === true;
       guardRefused = error instanceof DeliveryGuardError && !written && !attempted;
       result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain",
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
         ...(written ? { sent: true, inputPhase: "written" as const } : attempted ? { inputPhase: "attempted" as const } : {}) };
     } finally {
       delete attempt.compactInFlight;
     }
     if (!result.ok || result.outcome === "retained") {
+      if (result.inputReadFailure) {
+        attempt.inputReadFailure = { stage: "compact", ...result.inputReadFailure };
+        this.persist(input.sessionName, attempt.attemptId, { inputReadFailure: attempt.inputReadFailure });
+      }
       const phase = result.inputPhase;
       // A write that was issued, or text already in the input, is never "nothing sent".
       const writeAttempted = phase === "attempted" || phase === "written" || result.sent === true;
@@ -1927,7 +1939,7 @@ export class ClaudeCompactionEnforcer {
         compact: "not_sent", sends: record.sends,
         deadlineAt: record.deadlineAt ?? (record.delivery === "not_sent" ? null : record.updatedAt + AUTO_PREP_WAIT_MS_DEFAULT),
         policyWasEnabled: true, preparationRoot: record.preparationRoot, controller: new AbortController(),
-        compactInstruction: record.compactInstruction, inputBox: record.inputBox,
+        compactInstruction: record.compactInstruction, inputBox: record.inputBox, inputReadFailure: record.inputReadFailure,
         // A held attempt comes back held, with its recorded hold (never stamped again) and its map's age and usage.
         ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt, preparedReason: record.preparedReason ?? "map_complete_seat_never_idle" } : {}),
         ...(held ? { mapReadyAt: record.mapReadyAt ?? record.preparedAt ?? record.updatedAt } : record.mapReadyAt !== undefined ? { mapReadyAt: record.mapReadyAt } : {}),

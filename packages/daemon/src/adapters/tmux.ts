@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -77,7 +78,7 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 
 export type TmuxResult =
   | { ok: true; warnings?: string[]; stopPhase?: StopPhase }
-  | { ok: false; code: string; message: string; stopPhase?: StopPhase };
+  | { ok: false; code: string; message: string; stopPhase?: StopPhase; inputReadFailure?: InputReadDiagnostic };
 
 /** Furthest external stop boundary reached; an attempted command can have an uncertain effect. */
 export type StopPhase = "none" | "detach_attempted" | "detached" | "kill_attempted";
@@ -246,7 +247,7 @@ function isTmuxTransportAbsentError(err: unknown): boolean {
 }
 
 function classifyWriteError(err: unknown): TmuxResult {
-  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message };
+  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message, ...(err.inputReadFailure ? { inputReadFailure: err.inputReadFailure } : {}) };
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
@@ -600,7 +601,8 @@ export class TmuxAdapter {
         return guard.input(identity, () => write(pane, () => guard.checkInput(identity), bound.nodeId));
       });
     } catch (error) {
-      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
+      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message),
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
   }
 
