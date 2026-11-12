@@ -45,7 +45,7 @@ export function defaultWindowDeps(): WindowDeps {
   return {
     platform: process.platform, env, exists: existsSync,
     exec: async (file, args, timeoutMs = 10_000) => {
-      const command = file === "tmux" ? tmuxServerStartCommand(file, args) : { file, args };
+      const command = path.basename(file) === "tmux" ? tmuxServerStartCommand(file, args) : { file, args };
       try {
         const result = await run(command.file, command.args, { env, encoding: "utf8", timeout: timeoutMs });
         reportTmuxServerLimit(result.stderr);
