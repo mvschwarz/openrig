@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readWakeOutcome } from "../src/domain/connection-contract.js";
+import { memberCheckInStatus, readWakeOutcome } from "../src/domain/connection-contract.js";
 import { NUDGE_FAIL_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 
 describe("readWakeOutcome: every recorded nudge result reads as a delivery fact", () => {
@@ -49,5 +49,46 @@ describe("readWakeOutcome: every recorded nudge result reads as a delivery fact"
   it("no recorded attempt reads as no outcome", () => {
     expect(readWakeOutcome(null)).toBeNull();
     expect(readWakeOutcome(undefined)).toBeNull();
+  });
+});
+
+describe("memberCheckInStatus: a hosted member's check-in status", () => {
+  const now = new Date("2026-11-12T12:00:00.000Z");
+  const seenAgo = (minutes: number) => ({ state: "seen" as const, at: new Date(now.getTime() - minutes * 60_000).toISOString() });
+  const status = (checkInMinutes: number | null, checkIn: Parameters<typeof memberCheckInStatus>[0]["checkIn"], revokedAt?: string) =>
+    memberCheckInStatus({ checkInMinutes, checkIn, now, ...(revokedAt ? { revokedAt } : {}) }).status;
+
+  it("with a stated cadence, one rule: checking in up to exactly twice it, overdue a moment after", () => {
+    const at = (ms: number) => ({ state: "seen" as const, at: new Date(now.getTime() - ms).toISOString() });
+    expect(status(60, seenAgo(5))).toBe("checking-in");
+    expect(status(60, seenAgo(90))).toBe("checking-in"); // past one cadence is not yet overdue
+    expect(status(60, at(2 * 60 * 60_000))).toBe("checking-in");
+    expect(status(60, at(2 * 60 * 60_000 + 1))).toBe("check-in-overdue");
+    expect(status(1, at(2 * 60_000 + 1))).toBe("check-in-overdue"); // any positive cadence works the same way
+  });
+
+  it("a stated cadence that can't be used reads unknown with its reason, ahead of every other reading", () => {
+    expect(memberCheckInStatus({ checkInMinutes: null, cadenceProblem: "check_in_minutes \"60\" isn't a positive whole number of minutes",
+      checkIn: seenAgo(5), now })).toMatchObject({ status: "unknown", reason: expect.stringContaining("check_in_minutes") });
+    expect(memberCheckInStatus({ checkInMinutes: 60, checkIn: { state: "unknown" }, now })).toMatchObject({ status: "unknown", reason: "its check-ins couldn't be read" });
+  });
+
+  it("with no stated cadence it is prompted only, whatever its last check-in's age, and keeps that check-in", () => {
+    expect(status(null, seenAgo(5))).toBe("prompted-only");
+    expect(status(null, seenAgo(10_000))).toBe("prompted-only");
+    expect(memberCheckInStatus({ checkInMinutes: undefined, checkIn: seenAgo(5), now })).toMatchObject({ lastCheckInAt: seenAgo(5).at, expectedMinutes: null });
+  });
+
+  it("no recorded check-in reads never, with or without a cadence; an unreadable record reads unknown, never idle or overdue", () => {
+    expect(status(60, { state: "never" })).toBe("never-checked-in");
+    expect(memberCheckInStatus({ checkInMinutes: null, checkIn: { state: "never" }, now })).toMatchObject({ status: "never-checked-in", expectedMinutes: null });
+    expect(status(60, { state: "unknown" })).toBe("unknown");
+    expect(status(60, { state: "seen", at: "not a time" })).toBe("unknown");
+  });
+
+  it("disconnected comes only from a recorded revocation, ahead of everything else; silence never produces it", () => {
+    expect(status(60, seenAgo(5), "2026-11-12T11:00:00.000Z")).toBe("disconnected");
+    expect(status(60, seenAgo(100_000))).toBe("check-in-overdue");
+    expect(status(null, { state: "never" })).not.toBe("disconnected");
   });
 });

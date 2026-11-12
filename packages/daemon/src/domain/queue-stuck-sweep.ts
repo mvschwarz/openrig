@@ -34,7 +34,7 @@ import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSucce
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { readWakeOutcome } from "./connection-contract.js";
+import { memberCheckInStatus, readWakeOutcome } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -620,13 +620,21 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
  *  facts and the member's check-in state, never a current check-in's exact time, so a pass rewrites it only when the rows
  *  or that state change. */
 function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: InboxCheckIn,
-  now: Date): { summary: string; body: string } {
+  now: Date, cadenceMinutes: number | null = null): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
-  const recent = checkIn.state === "seen" && now.getTime() - Date.parse(checkIn.at) <= thresholdMinutes * 60_000;
+  // Only the words change; when this notice is filed doesn't. A member whose person stated a cadence is judged by it
+  // (overdue past twice it); one with none, by this threshold, as before.
+  const status = cadenceMinutes === null ? null : memberCheckInStatus({ checkInMinutes: cadenceMinutes, checkIn, now }).status;
+  const recent = status !== null ? status === "checking-in"
+    : checkIn.state === "seen" && now.getTime() - Date.parse(checkIn.at) <= thresholdMinutes * 60_000;
   const checkIns = recent
-    ? `checking in: it read its own inbox within the last ${thresholdMinutes} min`
+    ? cadenceMinutes !== null
+      ? `checking in: its last check-in is within twice its expected ${cadenceMinutes} min`
+      : `checking in: it read its own inbox within the last ${thresholdMinutes} min`
     : checkIn.state === "seen"
-      ? `no check-in observed since ${checkIn.at}`
+      ? cadenceMinutes !== null
+        ? `overdue: no check-in since ${checkIn.at}; expected every ${cadenceMinutes} min, so its schedule may be off or waiting for an approval`
+        : `no check-in observed since ${checkIn.at}`
       : checkIn.state === "never" ? "no check-in observed yet" : "unknown: its check-ins couldn't be read";
   const why = recent
     ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
@@ -1493,7 +1501,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // A polling member's notice says whether it's checking in; an agent seat's names the route to add instead.
       const polled = rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat);
       const backlogText = (standsFor: BacklogRow[]) => polled
-        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now)
+        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now, deps.queueRepo.hostedMemberCadence(seat))
         : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
       // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
       // else the operator agent. With none, it stays with the member, which reads it when it next checks.

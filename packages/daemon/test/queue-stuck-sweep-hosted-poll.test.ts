@@ -11,7 +11,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { queueRoutes } from "../src/routes/queue.js";
-import type { RosterWake } from "../src/domain/rosters.js";
+import type { RosterMember, RosterWake } from "../src/domain/rosters.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG, unclaimedBacklogTag } from "../src/domain/queue-stuck-sweep.js";
 
 const MEMBER = "helper-a@hub";
@@ -23,12 +23,13 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
   let repo: QueueRepository;
 
   function makeRepo(opts: { hostedWake?: (d: string) => RosterWake | null; resolveSessionAddresses?: (n: string) => string[];
-    validateRig?: (d: string) => boolean } = {}): QueueRepository {
+    validateRig?: (d: string) => boolean; hostedMembers?: () => RosterMember[] } = {}): QueueRepository {
     return new QueueRepository(db, bus, {
       validateRig: opts.validateRig ?? (() => true),
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       isHostedMember: (d) => d === MEMBER,
       hostedWake: opts.hostedWake ?? (() => null),
+      hostedMembers: opts.hostedMembers ?? (() => []),
       ...(opts.resolveSessionAddresses ? { resolveSessionAddresses: opts.resolveSessionAddresses } : {}),
     });
   }
@@ -118,6 +119,59 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
     expect(notice!.body).not.toMatch(/dead/i);
+  });
+
+  /** The member as its roster lists it, with the cadence its person stated at setup (or none). */
+  const asListed = (checkInMinutes?: number): RosterMember[] => [{ seat: MEMBER, host: "hub", capabilities: ["research"],
+    engagement: ["delegate"], use_when: "research", why: "it researches", hosted: true,
+    ...(checkInMinutes === undefined ? {} : { check_in_minutes: checkInMinutes }) }];
+
+  it("a stated cadence decides only the notice's check-in line, never when the notice is filed: overdue past twice it, checking in within it", async () => {
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    repo = makeRepo({ hostedMembers: () => asListed(60) });
+    repo.recordInboxCheckIn(MEMBER, at);
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(notices()[0]!.body).toContain(`check-ins: overdue: no check-in since ${at.toISOString()}; expected every 60 min, so its schedule may be off or waiting for an approval`);
+
+    // The same three-hour-old check-in is on time for a member expected every four hours, though older than the
+    // unclaimed age that judges a member with no stated cadence.
+    db.close();
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    bus = new EventBus(db);
+    repo = makeRepo({ hostedMembers: () => asListed(240) });
+    seedSeat("lead@hub");
+    repo.recordInboxCheckIn(MEMBER, at);
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(notices()[0]!.body).toContain("check-ins: checking in: its last check-in is within twice its expected 240 min");
+  });
+
+  it("check-in status is a status, never a refusal: work for an overdue or never-seen member queues and is recorded as before", async () => {
+    repo = makeRepo({ hostedMembers: () => asListed(60) });
+    repo.recordInboxCheckIn(MEMBER, new Date(Date.now() - 5 * 3_600_000));
+    const overdue = await repo.create({ sourceSession: "lead@hub", destinationSession: MEMBER, body: "work", summary: "work" });
+    const unlisted = makeRepo();
+    const baseline = await unlisted.create({ sourceSession: "lead@hub", destinationSession: MEMBER, body: "work", summary: "work" });
+    expect(repo.getById(overdue.qitemId)).toMatchObject({ state: "pending", destinationSession: MEMBER });
+    expect(repo.getById(overdue.qitemId)!.lastNudgeResult).toBe(unlisted.getById(baseline.qitemId)!.lastNudgeResult);
+    expect(repo.hostedMemberCheckIns().map((m) => m.status)).toEqual(["check-in-overdue"]);
+  });
+
+  it("the hosted-members read gives each member's status, last check-in and stated cadence", async () => {
+    const members = [...asListed(60), { ...asListed()[0]!, seat: "helper-b@hub" }, { ...asListed(30)[0]!, seat: "helper-c@hub" }];
+    repo = makeRepo({ hostedMembers: () => members });
+    const at = new Date(Date.now() - 10 * 60_000);
+    repo.recordInboxCheckIn(MEMBER, at);
+    repo.recordInboxCheckIn("helper-b@hub", at);
+    const res = await appFor(repo).request("/api/queue/hosted-members");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ members: [
+      { seat: MEMBER, rung: false, status: "checking-in", lastCheckInAt: at.toISOString(), expectedMinutes: 60, reporter: "openrig-observed" },
+      { seat: "helper-b@hub", rung: false, status: "prompted-only", lastCheckInAt: at.toISOString(), expectedMinutes: null, reporter: "openrig-observed" },
+      { seat: "helper-c@hub", rung: false, status: "never-checked-in", lastCheckInAt: null, expectedMinutes: 30, reporter: "openrig-observed" },
+    ] });
   });
 
   it("a member that never checked in says so", async () => {

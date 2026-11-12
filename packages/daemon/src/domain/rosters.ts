@@ -26,6 +26,12 @@ export interface RosterMember extends Reference {
   hosted?: boolean;
   /** A hosted member's trigger, rung when a row lands for it. */
   wake?: RosterWake;
+  /** How often a hosted member is expected to check its queue, in minutes, as its person set it up (an hourly schedule
+   *  is 60). Stated, not observed: absent means it checks only when a person prompts it. */
+  check_in_minutes?: number;
+  /** Why an authored `check_in_minutes` can't be used. The roster still loads; the member's check-in status reads
+   *  unknown with this reason. */
+  check_in_problem?: string;
 }
 export interface Roster {
   version: 1;
@@ -65,9 +71,16 @@ export function parseRoster(value: unknown): Roster {
         || (m.hosted !== undefined && typeof m.hosted !== "boolean")) {
       throw new Error("Each member needs seat, host, capabilities, engagement, use_when and why (optional caveat, and hosted: true or false)");
     }
+    // A cadence that can't be used never stops the roster loading: the member's check-in status reads unknown instead.
+    const cadence = m.check_in_minutes;
+    const cadenceProblem = cadence === undefined ? null
+      : m.hosted !== true ? "check_in_minutes is for a hosted member"
+        : !Number.isInteger(cadence) || (cadence as number) <= 0 ? `check_in_minutes ${JSON.stringify(cadence)} isn't a positive whole number of minutes`
+          : null;
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
-      ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }) };
+      ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
+      ...(cadence === undefined ? {} : cadenceProblem ? { check_in_problem: cadenceProblem } : { check_in_minutes: cadence as number }) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
@@ -101,6 +114,17 @@ export function hostedWakeFor(destination: string, folder: string, selfHostId: s
     if (member) return member.wake!;
   }
   return null;
+}
+
+/** The hosted members the rosters list on this host, one per seat: where two rosters list the same seat, the first by
+ *  file name wins. Empty when this host's id is unknown. */
+export function hostedMembersAt(folder: string, selfHostId: string | null): RosterMember[] {
+  if (!selfHostId) return [];
+  const bySeat = new Map<string, RosterMember>();
+  for (const roster of readRosters(folder).rosters) {
+    for (const m of roster.members) if (m.hosted === true && m.host === selfHostId && !bySeat.has(m.seat)) bySeat.set(m.seat, m);
+  }
+  return [...bySeat.values()];
 }
 
 /** Whether a roster on this host lists this address as a hosted member, with or without a trigger. */

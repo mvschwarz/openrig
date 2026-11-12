@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { enrichRosterMember, parseRoster, readRosters, rosterCommand, type RosterInventory } from "../src/commands/roster.js";
+import { enrichRosterMember, formatCheckIn, parseRoster, readRosters, rosterCommand, type RosterInventory } from "../src/commands/roster.js";
 
 const member = { seat: "editor@studio", host: "host-a", capabilities: ["colour grading"], engagement: ["consult"], use_when: "Choose a look", why: "Knows the footage", caveat: "Advice only" };
 const authored = { version: 1, id: "production", name: "Production", purpose: "Make a film", curator: { seat: "lead@studio", host: "host-a" }, updated_at: "2026-09-01", members: [member] };
@@ -132,4 +132,35 @@ it("does not choose the first duplicate route when activity observations conflic
   const unclocked = { ...idle, agentActivity: { ...idle.agentActivity, sampledAt: null } };
   expect(enrichRosterMember(member, { readAt: "2026-10-01T00:00:02Z", nodes: [idle, unclocked], sources: [] }).live.agentActivity)
     .toEqual({ state: "idle", reason: null, sampledAt: null });
+});
+
+it("keeps any positive whole check-in cadence; one that can't be used still loads, with its reason and no cadence", () => {
+  const hourly = { ...member, seat: "bot@team", hosted: true, check_in_minutes: 60 };
+  expect(parseRoster({ ...authored, members: [hourly, { ...hourly, seat: "fast@team", check_in_minutes: 1 }] }).members)
+    .toEqual([hourly, { ...hourly, seat: "fast@team", check_in_minutes: 1 }]);
+  for (const bad of [{ ...hourly, check_in_minutes: 0 }, { ...hourly, check_in_minutes: 1.5 }, { ...hourly, check_in_minutes: "60" },
+    { ...member, check_in_minutes: 60 }]) {
+    const [loaded] = parseRoster({ ...authored, members: [bad] }).members;
+    expect(loaded).not.toHaveProperty("check_in_minutes");
+    expect(loaded!.check_in_problem).toMatch(/check_in_minutes/);
+  }
+});
+it("shows a hosted member's check-in status from this host's daemon; another host's member, or no answer, reads unknown", () => {
+  const bot = { ...member, seat: "bot@team", host: "host-a", hosted: true, check_in_minutes: 60 };
+  const checkIns = [{ seat: "bot@team", rung: false, status: "check-in-overdue", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: 60, reporter: "openrig-observed" }];
+  const here = { ...inventory([]), localHostId: "host-a", checkIns };
+  expect(enrichRosterMember(bot, here).live.checkIn).toMatchObject({ status: "check-in-overdue", lastCheckInAt: "2026-11-12T09:00:00.000Z" });
+  expect(formatCheckIn(enrichRosterMember(bot, here).live.checkIn!)).toBe("overdue; last check-in 2026-11-12T09:00:00.000Z; expected every 60 min");
+  for (const [missing, reason] of [[{ ...here, checkIns: null }, "this host's daemon gave no check-in status"],
+    [{ ...here, localHostId: "host-b" }, "it's listed on another host, whose check-ins this host doesn't hold"],
+    [{ ...here, checkIns: [{ ...checkIns[0], status: "invented" }] }, "this host's daemon gave no status for it"]] as const) {
+    expect(enrichRosterMember(bot, missing).live.checkIn).toEqual({ status: "unknown", lastCheckInAt: null, expectedMinutes: 60, reason });
+  }
+  expect(formatCheckIn({ status: "unknown", lastCheckInAt: null, expectedMinutes: null, reason: "its check-ins couldn't be read" }))
+    .toBe("unknown (its check-ins couldn't be read)");
+  // Never seen and no schedule declared: both facts stay visible.
+  expect(formatCheckIn({ status: "never-checked-in", lastCheckInAt: null, expectedMinutes: null })).toBe("never checked in (none recorded); no schedule declared");
+  expect(formatCheckIn({ status: "never-checked-in", lastCheckInAt: null, expectedMinutes: 60 })).toBe("never checked in (none recorded); expected every 60 min");
+  expect(formatCheckIn({ status: "prompted-only", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: null })).toBe("prompted only; last check-in 2026-11-12T09:00:00.000Z");
+  expect(enrichRosterMember(member, here).live).not.toHaveProperty("checkIn");
 });

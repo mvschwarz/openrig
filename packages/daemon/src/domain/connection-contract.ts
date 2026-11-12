@@ -42,6 +42,75 @@ export interface ReportedFact<F extends string> {
   reporter: Reporter;
 }
 
+/** Whether a member outside any terminal is checking its queue. It's a status, never a refusal: work addressed to the
+ *  member queues and is rung exactly as before, a check-in isn't pickup (pickup is a claim), and no check-in isn't
+ *  idle, failure or safe. */
+export type CheckInStatus =
+  /** Its last check-in is no older than twice its stated cadence (`CHECK_IN_OVERDUE_CADENCES`). */
+  | "checking-in"
+  /** Its last check-in is older than twice its stated cadence: its schedule may be off or waiting for an approval. */
+  | "check-in-overdue"
+  /** No check-in recorded for it. */
+  | "never-checked-in"
+  /** No cadence stated: it checks its queue when a person prompts it. */
+  | "prompted-only"
+  /** Its connection was revoked or removed, as recorded. Never inferred from silence. Nothing records a revocation yet,
+   *  so nothing emits it: a revoked member stops checking in and reads overdue. */
+  | "disconnected"
+  /** Its check-ins couldn't be read, or its stated cadence can't be used (the reason says which). */
+  | "unknown";
+
+/** How each check-in status reads to a person. */
+export const CHECK_IN_DISPLAY: Readonly<Record<CheckInStatus, string>> = {
+  "checking-in": "checking in",
+  "check-in-overdue": "overdue",
+  "never-checked-in": "never checked in (none recorded)",
+  "prompted-only": "prompted only",
+  "disconnected": "disconnected",
+  "unknown": "unknown",
+};
+
+/** The one rule for a stated cadence: a last check-in no older than this many cadences reads checking in, and an older
+ *  one overdue. One missed run, plus its schedule's own jitter, isn't overdue. A cadence is its person's statement, so
+ *  neither reading proves a vendor schedule or a pickup. */
+export const CHECK_IN_OVERDUE_CADENCES = 2;
+
+export interface MemberCheckIn {
+  status: CheckInStatus;
+  /** Its own latest read of its pending inbox, as OpenRig observed it. */
+  lastCheckInAt: string | null;
+  /** The cadence its person stated at setup; null when none was. */
+  expectedMinutes: number | null;
+  reporter: Reporter;
+  /** Why the status is unknown, when it is. */
+  reason?: string;
+}
+
+/** A hosted member's check-in status from its stated cadence and its last observed check-in (`seen`, `never`, or
+ *  `unknown` when the record can't be read). First match wins: disconnected, unknown, never checked in, prompted only,
+ *  then checking in or overdue. Nothing passes `revokedAt` yet, so nothing reads disconnected. */
+export function memberCheckInStatus(input: {
+  checkInMinutes: number | null | undefined;
+  /** Why the stated cadence can't be used, from the roster. */
+  cadenceProblem?: string | null;
+  checkIn: { state: "seen"; at: string } | { state: "never" } | { state: "unknown" };
+  revokedAt?: string | null;
+  now: Date;
+}): MemberCheckIn {
+  const expectedMinutes = input.checkInMinutes ?? null;
+  const lastCheckInAt = input.checkIn.state === "seen" ? input.checkIn.at : null;
+  const unknown = (reason: string): MemberCheckIn => ({ status: "unknown", lastCheckInAt, expectedMinutes, reporter: "openrig-observed", reason });
+  const known = (status: CheckInStatus): MemberCheckIn => ({ status, lastCheckInAt, expectedMinutes, reporter: "openrig-observed" });
+  if (input.revokedAt) return known("disconnected");
+  if (input.cadenceProblem) return unknown(input.cadenceProblem);
+  if (input.checkIn.state === "unknown") return unknown("its check-ins couldn't be read");
+  if (input.checkIn.state === "never") return known("never-checked-in");
+  if (expectedMinutes === null) return known("prompted-only");
+  const age = input.now.getTime() - Date.parse(input.checkIn.at);
+  if (!Number.isFinite(age)) return unknown("its last check-in's time couldn't be read");
+  return known(age <= expectedMinutes * CHECK_IN_OVERDUE_CADENCES * 60_000 ? "checking-in" : "check-in-overdue");
+}
+
 /** The route a wake took. `none` means no route can carry it (a pull-only member, an address nothing holds). */
 export type WakeRoute = "terminal" | "gateway" | "hosted-trigger" | "none";
 

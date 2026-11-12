@@ -112,6 +112,28 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
   - `lastWake`: its latest ring and the result, among its 50 most recent rows.
 - `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
 
+### Check-in status
+
+A hosted member checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
+when it lists the member's own work). Its status compares its last check-in with the cadence its roster entry states
+(`check_in_minutes`):
+
+| Status | Meaning |
+|---|---|
+| `checking-in` | its last check-in is no older than twice its stated cadence |
+| `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
+| `never-checked-in` | no check-in recorded for it on this daemon, whether or not it states a cadence |
+| `prompted-only` | no cadence stated: it checks in when a person prompts it |
+| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so no member shows it |
+| `unknown` | its check-ins couldn't be read, or its stated cadence can't be used; the reason says which |
+
+A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
+anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
+isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
+gives each member on this host with its status, last check-in and stated cadence; `rig roster show` and `find` show it
+as `Check-in:`. When the member has unclaimed work, the standing notice described above judges its check-ins by the same
+cadence.
+
 ## Revoke
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
