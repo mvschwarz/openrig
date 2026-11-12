@@ -715,7 +715,7 @@ export class HerdrAdapter implements TerminalProvider {
       return null;
     }
     for (const id of found.stale) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
-    for (const id of found.unconfirmed) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept; this open adds a new workspace.`);
+    for (const id of found.unconfirmed) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known
     if (!found.live) return null;
     const { workspace_id: id, tab_id: tabId } = found.live;
     // As --window does: the reply must name this exact tab and workspace, or the view isn't proven on screen.

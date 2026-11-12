@@ -124,7 +124,8 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
     expect(second).toMatchObject({ ok: true, opened: SEATS, pages: 1 });
     expect(h.workspaces.map(ws => ws.label)).toEqual(["demo", "demo (2)"]);
     expect(second.notes).toEqual([
-      "Workspace w1 has this view, but its tiles' live attachments could not be confirmed, so it was kept; this open adds a new workspace.",
+      // CodeRabbit (PR 3068): the kept-workspace note claims nothing about this open; the creation says so itself
+      "Workspace w1 has this view, but its tiles' live attachments could not be confirmed, so it was kept.",
       'A view named "demo" is already open, so this one is "demo (2)".',
     ]);
   });
