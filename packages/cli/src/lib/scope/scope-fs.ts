@@ -115,8 +115,9 @@ export type ProgressStatusFrontmatterState =
  *  YAML (`readFrontmatter` / `updateFrontmatter`) and line-based slice readers
  *  (`SliceIndexer.parseFrontmatter`, which trims every frontmatter line at any
  *  indentation and lets the last `status:` line win). Returns `"ambiguous"`
- *  before mutation whenever nested/indented `status:` lines or non-scalar/flow
- *  `status` syntax would leave consumers disagreeing after top-level update. */
+ *  before mutation whenever duplicate top-level `status:` lines, nested/indented
+ *  `status:` lines, or non-scalar/flow `status` syntax would leave consumers
+ *  disagreeing after top-level update. */
 export function classifyProgressStatusFrontmatter(content: string): ProgressStatusFrontmatterState {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
   if (!match) {
@@ -164,6 +165,13 @@ export function classifyProgressStatusFrontmatter(content: string): ProgressStat
         ? `nested "status:" entry at line ${indentedStatusLines[0]} without a top-level status key`
         : `nested "status:" entry at line ${indentedStatusLines[0]} alongside top-level status`;
     return { kind: "ambiguous", detail };
+  }
+
+  if (unindentedStatusLines.length > 1) {
+    return {
+      kind: "ambiguous",
+      detail: `duplicate top-level "status:" entries at lines ${unindentedStatusLines[0]} and ${unindentedStatusLines[1]}`,
+    };
   }
 
   let yamlValid = false;

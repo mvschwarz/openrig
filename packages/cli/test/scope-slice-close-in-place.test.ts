@@ -867,7 +867,7 @@ describe("#2727 rig scope slice close --in-place", () => {
   it("reconciles preexisting PROGRESS.md frontmatter status across CLI, SliceIndexer, and GET /api/slices for delivered and non-delivery in-place closures while preserving unrelated PROGRESS content and default moving close", async () => {
     const delivered = await seedAcceptedSlice("m-progress-sync", "active-to-delivered");
     const deliveredProgressPath = path.join(delivered.sliceDir, "PROGRESS.md");
-      writeFile(
+    writeFile(
       deliveredProgressPath,
       [
         "---",
@@ -1009,7 +1009,7 @@ describe("#2727 rig scope slice close --in-place", () => {
     }
   });
 
-  it("refuses in-place close before any mutation when PROGRESS.md frontmatter has nested-only or later-nested status: entries that line-based slice readers would treat as slice status", async () => {
+  it("refuses in-place close before any mutation when PROGRESS.md frontmatter has duplicate top-level, nested-only, or later-nested status: entries that line-based slice readers would treat as slice status", async () => {
     const nestedOnly = await seedAcceptedSlice("m-ambiguous-progress", "nested-only-status");
     const nestedOnlyProgressPath = path.join(nestedOnly.sliceDir, "PROGRESS.md");
     writeFile(
@@ -1090,13 +1090,77 @@ describe("#2727 rig scope slice close --in-place", () => {
     );
     expect(readSliceReadiness(topPlusNestedDir).state).toBe("ready");
 
-    commitAll(projectRoot, "seed ambiguous nested progress status slices");
+    const createdDupTop = await runScope(
+      ["slice", "create", "m-ambiguous-progress", "duplicate-top-status", "--json"],
+      missionsRoot,
+    );
+    const dupTopDir = JSON.parse(createdDupTop.stdout).slice.path as string;
+    const dupTopName = path.basename(dupTopDir);
+    const dupTopSpecPath = path.join(dupTopDir, "SPEC.md");
+    const dupTopProgressPath = path.join(dupTopDir, "PROGRESS.md");
+    const dupTopEvidencePath = path.join(dupTopDir, "evidence.txt");
+    const dupTopId = String(readFrontmatter(dupTopSpecPath).id ?? "OPR.1.0.1.3");
+    writeFile(
+      dupTopSpecPath,
+      [
+        "---",
+        `id: ${dupTopId}`,
+        "status: active",
+        "---",
+        "# duplicate-top-status",
+        "",
+        "## Intent",
+        "Verify pre-mutation refusal when duplicate top-level status lines would leave line-based readers stale.",
+        "",
+        "## Mini-requirements",
+        "1. Preserve every file byte-for-byte on refusal.",
+        "",
+        "## Proof contract",
+        "- [x] Verified duplicate top-level refusal <!-- proof-item: dup-top-refusal-item -->",
+        "",
+      ].join("\n"),
+    );
+    writeFile(dupTopEvidencePath, "Evidence for duplicate-top-status.\n");
+    writeFile(
+      dupTopProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "status: active",
+        "owner: team-beta",
+        "status: active",
+        "---",
+        "# Progress — duplicate top-level status",
+        "",
+        "- Duplicate top-level status keys.",
+        "",
+      ].join("\n"),
+    );
+    const preDupTopReadiness = readSliceReadiness(dupTopDir);
+    recordJudgment(
+      missionsRoot,
+      {
+        scope: `m-ambiguous-progress/slices/${dupTopName}`,
+        item: preDupTopReadiness.items[0]!.id,
+        verdict: "accept",
+        reason: "Verified duplicate-top baseline",
+        evidence: ["evidence.txt"],
+        expectedRevision: preDupTopReadiness.items[0]!.revision,
+        expectedPrevious: null,
+      },
+      "judge@trial",
+      "transport:v1",
+    );
+    expect(readSliceReadiness(dupTopDir).state).toBe("ready");
+
+    commitAll(projectRoot, "seed ambiguous duplicate and nested progress status slices");
 
     const missionManifestPath = path.join(nestedOnly.missionDir, "mission.yaml");
     const nestedOnlySpecPath = path.join(nestedOnly.sliceDir, "SPEC.md");
     const nestedOnlyEvidencePath = path.join(nestedOnly.sliceDir, "proof", "evidence.md");
     const nestedOnlyJudgmentPath = path.join(nestedOnly.sliceDir, "proof", "judgments", "00000001.md");
     const topPlusNestedJudgmentPath = path.join(topPlusNestedDir, "proof", "judgments", "00000001.md");
+    const dupTopJudgmentPath = path.join(dupTopDir, "proof", "judgments", "00000001.md");
 
     const beforeManifest = fs.readFileSync(missionManifestPath, "utf8");
     const beforeNestedOnlySpec = fs.readFileSync(nestedOnlySpecPath, "utf8");
@@ -1107,6 +1171,10 @@ describe("#2727 rig scope slice close --in-place", () => {
     const beforeTopProgress = fs.readFileSync(topPlusNestedProgressPath, "utf8");
     const beforeTopEvidence = fs.readFileSync(topPlusNestedEvidencePath, "utf8");
     const beforeTopJudgment = fs.readFileSync(topPlusNestedJudgmentPath, "utf8");
+    const beforeDupTopSpec = fs.readFileSync(dupTopSpecPath, "utf8");
+    const beforeDupTopProgress = fs.readFileSync(dupTopProgressPath, "utf8");
+    const beforeDupTopEvidence = fs.readFileSync(dupTopEvidencePath, "utf8");
+    const beforeDupTopJudgment = fs.readFileSync(dupTopJudgmentPath, "utf8");
 
     const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
     try {
@@ -1135,6 +1203,38 @@ describe("#2727 rig scope slice close --in-place", () => {
       expect(closeTopPlusNested.stderr).toContain('nested "status:" entry');
       expect(closeTopPlusNested.stderr).toContain("before any file was modified");
 
+      const closeDupTop = await runScope(
+        ["slice", "close", dupTopName, "--mission", "m-ambiguous-progress", "--in-place", "--reason", "delivered", "--json"],
+        missionsRoot,
+      );
+      const activeApi = (await (await app.request("/api/slices?filter=active&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      const cliShipped = JSON.parse(
+        (await runScope(["slice", "ls", "--mission", "m-ambiguous-progress", "--state", "shipped", "--json"], missionsRoot)).stdout,
+      ).slices as Array<{ name: string }>;
+      expect({
+        exitCode: closeDupTop.exitCode,
+        cliShippedNames: cliShipped.map((s) => s.name),
+        indexerStatus: indexer.get(dupTopName)?.status,
+        progressUnchanged: fs.readFileSync(dupTopProgressPath, "utf8") === beforeDupTopProgress,
+      }).toEqual({
+        exitCode: 1,
+        cliShippedNames: [],
+        indexerStatus: "active",
+        progressUnchanged: true,
+      });
+
+      const dupTopError = JSON.parse(closeDupTop.stdout) as {
+        ok: boolean;
+        error: { fact: string; consequence: string; action: string };
+      };
+      expect(dupTopError.ok).toBe(false);
+      expect(dupTopError.error.fact).toContain(dupTopProgressPath);
+      expect(dupTopError.error.fact).toContain('duplicate top-level "status:"');
+      expect(dupTopError.error.consequence).toContain("before any file was modified");
+      expect(dupTopError.error.action).toContain("top-level scalar");
+
       // Exact byte-equality across mission.yaml, SPEC.md, PROGRESS.md, evidence, and proof judgment receipts:
       expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeManifest);
       expect(fs.readFileSync(nestedOnlySpecPath, "utf8")).toBe(beforeNestedOnlySpec);
@@ -1145,22 +1245,26 @@ describe("#2727 rig scope slice close --in-place", () => {
       expect(fs.readFileSync(topPlusNestedProgressPath, "utf8")).toBe(beforeTopProgress);
       expect(fs.readFileSync(topPlusNestedEvidencePath, "utf8")).toBe(beforeTopEvidence);
       expect(fs.readFileSync(topPlusNestedJudgmentPath, "utf8")).toBe(beforeTopJudgment);
+      expect(fs.readFileSync(dupTopSpecPath, "utf8")).toBe(beforeDupTopSpec);
+      expect(fs.readFileSync(dupTopProgressPath, "utf8")).toBe(beforeDupTopProgress);
+      expect(fs.readFileSync(dupTopEvidencePath, "utf8")).toBe(beforeDupTopEvidence);
+      expect(fs.readFileSync(dupTopJudgmentPath, "utf8")).toBe(beforeDupTopJudgment);
 
       // Proof readiness and CLI / SliceIndexer / GET /api/slices status remain 100% consistent ("active"):
       expect(readSliceReadiness(nestedOnly.sliceDir).state).toBe("ready");
       expect(readSliceReadiness(topPlusNestedDir).state).toBe("ready");
+      expect(readSliceReadiness(dupTopDir).state).toBe("ready");
 
-      const activeApi = (await (await app.request("/api/slices?filter=active&refresh=1")).json()) as {
-        slices: Array<{ name: string; status: string; rawStatus: string }>;
-      };
-      expect(activeApi.slices.map((s) => s.name).sort()).toEqual([nestedOnly.sliceName, topPlusNestedName]);
+      const expectedActiveNames = [nestedOnly.sliceName, topPlusNestedName, dupTopName].sort();
+      expect(activeApi.slices.map((s) => s.name).sort()).toEqual(expectedActiveNames);
       expect(indexer.get(nestedOnly.sliceName)?.status).toBe("active");
       expect(indexer.get(topPlusNestedName)?.status).toBe("active");
+      expect(indexer.get(dupTopName)?.status).toBe("active");
 
       const cliActive = JSON.parse(
         (await runScope(["slice", "ls", "--mission", "m-ambiguous-progress", "--state", "active", "--json"], missionsRoot)).stdout,
       ).slices as Array<{ name: string }>;
-      expect(cliActive.map((s) => s.name).sort()).toEqual([nestedOnly.sliceName, topPlusNestedName]);
+      expect(cliActive.map((s) => s.name).sort()).toEqual(expectedActiveNames);
     } finally {
       db.close();
     }

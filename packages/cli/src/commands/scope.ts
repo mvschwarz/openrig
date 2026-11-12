@@ -640,7 +640,7 @@ function buildSliceCloseCommand(): Command {
               consequence:
                 "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
               action:
-                'Use a single top-level scalar "status:" key in PROGRESS.md frontmatter (renaming or removing any nested "status:" entry), or close without --in-place, then retry.',
+                'Use a single top-level scalar "status:" key in PROGRESS.md frontmatter (removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.',
             });
           }
           const shouldReconcileProgressStatus = progressStatusState.kind === "reconcile";
