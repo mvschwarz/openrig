@@ -1304,14 +1304,27 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       ).run(unknownCodex.id);
       registry.updateResumeToken(registry.registerSession(unknownCodex.id, "dev-unknown-codex@m2").id, "codex_id", "tok-m2-ux", "hook");
 
-      expect(restoreOrchestrator.resolveRestorePosture(unknownCodex.id, rig.id) as string).toBe("legacy_custom_posture");
-      expect(new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.unknown-codex")?.resumeCommand).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ux'`,
+      const unknownCodexPosture = restoreOrchestrator.resolveRestorePosture(unknownCodex.id, rig.id) as string;
+      expect(unknownCodexPosture).toBe("legacy_custom_posture");
+      const unknownCodexEntryBefore = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.unknown-codex")!;
+      expect(unknownCodexEntryBefore.resumeCommand).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ux'`);
+      expect(unknownCodexEntryBefore.resumeCommandLabel).toBe("flags from current settings");
+      codexSent.length = 0;
+      const uxRes = await callAttemptResume(
+        unknownCodex.id,
+        "dev-unknown-codex@m2",
+        "codex_id",
+        "tok-m2-ux",
+        "/work/m2-ux",
+        unknownCodexPosture,
       );
+      expect(uxRes.kind).toBe("resumed");
+      expect(codexSent[0]).toContain("codex -s workspace-write ");
 
       // 2. Empty-string stored posture ("") under OPENRIG_YOLO=1:
       //    main passes "" through raw so yoloEnabled(env, "") delegates to ambient OPENRIG_YOLO=1 on restore
-      //    (both Claude and Codex), while Codex display normalizes "" to explicit floor (-s workspace-write).
+      //    (both Claude and Codex), while Codex display keeps the copyable floor (-s workspace-write) and labels
+      //    it as an empty-posture fallback rather than claiming managed resume uses -s workspace-write.
       const emptyClaude = rigRepo.addNode(rig.id, "dev.empty-claude", { runtime: "claude-code", cwd: "/work/m2-ec" });
       db.prepare(
         "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = '' WHERE id = ?",
@@ -1338,6 +1351,21 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       ).run(emptyCodex.id);
       registry.updateResumeToken(registry.registerSession(emptyCodex.id, "dev-empty-codex@m2").id, "codex_id", "tok-m2-ex", "hook");
 
+      const expectedEmptyCodexCmd = `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ex'`;
+      const expectedEmptyUnrecordedLabel =
+        "saved posture empty, showing fallback -s workspace-write (managed resume posture unknown)";
+      const expectedEmptyRecordedLabel =
+        "launched with -s danger-full-access (approval unrecorded); saved posture empty, showing fallback -s workspace-write (managed resume posture unknown)";
+
+      // Capture M2 empty-posture Case 1 & Case 2 (unrecorded launch observation across inventory and detail)
+      // before running real RestoreOrchestrator resume, which records the danger-full-access launch observation.
+      const emptyEntryUnrecorded = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-codex")!;
+      const emptyDetailUnrecorded = getNodeDetail(db, rig.id, "dev.empty-codex")!;
+      expect(emptyEntryUnrecorded.resumeCommand).toBe(expectedEmptyCodexCmd);
+      expect(emptyDetailUnrecorded.resumeCommand).toBe(expectedEmptyCodexCmd);
+      expect(emptyDetailUnrecorded.recoveryGuidance?.commands[0]).toBe(expectedEmptyCodexCmd);
+
+      // Real managed restore under OPENRIG_YOLO=1 still launches danger-full-access and records that observation.
       const emptyCodexPosture = restoreOrchestrator.resolveRestorePosture(emptyCodex.id, rig.id) as string;
       expect(emptyCodexPosture).toBe("");
       codexSent.length = 0;
@@ -1352,9 +1380,143 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(exRes.kind).toBe("resumed");
       expect(codexSent[0]).toContain("codex -s danger-full-access ");
       expect(codexSent[0]).not.toContain("-a never");
-      expect(new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-codex")?.resumeCommand).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-ex'`,
+
+      // Capture M2 empty-posture Case 3 & Case 4 (recorded launch observation across inventory and detail).
+      const emptyEntryRecorded = new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-codex")!;
+      const emptyDetailRecorded = getNodeDetail(db, rig.id, "dev.empty-codex")!;
+      expect(emptyEntryRecorded.resumeCommand).toBe(expectedEmptyCodexCmd);
+      expect(emptyDetailRecorded.resumeCommand).toBe(expectedEmptyCodexCmd);
+      expect(emptyDetailRecorded.recoveryGuidance?.commands[0]).toBe(expectedEmptyCodexCmd);
+
+      // Effective-input controls: an empty saved policy_launch_posture overridden by an explicit mode selection or
+      // a valid member envelope uses that override on both restore and display, so normal labels are preserved.
+      const emptyModeOverride = rigRepo.addNode(rig.id, "dev.empty-mode-override", { runtime: "codex", cwd: "/work/m2-emo" });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = '' WHERE id = ?",
+      ).run(emptyModeOverride.id);
+      permStore.write(emptyModeOverride.id, { runtime: "codex", mode: "floor" }, "op@m2", "explicit floor");
+      registry.updateResumeToken(
+        registry.registerSession(emptyModeOverride.id, "dev-empty-mode-override@m2").id,
+        "codex_id",
+        "tok-m2-emo",
+        "hook",
       );
+      expect(
+        new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-mode-override")?.resumeCommandLabel,
+      ).toBe("flags from current settings");
+      codexSent.length = 0;
+      const emoRes = await callAttemptResume(
+        emptyModeOverride.id,
+        "dev-empty-mode-override@m2",
+        "codex_id",
+        "tok-m2-emo",
+        "/work/m2-emo",
+        restoreOrchestrator.resolveRestorePosture(emptyModeOverride.id, rig.id) as string,
+      );
+      expect(emoRes.kind).toBe("resumed");
+      expect(codexSent[0]).toContain("codex -s workspace-write ");
+      expect(
+        new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-mode-override")?.resumeCommandLabel,
+      ).toBe("launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write");
+
+      const emptyEnvOverride = rigRepo.addNode(rig.id, "dev.empty-env-override", {
+        runtime: "codex",
+        cwd: "/work/m2-eeo",
+        codexPermissions: readOnlyOnRequestEnvelope,
+      });
+      db.prepare(
+        "UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = '' WHERE id = ?",
+      ).run(emptyEnvOverride.id);
+      registry.updateResumeToken(
+        registry.registerSession(emptyEnvOverride.id, "dev-empty-env-override@m2").id,
+        "codex_id",
+        "tok-m2-eeo",
+        "hook",
+      );
+      expect(
+        new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-env-override")?.resumeCommandLabel,
+      ).toBe("flags from current settings");
+      codexSent.length = 0;
+      const eeoRes = await callAttemptResume(
+        emptyEnvOverride.id,
+        "dev-empty-env-override@m2",
+        "codex_id",
+        "tok-m2-eeo",
+        "/work/m2-eeo",
+        restoreOrchestrator.resolveRestorePosture(emptyEnvOverride.id, rig.id) as string,
+      );
+      expect(eeoRes.kind).toBe("resumed");
+      expect(codexSent[0]).toContain("codex -s read-only -a on-request ");
+      expect(
+        new Map(getNodeInventory(db, rig.id).map((e) => [e.logicalId, e])).get("dev.empty-env-override")?.resumeCommandLabel,
+      ).toBeNull();
+
+      // Rig-level empty saved posture (no node provenance) with launch_wrapper composes both the fallback label and wrapper omission.
+      const emptyRig = rigRepo.createRig("m2-empty-rig");
+      db.prepare(
+        "UPDATE rigs SET permission_policy = 'builtin:yolo', rig_policy_origin = 'builtin', rig_policy_launch_posture = '' WHERE id = ?",
+      ).run(emptyRig.id);
+      const emptyRigWrapped = rigRepo.addNode(emptyRig.id, "dev.rig-empty-wrap", {
+        runtime: "codex",
+        cwd: "/work/m2-rew",
+        launchWrapper: ["mtn", "sandbox", "--"],
+      });
+      registry.updateResumeToken(
+        registry.registerSession(emptyRigWrapped.id, "dev-rig-empty-wrap@m2").id,
+        "codex_id",
+        "tok-m2-rew",
+        "hook",
+      );
+      expect(restoreOrchestrator.resolveRestorePosture(emptyRigWrapped.id, emptyRig.id) as string).toBe("");
+      const expectedWrappedEmptyLabel =
+        `${expectedEmptyUnrecordedLabel}; omits launch_wrapper (managed resume uses the wrapper)`;
+      expect(getNodeInventory(db, emptyRig.id)[0]?.resumeCommand).toBe(
+        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-rew'`,
+      );
+
+      // Assert all 4 M2 empty-posture combinations (inventory/detail x unrecorded/recorded) plus wrapped rig-empty composition,
+      // and verify even a recorded workspace-write observation on an empty-posture seat stays uncertain rather than matching.
+      const sameSandboxEmptySeat = rigRepo.addNode(emptyRig.id, "dev.rig-empty-same-sbx", {
+        runtime: "codex",
+        cwd: "/work/m2-ress",
+      });
+      registry.updateResumeToken(
+        registry.registerSession(sameSandboxEmptySeat.id, "dev-rig-empty-same-sbx@m2").id,
+        "codex_id",
+        "tok-m2-ress",
+        "hook",
+      );
+      observations.recordGeneration(
+        registry.currentOccupantTenure(sameSandboxEmptySeat.id)!.generationUuid,
+        observeCodexSandbox("-s workspace-write"),
+      );
+      const emptyRigByLogical = new Map(getNodeInventory(db, emptyRig.id).map((e) => [e.logicalId, e]));
+      const expectedSameSandboxEmptyLabel =
+        "launched with -s workspace-write (approval unrecorded); saved posture empty, showing fallback -s workspace-write (managed resume posture unknown)";
+
+      expect({
+        inventoryUnrecorded: emptyEntryUnrecorded.resumeCommandLabel,
+        detailUnrecorded: emptyDetailUnrecorded.resumeCommandLabel,
+        detailUnrecordedNote: emptyDetailUnrecorded.recoveryGuidance?.notes[0],
+        inventoryRecorded: emptyEntryRecorded.resumeCommandLabel,
+        detailRecorded: emptyDetailRecorded.resumeCommandLabel,
+        detailRecordedNote: emptyDetailRecorded.recoveryGuidance?.notes[0],
+        rigWrappedInventory: emptyRigByLogical.get("dev.rig-empty-wrap")?.resumeCommandLabel,
+        rigWrappedDetailNote: getNodeDetail(db, emptyRig.id, "dev.rig-empty-wrap")?.recoveryGuidance?.notes[0],
+        rigSameSandboxInventory: emptyRigByLogical.get("dev.rig-empty-same-sbx")?.resumeCommandLabel,
+      }).toEqual({
+        inventoryUnrecorded: expectedEmptyUnrecordedLabel,
+        detailUnrecorded: expectedEmptyUnrecordedLabel,
+        detailUnrecordedNote: expectedEmptyUnrecordedLabel,
+        inventoryRecorded: expectedEmptyRecordedLabel,
+        detailRecorded: expectedEmptyRecordedLabel,
+        detailRecordedNote: expectedEmptyRecordedLabel,
+        rigWrappedInventory: expectedWrappedEmptyLabel,
+        rigWrappedDetailNote: expectedWrappedEmptyLabel,
+        rigSameSandboxInventory: expectedSameSandboxEmptyLabel,
+      });
+      expect(emptyDetailUnrecorded.recoveryGuidance?.notes).not.toContain("flags from current settings");
+      expect(emptyDetailRecorded.recoveryGuidance?.notes.some((n) => n.includes("a resume now uses"))).toBe(false);
 
       // 3. Rig-level unknown stored posture when node provenance is absent also passes through raw on restore.
       const unknownRig = rigRepo.createRig("m2-unknown-rig");
@@ -1367,6 +1529,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(getNodeInventory(db, unknownRig.id)[0]?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-m2-rr'`,
       );
+      expect(getNodeInventory(db, unknownRig.id)[0]?.resumeCommandLabel).toBe("flags from current settings");
 
       // 4. Lazy lookup order: when custom node provenance lacks declaringDir or resolvedTarget, main does NOT eagerly
       //    call rigRepo.getRigPermissionPolicy(rigId) (nor getRigPolicyProvenance when node provenance exists), so a

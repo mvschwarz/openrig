@@ -51,6 +51,9 @@ export interface CodexResumeDisplayInput {
   codexDaemonOptOut?: boolean;
   codexPermissions?: CodexMemberPermissions;
   resolvedPosture?: "floor" | "full_bypass" | "auto";
+  /** True when the effective persisted restore posture is the empty string (""), so managed resume falls back to
+   *  daemon OPENRIG_YOLO at restore time while the displayed command uses the normalized floor fallback. */
+  emptySavedPosture?: boolean;
   nonInterruptive?: boolean;
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
@@ -159,6 +162,23 @@ export function buildCodexResumeDisplay(
     && recorded.axis === "sandbox"
     && recorded.state === "observed"
     && recorded.value !== null;
+
+  if (!envelope && input.emptySavedPosture) {
+    const fallbackClause = `saved posture empty, showing fallback ${currentFlags} (managed resume posture unknown)`;
+    if (!hasObservedRecord) {
+      return {
+        command,
+        status: "no_recorded_launch",
+        label: composeCodexResumeLabel(fallbackClause, hasLaunchWrapper),
+      };
+    }
+    const recordedFlags = formatRecordedCodexFlags(recorded.value!, recorded.approvalPolicy ?? null);
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(`launched with ${recordedFlags}; ${fallbackClause}`, hasLaunchWrapper),
+    };
+  }
 
   if (!hasObservedRecord) {
     return {

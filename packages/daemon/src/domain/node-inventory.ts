@@ -32,7 +32,11 @@ import {
 } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { resolveLaunchOverrideFromFacts, type LaunchOverrideSelectionFact } from "./native-permission-store.js";
-import { readRegularCustomPolicyFile, resolveDisplayedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
+import {
+  readRegularCustomPolicyFile,
+  resolveDisplayedRestorePosture,
+  resolvePersistedRestorePosture,
+} from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -155,22 +159,48 @@ function readCustomPolicyCached(
 function resolveBasePolicyPosture(
   row: InventoryRow,
   customPolicyCache: Map<string, string | null>,
-): "floor" | "full_bypass" | "auto" {
-  return resolveDisplayedRestorePosture(
-    {
-      nodeOrigin: row.node_policy_origin,
-      nodeLaunchPosture: row.node_policy_launch_posture,
-      nodeResolvedTarget: row.node_policy_resolved_target,
-      nodeDeclaringDir: row.node_policy_declaring_dir,
-      nodeRef: row.node_permission_policy,
-      rigOrigin: row.rig_policy_origin,
-      rigLaunchPosture: row.rig_policy_launch_posture,
-      rigResolvedTarget: row.rig_policy_resolved_target,
-      rigDeclaringDir: row.rig_policy_declaring_dir,
-      rigRef: row.rig_permission_policy,
-    },
-    { readFile: (target) => readCustomPolicyCached(target, customPolicyCache) },
-  );
+): { posture: "floor" | "full_bypass" | "auto"; emptySavedPosture: boolean } {
+  const snapshot = {
+    nodeOrigin: row.node_policy_origin,
+    nodeLaunchPosture: row.node_policy_launch_posture,
+    nodeResolvedTarget: row.node_policy_resolved_target,
+    nodeDeclaringDir: row.node_policy_declaring_dir,
+    nodeRef: row.node_permission_policy,
+    rigOrigin: row.rig_policy_origin,
+    rigLaunchPosture: row.rig_policy_launch_posture,
+    rigResolvedTarget: row.rig_policy_resolved_target,
+    rigDeclaringDir: row.rig_policy_declaring_dir,
+    rigRef: row.rig_permission_policy,
+  };
+  const readFile = (target: string) => readCustomPolicyCached(target, customPolicyCache);
+  const posture = resolveDisplayedRestorePosture(snapshot, { readFile });
+  const raw = row.node_policy_launch_posture === "" || row.rig_policy_launch_posture === ""
+    ? resolvePersistedRestorePosture({
+        getNodeProvenance: () =>
+          snapshot.nodeOrigin != null && snapshot.nodeLaunchPosture != null
+            ? {
+                origin: snapshot.nodeOrigin,
+                launchPosture: snapshot.nodeLaunchPosture,
+                resolvedTarget: snapshot.nodeResolvedTarget,
+                declaringDir: snapshot.nodeDeclaringDir,
+                nodeRef: snapshot.nodeRef,
+              }
+            : null,
+        getFallbackRigRef: () => snapshot.rigRef,
+        getRigProvenance: () =>
+          snapshot.rigOrigin != null && snapshot.rigLaunchPosture != null
+            ? {
+                origin: snapshot.rigOrigin,
+                launchPosture: snapshot.rigLaunchPosture,
+                resolvedTarget: snapshot.rigResolvedTarget,
+                declaringDir: snapshot.rigDeclaringDir,
+                rigRef: snapshot.rigRef,
+              }
+            : null,
+        readFile,
+      })
+    : posture;
+  return { posture, emptySavedPosture: raw === "" };
 }
 
 type PermissionSelectionsLookup =
@@ -209,6 +239,9 @@ function resolveCodexResumeResolution(
   } catch (error) {
     return { ok: false, diagnostic: `Permission selection: ${(error as Error).message}` };
   }
+  const basePosture = override.codexPermissions || override.launchPosture
+    ? undefined
+    : resolveBasePolicyPosture(row, customPolicyCache);
   return {
     ok: true,
     input: {
@@ -217,7 +250,8 @@ function resolveCodexResumeResolution(
       codexPermissions: override.codexPermissions,
       resolvedPosture: override.codexPermissions
         ? "floor"
-        : (override.launchPosture ?? resolveBasePolicyPosture(row, customPolicyCache)),
+        : (override.launchPosture ?? basePosture!.posture),
+      ...(basePosture?.emptySavedPosture ? { emptySavedPosture: true } : {}),
       nonInterruptive: row.rig_non_interruptive === 1,
       kernelAuthority: override.kernelAuthority === true,
       teamPermissionDefault: override.teamPermissionDefault === true,
