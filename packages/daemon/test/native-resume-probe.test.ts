@@ -1477,6 +1477,14 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(claudeTrustPromptFocus(narrow)).toBe("unknown");
   });
 
+  it("a 40-column backstop captured before its wrapped warning is complete waits, never resumed", () => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const partial = rows.slice(0, rows.findIndex(row => row.includes("⚠ This folder pre-approves")) + 1).join("\n");
+    expect(partial).not.toMatch(/tool permissions/);
+    expect(probe(partial)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
   it("is the same gate drawn with numbered options", () => {
     const numbered = screen.replace("❯ No, continue without these permissions", "❯ 1. No, continue without these permissions")
       .replace("  Yes, I trust this folder", "  2. Yes, I trust this folder");

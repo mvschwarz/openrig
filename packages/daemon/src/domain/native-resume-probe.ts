@@ -388,10 +388,12 @@ function claudeGatedGrantsPrompt(paneContent: string): "live" | "partial" | null
   return drawn.some(row => CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES) ? "live" : "partial";
 }
 
-/** A mark of the gated-grants backstop in these rows, read on their whitespace-joined text so a row that a narrow pane
- *  wrapped still counts. */
+/** A mark of the gated-grants backstop in these rows: on their whitespace-joined text, so a row that a narrow pane
+ *  wrapped still counts, or on a single row, so a warning still being drawn ("This folder pre-approves 2 tool" before
+ *  the next row) counts too. */
 function hasClaudeGatedGrantsMark(rows: string[]): boolean {
-  return CLAUDE_GATED_GRANTS_MARK.test(rows.join(" ").replace(/\s+/g, " "));
+  return CLAUDE_GATED_GRANTS_MARK.test(rows.join(" ").replace(/\s+/g, " "))
+    || rows.some(row => CLAUDE_GATED_GRANTS_MARK_ROW.test(row));
 }
 
 /** The rows Claude drew after its last own element (input frame, header or reply): the screen a prompt is on now.
