@@ -1019,6 +1019,16 @@ function emitHostResolutionError(res: { error: string; message: string }, json: 
   process.exitCode = 1;
 }
 
+/** Emit a local queue-list filter error without printing rows returned by a daemon that ignored it. */
+function emitQueueListFilterError(res: { error: string; message: string }, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(res));
+  } else {
+    console.error(res.message);
+  }
+  process.exitCode = 1;
+}
+
 const QUEUE_HOST_OPTION_HELP =
   "OPR.0.4.6.MH3: route this queue write to a REGISTERED remote host (see rig host ls). EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. Equivalent to the host-qualified destination form member@rig@<host>.";
 
@@ -1395,6 +1405,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+After reading an existing remote successor, record its exact closure target, including the host:
+  rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
+The note can accompany the closing update or be appended later; a separate note is not required.
+A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
+For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
+`)
     .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1937,6 +1954,24 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
+  const listTagFiltersInArgumentOrder: string[] = [];
+  const collectListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(value);
+    return [...previous, value];
+  };
+  const collectMissionListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`mission:${value}`);
+    return [...previous, value];
+  };
+  const collectSliceListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`slice:${value}`);
+    return [...previous, value];
+  };
+
+  cmd.hook("preSubcommand", (_parent, subcommand) => {
+    if (subcommand.name() === "list") listTagFiltersInArgumentOrder.length = 0;
+  });
+
   cmd
     .command("list")
     .description("List qitems (default: active + compact + current-rig; like 'docker ps')")
@@ -1950,6 +1985,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
+    .option("--tag <tag>", "Exact, case-sensitive tag filter; repeat for AND (commas are literal)", collectListTag, [] as string[])
+    .option("--mission <id>", "Filter by the exact mission:<id> tag; repeatable", collectMissionListTag, [] as string[])
+    .option("--slice <id>", "Filter by the exact slice:<id> tag; repeatable", collectSliceListTag, [] as string[])
     .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")
     .option("--host <id>", `${QUEUE_HOST_ROW_OPTION_HELP} With --host, the rows of every rig on that host unless --destination or --source narrows them; --owned and --mine name this host's seat and are refused.`)
@@ -1966,6 +2004,7 @@ Four orthogonal axes (docker/kubectl pattern):
 Active states: pending, in-progress, blocked.
 History (-a adds): done, canceled, handed-off, failed, denied.
 Use --state <states> to select specific states explicitly.
+Use repeated --tag <tag> values to require every exact, case-sensitive tag; commas are literal. --mission <id> and --slice <id> add mission:<id> and slice:<id> filters. Exact duplicates collapse and blank values are refused. A returned row that lacks a requested tag reveals an older daemon that ignored the filter; an empty list cannot prove it applied it.
 
 Depth: 'rig queue show <qitemId>' previews one body; add --full for the complete record.
 Frontier source: 'rig queue list' is the default status surface.
@@ -1993,13 +2032,24 @@ Examples:
       source?: string;
       state?: string;
       targetRepo?: string;
+      tag?: string[];
+      mission?: string[];
+      slice?: string[];
       limit: string;
       json?: boolean;
       host?: string;
     }) => {
+      const useJson = opts.json || opts.o === "json";
+      const orderedTags = listTagFiltersInArgumentOrder.splice(0);
+      const invalidTag = [...(opts.tag ?? []), ...(opts.mission ?? []), ...(opts.slice ?? [])]
+        .some((value) => value.trim().length === 0);
+      if (invalidTag) {
+        emitQueueListFilterError({ error: "tag_invalid", message: "tag filters cannot be blank" }, useJson);
+        return;
+      }
+      const tags = [...new Set(orderedTags)];
       const deps = getDeps();
       const remote = remoteHostOf(opts.host);
-      const useJson = opts.json || opts.o === "json";
       // The seat env names a seat of THIS host. On another host's daemon (a --host that resolves remote) it scopes
       // nothing that daemon holds: no rig is derived from it, and --owned/--mine are refused.
       const seatScope = (onRemote: boolean): URLSearchParams | null => {
@@ -2037,6 +2087,7 @@ Examples:
         if (opts.source) params.set("sourceSession", opts.source);
         if (opts.state) params.set("state", opts.state);
         if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
+        for (const tag of tags) params.append("tag", tag);
         if (opts.limit) params.set("limit", String(opts.limit));
         return params;
       };
@@ -2049,6 +2100,20 @@ Examples:
         const params = seatScope(target.remote !== undefined);
         if (!params) return;
         const res = await target.client.get<unknown>(`/api/queue/list?${params.toString()}`, target.options);
+        if (res.status < 400 && tags.length > 0 && Array.isArray(res.data)) {
+          const ignored = res.data.some((value) => {
+            if (!value || typeof value !== "object") return true;
+            const rowTags = (value as { tags?: unknown }).tags;
+            return !Array.isArray(rowTags) || tags.some((tag) => !rowTags.includes(tag));
+          });
+          if (ignored) {
+            emitQueueListFilterError({
+              error: "filter_unsupported",
+              message: "The daemon returned a queue row missing a requested exact tag; it may be too old to apply tag filters. Empty results cannot confirm tag filtering.",
+            }, useJson);
+            return;
+          }
+        }
         printResult(useJson, res.data, res.status);
       }, remote !== undefined, remote);
     });

@@ -112,7 +112,8 @@ export function validatePreRestore(
     // nothing, skip; usable type + token => exact resume, skip; a token
     // WITHOUT a usable resume type follows the current fresh path,
     // validate.
-    const resolution = resolveActiveSnapshotSession(data, node.id);
+    // A missing sessions list is already a blocker above; read it as empty here rather than throw.
+    const resolution = resolveActiveSnapshotSession({ ...data, sessions: sessions ?? [] }, node.id);
     const freshListed = opts.freshLogicalIds?.includes(node.logicalId) ?? false;
     let consumesReplay: boolean;
     if (resolution.kind === "ambiguous") {

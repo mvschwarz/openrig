@@ -30,11 +30,11 @@ import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } f
 import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
-import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type InboxCheckIn, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { readWakeOutcome } from "./connection-contract.js";
+import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -291,7 +291,9 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string, targets:
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     for (const token of note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)) {
-      const named = [token, ...token.split(",").map((t) => t.trim())].filter(Boolean);
+      const named = [token, ...token.split(",").map((t) => t.trim())]
+        .filter(Boolean)
+        .map((t) => targets.includes(t) ? t : t.replace(/[.,;:)]$/, ""));
       if (!named.some((t) => targets.includes(t))) continue;
       for (const t of named) verified.add(t);
       break;
@@ -619,20 +621,36 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
  *  and what to do. Its work's age runs from each row's own time, which a check-in never resets. Built from the rows' fixed
  *  facts and the member's check-in state, never a current check-in's exact time, so a pass rewrites it only when the rows
  *  or that state change. */
-function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: InboxCheckIn,
+function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: MemberCheckIn,
   now: Date): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
-  const recent = checkIn.state === "seen" && now.getTime() - Date.parse(checkIn.at) <= thresholdMinutes * 60_000;
-  const checkIns = recent
-    ? `checking in: it read its own inbox within the last ${thresholdMinutes} min`
-    : checkIn.state === "seen"
-      ? `no check-in observed since ${checkIn.at}`
-      : checkIn.state === "never" ? "no check-in observed yet" : "unknown: its check-ins couldn't be read";
+  // The member's shared check-in status, in the same words `rig roster` uses (`describeCheckIn`). Only the words follow
+  // it; when this notice is filed doesn't. Where that line would carry the time of a check-in that keeps moving (checking
+  // in, on request, unknown), the notice says instead whether the member read its inbox within the threshold, so a
+  // check-in rewrites the notice only when it changes that, never its time alone. An overdue or never-seen member's line
+  // is fixed until it checks in, so it keeps its evidence.
+  const at = checkIn.lastCheckInAt;
+  const lately = at !== null && now.getTime() - Date.parse(at) <= thresholdMinutes * 60_000;
+  const recency = at === null ? "" : lately ? `; it read its own inbox within the last ${thresholdMinutes} min` : `; no check-in since ${at}`;
+  const recent = checkIn.status === "checking-in" || ((checkIn.status === "on-request" || checkIn.status === "unknown") && lately);
+  const checkIns = ((): string => {
+    switch (checkIn.status) {
+      case "checking-in": return `checking in: its last check-in is within twice its expected ${checkIn.expectedMinutes} min`;
+      case "on-request": return `on request: it checks its queue when a person asks it${recency}`;
+      case "unknown": return `unknown (${checkIn.reason ?? "its check-in status couldn't be read"})${recency}`;
+      case "check-in-overdue":
+      case "no-check-in-yet":
+      case "disconnected":
+        return describeCheckIn(checkIn);
+    }
+  })();
   const why = recent
-    ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
-    : checkIn.state === "unknown"
-      ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
-      : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
+    ? "it's reading its own inbox, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
+    : checkIn.status === "check-in-overdue"
+      ? "nobody has claimed these rows, and it hasn't checked in as often as its setup expects. Ask its owner to check its schedule or a pending approval, or route the work to another seat"
+      : checkIn.status === "unknown" && at === null
+        ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
+        : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
     summary: `Stuck sweep: unclaimed-backlog on ${member} (${count})`,
     body:
@@ -1493,7 +1511,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // A polling member's notice says whether it's checking in; an agent seat's names the route to add instead.
       const polled = rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat);
       const backlogText = (standsFor: BacklogRow[]) => polled
-        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now)
+        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
         : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
       // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
       // else the operator agent. With none, it stays with the member, which reads it when it next checks.
