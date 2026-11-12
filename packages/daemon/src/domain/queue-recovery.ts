@@ -52,10 +52,12 @@ type RecoveryRow = { qitem_id: string; state: string; ts_updated: string; values
 type RecoveryScope = { db: Database.Database; byTag: Map<string, RecoveryRow[]> | null };
 let scope: RecoveryScope | null = null;
 /** Statement text of the index read; exported for tests that count how often a listing builds it. */
+// Unary + preserves the numeric CASE order but prevents a prefix match on the full-history listing
+// index. This batch needs the small recovery-tag index, not a scan of every retained queue row.
 export const RECOVERY_INDEX_SQL = `SELECT q.qitem_id, q.state, q.ts_updated, j.value AS value
     FROM queue_items q, json_each(q.tags) j
     WHERE ${RECOVERY_TAG_ROWS.replace(/\btags\b/g, "q.tags")} AND json_valid(q.tags) AND typeof(j.value) = 'text'
-    ${RECOVERY_ORDER.replace(/ LIMIT 1$/, "").replace(/\b(state|ts_updated|qitem_id)\b/g, "q.$1")}`;
+    ${RECOVERY_ORDER.replace("ORDER BY CASE", "ORDER BY +CASE").replace(/ LIMIT 1$/, "").replace(/\b(state|ts_updated|qitem_id)\b/g, "q.$1")}`;
 function buildRecoveryIndex(db: Database.Database): Map<string, RecoveryRow[]> {
   const rows = db.prepare(RECOVERY_INDEX_SQL).all() as Array<{ qitem_id: string; state: string; ts_updated: string; value: string }>;
   const byRow = new Map<string, RecoveryRow>();
