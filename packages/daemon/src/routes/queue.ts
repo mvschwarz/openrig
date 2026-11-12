@@ -45,6 +45,7 @@ import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
+import { HUMAN_ALERT_TAG } from "../domain/gateway/human-registry.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
@@ -601,8 +602,10 @@ export function queueRoutes(): Hono {
       ? (fwd.payload as { tags: unknown[] }).tags.filter((tag): tag is string => typeof tag === "string")
       : [];
     const requestedTags = forwardBody.tags as string[];
-    const acceptedTagsMatchRequest = acceptedTags.length === requestedTags.length
-      && acceptedTags.every((tag, index) => tag === requestedTags[index]);
+    const acceptedScopeTags = acceptedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const requestedScopeTags = requestedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const acceptedTagsMatchRequest = acceptedScopeTags.length === requestedScopeTags.length
+      && acceptedScopeTags.every((tag, index) => tag === requestedScopeTags[index]);
     const scopeCheck = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1"
       ? skippedCreateScopeAdvisory(acceptedTags)
       : null;
