@@ -19,5 +19,7 @@ keeps ordinary materialization behavior; it does not make repeated imports idemp
 JSON output is the native receipt. Both initial and replay receipts carry the same committed ids in
 `operation.rigId` and `operation.nodeIds`. Replays report current database state, not a cached first result. An empty
 receipt leaves the CLI nonzero: it cannot confirm preparation while the original execution is still running or failed
-before creating resources. The receipt's ids do not authorize launching anything; use the normal owner-authorized
+before creating resources. Text-mode replays still print recorded rig and node IDs when resources are archived or
+missing, with a warning and a nonzero exit status. JSON mode retains the native receipt and the same nonzero status.
+The receipt's ids do not authorize launching anything; use the normal owner-authorized
 [first start of a materialized seat](rig-spec.md#starting-one-materialized-seat) afterward.

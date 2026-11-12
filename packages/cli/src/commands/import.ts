@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import { Command } from "commander";
 import fs from "node:fs";
 import { z } from "zod";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonResponseError, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -25,11 +25,16 @@ const materializeResult = z.object({
   rigId: z.string(), specName: z.string(), nodes: z.array(z.object({ logicalId: z.string(), status: z.string() })),
 });
 
-function recordedMaterializationExists(operation: z.infer<typeof materializeOperation>): boolean {
-  return operation.rigId !== null && operation.current.rig?.id === operation.rigId &&
-    operation.current.rig.exists && operation.current.rig.archivedAt === null && operation.nodeIds.length > 0 &&
+function recordedMaterializationMatches(operation: z.infer<typeof materializeOperation>): boolean {
+  return operation.rigId !== null && operation.rigId.length > 0 && operation.current.rig?.id === operation.rigId &&
+    operation.nodeIds.length > 0 &&
     new Set(operation.nodeIds).size === operation.nodeIds.length && operation.current.nodes.length === operation.nodeIds.length &&
-    operation.nodeIds.every(id => operation.current.nodes.some(node => node.id === id && node.exists));
+    operation.nodeIds.every(id => operation.current.nodes.some(node => node.id === id));
+}
+
+function materializationCurrentlyAvailable(operation: z.infer<typeof materializeOperation>): boolean {
+  return operation.current.rig?.exists === true && operation.current.rig.archivedAt === null &&
+    operation.current.nodes.every(node => node.exists);
 }
 
 export function importCommand(depsOverride?: ImportDeps): Command {
@@ -53,12 +58,12 @@ export function importCommand(depsOverride?: ImportDeps): Command {
     .option("--cwd <path>", "Override launch/materialization working directory for all members")
     .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; operationId?: string; json?: boolean; workspaceOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string; cwd?: string }) => {
       const deps = getDeps();
-      if ((opts.operationId || opts.json) && (!opts.materializeOnly || opts.instantiate || opts.workspaceOnly || opts.preflight)) {
+      if ((opts.operationId !== undefined || opts.json) && (!opts.materializeOnly || opts.instantiate || opts.workspaceOnly || opts.preflight)) {
         console.error("--operation-id and --json require --materialize-only without other import modes.");
         process.exitCode = 1;
         return;
       }
-      if (opts.operationId && !z.uuid().safeParse(opts.operationId).success) {
+      if (opts.operationId !== undefined && !z.uuid().safeParse(opts.operationId).success) {
         console.error("--operation-id must be an RFC UUID.");
         process.exitCode = 1;
         return;
@@ -158,10 +163,18 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         const headers = {
           ...extraHeaders,
           ...(opts.targetRig ? { "X-Target-Rig-Id": opts.targetRig } : {}),
-          ...(opts.operationId ? { "X-OpenRig-Operation-Id": opts.operationId } : {}),
+          ...(opts.operationId !== undefined ? { "X-OpenRig-Operation-Id": opts.operationId } : {}),
         };
-        if (opts.operationId) {
-          const capabilities = await client.get<unknown>("/api/operations/capabilities");
+        if (opts.operationId !== undefined) {
+          let capabilities: DaemonResponse<unknown>;
+          try {
+            capabilities = await client.get<unknown>("/api/operations/capabilities");
+          } catch (error) {
+            if (!(error instanceof DaemonResponseError)) throw error;
+            console.error("This daemon did not return a readable operation capability response. Nothing was materialized; upgrade the daemon before using --operation-id.");
+            process.exitCode = 1;
+            return;
+          }
           const parsed = z.object({ contract: z.literal("operation-correlation.v1"), kinds: z.array(z.string()) }).safeParse(capabilities.data);
           if (capabilities.status >= 400 || !parsed.success || !parsed.data.kinds.includes("rig.materialize")) {
             console.error("This daemon does not advertise retry-safe materialization. Nothing was materialized; upgrade the daemon before using --operation-id.");
@@ -173,15 +186,16 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         const replay = materializeReplay.safeParse(res.data);
         const fresh = materializeResult.safeParse(res.data);
         const receipt = z.object({ operation: materializeOperation }).safeParse(res.data);
-        const confirmed = replay.success ? recordedMaterializationExists(replay.data.operation) : fresh.success;
+        const confirmed = replay.success ? recordedMaterializationMatches(replay.data.operation) : fresh.success;
         // Fresh results expose logical ids, not native node ids: compare the available count,
         // and require distinct recorded ids with matching current-node evidence, without inventing a mapping.
-        const correlated = !opts.operationId || receipt.success && receipt.data.operation.operationId === opts.operationId.toLowerCase() &&
-          recordedMaterializationExists(receipt.data.operation) && (replay.success || fresh.success &&
+        const correlated = opts.operationId === undefined || receipt.success && receipt.data.operation.operationId === opts.operationId.toLowerCase() &&
+          recordedMaterializationMatches(receipt.data.operation) && (replay.success || fresh.success &&
             receipt.data.operation.rigId === fresh.data.rigId && receipt.data.operation.nodeIds.length === fresh.data.nodes.length);
+        const available = !receipt.success || materializationCurrentlyAvailable(receipt.data.operation);
         if (opts.json) {
           console.log(JSON.stringify(res.data, null, 2));
-          if (res.status >= 400 || !confirmed || !correlated) process.exitCode = 1;
+          if (res.status >= 400 || !confirmed || !correlated || !available) process.exitCode = 1;
           return;
         }
         if (res.status === 409 || res.status === 400 || res.status === 404) {
@@ -211,6 +225,10 @@ export function importCommand(depsOverride?: ImportDeps): Command {
           console.error("Materialization is not confirmed. Inspect the operation receipt; an empty receipt can mean it is still running or failed before creation. Keep the same operation id to inspect it again.");
           process.exitCode = 1;
           return;
+        }
+        if (!available) {
+          console.error("Warning: the recorded rig is archived or resources are missing. The receipt IDs are preserved, but the topology is not currently available.");
+          process.exitCode = 1;
         }
         if (replay.success) {
           console.log(`Materialization replay: ${replay.data.operation.rigId}`);

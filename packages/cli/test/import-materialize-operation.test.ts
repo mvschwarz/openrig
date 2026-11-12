@@ -16,8 +16,10 @@ const replies = {
   empty: { status: 200, data: { replayed: true, operation: { ...operation, rigId: null, nodeIds: [], current: { rig: null, nodes: [] } } } },
 };
 let freshOperation: unknown = operation;
+let replayOperation: unknown = operation;
 let mode: keyof typeof replies = "fresh";
 let supportsMaterialization = true;
+let capabilityResponse: "json" | "not-found" | "unreadable" = "json";
 const requests: Array<{ url: string | undefined; headers: http.IncomingHttpHeaders; body: string }> = [];
 let server: http.Server, port: number;
 let priorExit: typeof process.exitCode;
@@ -38,11 +40,17 @@ beforeAll(async () => {
     for await (const chunk of req) body += chunk;
     requests.push({ url: req.url, headers: req.headers, body });
     if (req.method === "GET" && req.url === "/api/operations/capabilities") {
+      if (capabilityResponse !== "json") {
+        res.writeHead(capabilityResponse === "not-found" ? 404 : 200, { "Content-Type": "text/plain" });
+        res.end(capabilityResponse === "not-found" ? "Not Found" : "incomplete response");
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ contract: "operation-correlation.v1", kinds: supportsMaterialization ? ["rig.materialize"] : ["rig.import"] }));
       return;
     }
-    const reply = mode === "fresh" ? { ...replies.fresh, data: { ...replies.fresh.data, operation: freshOperation } } : replies[mode];
+    const reply = mode === "fresh" ? { ...replies.fresh, data: { ...replies.fresh.data, operation: freshOperation } }
+      : mode === "replay" ? { ...replies.replay, data: { replayed: true, operation: replayOperation } } : replies[mode];
     res.writeHead(reply.status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(reply.data));
   });
@@ -52,7 +60,10 @@ beforeAll(async () => {
   port = address.port;
 });
 afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
-afterEach(() => { process.exitCode = priorExit; vi.restoreAllMocks(); requests.length = 0; supportsMaterialization = true; freshOperation = operation; });
+afterEach(() => {
+  process.exitCode = priorExit; vi.restoreAllMocks(); requests.length = 0;
+  supportsMaterialization = true; capabilityResponse = "json"; freshOperation = operation; replayOperation = operation;
+});
 
 async function run(flags: string[]) {
   priorExit = process.exitCode;
@@ -90,6 +101,30 @@ describe("rig import --materialize-only operation receipts", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it.each([
+    { name: "archived rig", current: { ...operation.current, rig: { ...operation.current.rig, archivedAt: "2026-01-02T00:00:00Z" } } },
+    { name: "deleted rig", current: { ...operation.current, rig: { ...operation.current.rig, exists: false } } },
+    { name: "deleted node", current: { ...operation.current, nodes: [{ id: "prepared-node", exists: false }] } },
+  ])("recovers recorded IDs with a warning for a $name", async ({ current }) => {
+    mode = "replay";
+    replayOperation = { ...operation, current };
+    const result = await run(["--materialize-only", "--operation-id", operationId]);
+    expect(result.exitCode).toBe(1);
+    expect(result.output.join("\n")).toContain("Materialization replay: prepared-rig");
+    expect(result.output.join("\n")).toContain("Node: prepared-node");
+    expect(result.errors.join("\n")).toMatch(/warning.*archived|warning.*missing/i);
+    expect(result.errors.join("\n")).not.toContain("not confirmed");
+    expect(requests).toHaveLength(2);
+  });
+
+  it("retains the native JSON receipt and nonzero exit for an unavailable replay", async () => {
+    mode = "replay";
+    replayOperation = { ...operation, current: { ...operation.current, nodes: [{ id: "prepared-node", exists: false }] } };
+    const result = await run(["--materialize-only", "--operation-id", operationId, "--json"]);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.output[0]!)).toEqual({ replayed: true, operation: replayOperation });
+  });
+
   it.each(["conflict", "empty"] as const)("prints %s JSON but does not report successful materialization", async response => {
     mode = response;
     const result = await run(["--materialize-only", "--operation-id", operationId, "--json"]);
@@ -111,12 +146,27 @@ describe("rig import --materialize-only operation receipts", () => {
     expect(message).not.toContain("update your spec or target rig and retry");
   });
 
-  it("rejects malformed operation ids before any HTTP write", async () => {
+  it.each(["not-a-uuid", ""])("rejects a malformed operation id %j before any HTTP write", async id => {
     mode = "fresh";
-    const result = await run(["--materialize-only", "--operation-id", "not-a-uuid"]);
+    const result = await run(["--materialize-only", "--operation-id", id]);
     expect(result.exitCode).toBe(1);
     expect(requests).toEqual([]);
     expect(result.errors.join("\n")).toMatch(/UUID/i);
+  });
+
+  it("rejects an empty operation id outside materialize-only", async () => {
+    const result = await run(["--operation-id", ""]);
+    expect(result.exitCode).toBe(1);
+    expect(requests).toEqual([]);
+    expect(result.errors.join("\n")).toContain("--materialize-only");
+  });
+
+  it("preserves ordinary materialization when the operation id is omitted", async () => {
+    mode = "fresh";
+    const result = await run(["--materialize-only"]);
+    expect(result.exitCode).not.toBe(1);
+    expect(requests.map(request => request.url)).toEqual(["/api/rigs/import/materialize"]);
+    expect(requests[0]?.headers["x-openrig-operation-id"]).toBeUndefined();
   });
 
   it.each(["--operation-id", "--json"])("requires materialize-only for the scoped %s option", async flag => {
@@ -138,6 +188,16 @@ describe("rig import --materialize-only operation receipts", () => {
     expect(result.exitCode).toBe(1);
     expect(requests.map(request => request.url)).toEqual(["/api/operations/capabilities"]);
     expect(result.errors.join("\n")).toContain("Nothing was materialized");
+  });
+
+  it.each(["not-found", "unreadable"] as const)("explains an unreadable %s capability response before any write", async response => {
+    capabilityResponse = response;
+    const result = await run(["--materialize-only", "--operation-id", operationId]);
+    expect(result.exitCode).toBe(1);
+    expect(requests.map(request => request.url)).toEqual(["/api/operations/capabilities"]);
+    expect(result.output).toEqual([]);
+    expect(result.errors.join("\n")).toContain("Nothing was materialized");
+    expect(result.errors.join("\n")).toContain("upgrade the daemon");
   });
 
   it.each([
