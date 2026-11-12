@@ -347,8 +347,13 @@ with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down
 While the kernel's other seats are running, `rig up kernel --existing` refuses
 (it restores only a kernel with no live session), so start one stopped seat with
 `rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
-kernel's latest restore-usable snapshot and resumes its saved conversation; a seat
-it can't resume is reported as waiting for a decision, not as started.
+kernel snapshot that restore ranks first: the newest usable automatic one (taken
+before `rig down`, on the periodic schedule, or at a runtime switch), even when a
+manual one is newer, and otherwise the newest usable one. `--plan` names the
+snapshot it picked and any newer usable one, and `--snapshot-id <id>` picks one
+yourself. Under the default restore policy, which the kernel's seats keep, it
+resumes the seat's saved conversation; a seat it can't resume is reported as
+waiting for a decision, not as started.
 `rig seat launch <seat> --fresh --reason "…"` instead starts a new conversation
 with no continuity source: use it only when you want a fresh occupant, since the
 seat's earlier conversation isn't carried.
