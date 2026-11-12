@@ -3,7 +3,7 @@
 // cells run from packages/test-system/delivery/run.mjs; these tests keep the parts they rely on honest.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -302,19 +302,23 @@ describe("delivery harness: the cell's surroundings", () => {
   it("types an armed draft into exactly the armed pane, once, and shows it before letting the paste run", () => {
     const real = spawnSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).stdout.trim();
     if (!real) return; // no tmux on this host
-    const sockets = mkdtempSync("/tmp/dlv-test-");
+    // The tmux server's socket goes where this run may reach it: CI's macOS sandbox allows socket connects only under
+    // TMUX_TMPDIR. Kept short for the socket path limit, as the repo's other native tmux tests do.
+    const sockets = realpathSync(mkdtempSync(join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : tmpdir()), "dlv-test-")));
     const dir = mkdtempSync(join(tmpdir(), "delivery-inject-"));
     const env = { PATH: "/usr/bin:/bin", TMUX_TMPDIR: sockets, DELIVERY_REAL_TMUX: real, DELIVERY_TMUX_LOG: join(dir, "argv.jsonl"), DELIVERY_ARM: "t", DELIVERY_INJECT_DIR: dir };
     const tmux = (...args: string[]) => spawnSync(real, args, { encoding: "utf8", env });
     const wrapped = (...args: string[]) => spawnSync(join(HARNESS, "tmux"), args, { encoding: "utf8", env });
     try {
-      tmux("new-session", "-d", "-s", "s", "-x", "80", "-y", "10", "cat");
+      // The setup must hold before the wrapper is judged: a tmux that can't start fails here, not as a paste.
+      expect(tmux("new-session", "-d", "-s", "s", "-x", "80", "-y", "10", "cat")).toMatchObject({ status: 0, stderr: "" });
       const pane = tmux("display-message", "-p", "-t", "s", "#{pane_id}").stdout.trim();
-      tmux("set-buffer", "-b", "openrig_t_1", "NOTICE-TEXT");
-      tmux("set-buffer", "-b", "other_1", "OTHER");
+      expect(pane).toMatch(/^%\d+$/);
+      expect(tmux("set-buffer", "-b", "openrig_t_1", "NOTICE-TEXT")).toMatchObject({ status: 0, stderr: "" });
+      expect(tmux("set-buffer", "-b", "other_1", "OTHER")).toMatchObject({ status: 0, stderr: "" });
       writeFileSync(join(dir, "arm.json"), JSON.stringify({ pane, text: "DRAFT-TEXT", bufferPrefix: "openrig_" }));
       // A paste from another buffer leaves the arm in place.
-      expect(wrapped("paste-buffer", "-t", pane, "-b", "other_1").status).toBe(0);
+      expect(wrapped("paste-buffer", "-t", pane, "-b", "other_1")).toMatchObject({ status: 0, stderr: "" });
       expect(existsSync(join(dir, "fired.json"))).toBe(false);
       expect(existsSync(join(dir, "arm.json"))).toBe(true);
       expect(wrapped("paste-buffer", "-t", pane, "-b", "openrig_t_1").status).toBe(0);
