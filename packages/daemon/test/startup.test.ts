@@ -22,6 +22,10 @@ import type { ExecFn } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { DEFAULT_SYSTEM_WORLD_MANIFEST } from "../src/domain/system-world.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
+import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
+import { OPENRIG_HOME } from "../src/openrig-compat.js";
 
 const startupDnsFixture = vi.hoisted(() => ({
   discoveredNames: [] as string[],
@@ -99,6 +103,51 @@ function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logica
 }
 
 describe("createDaemon startup composition", () => {
+  it("the assembled OMP launch and direct resume issue distinct private builtin0 run grants", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "startup-omp-authority-"));
+    const seat = "worker@omp-authority";
+    const paths = piSeatPaths(path.join(OPENRIG_HOME, "state", "omp"), seat);
+    let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    try {
+      daemon = await createDaemon({ tmuxExec: async () => "", cmuxFactory: async () => { throw Error("fixture: no cmux"); } });
+      const { db, deps } = daemon, grants = new ActivityGrantStore(db);
+      const rig = deps.rigRepo.createRig("omp-authority"), node = deps.rigRepo.addNode(rig.id, "worker", { runtime: "omp", cwd: root });
+      const row = deps.sessionRegistry.registerSession(node.id, seat);
+      db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('omp-binding',?,?,'%1')").run(node.id, seat);
+      const token = path.join(paths.sessionsDir, "history.jsonl");
+      const privateEnv = new Map<string, string>();
+      vi.spyOn(deps.tmuxAdapter, "getPanePid").mockResolvedValue(101);
+      vi.spyOn(deps.tmuxAdapter, "setSessionEnv").mockImplementation(async (_seat, key, value) => { privateEnv.set(key, value); });
+      vi.spyOn(deps.tmuxAdapter, "unsetSessionEnv").mockImplementation(async (_seat, key) => { privateEnv.delete(key); });
+      const send = vi.spyOn(deps.tmuxAdapter, "sendShellCommand").mockImplementation(async (_seat, command) => {
+        const issued = db.prepare("SELECT run_id FROM activity_grants WHERE node_id=? AND revoked_at IS NULL AND activated_at IS NULL ORDER BY grant_id DESC LIMIT 1").get(node.id) as { run_id: string } | undefined;
+        expect(issued).toBeDefined();
+        expect(privateEnv.size).toBeGreaterThan(0);
+        for (const secret of privateEnv.values()) expect(command).not.toContain(secret);
+        fs.mkdirSync(paths.sessionsDir, { recursive: true }); fs.writeFileSync(token, "history");
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ ready: true, launchId: issued!.run_id, sessionFile: token, updatedAt: "t" }));
+        return { ok: true };
+      });
+      const binding = { ...deps.sessionRegistry.getBindingForNode(node.id)!, cwd: root };
+      expect(await deps.runtimeAdapters!.omp!.launchHarness(binding, { name: seat })).toMatchObject({ ok: true, resumeType: "omp_session_file" });
+      const first = grants.activeForNode(node.id)!;
+      expect(first).toMatchObject({ sessionId: row.id, binding: { runtime: "omp", runner: 0, pane: "%1", panePid: 101 } });
+      expect(grants.standing(first.grantId)).toBe("current");
+      const resume = (deps.restoreOrchestrator as unknown as { ompResume: OmpResumeAdapter }).ompResume;
+      expect(await resume.resume(seat, "omp_session_file", token, root)).toMatchObject({ ok: true });
+      const second = grants.activeForNode(node.id)!;
+      expect(second.runId).not.toBe(first.runId);
+      expect(grants.standing(first.grantId)).toBe("revoked");
+      expect(grants.standing(second.grantId)).toBe("current");
+      expect(db.prepare("SELECT agent_app,agent_runner FROM sessions WHERE id=?").get(row.id)).toEqual({ agent_app: null, agent_runner: null });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id=?").get(node.id)).toEqual({ n: 2 });
+    } finally {
+      daemon?.eventLoopMonitor.stop(); daemon?.contextMonitor.stop(); daemon?.deps.seatActivityService?.stop(); daemon?.db.close();
+      fs.rmSync(paths.seatRoot, { recursive: true, force: true }); fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
   // V0.3.1 slice 05 kernel-rig-as-default — startup tests construct
   // the daemon without booting the kernel rig. The kernel-boot path
   // is exercised separately in kernel-boot.test.ts (unit) +

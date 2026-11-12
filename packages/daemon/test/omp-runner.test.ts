@@ -55,13 +55,15 @@ describe("OMP runner command and child isolation", () => {
   });
 
   it("passes only declared provider key and managed identity, not daemon activity credentials", () => {
-    const env = buildPiChildEnv({ PATH: "/usr/bin", HOME: "/operator", ANTHROPIC_API_KEY: "seat-key", OPENAI_API_KEY: "other-key", OPENRIG_ACTIVITY_HOOK_TOKEN: "private-token", OPENRIG_OCCUPANT_GENERATION: "occupant-42", AWS_SECRET_ACCESS_KEY: "other-secret" }, { runtime: "omp", agentDir: "/openrig/state/omp/seat/agent", sessionsDir: "/openrig/state/omp/seat/sessions", model: "anthropic/claude-sonnet", sessionName, nodeId: "node-1", openrigHome: "/openrig", openrigUrl: "http://127.0.0.1:3000" });
+    const env = buildPiChildEnv({ PATH: "/usr/bin", HOME: "/operator", ANTHROPIC_API_KEY: "seat-key", OPENAI_API_KEY: "other-key", OPENRIG_ACTIVITY_HOOK_TOKEN: "private-token", OPENRIG_RUN_ID: "omp-actual-run", OPENRIG_RUN_GRANT_PRIVATE: "private-token", OPENRIG_OCCUPANT_GENERATION: "occupant-42", AWS_SECRET_ACCESS_KEY: "other-secret" }, { runtime: "omp", agentDir: "/openrig/state/omp/seat/agent", sessionsDir: "/openrig/state/omp/seat/sessions", model: "anthropic/claude-sonnet", sessionName, nodeId: "node-1", openrigHome: "/openrig", openrigUrl: "http://127.0.0.1:3000" });
     // OMP children get the same accepted identity allowlist as Pi (including
     // the occupant generation), plus the seat HOME and pinned identity.
     expect(env).toMatchObject({ HOME: "/openrig/state/omp/seat", PI_CODING_AGENT_DIR: "/openrig/state/omp/seat/agent", PI_CODING_AGENT_SESSION_DIR: "/openrig/state/omp/seat/sessions", ANTHROPIC_API_KEY: "seat-key", OPENRIG_SESSION_NAME: sessionName, OPENRIG_NODE_ID: "node-1", OPENRIG_RUNTIME: "omp", OPENRIG_HOME: "/openrig", OPENRIG_URL: "http://127.0.0.1:3000", OPENRIG_OCCUPANT_GENERATION: "occupant-42" });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(env).not.toHaveProperty("OPENRIG_ACTIVITY_HOOK_TOKEN");
+    expect(env).not.toHaveProperty("OPENRIG_RUN_ID");
+    expect(env).not.toHaveProperty("OPENRIG_RUN_GRANT_PRIVATE");
   });
 
   it("forwards the accepted OPENRIG_* identity to Pi children without OMP's seat HOME", () => {

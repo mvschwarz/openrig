@@ -380,13 +380,16 @@ describe("the guest router: only the hook post, and only for a grant", () => {
 });
 
 describe("credential-bound observation-only reports", () => {
-  function runner() {
+  function runner(runtime = "synth", kind = 1) {
     const f = fixture();
     f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('observed',?,?,'%1')").run(f.guest.id, GUEST);
     f.db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run(new Date(f.clock.now - 1000).toISOString(), f.guest.id);
     const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    f.db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, f.guest.id);
+    f.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
+      .run(kind === 0 ? null : runtime, kind, row.id);
     const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "Core launch", run: { runId: "actual-observation-run",
-      sessionId: row.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+      sessionId: row.id, binding: { runtime, runner: kind, pane: "%1", panePid: 101 } } });
     expect(f.grants.activate(grant.grantId)).toBe(true);
     const report = (sequence: number, observations: unknown) => ({ runId: grant.runId, sequence,
       occurredAt: new Date(f.clock.now + 1000).toISOString(), observations });
@@ -459,6 +462,30 @@ describe("credential-bound observation-only reports", () => {
     expect(f.reports()).toHaveLength(0);
     expect(f.grants.get(f.grant.grantId)?.revokedAt !== null).toBe(kind === "revoked");
   });
+
+  it.each([["omp", 0, "omp_session_file"], ["custom-rpc", 2, "community:custom-rpc"]] as const)(
+    "retains %s's native session-file type and launcher origin without verification", async (runtime, kind, resumeType) => {
+      const f = runner(runtime, kind), nativeRef = `/state/${runtime}/sessions/native.jsonl`;
+      const body = f.report(1, { session: { nativeRef } });
+      const accepted = await f.post(f.grant.token, body);
+      expect(accepted.status).toBe(200);
+      expect(await f.post(f.grant.token, body)).toEqual(accepted);
+      expect(f.reports()).toHaveLength(1);
+      expect(f.db.prepare("SELECT resume_type,resume_token,resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
+        .toEqual({ resume_type: resumeType, resume_token: nativeRef, resume_provenance: "launcher", resume_last_verified: null, resume_last_probe_status: null });
+      expect(f.activity(f.guest.id)).toBe("unknown");
+      expect(f.db.prepare("SELECT agent_app,agent_runner FROM sessions WHERE id=?").get(f.row.id))
+        .toEqual({ agent_app: kind === 0 ? null : runtime, agent_runner: kind });
+    });
+
+  it.each(["native-id", "relative.jsonl", "/state/not-a-session.txt", "/state/../native.jsonl", "/state/with space.jsonl"])(
+    "refuses malformed OMP session file %s before retaining a report", async nativeRef => {
+      const f = runner("omp", 0);
+      expect(await f.post(f.grant.token, f.report(1, { session: { nativeRef } })))
+        .toMatchObject({ status: 400, body: { code: "invalid_runner_observation" } });
+      expect(f.reports()).toHaveLength(0);
+      expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    });
 
   it("retains one authenticated report with a stable receipt and no fabricated activity or identity", async () => {
     const f = runner();
