@@ -7,7 +7,7 @@
 // reach the cell. The program's only credential is a dummy token that the stand-in accepts.
 
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,7 +113,19 @@ function rigSpec(kind, env) {
   ].join("\n");
 }
 
-const WORKER = ["name: worker", 'version: "1.0.0"', "resources:", "  skills: []", "profiles:", "  default:", "    uses:", "      skills: []", ""].join("\n");
+// The seat's agent: the shared pool imported as built-in agents do, selecting OpenRig's own plugin (its skills and, on
+// Claude Code, its hooks) and the managed activity hooks, as a normal seat has. It leaves out the shared default
+// settings and MCP fragment, which turn on network MCP servers a cell can't reach.
+const WORKER = ["name: worker", 'version: "1.0.0"', "imports:", "  - ref: local:../../shared", "resources:", "  skills: []", "profiles:", "  default:", "    uses:",
+  "      skills: []", "      plugins: [shared:openrig-core]", "      runtime_resources: [shared:claude-activity-hooks]", ""].join("\n");
+
+/** The shared spec pool of the OpenRig under test: a package keeps it in daemon/specs, a checkout in packages/daemon. */
+function sharedSpecs(openrig) {
+  const pkg = dirname(dirname(realpathSync(openrig)));
+  const found = [join(pkg, "daemon", "specs", "agents", "shared"), join(pkg, "..", "daemon", "specs", "agents", "shared")].find((d) => existsSync(join(d, "agent.yaml")));
+  if (!found) throw new Error(`no shared agent specs beside ${openrig}`);
+  return found;
+}
 
 /**
  * Open a cell. `program` is { kind: "claude" | "codex", bin } with bin the installed binary's absolute path; `openrig`
@@ -171,7 +183,10 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
   // From here on processes exist, so a cell that fails to open still stops everything it started.
   try {
     await rig(["daemon", "start", "--port", String(port), "--no-kernel"], { timeout: 90_000 });
+    const shared = sharedSpecs(openrig);
+    cpSync(shared, join(root, "rig", "shared"), { recursive: true });
     writeFileSync(join(root, "rig", "agents", "worker", "agent.yaml"), WORKER);
+    record({ step: "seat-profile", plugins: ["shared:openrig-core"], runtimeResources: ["shared:claude-activity-hooks"], sharedFrom: shared });
     const specPath = join(root, "rig", "rig.yaml");
     writeFileSync(specPath, rigSpec(program.kind, seatEnv(program.kind, standIn.url)));
     await rig(["up", specPath, "--json", "--yes", "--cwd", work], { timeout: 180_000 });
