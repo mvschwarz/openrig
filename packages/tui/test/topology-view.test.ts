@@ -287,6 +287,21 @@ describe("Phase-3 live-glyph honesty (the states the fleet GENUINELY serves)", (
       expect(g.glyph, `status=${status}`).not.toBe("●");
     }
   });
+
+  it("a ready, running seat the daemon reads as unknown renders ○, never idle; served words and the screen still decide", async () => {
+    const { statusGlyph } = await import("../src/topology/glyphs.js");
+    const seat = (agentActivity: { state?: string } | null | undefined, terminalActive: boolean | null) => statusGlyph({
+      logicalId: "dev.impl", podNamespace: "dev", runtime: "claude-code", model: null,
+      status: "running", nodeKind: "agent", startupStatus: "ready", contextUsedPercentage: null, agentActivity, terminalActive,
+    });
+    expect(seat({ state: "unknown" }, false)).toMatchObject({ glyph: "○", token: "actDetached" });
+    expect(seat({ state: "unknown" }, true)).toMatchObject({ glyph: "●", token: "actActive" });
+    expect(seat({ state: "running" }, false)).toMatchObject({ glyph: "●", token: "actActive" });
+    expect(seat({ state: "idle" }, false)).toMatchObject({ glyph: "●", token: "actIdle" });
+    // No activity word served: the screen fallback remains.
+    expect(seat(null, false)).toMatchObject({ glyph: "●", token: "actIdle" });
+    expect(seat(undefined, null)).toMatchObject({ glyph: "●", token: "actIdle" });
+  });
 });
 
 describe("R2 HIGH-3 — keyboard content focus stays VISIBLE under truecolor (segs path)", () => {
