@@ -1732,7 +1732,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.",
       inputSchema: z.object({
-        rigId: z.string().optional().describe("Rig name or identifier, not the team's display name; an external grant usually leaves it out to discover its team"),
+        rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
       annotations: READ_ONLY,
     },
