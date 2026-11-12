@@ -53,9 +53,11 @@ Optional fields on any rule:
 - **`on`** says which kind of turn the rule answers.
 - **`when`** matches the turn's text.
 
+A script is checked when it loads: `rules` must be a list (an absent one means the fallback answers everything), every rule needs exactly one action, and every `when` and `marker` pattern must compile.
+
 ### The request log
 
-Each request is one JSON line in the log, also available at `GET /_stand-in/requests`. The request is logged when it arrives, before any gate or delay. A line holds:
+Each request is one JSON line in the log, also available at `GET /_stand-in/requests`. The request is logged when it arrives, before any gate or delay. A request to the main path whose body isn't JSON is logged as `served: "malformed"` and answered with a 400, never a scripted reply. If the stand-in can't write its log, it answers 500 and records the failure at `GET /_stand-in/errors`, so a request missing from the log reads as the stand-in's failure, not the program's. A line holds:
 
 - the method and path.
 - every header name and every query name. A value is kept only for a short list of safe names: the headers `content-type`, `accept`, `user-agent`, `anthropic-version`, `anthropic-beta` and `openai-beta`, and the query `beta`. Every other value is recorded as `(present)`, since a provider can be set up to send a credential under any name.

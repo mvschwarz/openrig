@@ -371,6 +371,44 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect(() => loadScript({ rules: [{ say: "a", on: "assistant" }] })).toThrow(/on must be/);
   });
 
+  it("refuses a script whose rules aren't a list, or whose patterns don't compile, at load", () => {
+    expect(() => loadScript({ rules: { say: "a" } })).toThrow(/rules must be a list/);
+    expect(() => loadScript({ rules: "say a" })).toThrow(/rules must be a list/);
+    expect(() => loadScript({ rules: [null] })).toThrow(/must be an object/);
+    expect(() => loadScript({ rules: [{ say: "a", when: "DLV-(" }] })).toThrow(/rule 0: when isn't a valid pattern/);
+    expect(() => loadScript({ marker: "[", rules: [] })).toThrow(/marker isn't a valid pattern/);
+    // No rules at all is the fallback script, not a mistake.
+    expect(loadScript({}).rules).toEqual([]);
+  });
+
+  it.each(["messages", "responses"] as const)("answers a request body that isn't JSON with an error, not a scripted reply (%s)", async (kind) => {
+    const standIn = await start(kind, { script: { rules: [{ say: "never {{marker}}" }] } });
+    const path = kind === "messages" ? "/v1/messages" : "/v1/responses";
+    for (const raw of ['{"model": "x", "stream": tru', ""]) {
+      const res = await fetch(`${standIn.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toContain("never");
+    }
+    expect(standIn.requests().map((r) => [r.served, r.rule])).toEqual([["malformed", undefined], ["malformed", undefined]]);
+    expect(standIn.requests()[0]).toMatchObject({ body: '{"model": "x", "stream": tru', rawBytes: 28 });
+  });
+
+  it("answers 500 and records the failure when it can't write its log, rather than serving a turn it didn't keep", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stand-in-logfail-"));
+    try {
+      // A directory where the log file should be: every append fails.
+      const standIn = await start("responses", { script: { rules: [] }, logPath: dir });
+      const res = await post(`${standIn.url}/v1/responses`, codexTurn("DLV-logfail"));
+      expect(res.status).toBe(500);
+      expect(JSON.parse(res.text)).toMatchObject({ error: { type: "stand_in_error" } });
+      expect(standIn.errors()).toEqual([expect.objectContaining({ method: "POST", path: "/v1/responses", message: expect.stringMatching(/EISDIR/) })]);
+      const served = await (await fetch(`${standIn.url}/_stand-in/errors`)).json();
+      expect(served).toHaveLength(1);
+      // The server is still up for the next request.
+      expect((await fetch(`${standIn.url}/_stand-in/requests`)).status).toBe(200);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("runs from the command line and says where it listens", async () => {
     const dir = mkdtempSync(join(tmpdir(), "stand-in-cli-"));
     const scriptPath = join(dir, "script.json");
