@@ -4475,6 +4475,8 @@ export class QueueRepository {
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
+    // Set inside the transaction when this click changed the answers (a declared type, so the closure's write is seen).
+    let changed = null as { summary: string | null; answered: number } | null;
     const result = this.db.transaction((): RecordHumanAnswerResult => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
@@ -4505,8 +4507,21 @@ export class QueueRepository {
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), input.qitemId);
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
+      if (item.humanAnswers?.[input.questionId] !== input.optionId) {
+        changed = { summary: item.summary ?? null, answered: item.humanQuestions.length - unansweredQuestions(item.humanQuestions, answers).length };
+      }
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
+    // The click is on the ask before anyone hears of it; a failed event never takes it back or holds up its return.
+    if (changed && result.status === "recorded") {
+      try {
+        this.eventBus.emit({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
+          questionId: input.questionId, answered: changed.answered, questions: result.questions.length,
+          complete: result.complete, summary: changed.summary });
+      } catch (error) {
+        console.warn(`[queue] ${input.qitemId}'s recorded answer has no event`, error);
+      }
+    }
     // A pending ask's interrupted close finishes here, as theirs; a park resumes with it through the reply resolver.
     if (result.status === "not-applicable" && result.answeredBy) {
       this.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser: input.primaryUser });
