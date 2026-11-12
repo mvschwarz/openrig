@@ -2003,7 +2003,7 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',me
     expect(entries().filter(e => e.type === "abort")).toEqual([]);
     expect(f.outbox.runnerReceipt("literal")?.result).toMatchObject({ answer: "answer /abort" });
   }, 20000);
-  it.each([["pi", 0, true], ["arbitrary-preset", 1, true], ["arbitrary-rpc", 2, false]] as const)("production channel intersects implemented families for %s/%i (enabled=%s)", async (runtime, runner, enabled) => {
+  it.each([["pi", 0, true], ["omp", 0, false], ["arbitrary-preset", 1, true], ["arbitrary-rpc", 2, false]] as const)("production channel intersects implemented families for %s/%i (invocation mapping=%s)", async (runtime, runner, enabled) => {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const f = await fixture(true, runtime, runner);
     const production = new RunnerChannel(f.grants, f.outbox);
