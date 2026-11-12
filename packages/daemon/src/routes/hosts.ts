@@ -58,8 +58,8 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { UNATTRIBUTED_ACTOR, type QueueItem, type QueueRepository } from "../domain/queue-repository.js";
 import { askBackRoute } from "../domain/receiver-context.js";
 import { KERNEL_OPERATOR_SESSION, resolveDefaultReceiver } from "../domain/default-receiver.js";
-import type { HumanQuestion } from "../domain/human-questions.js";
-import { PAIR_SOURCE_SESSION, quotedRequester } from "../domain/hosts/pairing-ask.js";
+import { MAX_QUESTION_TEXT, type HumanQuestion } from "../domain/human-questions.js";
+import { PAIR_SOURCE_SESSION, quotedRequester, quotedRequesterWithin } from "../domain/hosts/pairing-ask.js";
 import { existsSync } from "node:fs";
 import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-registry.js";
 import { resolveDefaultPerson } from "../domain/gateway/participants.js";
@@ -98,7 +98,10 @@ const PAIR_HTTP_TIMEOUT_MS = 10_000;
 const PAIR_QUESTION_ID = "pair";
 const PAIR_APPROVE = "approve";
 function pairQuestion(requester: string, code: string): HumanQuestion[] {
-  return [{ id: PAIR_QUESTION_ID, question: `Pair ${quotedRequester(requester)} (code ${code}) with this host?`, options: [
+  // The question has a length limit and the quoted name can outgrow it, so only the question shortens it.
+  const [before, after] = ["Pair ", ` (code ${code}) with this host?`];
+  const name = quotedRequesterWithin(requester, MAX_QUESTION_TEXT - before.length - after.length);
+  return [{ id: PAIR_QUESTION_ID, question: `${before}${name}${after}`, options: [
     { id: PAIR_APPROVE, label: "Approve: hand this host's bearer token to the requester" },
     { id: "deny", label: "Deny" },
   ] }];
@@ -412,7 +415,11 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       }
     }
     const rawRequester = (typeof body.requester === "string" ? body.requester : "").trim();
-    const requester = rawRequester.slice(0, 128).replace(/[\r\n\t\u2028\u2029]/g, " ").trim() || "unknown requester";
+    // Line breaks, and characters that change how the text around them displays without showing themselves (DEL, C1
+    // controls, zero-width and byte-order marks, bidirectional overrides and isolates), become spaces, here once for
+    // every surface that shows the name; quoting escapes the remaining controls visibly.
+    const requester = rawRequester.slice(0, 128)
+      .replace(/[\r\n\t\u2028\u2029\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, " ").trim() || "unknown requester";
     const pairId = randomUUID();
     const code = String(randomInt(100000, 1000000));
 

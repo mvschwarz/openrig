@@ -14,3 +14,16 @@ export function isHostPairingAsk(item: { sourceSession: string; evidenceRef?: st
 export function quotedRequester(requester: string): string {
   return JSON.stringify(requester);
 }
+
+/** The quoted name where a limit applies (the request's question): whole when it fits in `max` characters, else the
+ *  longest leading part that fits, quoted and marked "(shortened)", so it never reads as the whole name. Escapes can
+ *  make a name up to six times longer quoted than stored; the request's body and its record keep it whole. */
+export function quotedRequesterWithin(requester: string, max: number): string {
+  const whole = quotedRequester(requester);
+  if (whole.length <= max) return whole;
+  const marker = " (shortened)";
+  // By code point, so a character outside the basic plane is never split.
+  const kept = [...requester];
+  while (kept.length > 0 && quotedRequester(kept.join("")).length + marker.length > max) kept.pop();
+  return `${quotedRequester(kept.join(""))}${marker}`;
+}
