@@ -5289,7 +5289,8 @@ export class QueueRepository {
    *  only; nothing here changes how work reaches it. */
   hostedMemberCheckIns(now: Date = new Date()): Array<{ seat: string; rung: boolean } & MemberCheckIn> {
     return this.hostedMembersFn().map((m) => ({ seat: m.seat, rung: m.wake !== undefined,
-      ...memberCheckInStatus({ checkInMinutes: m.check_in_minutes, cadenceProblem: m.check_in_problem, checkIn: this.lastInboxCheckIn(m.seat), now }) }));
+      ...memberCheckInStatus({ checkInMinutes: m.check_in_minutes, onRequest: m.check_in_on_request, cadenceProblem: m.check_in_problem,
+        checkIn: this.lastInboxCheckIn(m.seat), now }) }));
   }
 
   /** One member's check-in status, as `hostedMemberCheckIns` gives it. A seat the rosters don't list here (or can't be
@@ -5297,8 +5298,9 @@ export class QueueRepository {
   hostedMemberCheckIn(seat: string, now: Date = new Date()): MemberCheckIn {
     let member: RosterMember | undefined;
     try { member = this.hostedMembersFn().find((m) => this.isSameSession(m.seat, seat)); } catch { member = undefined; }
-    return memberCheckInStatus({ checkInMinutes: member?.check_in_minutes, cadenceProblem: member?.check_in_problem,
-      checkIn: this.lastInboxCheckIn(seat), now });
+    // The roster's spelling of the seat, as the list read uses, so both read the same check-ins.
+    return memberCheckInStatus({ checkInMinutes: member?.check_in_minutes, onRequest: member?.check_in_on_request,
+      cadenceProblem: member?.check_in_problem, checkIn: this.lastInboxCheckIn(member?.seat ?? seat), now });
   }
 
   /** This session's latest recorded check-in under any of its names. */

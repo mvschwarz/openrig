@@ -52,12 +52,13 @@ export type CheckInStatus =
   | "check-in-overdue"
   /** No check-in recorded for it. */
   | "no-check-in-yet"
-  /** No cadence stated: it checks its queue when a person prompts it. */
+  /** Its setup says it checks its queue when a person asks it (`check_in_on_request`), not on a schedule. */
   | "on-request"
   /** Its connection was revoked or removed, as recorded. Never inferred from silence. Nothing records a revocation yet,
    *  so nothing emits it: a revoked member stops checking in and reads overdue. */
   | "disconnected"
-  /** Its check-ins couldn't be read, or its stated cadence can't be used (the reason says which). */
+  /** Its setup states no cadence, its stated one can't be used, or its check-ins couldn't be read (the reason says
+   *  which). Never idle and never overdue: with no stated cadence, OpenRig assumes none. */
   | "unknown";
 
 /** How each check-in status reads to a person. */
@@ -81,16 +82,21 @@ export interface MemberCheckIn {
   lastCheckInAt: string | null;
   /** The cadence its person stated at setup; null when none was. */
   expectedMinutes: number | null;
+  /** Its setup says it checks in when a person asks it. */
+  onRequest: boolean;
   reporter: Reporter;
   /** Why the status is unknown, when it is. */
   reason?: string;
 }
 
-/** A hosted member's check-in status from its stated cadence and its last observed check-in (`seen`, `never`, or
- *  `unknown` when the record can't be read). First match wins: disconnected, unknown, no check-in yet, on request,
- *  then checking in or overdue. Nothing passes `revokedAt` yet, so nothing reads disconnected. */
+/** A connected assistant's check-in status from what its setup states (a cadence, or on request) and its last observed
+ *  check-in (`seen`, `never`, or `unknown` when the record can't be read). First match wins: disconnected, unknown (an
+ *  unusable statement or an unreadable record), no check-in yet, on request, then checking in or overdue by its cadence,
+ *  else unknown because it states none. Nothing passes `revokedAt` yet, so nothing reads disconnected. */
 export function memberCheckInStatus(input: {
   checkInMinutes: number | null | undefined;
+  /** Its setup says it checks in on request rather than on a schedule. */
+  onRequest?: boolean;
   /** Why the stated cadence can't be used, from the roster. */
   cadenceProblem?: string | null;
   checkIn: { state: "seen"; at: string } | { state: "never" } | { state: "unknown" };
@@ -99,16 +105,37 @@ export function memberCheckInStatus(input: {
 }): MemberCheckIn {
   const expectedMinutes = input.checkInMinutes ?? null;
   const lastCheckInAt = input.checkIn.state === "seen" ? input.checkIn.at : null;
-  const unknown = (reason: string): MemberCheckIn => ({ status: "unknown", lastCheckInAt, expectedMinutes, reporter: "openrig-observed", reason });
-  const known = (status: CheckInStatus): MemberCheckIn => ({ status, lastCheckInAt, expectedMinutes, reporter: "openrig-observed" });
+  const onRequest = input.onRequest === true;
+  const unknown = (reason: string): MemberCheckIn => ({ status: "unknown", lastCheckInAt, expectedMinutes, onRequest, reporter: "openrig-observed", reason });
+  const known = (status: CheckInStatus): MemberCheckIn => ({ status, lastCheckInAt, expectedMinutes, onRequest, reporter: "openrig-observed" });
   if (input.revokedAt) return known("disconnected");
   if (input.cadenceProblem) return unknown(input.cadenceProblem);
   if (input.checkIn.state === "unknown") return unknown("its check-ins couldn't be read");
   if (input.checkIn.state === "never") return known("no-check-in-yet");
-  if (expectedMinutes === null) return known("on-request");
+  if (onRequest) return known("on-request");
+  if (expectedMinutes === null) return unknown(NO_CADENCE_STATED);
   const age = input.now.getTime() - Date.parse(input.checkIn.at);
   if (!Number.isFinite(age)) return unknown("its last check-in's time couldn't be read");
   return known(age <= expectedMinutes * CHECK_IN_OVERDUE_CADENCES * 60_000 ? "checking-in" : "check-in-overdue");
+}
+
+/** Why a connected assistant whose setup states neither a cadence nor on request reads unknown. */
+export const NO_CADENCE_STATED = "no check-in cadence declared";
+
+/** A connected assistant's check-in in one line for a person, with its evidence: "overdue: last check-in 13:05,
+ *  expected every 60 min; its schedule may be off or waiting for an approval". */
+export function describeCheckIn(c: Pick<MemberCheckIn, "status" | "lastCheckInAt" | "expectedMinutes" | "onRequest" | "reason">): string {
+  const last = c.lastCheckInAt ? `last check-in ${c.lastCheckInAt}` : null;
+  const expected = c.expectedMinutes !== null ? `expected every ${c.expectedMinutes} min`
+    : c.onRequest ? "checks in when a person asks it" : NO_CADENCE_STATED;
+  switch (c.status) {
+    case "checking-in": return `checking in: ${last}, ${expected}`;
+    case "check-in-overdue": return `overdue: ${last}, ${expected}; its schedule may be off or waiting for an approval`;
+    case "no-check-in-yet": return `no check-in yet; ${expected}`;
+    case "on-request": return `on request: it checks its queue when a person asks it${last ? `; ${last}` : ""}`;
+    case "disconnected": return "disconnected: its connection was revoked or removed";
+    case "unknown": return `unknown (${c.reason ?? "its check-in status couldn't be read"})${last ? `; ${last}` : ""}`;
+  }
 }
 
 /** The route a wake took. `none` means no route can carry it (a pull-only member, an address nothing holds). */

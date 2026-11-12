@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { memberCheckInStatus, readWakeOutcome } from "../src/domain/connection-contract.js";
+import { describeCheckIn, memberCheckInStatus, readWakeOutcome } from "../src/domain/connection-contract.js";
 import { NUDGE_FAIL_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 
 describe("readWakeOutcome: every recorded nudge result reads as a delivery fact", () => {
@@ -73,9 +73,18 @@ describe("memberCheckInStatus: a hosted member's check-in status", () => {
     expect(memberCheckInStatus({ checkInMinutes: 60, checkIn: { state: "unknown" }, now })).toMatchObject({ status: "unknown", reason: "its check-ins couldn't be read" });
   });
 
-  it("with no stated cadence it is on request, whatever its last check-in's age, and keeps that check-in", () => {
-    expect(status(null, seenAgo(5))).toBe("on-request");
-    expect(status(null, seenAgo(10_000))).toBe("on-request");
+  it("with no stated cadence it reads unknown with its last check-in, never on request, idle or overdue", () => {
+    expect(memberCheckInStatus({ checkInMinutes: null, checkIn: seenAgo(5), now }))
+      .toMatchObject({ status: "unknown", reason: "no check-in cadence declared", lastCheckInAt: seenAgo(5).at });
+    expect(status(null, seenAgo(10_000))).toBe("unknown");
+  });
+
+  it("on request only when its setup says so, whatever its last check-in's age", () => {
+    const onRequest = (checkIn: Parameters<typeof memberCheckInStatus>[0]["checkIn"]) =>
+      memberCheckInStatus({ checkInMinutes: null, onRequest: true, checkIn, now });
+    expect(onRequest(seenAgo(5)).status).toBe("on-request");
+    expect(onRequest(seenAgo(10_000))).toMatchObject({ status: "on-request", onRequest: true });
+    expect(onRequest({ state: "never" }).status).toBe("no-check-in-yet");
     expect(memberCheckInStatus({ checkInMinutes: undefined, checkIn: seenAgo(5), now })).toMatchObject({ lastCheckInAt: seenAgo(5).at, expectedMinutes: null });
   });
 
@@ -90,5 +99,25 @@ describe("memberCheckInStatus: a hosted member's check-in status", () => {
     expect(status(60, seenAgo(5), "2026-11-12T11:00:00.000Z")).toBe("disconnected");
     expect(status(60, seenAgo(100_000))).toBe("check-in-overdue");
     expect(status(null, { state: "never" })).not.toBe("disconnected");
+  });
+});
+
+describe("describeCheckIn: one line, with its evidence", () => {
+  const base = { lastCheckInAt: "2026-11-12T13:05:00.000Z", expectedMinutes: 60, onRequest: false };
+  it("overdue carries its last check-in, its expected cadence and the suspected reason", () => {
+    expect(describeCheckIn({ ...base, status: "check-in-overdue" }))
+      .toBe("overdue: last check-in 2026-11-12T13:05:00.000Z, expected every 60 min; its schedule may be off or waiting for an approval");
+    expect(describeCheckIn({ ...base, status: "checking-in" })).toBe("checking in: last check-in 2026-11-12T13:05:00.000Z, expected every 60 min");
+  });
+  it("names what setup says when there's no check-in, and gives an unknown its reason and last check-in", () => {
+    expect(describeCheckIn({ ...base, status: "no-check-in-yet", lastCheckInAt: null })).toBe("no check-in yet; expected every 60 min");
+    expect(describeCheckIn({ ...base, status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: null, onRequest: true }))
+      .toBe("no check-in yet; checks in when a person asks it");
+    expect(describeCheckIn({ ...base, status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: null }))
+      .toBe("no check-in yet; no check-in cadence declared");
+    expect(describeCheckIn({ ...base, status: "on-request", expectedMinutes: null, onRequest: true }))
+      .toBe("on request: it checks its queue when a person asks it; last check-in 2026-11-12T13:05:00.000Z");
+    expect(describeCheckIn({ ...base, status: "unknown", expectedMinutes: null, reason: "no check-in cadence declared" }))
+      .toBe("unknown (no check-in cadence declared); last check-in 2026-11-12T13:05:00.000Z");
   });
 });

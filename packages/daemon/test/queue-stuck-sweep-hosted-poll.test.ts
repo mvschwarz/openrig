@@ -115,7 +115,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(more).toEqual([]);
     expect(notice!.destinationSession).toBe(PERSON);
     expect(notice!.sourceSession).toBe(MEMBER);
-    expect(notice!.body).toContain(`check-ins: on request (no schedule declared): no check-in since ${at.toISOString()}`);
+    expect(notice!.body).toContain(`check-ins: unknown (no check-in cadence declared); no check-in since ${at.toISOString()}`);
     expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
     expect(notice!.body).not.toMatch(/dead/i);
@@ -132,7 +132,8 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     repo.recordInboxCheckIn(MEMBER, at);
     await work(MEMBER, { ageMinutes: 61 });
     await sweep();
-    expect(notices()[0]!.body).toContain(`check-ins: overdue: no check-in since ${at.toISOString()}; expected every 60 min, so its schedule may be off or waiting for an approval`);
+    expect(notices()[0]!.body).toContain(`check-ins: overdue: last check-in ${at.toISOString()}, expected every 60 min; its schedule may be off or waiting for an approval`);
+    expect(notices()[0]!.body).toContain("why: nobody has claimed these rows, and it hasn't checked in as often as its setup expects.");
 
     // The same three-hour-old check-in is on time for a member expected every four hours, though older than the
     // unclaimed age that judges a member with no stated cadence.
@@ -155,7 +156,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await work(MEMBER, { ageMinutes: 61 });
     await sweep();
     expect(repo.hostedMemberCheckIns()[0]).toMatchObject({ status: "unknown", reason: member.check_in_problem });
-    expect(notices()[0]!.body).toContain(`check-ins: unknown: ${member.check_in_problem}`);
+    expect(notices()[0]!.body).toContain(`check-ins: unknown (${member.check_in_problem}); it read its own inbox within the last 60 min`);
     expect(notices()[0]!.body).not.toContain("checking in");
   });
 
@@ -171,26 +172,31 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
   });
 
   it("the hosted-members read gives each member's status, last check-in and stated cadence", async () => {
-    const members = [...asListed(60), { ...asListed()[0]!, seat: "helper-b@hub" }, { ...asListed(30)[0]!, seat: "helper-c@hub" }];
+    const members = [...asListed(60), { ...asListed()[0]!, seat: "helper-b@hub", check_in_on_request: true as const },
+      { ...asListed(30)[0]!, seat: "helper-c@hub" }, { ...asListed()[0]!, seat: "helper-d@hub" }];
     repo = makeRepo({ hostedMembers: () => members });
     const at = new Date(Date.now() - 10 * 60_000);
     repo.recordInboxCheckIn(MEMBER, at);
     repo.recordInboxCheckIn("helper-b@hub", at);
+    repo.recordInboxCheckIn("helper-d@hub", at);
     const res = await appFor(repo).request("/api/queue/hosted-members");
     expect(res.status).toBe(200);
     const body = await res.json() as { hostId: unknown; members: unknown };
     expect(body).toHaveProperty("hostId");
     expect(body.members).toEqual([
-      { seat: MEMBER, rung: false, status: "checking-in", lastCheckInAt: at.toISOString(), expectedMinutes: 60, reporter: "openrig-observed" },
-      { seat: "helper-b@hub", rung: false, status: "on-request", lastCheckInAt: at.toISOString(), expectedMinutes: null, reporter: "openrig-observed" },
-      { seat: "helper-c@hub", rung: false, status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: 30, reporter: "openrig-observed" },
+      { seat: MEMBER, rung: false, status: "checking-in", lastCheckInAt: at.toISOString(), expectedMinutes: 60, onRequest: false, reporter: "openrig-observed" },
+      { seat: "helper-b@hub", rung: false, status: "on-request", lastCheckInAt: at.toISOString(), expectedMinutes: null, onRequest: true, reporter: "openrig-observed" },
+      { seat: "helper-c@hub", rung: false, status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: 30, onRequest: false, reporter: "openrig-observed" },
+      // States neither a cadence nor on request: unknown, with its last check-in, never on request, idle or overdue.
+      { seat: "helper-d@hub", rung: false, status: "unknown", lastCheckInAt: at.toISOString(), expectedMinutes: null, onRequest: false,
+        reporter: "openrig-observed", reason: "no check-in cadence declared" },
     ]);
   });
 
   it("a member that never checked in says so", async () => {
     await work(MEMBER, { ageMinutes: 61 });
     await sweep();
-    expect(notices()[0]!.body).toContain("check-ins: no check-in yet; no schedule declared");
+    expect(notices()[0]!.body).toContain("check-ins: no check-in yet; no check-in cadence declared");
   });
 
   it("polling without claiming: old work still surfaces, and the member's check-ins neither reset its age nor rewrite the notice", async () => {
@@ -199,8 +205,8 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await poll();
     await sweep();
     const [notice] = notices();
-    expect(notice!.body).toContain("check-ins: on request (no schedule declared): it read its own inbox within the last 60 min");
-    expect(notice!.body).toContain("it's checking in, but this work is still unclaimed");
+    expect(notice!.body).toContain("check-ins: unknown (no check-in cadence declared); it read its own inbox within the last 60 min");
+    expect(notice!.body).toContain("it's reading its own inbox, but this work is still unclaimed");
     expect(notice!.body).toContain(`- ${old.qitemId}, unclaimed since ${old.tsCreated}`);
     expect(notice!.body).not.toContain(young.qitemId);
     expect(perRow()).toEqual([]);
@@ -253,7 +259,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(errors.mock.calls.filter((call) => String(call[0]).includes("inbox check-in not recorded"))).toHaveLength(1);
     expect(repo.lastInboxCheckIn(MEMBER)).toEqual({ state: "unknown" });
     await sweep();
-    expect(notices()[0]!.body).toContain("check-ins: unknown: its check-ins couldn't be read");
+    expect(notices()[0]!.body).toContain("check-ins: unknown (its check-ins couldn't be read)");
   });
 
   it("after a restart the stale check-in is still known, and the first new read records at once", async () => {

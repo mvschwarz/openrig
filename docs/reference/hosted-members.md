@@ -115,17 +115,21 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 ### Check-in status
 
 A connected assistant (a roster member marked `hosted: true`) checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
-when it lists the member's own work). Its status compares its last check-in with the cadence its roster entry states
-(`check_in_minutes`):
+when it lists the member's own work). Other calls it makes don't count yet. Its status compares its last check-in with
+what its roster entry states: a cadence (`check_in_minutes`), or that it checks in when a person asks it
+(`check_in_on_request: true`):
 
 | Status | Meaning |
 |---|---|
 | `checking-in` | its last check-in is no older than twice its stated cadence |
 | `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
-| `no-check-in-yet` | no check-in recorded for it on this daemon, whether or not it states a cadence |
-| `on-request` | no cadence stated: it checks in when a person prompts it |
-| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so no member shows it |
-| `unknown` | its check-ins couldn't be read, or its stated cadence can't be used; the reason says which |
+| `no-check-in-yet` | no check-in recorded for it on this daemon, whatever its entry states |
+| `on-request` | its entry says it checks in when a person asks it |
+| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so a revoked assistant reads overdue (or unknown, with no cadence) |
+| `unknown` | its entry states neither, its statement can't be used, or its check-ins couldn't be read; the reason says which, and its last check-in is shown. OpenRig assumes no cadence, so this never reads idle or overdue |
+
+Each place it's shown gives the evidence with it, for example `overdue: last check-in 2026-11-12T13:05:00Z, expected
+every 60 min; its schedule may be off or waiting for an approval`.
 
 A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
 anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in

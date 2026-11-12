@@ -34,7 +34,7 @@ import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSucce
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
+import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -622,31 +622,33 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
 function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: MemberCheckIn,
   now: Date): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
-  // The member's shared check-in status, worded. Only the words follow it; when this notice is filed doesn't. A member
-  // with no stated cadence keeps this threshold for whether it read its inbox lately, and no line carries a current
-  // check-in's time, so a check-in alone never rewrites the notice.
+  // The member's shared check-in status, in the same words `rig roster` uses (`describeCheckIn`). Only the words follow
+  // it; when this notice is filed doesn't. Where that line would carry the time of a check-in that keeps moving (checking
+  // in, on request, unknown), the notice says instead whether the member read its inbox within the threshold, so a
+  // check-in rewrites the notice only when it changes that, never its time alone. An overdue or never-seen member's line
+  // is fixed until it checks in, so it keeps its evidence.
   const at = checkIn.lastCheckInAt;
-  const cadence = checkIn.expectedMinutes;
   const lately = at !== null && now.getTime() - Date.parse(at) <= thresholdMinutes * 60_000;
-  const recent = checkIn.status === "checking-in" || (checkIn.status === "on-request" && lately);
+  const recency = at === null ? "" : lately ? `; it read its own inbox within the last ${thresholdMinutes} min` : `; no check-in since ${at}`;
+  const recent = checkIn.status === "checking-in" || ((checkIn.status === "on-request" || checkIn.status === "unknown") && lately);
   const checkIns = ((): string => {
     switch (checkIn.status) {
-      case "checking-in": return `checking in: its last check-in is within twice its expected ${cadence} min`;
+      case "checking-in": return `checking in: its last check-in is within twice its expected ${checkIn.expectedMinutes} min`;
+      case "on-request": return `on request: it checks its queue when a person asks it${recency}`;
+      case "unknown": return `unknown (${checkIn.reason ?? "its check-in status couldn't be read"})${recency}`;
       case "check-in-overdue":
-        return `overdue: no check-in since ${at}; expected every ${cadence} min, so its schedule may be off or waiting for an approval`;
-      case "on-request": return `on request (no schedule declared): ${lately
-        ? `it read its own inbox within the last ${thresholdMinutes} min` : `no check-in since ${at}`}`;
       case "no-check-in-yet":
-        return `no check-in yet; ${cadence !== null ? `expected every ${cadence} min` : "no schedule declared"}`;
-      case "disconnected": return "disconnected: its connection was revoked or removed";
-      case "unknown": return `unknown: ${checkIn.reason ?? "its check-in status couldn't be read"}`;
+      case "disconnected":
+        return describeCheckIn(checkIn);
     }
   })();
   const why = recent
-    ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
-    : checkIn.status === "unknown"
-      ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
-      : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
+    ? "it's reading its own inbox, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
+    : checkIn.status === "check-in-overdue"
+      ? "nobody has claimed these rows, and it hasn't checked in as often as its setup expects. Ask its owner to check its schedule or a pending approval, or route the work to another seat"
+      : checkIn.status === "unknown" && at === null
+        ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
+        : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
     summary: `Stuck sweep: unclaimed-backlog on ${member} (${count})`,
     body:

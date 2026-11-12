@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { ConfigStore } from "../config-store.js";
 import { mcpPresenceFilePath, readPresence } from "../mcp-presence.js";
-import { CHECK_IN_DISPLAY, type CheckInStatus } from "@openrig/daemon/connection-contract";
+import { CHECK_IN_DISPLAY, describeCheckIn, type CheckInStatus } from "@openrig/daemon/connection-contract";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { DaemonClient } from "../client.js";
 import { realDeps } from "./daemon.js";
@@ -74,7 +74,8 @@ export async function readRosterInventory(): Promise<RosterInventory> {
 }
 
 function hostedCheckIn(member: RosterMember, inventory: RosterInventory): Row {
-  const unknown = (reason: string) => ({ status: "unknown", lastCheckInAt: null, expectedMinutes: member.check_in_minutes ?? null, reason });
+  const unknown = (reason: string) => ({ status: "unknown", lastCheckInAt: null, expectedMinutes: member.check_in_minutes ?? null,
+    onRequest: member.check_in_on_request === true, reason });
   // The daemon names its own host with its check-ins, so a team with no terminal seat still matches its members.
   if (!inventory.checkIns) return unknown("this host's daemon gave no check-in status");
   if (!inventory.checkIns.hostId || member.host !== inventory.checkIns.hostId) return unknown("it's listed on another host, whose check-ins this host doesn't hold");
@@ -83,15 +84,16 @@ function hostedCheckIn(member: RosterMember, inventory: RosterInventory): Row {
     : unknown("this host's daemon gave no status for it");
 }
 
-/** "overdue; last check-in 13:05; expected every 60 min", for the human roster view. */
+/** A connected assistant's check-in in one human line with its evidence, in the daemon's own words
+ *  (`describeCheckIn`): "overdue: last check-in 13:05, expected every 60 min; its schedule may be off or waiting for an
+ *  approval". A status this CLI doesn't know reads unknown. */
 export function formatCheckIn(checkIn: Row): string {
-  const status = typeof checkIn.status === "string" && checkIn.status in CHECK_IN_DISPLAY ? checkIn.status as CheckInStatus : "unknown";
-  const words = [CHECK_IN_DISPLAY[status] + (status === "unknown" && typeof checkIn.reason === "string" ? ` (${checkIn.reason})` : "")];
-  if (typeof checkIn.lastCheckInAt === "string") words.push(`last check-in ${checkIn.lastCheckInAt}`);
-  if (typeof checkIn.expectedMinutes === "number") words.push(`expected every ${checkIn.expectedMinutes} min`);
-  // "on request" already says it; for a member never seen, both facts stay visible.
-  else if (status === "no-check-in-yet" || status === "disconnected") words.push("no schedule declared");
-  return words.join("; ");
+  const known = typeof checkIn.status === "string" && checkIn.status in CHECK_IN_DISPLAY;
+  return describeCheckIn({ status: known ? checkIn.status as CheckInStatus : "unknown",
+    lastCheckInAt: typeof checkIn.lastCheckInAt === "string" ? checkIn.lastCheckInAt : null,
+    expectedMinutes: typeof checkIn.expectedMinutes === "number" ? checkIn.expectedMinutes : null,
+    onRequest: checkIn.onRequest === true,
+    ...(known && typeof checkIn.reason === "string" ? { reason: checkIn.reason } : {}) });
 }
 
 export function enrichRosterMember(member: RosterMember, inventory: RosterInventory) {
