@@ -469,6 +469,37 @@ describe("run-bound native channel custody", () => {
       result: { kind: "wake", completion: "completed", answer: "invented", submissionUnknown: true } })).toThrow(/uncertainty|Invalid/);
     expect(f.outbox.runnerReceipt("wake")?.stage).toBe("submitted");
   });
+  it("unproven native wake ownership persists run quarantine across a fresh channel without replay", async () => {
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.channel.admit(f.node.id, { outboxId: "unowned", senderSession: "sender", destinationSession: "dev@channel", body: "question", kind: "wake", inputRoute: "native", payload: { question: "question" } });
+    const post = (type: string, extra = {}) => f.channel.post(f.grant.token, { type, runId: f.grant.runId, requestId: "unowned", sequence: 1, ...extra });
+    f.channel.frames(f.grant.token, 0); post("ack", { state: "accepted" }); post("submitted");
+    expect(() => post("result", { result: { kind: "wake", completion: "completed", answer: "unrelated", ownershipUnknown: true } })).toThrow(/ownership|Invalid/);
+    for (const ownershipUnknown of [false, "unknown"]) expect(() => post("result", { result: { kind: "wake", completion: "unknown", answer: null, ownershipUnknown } })).toThrow(/ownership|Invalid/);
+    f.admit("following");
+    post("result", { result: { kind: "wake", completion: "unknown", answer: null, ownershipUnknown: true } });
+    expect(f.outbox.runnerReceipt("unowned")).toMatchObject({ stage: "completed", reconciliation: "native_ownership_unknown", result: { answer: null } });
+    expect(f.outbox.getById("unowned")?.deliveryState).toBe("indeterminate");
+    expect((await f.transport.sendNativeWake("dev@channel", "question", "unowned", "sender")).sent).toBeUndefined();
+    const recovered = new RunnerChannel(f.grants, new OutboxHandler(f.db), new Set(["hosted-pi-rpc"]));
+    recovered.post(f.grant.token, { ...f.hello, retained: false });
+    cleanups.push(recovered.connect(f.grant.token));
+    expect(recovered.capable(f.node.id, "wake")).toBe(false);
+    expect(recovered.frames(f.grant.token, 0)).toEqual([]);
+    expect(f.outbox.runnerReceipt("following")?.stage).toBe("pending");
+    expect(() => recovered.admit(f.node.id, { outboxId: "later", senderSession: "sender", destinationSession: "dev@channel", body: "later", kind: "input", inputRoute: "native", payload: { text: "later" } })).toThrow();
+    expect(f.outbox.runnerReceipt("unowned")?.result).toMatchObject({ answer: null, completion: "unknown" });
+    expect(() => recovered.admit(f.node.id, { outboxId: "unowned", senderSession: "sender", destinationSession: "dev@channel", body: "question", kind: "wake", inputRoute: "native", payload: { question: "question" } })).toThrow();
+    f.outbox.eraseRunner("unowned", new Date().toISOString());
+    recovered.post(f.grant.token, f.hello);
+    expect(recovered.capable(f.node.id, "wake")).toBe(false);
+    expect(recovered.frames(f.grant.token, 0)).toEqual([]);
+    expect(f.outbox.runnerReceipt("unowned")).toMatchObject({ payload: {}, erasedAt: expect.any(String), reconciliation: "native_ownership_unknown" });
+    expect(f.outbox.runnerReceipt("unowned")?.result).toBeUndefined();
+    expect(() => post("result", { result: { kind: "wake", completion: "completed", answer: "revived" } })).toThrow(/erased/);
+  });
   it("broadcast counts pending and unknown native custody without claiming delivery or failure", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
     f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);

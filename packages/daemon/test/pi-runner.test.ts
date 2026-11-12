@@ -1432,6 +1432,43 @@ describe("managed Pi input and attributed wake", () => {
     expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person steer" }));
     expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
   });
+  it.each(["queued", "handled", "started"])("authoritative %s disposition cannot adopt earlier native/extension events", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "wake"));
+    f.event("agent_start");
+    if (disposition === "queued") f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "unrelated execution" }], stopReason: "stop" } });
+    f.event("agent_end");
+    // Native terminal alone cannot commit an answer or release a preflight awaiting disposition.
+    await new Promise(resolve => setImmediate(resolve));
+    if (disposition !== "queued") {
+      expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+      f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown", ownershipUnknown: true }) }));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start"); f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "queued followup" }], stopReason: "stop" } }); f.event("agent_end");
+    f.core.handleUserBlock("person still works");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person still works" }));
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "question")).toHaveLength(1);
+  });
+  it("a queued disposition holds managed dispatch through native terminal without guessing ownership", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start");
+    f.event("response", { id: "openrig-native-question", success: true, data: { disposition: "queued" } });
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ completion: "unknown", answer: null }) }));
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+  });
   it("queues busy wakes, protects the dedicated answer, and deduplicates offers", async () => {
     const f = managed(); f.event("agent_start");
     await f.core.acceptRunnerRequest(f.frame("steer", 1, "input"));

@@ -2882,7 +2882,7 @@ export class SessionTransport {
   private nativeResult(sessionName: string, receipt: import("./outbox-handler.js").RunnerReceipt): SendResult {
     const rejected = receipt.stage === "rejected";
     return { ok: !rejected, sessionName, verified: false, outboxIds: receipt.memberIds ?? [receipt.requestId], runnerReceipt: receipt,
-      ...(!receipt.result?.submissionUnknown && (receipt.stage === "submitted" || receipt.stage === "completed") ? { sent: true } : rejected ? { sent: false } : {}),
+      ...(!receipt.reconciliation && !receipt.result?.submissionUnknown && (receipt.stage === "submitted" || receipt.stage === "completed") ? { sent: true } : rejected ? { sent: false } : {}),
       reason: receipt.reconciliation ?? `native_${receipt.stage}` };
   }
 

@@ -927,6 +927,7 @@ export async function readPiSessionEntryIds(
 interface PiManagedEntry {
   frame: PiManagedRequest; acceptance?: Promise<void>; state: "accepting" | "queued" | "writing" | "submitted" | "terminal" | "unavailable";
   reports: Promise<unknown>; nativeAccepted?: boolean; terminalResult?: Record<string, unknown>; wakeOpened?: boolean; contaminated?: boolean; answer?: string[]; stopReason?: string;
+  disposition?: string; preDispositionEvents?: boolean; nativeTerminal?: boolean;
 }
 
 export class RunnerCore {
@@ -943,6 +944,7 @@ export class RunnerCore {
   private readonly managedQueue: PiManagedEntry[] = [];
   private readonly managedRpc = new Map<string, PiManagedEntry>();
   private managedWake: PiManagedEntry | null = null;
+  private managedQuarantined = false;
   private pendingManagedStart = false;
   private readonly personPreflights = new Set<string>();
   private promptRevision = 0;
@@ -1022,7 +1024,7 @@ export class RunnerCore {
   }
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
-  nativeChannelCapabilities() { return { input: this.ready && this.runtime === "pi", wake: this.ready && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: false }; }
+  nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined && this.runtime === "pi", wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: false }; }
 
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
   start(ready?: Record<string, unknown>): void {
@@ -1137,7 +1139,7 @@ export class RunnerCore {
   }
 
   private pumpManaged(): void {
-    if (!this.ready || this.managedWake || this.pendingManagedStart && !this.streaming) return;
+    if (!this.ready || this.managedQuarantined || this.managedWake || this.pendingManagedStart && !this.streaming) return;
     const entry = this.managedQueue[0];
     if (!entry || this.personPreflights.size || [...this.managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < entry.frame.sequence)
       || entry.frame.kind === "wake" && (this.streaming || this.pendingManagedStart)) return;
@@ -1161,11 +1163,17 @@ export class RunnerCore {
   }
 
   private finishManagedWake(entry: PiManagedEntry, forced?: "unknown" | "failed"): void {
-    const completion = forced ?? (entry.contaminated || !entry.wakeOpened ? "unknown"
+    // Pi reports started before agent.prompt, but awaits extension handlers before handled.
+    // Events before that authoritative disposition cannot establish this invocation's ownership.
+    if (!forced && entry.disposition === undefined) return;
+    const ownershipUnknown = !["started", "handled"].includes(entry.disposition ?? "") || entry.preDispositionEvents === true;
+    if (ownershipUnknown) this.managedQuarantined = true;
+    const completion = forced ?? (ownershipUnknown || entry.contaminated || !entry.wakeOpened ? "unknown"
       : entry.stopReason === "stop" && entry.answer?.some(text => text.length > 0) ? "completed" : entry.stopReason === "aborted" ? "interrupted" : entry.stopReason === "error" ? "failed" : "unknown");
     entry.state = "terminal";
     entry.terminalResult = { kind: "wake", nativeTurnId: `pi-wake-${entry.frame.requestId}`,
       completion: forced && !entry.nativeAccepted ? "unknown" : completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
+      ...(ownershipUnknown ? { ownershipUnknown: true } : {}),
       ...(forced && !entry.nativeAccepted ? { submissionUnknown: true } : {}) };
     if (entry.nativeAccepted || forced) this.reportManaged(entry, "result", entry.terminalResult);
     if (this.managedWake === entry) this.managedWake = null;
@@ -1264,10 +1272,14 @@ export class RunnerCore {
       this.managedRpc.delete(String(record.id));
       if (record.success === true) {
         managed.nativeAccepted = true; managed.state = "submitted"; this.reportManaged(managed, "submitted");
-        if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
-        else if (managed.frame.kind === "input") { managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true }); }
-        else if ((record.data as { disposition?: string } | undefined)?.disposition === "handled") this.finishManagedWake(managed, "unknown");
-        if ((record.data as { disposition?: string } | undefined)?.disposition === "handled") { this.pendingManagedStart = false; this.pumpManaged(); }
+        if (managed.frame.kind === "wake") {
+          const disposition = (record.data as { disposition?: unknown } | undefined)?.disposition;
+          managed.disposition = typeof disposition === "string" ? disposition : "unknown";
+          if (!["started", "handled"].includes(managed.disposition) || managed.preDispositionEvents) this.managedQuarantined = true;
+          if (managed.nativeTerminal || managed.disposition !== "started" && !this.streaming) this.finishManagedWake(managed);
+          else if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
+          if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpManaged(); }
+        } else { managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true }); }
       } else {
         managed.state = "terminal"; this.pendingManagedStart = false;
         this.reportManaged(managed, "rejected", { kind: managed.frame.kind, reason: "native_prompt_rejected" });
@@ -1693,11 +1705,12 @@ export class RunnerCore {
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
     const wake = this.managedWake;
+    if (wake && wake.disposition === undefined && ["agent_start", "message_end", "agent_end"].includes(String(event.type))) wake.preDispositionEvents = true;
     if (event.type === "agent_start" && wake) {
       if (wake.wakeOpened) wake.contaminated = true;
       wake.wakeOpened = true;
     }
-    if (event.type === "message_end" && wake) {
+    if (event.type === "message_end" && wake && wake.disposition === "started" && !wake.preDispositionEvents && wake.wakeOpened) {
       const assistant = event.message as { role?: string; content?: Array<{ type: string; text?: string }>; stopReason?: string } | undefined;
       if (assistant?.role === "assistant") {
         wake.answer!.push(...(Array.isArray(assistant.content) ? assistant.content : []).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text!));
@@ -1730,7 +1743,7 @@ export class RunnerCore {
       }
       this.idleRevision = -1;
       this.pendingManagedStart = false;
-      if (wake) this.finishManagedWake(wake);
+      if (wake) { wake.nativeTerminal = true; this.finishManagedWake(wake); }
       setImmediate(() => this.pumpManaged());
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed

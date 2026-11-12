@@ -104,7 +104,7 @@ export interface RunnerReceipt {
   stage: "pending" | "offered" | "accepted" | "submitted" | "completed" | "rejected";
   bindingHash?: string; erasedAt?: string; acceptedAt?: string; submittedAt?: string; completedAt?: string;
   acceptedTurnId?: string; nativeTurnId?: string; result?: Record<string, unknown>;
-  reconciliation?: "receiver_state_lost";
+  reconciliation?: "receiver_state_lost" | "native_ownership_unknown";
 }
 export type RunnerAdmission = OutboxRecordInput & { outboxId: string; nodeId: string; runId: string;
   kind: RunnerReceipt["kind"]; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown> };
@@ -289,7 +289,7 @@ export class OutboxHandler {
       if (!receipt || receipt.requestId !== id || receipt.nodeId !== nodeId || receipt.runId !== runId || receipt.sequence !== sequence)
         throw new OutboxHandlerError("runner_request_mismatch", "Unknown request or run/sequence mismatch.");
       if (receipt.erasedAt) throw new OutboxHandlerError("runner_receipt_erased", "This native receipt was erased; no result recorded.");
-      if (receipt.reconciliation) throw new OutboxHandlerError("runner_state_lost", "Receiver state was lost; effect remains indeterminate.");
+      if (receipt.reconciliation) throw new OutboxHandlerError("runner_state_lost", "Native custody or execution ownership is uncertain; effect remains indeterminate.");
       for (const key of ["acceptedTurnId", "nativeTurnId", "result"] as const) {
         if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key]))
           throw new OutboxHandlerError("runner_result_conflict", "A different native result is already retained.");
@@ -309,12 +309,13 @@ export class OutboxHandler {
         throw new OutboxHandlerError("runner_stage_conflict", "Submitted effects cannot become pre-effect rejection.");
       const at = new Date().toISOString();
       const updated: RunnerReceipt = { ...receipt, ...evidence, stage,
+        ...(evidence.result?.ownershipUnknown === true ? { reconciliation: "native_ownership_unknown" as const } : {}),
         ...(stage === "accepted" ? { acceptedAt: at } : stage === "submitted" ? { submittedAt: at }
           : stage === "completed" || stage === "rejected" ? { completedAt: at } : {}) };
       this.writeRunner(updated);
       if (stage === "submitted" || stage === "completed" || stage === "rejected") for (const memberId of receipt.memberIds ?? [id])
         this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=? WHERE outbox_id=?")
-          .run(unknownSubmission ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || stage === "rejected" ? null : at, memberId);
+          .run(unknownSubmission || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || updated.reconciliation || stage === "rejected" ? null : at, memberId);
       return updated;
     })();
   }
@@ -342,7 +343,8 @@ export class OutboxHandler {
     const retained = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
     const tombstone: RunnerReceipt | null = receipt ? { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
       sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: {},
-      ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
+      ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
+      bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
     this.db.transaction(() => {
       // Every erasure entry point removes this selected source's content/endpoints. Other group source histories
       // stay governed by their own scope; the composed native payload/result is always sanitized for the whole group.
