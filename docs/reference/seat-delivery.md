@@ -226,6 +226,18 @@ retry is scheduled. The reasons are:
 one with a reused `deliveryId`; the result warns older callers that this field no
 longer deduplicates input. The CLI does not generate a deduplication key.
 
+The last recorded managed-compaction input refusal appears as `inputReadFailure` in the attempt
+record and `rig compact --state`: the preparation or compact stage, `composer`
+(the explicit composer hold) or `draft-aware` check, reader status, confidence,
+a fixed read-failure reason and cursor flags. An owed restore step reports it in
+`owedRestore.lastDelivery`. These fields contain no input text, suggestions,
+terminal frames or exception messages. Confidence and timeout fields are `null`
+when that reader does not supply them; a known composer read timeout reports
+`timedOut: true`. A generic `capture_unavailable` does not identify the failed
+capture operation. Older records lack this diagnostic. It neither changes the
+refusal nor retries an attempt; missing metadata cannot establish which check
+caused a historical refusal.
+
 Clearing a draft, changing modes or restarting does not flush saved messages or
 callbacks. To try again, send a current request: it rechecks the recipient and input.
 A caller abort before paste cancels input; after a write may have started, the
