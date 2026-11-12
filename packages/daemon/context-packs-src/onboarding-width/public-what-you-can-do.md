@@ -1231,12 +1231,9 @@ reaching them is ordinary work rather than an escalation.
   see which host you are acting on, and check a registered host is *actually* usable end to end.
   `rig host edit <id>` corrects an entry (its id and transport stay fixed), and `rig host remove <id>` deletes
   only the registry entry: credential files, the learned identity and the selection stay as they are.
-- **`rig network connect <seat> --hub <url> --as <participant> --token-file <path>`** (with `status`
-  and `disconnect`) — **experimental, unsupported and at your own risk.** It connects one selected
-  local seat to a participant on a hub you already have, and carries that seat's work both ways.
-  HTTPS by default; plain http only with an explicit `--allow-http` recorded for that binding. The
-  daemon starts the connector, sweeps leftover credential folders and schedules local rounds even
-  with no binding, so it isn't inert.
+- **`rig network`** — **experimental, unsupported and at your own risk.** It connects one local seat
+  to a hub you already have. The daemon starts the connector, sweeps leftover credential folders and
+  schedules local rounds even with no binding, so it isn't inert, and its migrations apply on upgrade.
 - **A cross-host queue write that times out reads INDETERMINATE, not failed.** The CLI waits 15
   seconds for the daemon's answer, and `rig queue create` with no answer reads the row back once by
   its ID. Reconcile by that ID before any retry; don't send the write twice.
