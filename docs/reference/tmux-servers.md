@@ -61,6 +61,12 @@ Existing OpenRig session options, such as `terminal.status_bar`, still apply.
 An existing server does not reread its configuration merely because the daemon
 restarts. Settings and sessions in a separate personal server are left alone.
 
+When OpenRig creates a tmux server on macOS or Linux, its creating client tries
+to raise the soft open-file limit to 8192, bounded by the inherited hard limit.
+An already higher soft limit is preserved. A failed raise produces an advisory
+and the start continues with the inherited limit. Connecting to an existing
+server does not change that server's limit or restart its sessions.
+
 ## Existing teams and deferred migration
 
 At startup, the daemon checks the previously selected server before switching.
