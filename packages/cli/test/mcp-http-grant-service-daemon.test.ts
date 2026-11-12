@@ -1045,6 +1045,94 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect((await asExternal("rig_queue_create", { destination: "lead@team-a", body: "far", qitemId: far })).text).not.toContain("other-host");
   });
 
+  describe("a fair-use throttle on an active answer", () => {
+    const ALL = { queue: ["create", "show", "list", "claim", "update"] };
+    const throttled = (throttle: unknown) => (): [number, unknown] => [200, active({ objects: ALL, throttle })];
+
+    it("holds back only new creates, which write nothing and say when to retry with the same id; a replay, claim, update, show and list are served", async () => {
+      answer = () => [200, active({ objects: ALL })];
+      const { url } = await listen();
+      const ask = await connect(url);
+      const landed = { destination: "lead@team-a", body: "First task", qitemId: "qitem-landed" };
+      expect((await ask("rig_queue_create", landed)).isError).toBe(false);
+      const theirs = (await create("lead@team-a", CALLER, "A task for the assistant")).qitemId;
+      answer = throttled({ new_work: true, retry_after_seconds: 30 });
+      const before = rows();
+      for (const args of [
+        { destination: "lead@team-a", body: "New work" },
+        { destination: "lead@team-a", body: "New work", qitemId: "qitem-new" },
+        { destination: "lead@team-a", body: "Improve it", revises: landed.qitemId },
+      ] as Array<Record<string, string>>) {
+        const held = await ask("rig_queue_create", args);
+        expect(held.isError).toBe(true);
+        expect(held.structured).toMatchObject({ ok: false, code: "fair_use_retry_later", retryable: true, retryAfterSeconds: 30, outcome: "not_written" });
+        expect(held.structured.earlierAttempt).toBeUndefined();
+        expect(held.text).toContain("Nothing was created by this call.");
+        expect(held.text).toContain(`Retry after 30 seconds with the same qitemId ${held.structured.qitemId}.`);
+        if (args.qitemId) expect(held.structured.qitemId).toBe(args.qitemId);
+      }
+      expect(rows()).toBe(before);
+      expect(repo.getById("qitem-new")).toBeFalsy();
+      const replay = await ask("rig_queue_create", landed);
+      expect(replay.isError).toBe(false);
+      expect(replay.structured.qitemId).toBe(landed.qitemId);
+      expect((await ask("rig_queue_claim", { qitemId: theirs })).isError).toBe(false);
+      expect((await ask("rig_queue_update", { qitemId: theirs, state: "done", closureReason: "no-follow-on", resolution: "Done" })).isError).toBe(false);
+      expect(repo.getById(theirs)).toMatchObject({ state: "done", resolution: "Done" });
+      expect((await ask("rig_queue_show", { qitemId: landed.qitemId })).isError).toBe(false);
+      expect((await ask("rig_queue_list", {})).isError).toBe(false);
+      expect(rows()).toBe(before);
+      // Once the service lifts it, the same retry lands.
+      answer = () => [200, active({ objects: ALL })];
+      expect((await ask("rig_queue_create", { destination: "lead@team-a", body: "New work", qitemId: "qitem-new" })).isError).toBe(false);
+      expect(rows()).toBe(before + 1);
+    });
+
+    it.each([
+      ["a string", "yes"],
+      ["a list", [true]],
+      ["new_work as text", { new_work: "true", retry_after_seconds: 30 }],
+      ["a delay as text", { new_work: true, retry_after_seconds: "30" }],
+      ["no delay", { new_work: true }],
+    ])("ignores a throttle it can't read (%s): nothing is refused, and the log says so", async (_label, throttle) => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      answer = throttled(throttle);
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { destination: "lead@team-a", body: "Served" })).isError).toBe(false);
+      expect(rows()).toBe(1);
+      expect(logged.mock.calls.some(([line]) => String(line).includes("answered an unusable throttle, so it's ignored"))).toBe(true);
+      logged.mockRestore();
+    });
+
+    it("serves everything when new_work is false, and keeps a delay within 1 to 600 seconds, rounded up", async () => {
+      answer = throttled({ new_work: false, retry_after_seconds: 30 });
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { destination: "lead@team-a", body: "Served" })).isError).toBe(false);
+      for (const [given, kept] of [[0, 1], [-5, 1], [12.2, 13], [9000, 600]]) {
+        answer = throttled({ new_work: true, retry_after_seconds: given });
+        expect((await ask("rig_queue_create", { destination: "lead@team-a", body: "Held" })).structured.retryAfterSeconds).toBe(kept);
+      }
+      expect(rows()).toBe(1);
+    });
+
+    it.each([
+      ["answers an error", () => new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "Content-Type": "application/json" } })],
+      ["answers a body it can't parse", () => new Response("{", { status: 200, headers: { "Content-Type": "application/json" } })],
+    ])("writes nothing, and says an earlier attempt is unknown, when the check of whether the id landed %s", async (_label, failure) => {
+      answer = throttled({ new_work: true, retry_after_seconds: 5 });
+      const { url } = await listen();
+      const ask = await connect(url);
+      broken = (req) => req.method === "GET" && new URL(req.url).pathname === "/api/queue/qitem-unread" ? failure() : undefined;
+      const held = await ask("rig_queue_create", { destination: "lead@team-a", body: "Maybe", qitemId: "qitem-unread" });
+      broken = undefined;
+      expect(held.structured).toMatchObject({ code: "fair_use_retry_later", outcome: "not_written", earlierAttempt: "unknown", qitemId: "qitem-unread" });
+      expect(held.text).toContain("Whether an earlier attempt with this id was saved is unknown");
+      expect(rows()).toBe(0);
+    });
+  });
+
   it("a task parked on an internal child reads blocked, with no child id, owner or state anywhere", async () => {
     const { asExternal, asLead, mine } = await externalAndLead();
     const child = await create("lead@team-a", "qa@team-b", "SECRET child");

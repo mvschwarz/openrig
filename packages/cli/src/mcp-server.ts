@@ -432,6 +432,17 @@ function outOfScope(what: string, hint?: string): TextResult {
   return errorResult(JSON.stringify({ ok: false, error: "out_of_scope", message }), "out_of_scope", message);
 }
 
+/** A new create the grant service's fair-use limit holds back: nothing was written, and it says when to retry with the same
+ *  id. `unread`: whether an earlier create with this id was saved couldn't be read. */
+function fairUseRetryLater(qitemId: string, retryAfterSeconds: number, unread: boolean): TextResult {
+  const earlier = unread ? ` Whether an earlier attempt with this id was saved is unknown: check rig_queue_show with qitemId ${qitemId} before retrying.` : "";
+  const message = `OpenRig: this account has reached its fair-use limit for new work just now. Nothing was created by this call.${earlier}`
+    + ` Retry after ${retryAfterSeconds} seconds with the same qitemId ${qitemId}. Work you already have continues as usual: read, claim, answer and`
+    + " close it, and to reply to an item addressed to you, put the reply in its resolution when you close it.";
+  return errorResult(message, "fair_use_retry_later", message,
+    { retryable: true, retryAfterSeconds, qitemId, outcome: "not_written", ...(unread ? { earlierAttempt: "unknown" } : {}) });
+}
+
 /** A file the daemon read through a shared root, as text from offset: at most CONTEXT_TEXT_LIMIT characters, with
  *  nextOffset when more of what the daemon read remains, and its byte cut when the file was longer than the daemon reads. */
 function artifactView(source: string, read: FileRead, offset: number): Record<string, unknown> {
@@ -507,8 +518,10 @@ export type McpAccessClass = "work" | "workspace" | "owner" | "person";
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
   /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`), the grant it answered
-   *  with, and `person`, the gateway entity id of the person the grant service vouches owns this connection. */
-  external?: { objects: Readonly<Record<string, readonly string[]>>; grant?: { id: string; version?: number | string }; person?: string };
+   *  with, `person`, the gateway entity id of the person the grant service vouches owns this connection, and `throttle`,
+   *  the service's fair-use limit on new work for this request: the seconds before a new create is accepted again. */
+  external?: { objects: Readonly<Record<string, readonly string[]>>; grant?: { id: string; version?: number | string }; person?: string;
+    throttle?: { retryAfterSeconds: number } };
 };
 
 /** The tool each external object/action pair offers. A pair not listed here offers nothing. */
@@ -638,7 +651,7 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
 
 /** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
 const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
-  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it, close it done, and reply, when it needs one, with a new item to its sender. Nothing promises to wake you, so check your items again.",
+  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.",
 ].join("\n");
 
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
@@ -1402,6 +1415,19 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
       }
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+      // The grant service's fair-use limit holds back new work only. A retry of a create that already landed isn't new
+      // work: the daemon answers it from the stored row, so it goes through as before.
+      const throttle = access?.external?.throttle;
+      if (throttle) {
+        let landed: boolean | undefined = false;
+        if (qitemId) {
+          try {
+            const existing = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+            landed = existing.status < 400 ? true : existing.status === 404 ? false : undefined;
+          } catch { landed = undefined; }
+        }
+        if (landed !== true) return fairUseRetryLater(id, throttle.retryAfterSeconds, landed === undefined);
+      }
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
       try {
