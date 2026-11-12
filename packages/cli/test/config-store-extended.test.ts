@@ -197,6 +197,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.
       "output.whoami_peers",
+      "output.rebuild_recaps",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
       // The providers chosen at rig setup --providers, which kernel boot honours.

@@ -116,6 +116,7 @@ export const PRUNABLE_EVENT_TYPES = [
   "queue.claimed",
   "queue.unclaimed",
   "queue.handed_off",
+  "queue.answer_recorded",
   // One delivery-evidence record per send, and one prompt observation per prompt hook; kept only as long as the other
   // high-volume event types.
   "transport.delivery_evidence",

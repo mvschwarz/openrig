@@ -133,14 +133,16 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     for (const row of rows) expect(routed.some((f) => f.tags?.includes(`stuck-sweep:unclaimed-obligation:${row.qitemId}`))).toBe(true);
   });
 
-  it("with a delegation parent, each unclaimed row's finding goes to the parent", async () => {
+  it("with a delegation parent, the unclaimed rows go to the parent in its one notice for this seat (#2988)", async () => {
     const lead = seat("lane", "work.lead", "lead@lane");
     const parent = seat("lane", "coord.owner", "owner@lane");
     rigs.addEdge(lead.rig.id, parent.node.id, lead.node.id, "delegates_to");
     const row = await work("lead@lane");
     await sweep();
     expect(findingsTo("lead@lane")).toHaveLength(0);
-    expect(findingsTo("owner@lane").map((f) => f.tags)).toEqual([expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`])]);
+    const filed = findingsTo("owner@lane");
+    expect(filed.map((f) => f.tags)).toEqual([expect.arrayContaining(["stuck-sweep:unclaimed-backlog:lead@lane=>owner@lane"])]);
+    expect(filed[0]!.body).toContain(row.qitemId);
   });
 
   it("an address that isn't an agent seat here keeps a finding per row", async () => {
