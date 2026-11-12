@@ -210,16 +210,26 @@ coalesce; three failures pause retries until observed liveness or 15 quiet minut
 A rig whose **only seat is dormant never cold-starts**: this conservative gate needs
 a live peer; start that seat explicitly.
 
-**Verification** — Build and lint pass; 304 tests pass across 12 focused/lifecycle/queue
-suites, including 65 cold-start tests. Continuity evidence is **unit-level against
-the real launch door with faked tmux/Pi adapter; live fleet e2e pending**. No new
-scheduler, topology, memory gate, reaper or rig-level verb. Migration 163 follows
-the merged upstream base `c00289e26`.
+**Verification** — `npm ci`, build and lint exit 0; 362 tests pass across 13
+suites (cold-start, lifecycle, queue, stop-route). A live single-host end-to-end run
+with real native Pi seats killed a seat's runner, restarted the daemon, and let a
+queued wake cold-start it: the relaunched seat resumed the **identical session file**
+(`SAME CONVERSATION: true`) and then claimed the queued row about six minutes later
+(four consecutive runs; evidence receipts listed below). Not claimed: multi-seat /
+9-rig fleet verification. No new scheduler, topology, memory gate, reaper or
+rig-level verb. Migration 163 follows the merged upstream base `c00289e26`.
 
-**Limits to review** — Missing restore snapshots fail closed. Legacy stop events
-without a session id cannot authorize reaper revival. Independent post-fix review
-and real-fleet resume/pickup are still needed. This is a local review package, not
-a release or merge commitment.
+**Hardening** — daemon-internal stop attribution is non-forgeable: the stop route
+ignores a caller-supplied operator and records transport identity, excluding the
+reserved `daemon:*` namespace, so only a genuine internal stop can mark a seat
+revivable. Spoof attempts (body claim, header claim, case/whitespace variants) are
+covered by regressions and remain intentional, non-revivable stops.
+
+**Limits to review** — Missing restore snapshots fail closed (`no_usable_snapshot`).
+A rig whose only seat is dormant never cold-starts (needs a live peer). Legacy stop
+events without a session id cannot authorize revival. Verification so far is one
+live seat plus simulated-runtime end-to-end runs, not a multi-rig fleet. This is a
+review package, not a release or merge commitment.
 
 ---
 
