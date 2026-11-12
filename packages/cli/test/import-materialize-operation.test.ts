@@ -98,6 +98,19 @@ describe("rig import --materialize-only operation receipts", () => {
     expect(JSON.parse(result.output[0]!)).toEqual(replies[response].data);
   });
 
+  it("explains how to resolve an operation conflict in text mode", async () => {
+    mode = "conflict";
+    const result = await run(["--materialize-only", "--operation-id", operationId]);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toEqual([]);
+    const message = result.errors.join("\n");
+    expect(message).toContain("operation_id_conflict");
+    expect(message).toContain("exact original request and options");
+    expect(message).toContain("new operation ID");
+    expect(message).toContain("deliberately start a new operation");
+    expect(message).not.toContain("update your spec or target rig and retry");
+  });
+
   it("rejects malformed operation ids before any HTTP write", async () => {
     mode = "fresh";
     const result = await run(["--materialize-only", "--operation-id", "not-a-uuid"]);

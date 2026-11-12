@@ -187,6 +187,11 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         if (res.status === 409 || res.status === 400 || res.status === 404) {
           const error = z.object({ code: z.string().optional(), errors: z.array(z.string()).optional(), message: z.string().optional(), error: z.string().optional() }).safeParse(res.data);
           const data = error.success ? error.data : {};
+          if (data.code === "operation_id_conflict") {
+            console.error("Materialize failed: operation_id_conflict.\nReuse this operation ID with the exact original request and options, or use a new operation ID to deliberately start a new operation.");
+            process.exitCode = 1;
+            return;
+          }
           if (data.code === "rig_name_running") {
             console.error(data.error ?? data.message ?? "A rig with this name is already running.");
             process.exitCode = 1;
