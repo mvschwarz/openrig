@@ -80,6 +80,10 @@ describe("Ps CLI", () => {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: `Rig "${rigId}" not found` }));
         }
+      } else if (req.url === "/api/queue/hosted-members" && req.method === "GET") {
+        // A current daemon with no connected assistants.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ hostId: "host-a", members: [] }));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));

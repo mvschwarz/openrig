@@ -723,7 +723,10 @@ describe("MCP Server", () => {
       ] }));
     fs.writeFileSync(path.join(folder, "b.json"), "{ not json");
     let hostSelfId: string | null = "host-a";
+    let checkIns: unknown = { hostId: "host-a", members: [{ seat: "grok@my-rig", rung: true, status: "check-in-overdue",
+      lastCheckInAt: "2026-10-26T09:00:00.000Z", expectedMinutes: 60, reporter: "openrig-observed" }] };
     const getFn = vi.fn(async (p: string) => {
+      if (p === "/api/queue/hosted-members") return checkIns === null ? { status: 404, data: {} } : { status: 200, data: checkIns };
       if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
       if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "my-rig" }, nodes: [{ id: "n1", logicalId: "dev.impl" }, { id: "n2", logicalId: "dev.qa" }], edges: [], representative: null } };
       if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
@@ -759,7 +762,12 @@ describe("MCP Server", () => {
       expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
         caveat: "Text only", pane: null, activity: "unknown",
         presence: { lastCallAt: "2026-10-26T11:05:00.000Z", lastWakeScope: "the latest ring among its 50 most recent rows",
-          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" } } }]);
+          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" },
+          checkIn: { status: "check-in-overdue", lastCheckInAt: "2026-10-26T09:00:00.000Z", expectedMinutes: 60, onRequest: false } } }]);
+      // A daemon that gives no check-in status (an older one) leaves it unknown, with the reason, never a guess.
+      checkIns = null;
+      expect(((await here.team()).hostedMembers[0] as { presence: { checkIn: unknown } }).presence.checkIn)
+        .toEqual({ status: "unknown", lastCheckInAt: null, expectedMinutes: null, onRequest: false, reason: "this daemon gave no check-in status" });
       // A scoped caller gets a generic note; the file names and errors go to this server's log.
       expect(found.hostedMembersNote).toBe("Some rosters couldn't be read, so hosted members may be missing.");
       expect(log.mock.calls.flat().join(" ")).toContain("b.json");
