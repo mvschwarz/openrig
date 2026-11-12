@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 
 export const OPERATION_CONTRACT = "operation-correlation.v1";
-export const OPERATION_KINDS = ["rig.create", "rig.import", "member.add"] as const;
+export const OPERATION_KINDS = ["rig.create", "rig.import", "rig.materialize", "member.add"] as const;
 type OperationKind = typeof OPERATION_KINDS[number];
 type Row = { request_hash: string; rig_id: string | null; node_ids_json: string };
 

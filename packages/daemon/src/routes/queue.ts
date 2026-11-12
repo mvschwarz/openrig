@@ -1330,6 +1330,11 @@ export function queueRoutes(): Hono {
   app.get("/list", (c) => {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
+    const rawTags = c.req.queries("tag") ?? [];
+    if (rawTags.some((tag) => tag.trim().length === 0)) {
+      return c.json({ error: "tag_invalid", message: "tag filters cannot be blank" }, 400);
+    }
+    const tags = [...new Set(rawTags)];
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
     const parsedLimit = queryLimit(c);
@@ -1361,6 +1366,7 @@ export function queueRoutes(): Hono {
     if (!attention) {
       const repo = getRepo(c);
       const items = repo.list({
+        tag: tags.length > 0 ? tags : undefined,
         destinationSession,
         sourceSession,
         state,
@@ -1409,6 +1415,7 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).listAttention({
       limit: userLimit,
       state,
+      tag: tags.length > 0 ? tags : undefined,
       destinationSession,
       sourceSession,
       targetRepo,
@@ -1551,6 +1558,8 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      answers: repo.answersForAsk(qitemId),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

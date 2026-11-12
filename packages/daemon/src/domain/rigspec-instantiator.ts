@@ -552,7 +552,7 @@ export class PodRigInstantiator {
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string; recordCreated?: RecordCreated },
   ): Promise<MaterializeOutcome> {
     let raw: unknown;
     try {
@@ -698,9 +698,9 @@ export class PodRigInstantiator {
         if (!materializedRigId) {
           const rig = this.deps.rigRepo.createRig(rigSpec.name);
           materializedRigId = rig.id;
-          opts?.recordCreated?.(rig.id);
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
+        opts?.recordCreated?.(materializedRigId);
 
         // PL-007: persist the rig's typed workspace block when declared.
         if (rigSpec.workspace) {

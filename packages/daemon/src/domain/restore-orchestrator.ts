@@ -9,7 +9,7 @@ import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import { ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
@@ -35,7 +35,7 @@ import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-re
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { absentGuidanceBlocks, applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
 import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -269,6 +269,9 @@ export interface RestoreOrchestratorDeps {
 export class RestoreOrchestrator {
   readonly db: Database.Database;
   private activeRestores = new Set<string>();
+  /** #3039: per node, the guidance blocks its resumed launch carried, which the check after the launch doesn't look for in
+   *  the repository file. */
+  private launchGuidanceBlocks = new Map<string, Set<string>>();
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
@@ -1548,6 +1551,17 @@ export class RestoreOrchestrator {
     try { this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(file, nodeId); } catch { /* no column */ }
   }
 
+  /** #3039: whether this resume's launch carries the seat's guidance, by the adapter's own fresh-launch rule (a Codex
+   *  conversation resume). Anything unanswered or unreadable keeps the repository path. */
+  private async resumeLaunchCarriesGuidance(adapter: import("./runtime-adapter.js").RuntimeAdapter | undefined,
+    binding: import("./runtime-adapter.js").NodeBinding): Promise<boolean> {
+    if (!adapter?.guidanceFileFor) return false;
+    try {
+      const answer = adapter.guidanceFileFor(binding, { resuming: true, resumingConversation: true });
+      return (answer instanceof Promise ? await answer : answer).launchInstructions === true;
+    } catch { return false; }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1555,6 +1569,8 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     warnings?: string[],
   ): RestoreNodeResult {
+    const launchCarried = this.launchGuidanceBlocks.get(node.id);
+    this.launchGuidanceBlocks.delete(node.id);
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
@@ -1581,7 +1597,9 @@ export class RestoreOrchestrator {
     const noted = notes.length > 0 ? { ...result, guidanceNotes: notes } : result;
     let missing: string[];
     try {
-      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
+      // #3039: a block the resumed launch carried isn't looked for in the repository file; one it couldn't carry still is.
+      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })
+        .filter((id) => !launchCarried?.has(id));
     } catch (err) {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
@@ -1829,6 +1847,18 @@ export class RestoreOrchestrator {
       }
     }
 
+    // #3039: a pod-aware resume whose saved choice is the repository file asks the adapter, as startup does, whether its
+    // launch carries the guidance (a Codex conversation resume, the fresh launch's rule). Then the saved guidance goes with
+    // the resume as developer instructions (the containment below lets only it through), and the repository AGENTS.md
+    // gets only #2456's refresh of blocks already there. A legacy resume starts its harness before startNode, so it can't.
+    let launchCarriesGuidance = false;
+    this.launchGuidanceBlocks.delete(node.id);
+    if (resumeRequested && resumeToken && launchResult && isPodAware && startupCtx && !startupCtx.guidanceFile) {
+      launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, session?.communityHarness),
+        { ...launchResult.binding, guidanceFile: null, cwd: launchCwd, codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined });
+    }
+    let launchGuidance: import("./runtime-adapter.js").ResolvedStartupFile[] | null = null;
+
     // A narrow exception to the replay containment below: before either native resume path
     // starts the harness, put back only the MISSING managed guidance blocks from the saved
     // startup selection. Ordinary `rig down` strips them; without this the resumed
@@ -1862,6 +1892,23 @@ export class RestoreOrchestrator {
       if (linked && guidance) {
         warnings?.push(`Restore guidance: ${node.logicalId}: ${linked} is now a link, so nothing was put back in ${guidance.targetPath}, which other sessions could read.`);
         guidance = null;
+      }
+      if (guidance && guidance.items.length > 0 && launchCarriesGuidance && startupCtx) {
+        // #3039: a block the file doesn't hold at all goes with the launch instead of being put back, when its source reads
+        // now (the writer's own read). Everything else stays with the writer below, as before: a block already there
+        // (refreshed or kept and named), a partial one, a source that's gone or can't be read (gaps), and the seat-skills
+        // line (the person's yes was for that file). So the launch's own placement writes nothing here: each block it gets is
+        // absent from the file. Each goes as an optional startup file, so a read that fails at the launch skips it rather
+        // than stopping the resume, and the check after the launch looks only past the blocks the launch reports it sent.
+        let absent = new Set<string>();
+        try { absent = new Set(absentGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })); }
+        catch { /* unreadable: the writer below reports it */ }
+        const reads = (path: string): boolean => { try { readFileSync(path, "utf-8"); return true; } catch { return false; } };
+        const carried = guidance.items.filter((item) => absent.has(item.blockId) && !item.unresolved
+          && item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && reads(item.sourcePath));
+        launchGuidance = carried.map((item) => ({ path: item.blockId, absolutePath: item.sourcePath, ownerRoot: dirname(item.sourcePath),
+          deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
+        guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
@@ -1992,7 +2039,8 @@ export class RestoreOrchestrator {
     // launches are new histories and keep their replay.
     // One narrow exception: MISSING managed guidance blocks are put back before the harness
     // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
-    // nothing else is replayed.
+    // nothing else is replayed. #3039: when the resumed launch carries the guidance instead, only that
+    // saved guidance passes, as optional startup files (launchGuidance): no action, skill or other resource.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
@@ -2066,7 +2114,7 @@ export class RestoreOrchestrator {
           const existsFn = opts.fsOps?.exists ?? (() => true);
           const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
@@ -2134,6 +2182,8 @@ export class RestoreOrchestrator {
             ...launchResult.binding,
             // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
             guidanceFile: startupCtx.guidanceFile ?? null,
+            // #3039: the resumed launch carries the guidance chosen above, so startup doesn't ask again and the adapter queues it.
+            ...(launchGuidance ? { guidanceLaunchInstructions: true as const } : {}),
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             ...(opts?.claudeLaunch ? { claudeLaunch: opts.claudeLaunch } : {}),
@@ -2179,6 +2229,11 @@ export class RestoreOrchestrator {
               ...(selected ? { beforeNativeLaunch: () => selected.beforeNative(launchResult.session.id, launchResult.binding.id) } : {}),
             });
             warnings?.push(...(startupResult.warnings ?? []));
+            // #3039: the blocks the resumed launch actually sent, by the adapter's own record, are the ones the check after the
+            // launch doesn't look for in the repository file.
+            const carriedIds = new Set((launchGuidance ?? []).map((f) => f.path));
+            const sentGuidance = carriedIds.size > 0 && launchResult.binding.tmuxSession ? adapter.launchGuidanceSent?.(launchResult.binding.tmuxSession) : undefined;
+            if (sentGuidance?.length) this.launchGuidanceBlocks.set(node.id, new Set(sentGuidance.filter((id) => carriedIds.has(id))));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested

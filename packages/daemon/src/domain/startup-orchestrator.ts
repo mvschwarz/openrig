@@ -437,12 +437,17 @@ export class StartupOrchestrator {
     // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
     // older snapshot), and a continuation carries its launch's choice, so the adapter isn't asked again and an existing
     // seat isn't silently repointed. This runs after the pending mark: a continuation claims its attempt before any await.
-    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+    // A resume of the seat's own conversation (a restore, `rig up --existing`) whose saved choice is the repository file is
+    // asked too, only whether its launch can carry the guidance: the saved file stays as it is.
+    const resumingConversation = Boolean(input.resumeToken) && !input.forkSource && !input.skipHarnessLaunch;
+    const savedRepositoryResume = resumingConversation && input.binding.guidanceFile === null && !input.binding.guidanceLaunchInstructions;
+    if ((input.binding.guidanceFile === undefined || savedRepositoryResume) && input.adapter.guidanceFileFor) {
       // A continuation launches nothing, so it never chooses guidance that only a launch carries.
-      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch) });
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch), resumingConversation });
       const chosen = answer instanceof Promise ? await answer : answer;
       if (chosen.note) warnings.push(chosen.note);
-      const guidance = { guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) };
+      const file = savedRepositoryResume ? null : chosen.file;
+      const guidance = { guidanceFile: file, ...(chosen.launchInstructions && file === null ? { guidanceLaunchInstructions: true } : {}) };
       input = { ...input, binding: { ...input.binding, ...guidance } };
       // A failure recorded from the delivery input keeps the choice for a later continuation too.
       deliveryInput.binding = { ...deliveryInput.binding, ...guidance };

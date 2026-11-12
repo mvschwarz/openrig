@@ -119,7 +119,8 @@ configurations, as below; do not take the pin from a cached page summary.
    from the installing agent; do not ask for them again. If the goal is missing,
    ask once: "What would you like to build or change?" If they already named a
    team, use it and skip the questions it answers. Keep any choice the
-   handoff carries, such as a trust or hook-review prompt they declined.
+   handoff carries, such as a trust or hook-review prompt they declined or
+   a permission choice they made.
 2. **Where it works.** If the folder is missing, ask which folder the team should
    work in (usually a clone of their repository) and use its absolute path. Your
    own working directory is OpenRig's: the workspace's `kernel` folder (on an older
@@ -249,11 +250,33 @@ configurations, as below; do not take the pin from a cached page summary.
    separates project files, not that Codex home. `rig setup` lists these writes. If they'd rather keep
    their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
-   If they keep permission prompts on, say what that will be like before
-   their yes: each seat stops and asks before an action its permissions
-   don't already cover, the asks come often, especially early, and each one
-   needs their answer, in the seat's pane or through you. Their yes starts
-   the team; it isn't a yes to those later asks.
+   Before their yes, explain the team's permission defaults. Claude's team
+   default adds allowances for ordinary `rig` commands, project reads and
+   common tests. Branches, commits, running their program, installs and other
+   shell commands may ask, depending on existing native rules. A Codex seat
+   uses its configured writable roots and may ask for broader access. When a
+   prompt appears, they can answer in that seat's terminal or through you.
+   Their own agent's mode isn't the team's; existing user and project rules
+   can still affect the seats. Their yes starts the team; it isn't a yes to
+   later prompts.
+   - **A permission choice already made** (in the handoff or to you: fewer
+     prompts for this project, a mode, a rule, or keep prompts on): use it,
+     and don't ask again, when it covers the commands this goal will repeat
+     in this project. Keeping prompts on covers them all. A choice for other
+     commands or another scope, such as a user-wide rule for `rig` commands,
+     doesn't: make the one offer below for the commands it leaves out.
+   - **Otherwise, one offer if they want fewer interruptions:** name the
+     command families this goal will repeat in their folder (for example
+     `git switch`, `git add`, `git commit` and the project's test command)
+     and offer to allow just those, for this project only. For Claude seats
+     that's allow rules in the project's `.claude/settings.local.json`,
+     normally loaded by Claude sessions in that folder, including their own,
+     under the default setting sources; for a Codex seat, follow the same
+     skill's Codex rules. On their yes, apply it with
+     `applying-a-permission-policy`. Say what still asks: a command joined
+     with `&&`, `;` or a pipe asks unless every part is allowed, and on Claude
+     seats OpenRig's lifecycle commands still ask. On a no, keep the team
+     default and don't offer again.
    For a team that already exists, `rig seat status <seat>` shows each seat's
    planned permissions: the native mode, where it comes from, what OpenRig
    adds and what isn't known. Read it to them as planned, not observed.
@@ -339,10 +362,16 @@ configurations, as below; do not take the pin from a cached page summary.
     names. Tell them it's a usage limit, which seat, and when it resets, with
     the menu's choices in its own words. One of them may spend usage credits,
     so the choice is theirs.
-    When you see one, tell them where they already are: which seat, what its
-    prompt asks (`rig capture <session>` with the seat's
-    `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or
-    just its name if it has none. Don't answer another seat's prompt yourself.
+    When you see one, tell them where it is and where they can answer: which
+    seat, what its prompt asks (`rig capture <session>` with the seat's
+    `canonicalSessionName` shows it), and that seat's terminal, or through
+    you. A team seat's terminal is in the team's space from step 8. A kernel
+    seat's is in the kernel's view (`rig terminal open saved:kernel --window`;
+    the advisor has its own tab or window). Only when no space is open, give the
+    seat's `tmuxAttachCommand` as a command for a new terminal, with one
+    line on what it does (it shows that seat; closing the window leaves the
+    seat running), or just its name if it has none. Never send them to a
+    bare `tmux attach`. Don't answer another seat's prompt yourself.
     With prompts on, several seats may wait at once. Gather them, then tell
     the person in one message, one line per prompt: the seat, the exact
     action it asks to take (the command or file), and the choices the prompt
@@ -366,12 +395,14 @@ configurations, as below; do not take the pin from a cached page summary.
     and check the result before sending anything more; never resend an answer
     whose effect you can't see. Otherwise they answer in the seat's pane.
     Grouping can shorten the asking, not the number of prompts. If they find
-    the prompts too many, lay out their choices without picking one: keep
-    prompts on; take a prompt's own standing approval for one command when it
-    offers one; or change the team's permissions deliberately, as a separate
-    choice (`applying-a-permission-policy`, `rig seat set-permissions` for
-    later launches, or Workshop's broad-access bundle). An answer to a prompt
-    never changes a permission mode.
+    the prompts too many and haven't already chosen, make step 6's one offer,
+    named from the commands that actually asked: allow those command families
+    for this project, applied on their yes with `applying-a-permission-policy`,
+    which says how to check it took effect in the seats. Their other choices
+    stay open: keep prompts on; take a prompt's own standing approval for one
+    command when it offers one; `rig seat set-permissions` for later launches;
+    or Workshop's broad-access bundle. An answer to a prompt never changes a
+    permission mode.
 
 Avoid these:
 - launching a team without the person's yes;

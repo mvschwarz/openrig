@@ -43,6 +43,7 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
 import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
   MissionControlActionLog,
@@ -695,7 +696,7 @@ export class MissionControlWriteContract {
     try {
       returned = await this.queueRepo.createHumanAnswer({
         sourceSession: input.actorSession, destinationSession: ask.sourceSession,
-        body: `${reply}\n${answeredBy} in OpenRig.`,
+        body: `${reply}\n${answeredBy} in OpenRig.${unattributed ? `\n${terminalAnswerMeaning(UNNAMED_PRIMARY_USER)} ${askBackRoute(this.queueRepo.reachablePerson(forAsked), UNNAMED_PRIMARY_USER, input.qitemId)}` : ""}`,
         summary: `${forAsked && unattributed ? `Unattributed (${UNNAMED_PRIMARY_USER})` : input.actorSession} answered${forAsked ? ` ${forAsked}'s ask` : ""}: ${ask.summary ?? input.qitemId}`,
         tags: [
           "human-answer",

@@ -41,6 +41,14 @@ it.each([
 });
 
 describe("the live predecessor record", () => {
+  const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+  // `ps -o lstart=` prints local clock time with no zone; format the intended UTC instant in the host's local zone.
+  function psLocalLstart(utcIso: string): string {
+    const d = new Date(utcIso);
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    return `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${d.getFullYear()}`;
+  }
   function fixture(options: { wrongThread?: boolean; stale?: boolean; incompleteLatest?: boolean; turnover?: boolean; argv?: string[] | null } = {}) {
     const root = mkdtempSync(join(tmpdir(), "codex-rebuild-")); roots.push(root);
     const path = join(root, "record.jsonl");
@@ -49,12 +57,12 @@ describe("the live predecessor record", () => {
       { type: "turn_context", timestamp: options.stale ? "2026-10-20T04:59:59Z" : "2026-10-20T05:01:00Z", payload },
       ...(options.incompleteLatest ? [{ type: "turn_context", timestamp: "2026-10-20T05:02:00Z", payload: { cwd: "/project", approval_policy: "never" } }] : []),
     ].map(row => JSON.stringify(row)).join("\n") + "\n");
-    const native = provenCodexResume("fixture-thread");
+    const native = provenCodexResume("fixture-thread", { startedAt: psLocalLstart("2026-10-20T05:00:01Z") });
     let reads = 0;
     const listProcesses = vi.fn(() => {
       const rows = native.listProcesses().map(row => row.executableName === "codex" && options.argv !== undefined
         ? { ...row, command: options.argv?.join(" ") ?? row.command, argv: options.argv } : row);
-      if (options.turnover && reads++ > 0) return rows.map(row => ({ ...row, startedAt: "Tue Oct 20 05:02:01 2026" }));
+      if (options.turnover && reads++ > 0) return rows.map(row => ({ ...row, startedAt: psLocalLstart("2026-10-20T05:02:01Z") }));
       return rows;
     });
     return { nodeId: "seat", sessionName: "member@team", cwd: "/project", path,

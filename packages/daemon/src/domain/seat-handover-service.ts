@@ -19,6 +19,7 @@ import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILI
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, sep } from "node:path";
 import { keptGuidanceSeatLine, lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot, seatStartupTextFiles, type SeatStartupTextFile } from "./restore-guidance.js";
 import { managedBlockRecords } from "./managed-block-records.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -1075,9 +1076,24 @@ export class SeatHandoverService {
       lines.push("", "Priming artifacts (read each, in order):");
       for (const artifact of required) lines.push(`- ${artifact.address} — ${artifact.label}`);
     }
-    if (history.length > 0) {
+    const newest = history[0];
+    if (newest) {
       lines.push("", "Older recaps, newest first (read these only if you need the seat's history):");
-      for (const artifact of history) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      const settings = new SettingsStore();
+      let limit: number;
+      try {
+        limit = Number(settings.resolveOne("output.rebuild_recaps").value);
+      } catch {
+        // Optional presentation settings must not interrupt successor delivery.
+        limit = 3;
+      }
+      const folder = dirname(newest.address);
+      // A folder pointer replaces paths only when it covers EVERY optional artifact.
+      // Custom resolvers with other layouts retain their complete explicit list.
+      const bounded = limit > 0 && history.length > limit && basename(folder) === "recap-superseded"
+        && history.every((artifact) => isAbsolute(artifact.address) && dirname(artifact.address) === folder);
+      for (const artifact of bounded ? history.slice(0, limit) : history) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      if (bounded) lines.push(`All ${history.length} older recaps: ${folder}${sep} (optional history; list this folder for the rest).`);
     }
     if (info.gaps.length > 0) {
       lines.push("", "Declared but MISSING on disk (known gaps, named so nothing is silently dropped):");
@@ -1335,10 +1351,11 @@ export class SeatHandoverService {
       });
       // (e/Class-B): capture the RETIRING occupant's generation BEFORE registerClaimedSession mints the
       // successor's tenure below — after that mint the node's "current" generation IS the successor's
-      // (the name is reused), so this is the only point the retiree's generation is resolvable.
-      const retiringGeneration =
-        this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
+      // (the name is reused), so this is the only point the retiree's generation is resolvable. It is read by
+      // this node, not by its session name: an earlier generation of the seat (an archived rig of the same
+      // name) can hold a newer session row under that name.
       const tenureBefore = this.readOccupantTenure(input.node.id);
+      const retiringGeneration = tenureBefore?.generationUuid ?? undefined;
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
       const newSession = this.sessionRegistry.registerClaimedSession(
         input.node.id,

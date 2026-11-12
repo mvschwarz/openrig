@@ -1466,6 +1466,33 @@ describe("MCP Server", () => {
       }
     });
 
+    it("issue2728 rig_queue_list composes exact tags and mission/slice aliases", async () => {
+      const row = { qitemId: "qitem-match", tags: ["review", "mission:launch", "slice:docs"] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row] }));
+      await setup({ get: getFn });
+      const listed = await mcpClient.callTool({
+        name: "rig_queue_list",
+        arguments: { tags: ["review", "mission:launch", "review"], mission: "launch", slice: "docs", all: true },
+      });
+      const params = new URLSearchParams(String(getFn.mock.calls[0]?.[0]).split("?")[1]);
+      expect(params.getAll("tag")).toEqual(["review", "mission:launch", "slice:docs"]);
+      expect(listed.structuredContent).toEqual({ items: [row] });
+      await cleanup();
+    });
+
+    it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
+      const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
+      await setup({ get: getFn });
+      const listed = await mcpClient.callTool({
+        name: "rig_queue_list",
+        arguments: { tags: ["review", "publish"], all: true },
+      });
+      expect(listed.isError).toBe(true);
+      expect(listed.structuredContent).toMatchObject({ ok: false, code: "filter_unsupported" });
+      expect((listed.content as Array<{ text: string }>)[0]!.text).toContain("tag");
+      await cleanup();
+    });
+
     it("rig_queue_list asks for a seat instead of guessing one", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [] }));
       const prior = process.env.OPENRIG_SESSION_NAME;
