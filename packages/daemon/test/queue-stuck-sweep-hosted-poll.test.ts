@@ -373,6 +373,76 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notices().filter((n) => n.state === "pending").map((n) => n.destinationSession)).toEqual(["lead@hub"]);
   });
 
+  // Review of #3049: an old recipient the sweep no longer recognizes isn't proof the rows were its own. A notice the
+  // operator agent got for two creators' rows keeps standing for both when the operator setting changes and its list
+  // is unreadable, even with a raised threshold hiding both rows.
+  it.each(["missing", "malformed"] as const)("a notice whose list is %s keeps every row when the operator it went to is no longer recognized", async (how) => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    seedSeat("operator2@hub");
+    const first = await work(MEMBER, { ageMinutes: 70 });
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" });
+    const [toOperator] = notices();
+    expect(toOperator!.destinationSession).toBe("operator@hub");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toOperator!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(how === "malformed" ? `${body}\n${prefix}[` : body, toOperator!.qitemId);
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator2@hub", unclaimedAgeMinutes: 120 });
+    const open = notices().filter((n) => n.state === "pending");
+    expect(open.length).toBeGreaterThan(0);
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
+  });
+
+  it("a creator's notice that grows with another creator's row in place loses the creator mark", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const first = await work(MEMBER, { ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" });
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator");
+    // lead@hub becomes the recovery agent: it sees any row, so another creator's row joins its notice in place.
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "lead@hub" });
+    expect(repo.getById(toLead!.qitemId)!.body).toContain(other.qitemId);
+    expect(repo.getById(toLead!.qitemId)!.tags).not.toContain("stuck-sweep-backlog-to-creator");
+    // Then the setting changes back and the list is unreadable: the other creator's row is still stood for.
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub", unclaimedAgeMinutes: 120 });
+    const open = notices().filter((n) => n.state === "pending");
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
+  });
+
+  it("the creator mark alone proves provenance: a member that gains a wake keeps its creator's notice to that creator's rows", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    await work(MEMBER, { ageMinutes: 70 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    // The member gains a wake (no longer polled), and another creator's young row arrives with its wake verified.
+    repo = makeRepo({ hostedWake: (d) => (d === MEMBER ? { webhook: { url_ref: "HELPER_A_WAKE" } } as RosterWake : null) });
+    await work(MEMBER, { from: "orch@hub", ageMinutes: 5, result: "verified" });
+    await sweep(noPerson);
+    const toLeadNow = notices().filter((n) => n.state === "pending" && n.destinationSession === "lead@hub");
+    for (const n of toLeadNow) expect(repo.getById(n.qitemId)!.body).not.toContain("orch@hub");
+  });
+
+  it("a member's notice to the one creator of its rows is marked even when that creator is also the recovery agent", async () => {
+    await work(MEMBER, { ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "lead@hub" });
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator");
+  });
+
   it("a notice to a creator lists only that creator's rows: another creator's row moves every row to the next recipient", async () => {
     seedSeat("orch@hub");
     seedSeat("operator@hub");

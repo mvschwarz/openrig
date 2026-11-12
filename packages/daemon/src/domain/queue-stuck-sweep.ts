@@ -128,6 +128,19 @@ export const UNCLAIMED_BACKLOG_LISTED_ROWS = 20;
 /** #2988: the key of a notice sent to a seat's delegation parent is `<child seat>=><parent>`; a seat's own notice is keyed
  *  by the seat alone. */
 const PARENT_BACKLOG_SEPARATOR = "=>";
+/** Review of #3049: a polling member's notice the sweep filed to the one creator of every row it listed. Only this mark
+ *  establishes that the notice shows that creator's rows alone; an old recipient the sweep doesn't recognize proves
+ *  nothing (the operator setting may have changed). */
+const BACKLOG_TO_CREATOR_TAG = "stuck-sweep-backlog-to-creator";
+/** Whether a notice's stored tags carry the creator mark; tags that don't read as a JSON array carry none. */
+function marcadoAoCriador(tags: string | null): boolean {
+  try {
+    const lidas: unknown = JSON.parse(tags ?? "[]");
+    return Array.isArray(lidas) && lidas.includes(BACKLOG_TO_CREATOR_TAG);
+  } catch {
+    return false;
+  }
+}
 /** Idempotency key of the standing unclaimed-backlog notice a delegation parent gets for one child seat's rows: one open
  *  notice per (parent, child). */
 export function parentBacklogTag(parent: string, child: string): string {
@@ -1686,7 +1699,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         return noWakeRecipient(seat, distinct.length === 1 ? distinct[0]! : null).seat ?? seat;
       };
       /** Files a notice and wakes its recipient; its id, or null when the create failed (reported in failedCreates). */
-      const fileNotice = async (text: { summary: string; body: string }, recipient: string): Promise<string | null> => {
+      const fileNotice = async (text: { summary: string; body: string }, recipient: string, creators: string[] = []): Promise<string | null> => {
         try {
           const created = await deps.queueRepo.create({
             // A notice about a seat's own rows comes from that seat, as a restore notice does; OpenRig wakes its recipient.
@@ -1695,7 +1708,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             body: text.body,
             summary: text.summary,
             evidenceRef: `rig queue list --destination ${seat} --state pending`,
-            tags: [STUCK_SWEEP_FINDING_TAG, tag],
+            tags: [STUCK_SWEEP_FINDING_TAG, tag,
+              ...(polled && recipient !== seat && creators.length > 0 && creators.every((c) => c === recipient)
+                ? [BACKLOG_TO_CREATOR_TAG] : [])],
             wakeTrigger: "openrig" as const,
           });
           othersMayHaveRun();
@@ -1712,24 +1727,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const last = deps.db
         .prepare(
           // The first term lets the planner use idx_queue_items_recovery_tags, as the finding lookup above does.
-          `SELECT qitem_id, state, ts_updated, summary, body, destination_session FROM queue_items
+          `SELECT qitem_id, state, ts_updated, summary, body, destination_session, tags FROM queue_items
             WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ? ESCAPE '\\'
             ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
                      ts_updated DESC, ts_created DESC, qitem_id DESC
             LIMIT 1`,
         )
         .get(`%"${tag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}"%`) as
-        | { qitem_id: string; state: string; ts_updated: string; summary: string | null; body: string; destination_session: string }
+        | { qitem_id: string; state: string; ts_updated: string; summary: string | null; body: string; destination_session: string; tags: string | null }
         | undefined;
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
         const listedNow = new Set(rows.map((c) => c.row.qitemId));
         // An unreadable list is rebuilt as every row still waiting unclaimed at the seat: all it could have stood for that
         // nothing has resolved yet, and maybe more, never just the rows that qualify on this pass (review of #3049). From
         // there the notice follows its rows as any other: it lets go of each one only as it's resolved or covered elsewhere.
-        // A member's notice that went to one of its rows' creators only ever listed rows from that creator.
+        // A member's notice the sweep marked as filed to the one creator of its rows only ever listed that creator's rows:
+        // the mark alone proves it (any rewrite that brings in another creator's row drops it). Without the mark (an
+        // operator that is no longer recognized, an older notice, unreadable tags), it carries every unresolved row.
         const legivel = backlogRowsOf(last.body);
-        const soDoCriador = polled && last.destination_session !== seat && !seesAnyRow(last.destination_session)
-          ? last.destination_session : null;
+        const soDoCriador = marcadoAoCriador(last.tags) ? last.destination_session : null;
         const stoodFor = legivel ?? new Set((deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE destination_session = ?
             AND state = 'pending' AND claimed_at IS NULL AND (? IS NULL OR source_session = ?)
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`)
@@ -1806,7 +1822,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         if (polled && last.destination_session !== seat && !seesAnyRow(last.destination_session)
           && standsFor.some((r) => r.from !== last.destination_session)) {
           const recipient = recipientFor(standsFor.map((r) => r.from));
-          if (!(await fileNotice(backlogText(standsFor), recipient))) continue;
+          if (!(await fileNotice(backlogText(standsFor), recipient, standsFor.map((r) => r.from)))) continue;
           await deps.queueRepo.update({
             qitemId: last.qitem_id,
             actorSession: "stuck-sweep@system",
@@ -1817,6 +1833,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           othersMayHaveRun();
           findings.push({ kind: "unclaimed-backlog", qitemId: key, findingQitemId: last.qitem_id, action: "closed" });
           continue;
+        }
+        // A creator's notice that now stands for another creator's row (its recipient sees any row) is no longer creator-only.
+        if (marcadoAoCriador(last.tags) && standsFor.some((r) => r.from !== last.destination_session)) {
+          deps.db.prepare(`UPDATE queue_items SET tags = (SELECT json_group_array(value) FROM json_each(tags) WHERE value != ?)
+            WHERE qitem_id = ? AND json_valid(tags)`).run(BACKLOG_TO_CREATOR_TAG, last.qitem_id);
         }
         const text = backlogText(standsFor);
         let written = text.summary === last.summary && text.body === last.body;
@@ -1847,7 +1868,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         heldBack.set(tag, new Set(current.map((c) => c.row.qitemId)));
         continue;
       }
-      const filed = await fileNotice(backlogText(current.map(backlogRow)), recipientFor(current.map((c) => c.row.sourceSession)));
+      const filed = await fileNotice(backlogText(current.map(backlogRow)), recipientFor(current.map((c) => c.row.sourceSession)),
+        current.map((c) => c.row.sourceSession));
       if (filed && parent) await foldInto(filed, seat, parent, current.map((c) => c.row.qitemId));
     }
 
