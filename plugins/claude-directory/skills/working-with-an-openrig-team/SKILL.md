@@ -23,8 +23,9 @@ nothing is launched for it.
   address they agree to.
 - Prefix every `rig queue` command with it: `OPENRIG_SESSION_NAME=<address> rig queue ...`. That's how OpenRig knows
   who is acting. Without it, claiming and recording answers are refused.
-- `rig` must be on the PATH (`rig --version`). If it isn't, OpenRig isn't installed here: point the person to
-  https://openrig.dev and stop.
+- `rig` must be on the PATH (`rig --version`). If it fails, `rig` isn't on this shell's PATH: OpenRig may not be
+  installed, or may be installed where this shell doesn't look. Ask the person. If it isn't installed, point them to
+  https://openrig.dev, and stop until `rig --version` works.
 
 ## Find who takes the work
 
@@ -39,7 +40,9 @@ the reply route, because your address has no terminal and `rig send` can't reach
 
 > To ask me anything, create a queue item to `<address>` (`rig queue create --destination <address> ...`), then block
 > this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I check it
-> when the person asks. When you finish, put the outcome in this item's resolution and any file in its evidence ref.
+> when the person asks. Don't ask in your own terminal: the person isn't there. If you hand this item on, copy this
+> paragraph into the new item. When you finish, put the outcome in this item's resolution and any file in its
+> evidence ref.
 
 Write the body to a file first, so quotes and newlines survive the shell.
 
@@ -54,9 +57,12 @@ OPENRIG_SESSION_NAME=<address> rig queue create --destination <lead session> \
 
 ## Follow it
 
-- `rig queue show <qitemId> --full` gives its state, its current owner, its notes and its transitions.
-- When a seat hands the work on, the item names the next one (`handedOffTo`). Follow the chain to the newest item
-  before you report.
+- `rig queue show <qitemId> --full` gives its state, its current owner and how it closed. Its history, including the
+  notes the team recorded, is `rig queue transitions <qitemId> --full`.
+- When a seat hands the work on, `handedOffTo` names the seat it went to, not the next item, so never pass it to
+  `rig queue show`. The next item is the one whose `handedOffFrom` is this item's id. On OpenRig 0.7.12 or later,
+  `rig queue show <qitemId> --json` lists it under `successors`. On 0.7.11, find it in
+  `rig queue list --destination <that seat> -a -o json`. Follow the chain to the newest item before you report.
 - Report what the record says. A claimed item isn't finished work, and a quiet one isn't stuck: say what you saw and
   when it last changed.
 - Nothing wakes this chat when the team finishes. Check again when the person asks, or when they come back.
@@ -80,14 +86,16 @@ OPENRIG_SESSION_NAME=<address> rig queue create --destination <lead session> \
   than on the question's id, your answer won't wake its seat. Release it with the person's words:
   `OPENRIG_SESSION_NAME=<address> rig queue resolve <work qitemId> --decision "Answered in <question qitemId>: <the person's words>"`.
 - If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
-- If a work item is blocked waiting on the person but no question reached your address, its notes usually say what it
-  needs. Show the person, and send their answer as a new item to the same seat that names the blocked `qitemId`.
+- If a work item is blocked waiting on the person but no question reached your address, its transitions
+  (`rig queue transitions <qitemId> --full`) usually say what it needs. Show the person, and send their answer as a new
+  item to the same seat that names the blocked `qitemId`.
 - Some questions go to the person directly, not to your address. Those wait where they already answer the team, such
   as the OpenRig TUI or Slack. You can mention them; answering them isn't yours.
 
 ## Read the result
 
-- When the item is `done`, its `resolution` is the answer, and its transitions hold the notes the team recorded.
+- When the item is `done`, its `resolution` is the answer, and its transitions
+  (`rig queue transitions <qitemId> --full`) hold the notes the team recorded.
 - If it names an `evidenceRef`, that's the file the team produced. Read it with your file tools, or give the person
   the path.
 - To ask for changes, create a new item that names the earlier `qitemId` in its body, so the revision is easy to trace.

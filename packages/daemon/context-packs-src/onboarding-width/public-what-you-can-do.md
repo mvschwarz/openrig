@@ -272,8 +272,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
   the failure. In the window's `--json` output, `reusedWorkspace` with no new tiles means an
   existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
-  view in a provider that is already running, without opening a window. Ordinary opens add a new
-  workspace, so to come back to a fixed view, focus its open space; task follow mode reuses one.
+  view in a provider that is already running, without opening a window. Herdr reuses a workspace
+  that still shows the view with live attachments (`reusedWorkspace`, no new tiles); otherwise an
+  ordinary open adds a new workspace. Task follow mode reuses one.
   **`qitem:<id>` as the view** previews or opens the current local owners of that task: its
   pending, in-progress and blocked rows through explicitly linked successors, without closed
   predecessors or past senders. It's a read-only membership view: stopped, missing, external and

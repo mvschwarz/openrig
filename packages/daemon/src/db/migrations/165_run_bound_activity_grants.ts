@@ -2,7 +2,7 @@ import type { Migration } from "../migrate.js";
 
 /** Durable actual-run binding; legacy grants remain explicitly unbound. */
 export const runBoundActivityGrantsSchema: Migration = {
-  name: "163_run_bound_activity_grants.sql",
+  name: "165_run_bound_activity_grants.sql",
   sql: `
     ALTER TABLE activity_grants ADD COLUMN run_id TEXT;
     ALTER TABLE activity_grants ADD COLUMN session_id TEXT;

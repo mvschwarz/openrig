@@ -131,7 +131,13 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
 
 /** `resumeRotation`: the rotation recorded with `resumeToken` (#1077), as `rig seat clear-attention` passes it, so a
  *  seat whose Claude continued its conversation under a new id is proved by the process that recorded the rotation. */
-export interface ReadinessOptions { resumeToken?: string | null; resumeRotation?: ClaudeResumeRotation | null }
+export interface ReadinessOptions {
+  resumeToken?: string | null;
+  resumeRotation?: ClaudeResumeRotation | null;
+  /** The poll this check belongs to. An adapter that honours it takes its process listings from the pass, so the
+   *  agents checked in one poll share them; an adapter that doesn't reads for itself, as before. */
+  observationPass?: import("./process-observation-pass.js").ObservationPass;
+}
 
 // -- Harness launch result --
 

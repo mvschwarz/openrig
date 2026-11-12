@@ -1,0 +1,24 @@
+  lists them all.
+  End of generated identity context.
+
+  OpenRig: this seat's skills. This list replaces any earlier OpenRig skill
+  list in this conversation.
+
+  No OpenRig skills are kept for this seat.
+
+
+• ack (no marker)
+
+  Worked for <1s • 16:36
+
+
+  Select Reasoning Level for GPT-6.1-Sol
+
+
+› 1. Low (default)    Fast responses with lighter reasoning
+  2. Medium           Balances speed and reasoning depth for everyday tasks
+  3. High             Greater reasoning depth for complex problems
+  4. Extra high       Extra high reasoning depth for complex problems
+  5. More reasoning…  Max and Ultra consume usage limits faster
+
+  enter default · s session · esc back

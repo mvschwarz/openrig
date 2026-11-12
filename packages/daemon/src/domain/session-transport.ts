@@ -4,6 +4,7 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
+import { currentClaudeModelMenu, currentCodexModelPicker } from "./native-model-picker.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
@@ -842,7 +843,10 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const claudePicker = options.runtime === "codex" || options.runtime === "pi" ? null : currentClaudeResumePicker(paneContent);
   const themeMenu = options.runtime === undefined || options.runtime === "claude-code"
     ? currentClaudeThemeMenu(paneContent) : null;
-  const selectionPromptEvidence = themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  // The program's own /model picker: its highlighted row can sit above the scan window, and Enter there confirms it.
+  const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
+    : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
@@ -4197,7 +4201,8 @@ export class SessionTransport {
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
-        if ((hookActivity.state === "running" || hookActivity.state === "idle") && input.runtime === "claude-code") {
+        // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4213,6 +4218,24 @@ export class SessionTransport {
           // After an idle hook only a dialog refuses: a draft or other input stays the delivery guard's.
           if (paneVeto.state === "needs_input" && (hookActivity.state === "running"
             || paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
+        }
+        // Codex's /model picker fires no hook either, and Codex opens it during a running turn too. After any fresh
+        // hook short of a permission request, only a current selector recognized in full refuses (the dialogue-only
+        // read skips the numbered-row scan, so history, drafts and a busy pane with no picker still deliver).
+        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && input.runtime === "codex") {
+          const paneVeto = await probeSessionActivity({
+            communityHarness, communityHarnessSendProbe: true,
+            composerSnapshot,
+            currentClaudeDialogueOnly: true,
+            sessionName: input.sessionName,
+            runtime: input.runtime,
+            attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+            tmuxAdapter: this.tmuxAdapter,
+            now,
+            captureObserver: privateInput ? undefined : this.captureObserver,
+            binding,
+          });
+          if (paneVeto.state === "needs_input" && paneVeto.reason === "selection_prompt") return paneVeto;
         }
         return hookActivity;
       }
