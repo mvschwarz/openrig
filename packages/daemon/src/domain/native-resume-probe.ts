@@ -40,7 +40,11 @@ export interface ProbeShellReadyInput {
   paneContent: string | null;
 }
 
-export type CodexResumeLabelStatus = "recorded_match" | "recorded_difference" | "no_recorded_launch";
+export type CodexResumeLabelStatus =
+  | "recorded_match"
+  | "recorded_difference"
+  | "recorded_uncertain"
+  | "no_recorded_launch";
 
 export interface CodexResumeDisplayInput {
   codexConfigProfile?: string | null;
@@ -152,18 +156,26 @@ export function buildCodexResumeDisplay(
   }
 
   const recordedApproval = recorded.approvalPolicy ?? null;
-  // A historical read-only envelope never launched without -a, so a NULL approval_policy on read-only is always
-  // incomplete historical data rather than a match.
-  const canMatchApproval = recordedApproval === currentApproval
-    && !(recorded.value === "read-only" && recordedApproval === null);
-  if (currentSandbox !== null && recorded.value === currentSandbox && canMatchApproval) {
+  // A NULL approval_policy cannot distinguish a plain floor launch without -a from a pre-upgrade envelope whose
+  // on-request/untrusted approval was not recorded, so only a non-null recorded approval can prove recorded_match.
+  if (
+    currentSandbox !== null
+    && recorded.value === currentSandbox
+    && recordedApproval !== null
+    && recordedApproval === currentApproval
+  ) {
     return { command, status: "recorded_match", label: null };
   }
 
   const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  const isSameSandboxUnrecordedApproval = currentSandbox !== null
+    && recorded.value === currentSandbox
+    && recorded.value !== "read-only"
+    && recordedApproval === null
+    && currentApproval === null;
   return {
     command,
-    status: "recorded_difference",
+    status: isSameSandboxUnrecordedApproval ? "recorded_uncertain" : "recorded_difference",
     label: `launched with ${recordedFlags}; a resume now uses ${currentFlags}`,
   };
 }

@@ -149,15 +149,8 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
     expect(envDisplay.command).not.toContain("hide_full_access_warning");
   });
 
-  it("covers all three label cases across sandbox and approval combinations in buildCodexResumeDisplay / buildNativeResumeDisplay", () => {
-    // 1. Recorded match: floor, full_bypass, and all three approval values (never, on-request, untrusted).
-    expect(
-      buildCodexResumeDisplay("tok-1", {
-        resolvedPosture: "floor",
-        recordedLaunch: observeCodexSandbox("-s workspace-write"),
-      }),
-    ).toMatchObject({ status: "recorded_match", label: null });
-
+  it("covers recorded match, recorded uncertainty, recorded difference, and no-recorded-launch cases across sandbox and approval combinations in buildCodexResumeDisplay / buildNativeResumeDisplay", () => {
+    // 1. Recorded match: requires a positively recorded non-null approval matching current settings (full_bypass and all three envelope approvals).
     expect(
       buildCodexResumeDisplay("tok-2", {
         resolvedPosture: "full_bypass",
@@ -178,6 +171,38 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
       });
       expect(display?.command).toContain(`-s ${perms.sandbox} -a ${perms.approval}`);
     }
+
+    // 1b. Recorded uncertainty (J01): workspace-write with approvalPolicy === null cannot distinguish a pre-upgrade
+    // on-request/untrusted envelope from a plain floor launch without -a, so floor resume retains explicit uncertainty
+    // while keeping the ordinary resume command copyable.
+    expect(
+      buildCodexResumeDisplay("tok-hist-ww-floor", {
+        resolvedPosture: "floor",
+        recordedLaunch: {
+          runtime: "codex",
+          axis: "sandbox",
+          state: "observed",
+          value: "workspace-write",
+          approvalPolicy: null,
+          reason: "emitted_launch_arguments",
+        },
+      }),
+    ).toEqual({
+      command: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-hist-ww-floor'`,
+      status: "recorded_uncertain",
+      label: "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+    });
+
+    expect(
+      buildNativeResumeDisplay("codex", "tok-1", null, null, false, null, {
+        resolvedPosture: "floor",
+        recordedLaunch: observeCodexSandbox("-s workspace-write"),
+      }),
+    ).toEqual({
+      command: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-1'`,
+      status: "recorded_uncertain",
+      label: "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+    });
 
     // 2. Recorded difference: maintainer's exact example + approval-only + profile switch.
     const fullToFloor = buildCodexResumeDisplay("tok-diff", {
@@ -677,10 +702,16 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     expect(legacyNodeEntry.resumeCommand).toBe(
       await runRealRestoreResolvedResume(legacyNode.id, legacyNodeRig.id, "tok-legacy-node"),
     );
-    expect(legacyNodeEntry.resumeCommandLabel).toBeNull();
-    expect(legacyNodeDetail.resumeCommandLabel).toBeNull();
+    expect(legacyNodeEntry.resumeCommandLabel).toBe(
+      "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+    );
+    expect(legacyNodeDetail.resumeCommandLabel).toBe(
+      "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+    );
     expect(legacyNodeDetail.recoveryGuidance?.commands[0]).toBe(legacyNodeEntry.resumeCommand);
-    expect(legacyNodeDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
+    expect(legacyNodeDetail.recoveryGuidance?.notes).toContain(
+      "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+    );
 
     // 2. Legacy rig permission_policy = 'builtin:yolo' WITHOUT saved rig provenance (NULL rig_policy_origin/posture):
     //    real restore also resolves "floor" (-s workspace-write).
@@ -890,6 +921,9 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(entries.get("dev.nodecustom")?.resumeCommand).toBe(
         await runRealRestoreResolvedResume(nodeCustom.id, rig.id, "tok-node-custom"),
       );
+      expect(entries.get("dev.nodecustom")?.resumeCommandLabel).toBe(
+        "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write",
+      );
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -977,4 +1011,121 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       expect(detail.recoveryGuidance?.notes).toContain(expectedLabel);
     },
   );
+
+  it("J01: retains explicit uncertainty when a persisted current-generation workspace-write / NULL-approval record transitions to floor across inventory and detail while keeping known-approval matches silent", async () => {
+    const rig = rigRepo.createRig("j01-rig");
+
+    // 1. Historical pre-upgrade workspace-write envelope (on-request/untrusted persisted as approval_policy = NULL)
+    //    subsequently switched to plain floor selection: command stays copyable, label retains explicit uncertainty.
+    const histNode = rigRepo.addNode(rig.id, "dev.hist-ww", {
+      runtime: "codex",
+      cwd: "/work/hist",
+      codexPermissions: workspaceUntrustedEnvelope,
+    });
+    const sHist = registry.registerSession(histNode.id, "dev-hist-ww@j01-rig");
+    registry.updateResumeToken(sHist.id, "codex_id", "tok-j01-hist", "hook");
+    const histGen = registry.currentOccupantTenure(histNode.id)!.generationUuid;
+    expect(
+      observations.recordGeneration(histGen, {
+        runtime: "codex",
+        axis: "sandbox",
+        state: "observed",
+        value: "workspace-write",
+        approvalPolicy: null,
+        reason: "emitted_launch_arguments",
+      }),
+    ).toBe(true);
+    expect(
+      db.prepare("SELECT value, approval_policy FROM applied_launch_observations WHERE generation_uuid = ?").get(histGen),
+    ).toEqual({ value: "workspace-write", approval_policy: null });
+
+    await lifecycle.setPermissions({
+      seatRef: "dev-hist-ww@j01-rig",
+      mode: "floor",
+      actor: "op@j01-rig",
+      reason: "Move historical workspace-write seat to floor",
+    });
+
+    // 2. Modern floor launch recorded via observeCodexSandbox("-s workspace-write") stores the identical SQLite shape
+    //    ({ value: "workspace-write", approval_policy: null }) without provenance, so it must also stay uncertain.
+    const modernFloorNode = rigRepo.addNode(rig.id, "dev.floor-null", { runtime: "codex", cwd: "/work/floor-null" });
+    const sFloorNull = registry.registerSession(modernFloorNode.id, "dev-floor-null@j01-rig");
+    registry.updateResumeToken(sFloorNull.id, "codex_id", "tok-j01-floor", "hook");
+    const floorGen = registry.currentOccupantTenure(modernFloorNode.id)!.generationUuid;
+    expect(observations.recordGeneration(floorGen, observeCodexSandbox("-s workspace-write"))).toBe(true);
+    expect(
+      db.prepare("SELECT value, approval_policy FROM applied_launch_observations WHERE generation_uuid = ?").get(floorGen),
+    ).toEqual({ value: "workspace-write", approval_policy: null });
+
+    // 3. Tokenless seat with persisted workspace-write / NULL approval on floor surfaces the same uncertainty note on --last.
+    const tokenlessNode = rigRepo.addNode(rig.id, "dev.tokenless-null", { runtime: "codex", cwd: "/work/tokenless" });
+    registry.registerSession(tokenlessNode.id, "dev-tokenless-null@j01-rig");
+    expect(
+      observations.recordGeneration(
+        registry.currentOccupantTenure(tokenlessNode.id)!.generationUuid,
+        observeCodexSandbox("-s workspace-write"),
+      ),
+    ).toBe(true);
+
+    // 4. Known complete workspace-write + untrusted record matching current settings stays silent (label: null).
+    const matchNode = rigRepo.addNode(rig.id, "dev.known-match", {
+      runtime: "codex",
+      cwd: "/work/match",
+      codexPermissions: workspaceUntrustedEnvelope,
+    });
+    const sMatch = registry.registerSession(matchNode.id, "dev-known-match@j01-rig");
+    registry.updateResumeToken(sMatch.id, "codex_id", "tok-j01-match", "hook");
+    expect(
+      observations.recordGeneration(
+        registry.currentOccupantTenure(matchNode.id)!.generationUuid,
+        observeCodexEnvelope(codexMemberEnvelope(workspaceUntrustedEnvelope)),
+      ),
+    ).toBe(true);
+
+    const expectedUncertainLabel =
+      "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write";
+
+    const single = getNodeInventory(db, rig.id);
+    const bySet = getNodeInventoryForRigs(db, new Set([rig.id])).get(rig.id);
+    const byAll = getNodeInventoryForAllRigs(db).get(rig.id);
+    expect(bySet).toEqual(single);
+    expect(byAll).toEqual(single);
+
+    const byLogicalId = new Map(single.map((e) => [e.logicalId, e]));
+
+    for (const [logicalId, token] of [
+      ["dev.hist-ww", "tok-j01-hist"],
+      ["dev.floor-null", "tok-j01-floor"],
+    ] as const) {
+      const entry = byLogicalId.get(logicalId)!;
+      const detail = getNodeDetail(db, rig.id, logicalId)!;
+      const expectedCmd = `codex -s workspace-write ${UPDATE_OFF} resume '${token}'`;
+      expect(entry.resumeCommand).toBe(expectedCmd);
+      expect(entry.resumeCommandLabel).toBe(expectedUncertainLabel);
+      expect(detail.resumeCommand).toBe(expectedCmd);
+      expect(detail.resumeCommandLabel).toBe(expectedUncertainLabel);
+      expect(detail.recoveryGuidance?.commands[0]).toBe(expectedCmd);
+      expect(detail.recoveryGuidance?.notes).toContain(expectedUncertainLabel);
+      expect(detail.recoveryGuidance?.notes).not.toContain("flags from current settings");
+    }
+
+    const tokenlessEntry = byLogicalId.get("dev.tokenless-null")!;
+    const tokenlessDetail = getNodeDetail(db, rig.id, "dev.tokenless-null")!;
+    expect(tokenlessEntry.resumeCommand).toBeNull();
+    expect(tokenlessEntry.resumeCommandLabel).toBeNull();
+    expect(tokenlessDetail.recoveryGuidance?.commands).toEqual([
+      "cd /work/tokenless",
+      `codex -s workspace-write ${UPDATE_OFF} resume --last`,
+    ]);
+    expect(tokenlessDetail.recoveryGuidance?.notes).toContain(expectedUncertainLabel);
+
+    const matchEntry = byLogicalId.get("dev.known-match")!;
+    const matchDetail = getNodeDetail(db, rig.id, "dev.known-match")!;
+    expect(matchEntry.resumeCommand).toBe(
+      `codex -s workspace-write -a untrusted -c 'sandbox_workspace_write.writable_roots=[]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' -c 'sandbox_workspace_write.exclude_slash_tmp=false' ${UPDATE_OFF} resume 'tok-j01-match'`,
+    );
+    expect(matchEntry.resumeCommandLabel).toBeNull();
+    expect(matchDetail.resumeCommandLabel).toBeNull();
+    expect(matchDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
+  });
 });
