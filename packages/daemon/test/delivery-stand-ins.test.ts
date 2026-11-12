@@ -248,6 +248,37 @@ describe("delivery suite stand-ins: what the log keeps about each turn", () => {
       .toEqual([["tool_result", "first block"], ["tool_result", "second block"]]);
   });
 
+  it.each([
+    ["empty", []],
+    ["image-only", [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }]],
+  ])("dispatches a Claude tool result with no text (%s) as a tool round, with or without typed text beside it", async (_label, content) => {
+    const standIn = await start("messages", { script: { rules: [{ on: "tool_result", say: "round" }] } });
+    const history = [{ role: "user", content: "go DLV-1" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] }];
+    for (const extra of [[], [{ type: "text", text: "typed DLV-2" }]]) {
+      await post(`${standIn.url}/v1/messages`, { model: "m", stream: true, messages: [...history,
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content }, ...extra] }] });
+    }
+    const [alone, mixed] = standIn.requests();
+    expect([alone.turn.kind, alone.rule, alone.turn.parts]).toEqual(["tool_result", 0, []]);
+    expect([mixed.turn.kind, mixed.rule, mixed.marker]).toEqual(["tool_result", 0, "DLV-2"]);
+    expect(mixed.turn.parts.map((p: { source: string; text: string }) => [p.source, p.text])).toEqual([["text", "typed DLV-2"]]);
+  });
+
+  it.each([
+    ["empty", []],
+    ["image-only", [{ type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" }]],
+  ])("dispatches a Codex tool output with no text (%s) as a tool round, with or without typed text after it", async (_label, output) => {
+    const standIn = await start("responses", { script: { rules: [{ on: "tool_result", say: "round" }] } });
+    const history = [{ type: "message", role: "user", content: [{ type: "input_text", text: "go DLV-1" }] },
+      { type: "function_call", call_id: "c1", name: "view_image", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output }];
+    for (const extra of [[], [{ type: "message", role: "user", content: [{ type: "input_text", text: "typed DLV-2" }] }]]) {
+      await post(`${standIn.url}/v1/responses`, { ...codexTurn("x"), input: [...history, ...extra] });
+    }
+    const [alone, mixed] = standIn.requests();
+    expect([alone.turn.kind, alone.rule, alone.turn.parts]).toEqual(["tool_result", 0, []]);
+    expect([mixed.turn.kind, mixed.rule, mixed.marker]).toEqual(["tool_result", 0, "DLV-2"]);
+  });
+
   it("keeps the request body's raw size and sha256, to tie the parsed log to the wire", async () => {
     const standIn = await start("messages", { script: { rules: [] } });
     const raw = JSON.stringify(userTurn("wire DLV-1"));

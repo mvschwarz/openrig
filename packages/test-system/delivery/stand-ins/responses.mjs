@@ -49,11 +49,13 @@ export function responsesTurnOf(body) {
   const input = inputItems(body);
   let start = input.length;
   while (start > 0 && (TOOL_OUTPUTS.has(input[start - 1]?.type) || isUserMessage(input[start - 1]))) start -= 1;
-  const parts = input.slice(start).flatMap((item) => TOOL_OUTPUTS.has(item.type)
+  const run = input.slice(start);
+  const parts = run.flatMap((item) => TOOL_OUTPUTS.has(item.type)
     ? toolOutputParts(item.output).map((text) => ({ text, source: "tool_result" }))
     : itemParts(item).map((text) => ({ text, source: "text" })));
-  if (parts.length === 0) return { kind: "other", text: "", parts: [] };
-  const kind = parts.some((part) => part.source === "tool_result") ? "tool_result" : "user";
+  // The kind comes from the items themselves: a tool output with no text still makes a tool round.
+  if (run.length === 0) return { kind: "other", text: "", parts: [] };
+  const kind = run.some((item) => TOOL_OUTPUTS.has(item.type)) ? "tool_result" : "user";
   return { kind, text: parts.map((part) => part.text).join("\n"), parts };
 }
 
