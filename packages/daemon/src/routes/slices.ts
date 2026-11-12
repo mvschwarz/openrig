@@ -4,7 +4,7 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
-//   GET /api/slices?filter=all|active|done|blocked  — list (default: all)
+//   GET /api/slices?filter=all|active|done|closed|blocked  — list (default: all)
 //   GET /api/slices/:name                            — full per-tab payload
 //   GET /api/slices/:name/proof-asset/:relPath{.+}   — serves screenshots /
 //                                                       videos / traces from

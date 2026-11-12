@@ -287,6 +287,44 @@ describe("MissionProgressHeatmap (slice 13.5)", () => {
     expect(warningLegend.className).toMatch(/bg-amber-300/);
   });
 
+  it("separates closed slices from done (complete) in both row cells and legend swatch", async () => {
+    const rows = [
+      makeRow("doneSlice", "done"),
+      makeRow("closedSlice", "closed"),
+    ];
+    const detailsByName = new Map<string, SliceDetail>([
+      ["doneSlice", makeDetail("doneSlice", [{ text: "d1", done: true }])],
+      [
+        "closedSlice",
+        makeDetail("closedSlice", [
+          { text: "c1", done: true },
+          { text: "c2", done: false },
+        ]),
+      ],
+    ]);
+    const { findByTestId } = withRouter(
+      <MissionProgressHeatmap rows={rows} detailsByName={detailsByName} />,
+    );
+
+    const closedRow = await findByTestId("mission-progress-heatmap-row-closedSlice");
+    expect(closedRow.getAttribute("data-tone")).toBe("neutral");
+
+    const doneCell = await findByTestId("mission-progress-heatmap-cell-doneSlice-0");
+    const closedDoneCell = await findByTestId("mission-progress-heatmap-cell-closedSlice-0");
+    const closedNotDoneCell = await findByTestId("mission-progress-heatmap-cell-closedSlice-1");
+
+    expect(doneCell.className).toMatch(/bg-emerald-400/);
+    expect(closedDoneCell.className).toMatch(/bg-surface-highest/);
+    expect(closedDoneCell.className).not.toMatch(/bg-emerald-400/);
+    expect(closedNotDoneCell.className).toMatch(/border-outline-variant/);
+
+    const legend = await findByTestId("mission-progress-heatmap-legend");
+    expect(legend.textContent).toContain("done (closed)");
+    const closedLegend = await findByTestId("mission-progress-heatmap-legend-closed");
+    expect(closedLegend.className).toContain("border-outline bg-surface-highest");
+    expect(closedDoneCell.className).toContain("border-outline bg-surface-highest");
+  });
+
   it("renders an empty-state when the mission has no scoped slices", async () => {
     const { findByTestId } = withRouter(
       <MissionProgressHeatmap rows={[]} detailsByName={new Map()} />,

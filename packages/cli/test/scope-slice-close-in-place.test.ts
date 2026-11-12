@@ -23,6 +23,7 @@ import { queueTransitionsSchema } from "../../daemon/src/db/migrations/025_queue
 import { missionControlActionsSchema } from "../../daemon/src/db/migrations/037_mission_control_actions.js";
 import { SliceIndexer } from "../../daemon/src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../../daemon/src/domain/slices/slice-detail-projector.js";
+import { classifyScopeItem } from "../../daemon/src/domain/scope/scope-audit.js";
 import { slicesRoutes } from "../../daemon/src/routes/slices.js";
 
 interface CaptureResult {
@@ -1270,6 +1271,259 @@ describe("#2727 rig scope slice close --in-place", () => {
     }
   });
 
+  it("refuses in-place close before any mutation when PROGRESS.md top-level status: carries an inline # comment so non-delivery close never appears done in SliceIndexer or GET /api/slices, and reconciles cleanly once the comment is on its own line", async () => {
+    const inlineDeferred = await seedAcceptedSlice("m-inline-comment-progress", "inline-comment-deferred");
+    const inlineDeferredProgressPath = path.join(inlineDeferred.sliceDir, "PROGRESS.md");
+    writeFile(
+      inlineDeferredProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "status: active # current cursor",
+        "rail-item: PL-2727",
+        "checks:",
+        "  verdict: pass",
+        "---",
+        "# Progress — inline-comment-deferred",
+        "",
+        "- Kept author progress note.",
+        "",
+      ].join("\n"),
+    );
+
+    const createdKeyComment = await runScope(
+      ["slice", "create", "m-inline-comment-progress", "multiline-key-inline-comment", "--json"],
+      missionsRoot,
+    );
+    const keyCommentDir = JSON.parse(createdKeyComment.stdout).slice.path as string;
+    const keyCommentName = path.basename(keyCommentDir);
+    const keyCommentSpecPath = path.join(keyCommentDir, "SPEC.md");
+    const keyCommentProgressPath = path.join(keyCommentDir, "PROGRESS.md");
+    const keyCommentEvidencePath = path.join(keyCommentDir, "evidence.txt");
+    const keyCommentId = String(readFrontmatter(keyCommentSpecPath).id ?? "OPR.1.0.1.2");
+    writeFile(
+      keyCommentSpecPath,
+      [
+        "---",
+        `id: ${keyCommentId}`,
+        "status: active",
+        "---",
+        "# multiline-key-inline-comment",
+        "",
+        "## Intent",
+        "Verify pre-mutation refusal when an inline comment sits on the status: key line before a multiline scalar.",
+        "",
+        "## Mini-requirements",
+        "1. Preserve every file byte-for-byte on refusal without silently discarding the inline comment.",
+        "",
+        "## Proof contract",
+        "- [x] Verified multiline key comment refusal <!-- proof-item: multiline-key-comment-item -->",
+        "",
+      ].join("\n"),
+    );
+    writeFile(keyCommentEvidencePath, "Evidence for multiline-key-inline-comment.\n");
+    writeFile(
+      keyCommentProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "status: # key cursor comment",
+        "  active",
+        "owner: team-gamma",
+        "---",
+        "# Progress — multiline key inline comment",
+        "",
+        "- Multiline scalar with key inline comment.",
+        "",
+      ].join("\n"),
+    );
+    const preKeyCommentReadiness = readSliceReadiness(keyCommentDir);
+    recordJudgment(
+      missionsRoot,
+      {
+        scope: `m-inline-comment-progress/slices/${keyCommentName}`,
+        item: preKeyCommentReadiness.items[0]!.id,
+        verdict: "accept",
+        reason: "Verified multiline key comment baseline",
+        evidence: ["evidence.txt"],
+        expectedRevision: preKeyCommentReadiness.items[0]!.revision,
+        expectedPrevious: null,
+      },
+      "judge@trial",
+      "transport:v1",
+    );
+    expect(readSliceReadiness(keyCommentDir).state).toBe("ready");
+
+    commitAll(projectRoot, "seed inline comment progress status slices");
+
+    const missionManifestPath = path.join(inlineDeferred.missionDir, "mission.yaml");
+    const inlineDeferredSpecPath = path.join(inlineDeferred.sliceDir, "SPEC.md");
+    const inlineDeferredEvidencePath = path.join(inlineDeferred.sliceDir, "proof", "evidence.md");
+    const inlineDeferredJudgmentPath = path.join(inlineDeferred.sliceDir, "proof", "judgments", "00000001.md");
+    const keyCommentJudgmentPath = path.join(keyCommentDir, "proof", "judgments", "00000001.md");
+
+    const beforeManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeInlineDeferredSpec = fs.readFileSync(inlineDeferredSpecPath, "utf8");
+    const beforeInlineDeferredProgress = fs.readFileSync(inlineDeferredProgressPath, "utf8");
+    const beforeInlineDeferredEvidence = fs.readFileSync(inlineDeferredEvidencePath, "utf8");
+    const beforeInlineDeferredJudgment = fs.readFileSync(inlineDeferredJudgmentPath, "utf8");
+    const beforeKeyCommentSpec = fs.readFileSync(keyCommentSpecPath, "utf8");
+    const beforeKeyCommentProgress = fs.readFileSync(keyCommentProgressPath, "utf8");
+    const beforeKeyCommentEvidence = fs.readFileSync(keyCommentEvidencePath, "utf8");
+    const beforeKeyCommentJudgment = fs.readFileSync(keyCommentJudgmentPath, "utf8");
+
+    const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
+    try {
+      // 1. Non-delivery --in-place --reason deferred on status: active # current cursor must fail closed before any write
+      //    and must NEVER appear as done in SliceIndexer or GET /api/slices?filter=done.
+      const closeDeferred = await runScope(
+        ["slice", "close", inlineDeferred.sliceName, "--mission", "m-inline-comment-progress", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      const doneAfterRefusal = (await (await app.request("/api/slices?filter=done&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      const closedAfterRefusal = (await (await app.request("/api/slices?filter=closed&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      const activeAfterRefusal = (await (await app.request("/api/slices?filter=active&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      const cliShippedAfterRefusal = JSON.parse(
+        (await runScope(["slice", "ls", "--mission", "m-inline-comment-progress", "--state", "shipped", "--json"], missionsRoot)).stdout,
+      ).slices as Array<{ name: string }>;
+      const cliClosedAfterRefusal = JSON.parse(
+        (await runScope(["slice", "ls", "--mission", "m-inline-comment-progress", "--state", "closed", "--json"], missionsRoot)).stdout,
+      ).slices as Array<{ name: string }>;
+
+      expect({
+        exitCode: closeDeferred.exitCode,
+        doneApiSlices: doneAfterRefusal.slices.map((s) => ({
+          name: s.name,
+          status: s.status,
+          rawStatus: s.rawStatus,
+        })),
+        closedApiNames: closedAfterRefusal.slices.map((s) => s.name),
+        activeApiNames: activeAfterRefusal.slices.map((s) => s.name).sort(),
+        indexerStatus: indexer.get(inlineDeferred.sliceName)?.status,
+        cliShippedNames: cliShippedAfterRefusal.map((s) => s.name),
+        cliClosedNames: cliClosedAfterRefusal.map((s) => s.name),
+        progressUnchanged: fs.readFileSync(inlineDeferredProgressPath, "utf8") === beforeInlineDeferredProgress,
+      }).toEqual({
+        exitCode: 1,
+        doneApiSlices: [],
+        closedApiNames: [],
+        activeApiNames: [inlineDeferred.sliceName, keyCommentName].sort(),
+        indexerStatus: "active",
+        cliShippedNames: [],
+        cliClosedNames: [],
+        progressUnchanged: true,
+      });
+
+      const deferredError = JSON.parse(closeDeferred.stdout) as {
+        ok: boolean;
+        error: { fact: string; consequence: string; action: string };
+      };
+      expect(deferredError.ok).toBe(false);
+      expect(deferredError.error.fact).toContain(inlineDeferredProgressPath);
+      expect(deferredError.error.fact).toContain('top-level "status:" entry with an inline "#" comment at line 3');
+      expect(deferredError.error.consequence).toContain("before any file was modified");
+      expect(deferredError.error.action).toContain('without an inline "#" comment');
+      expect(deferredError.error.action).toContain('moving any inline comment onto its own "#" line');
+
+      // 2. Delivered human-mode refusal + multiline key-comment refusal preserve all bytes and readiness.
+      const closeDeliveredHuman = await runScope(
+        ["slice", "close", inlineDeferred.sliceName, "--mission", "m-inline-comment-progress", "--in-place", "--reason", "delivered"],
+        missionsRoot,
+      );
+      expect(closeDeliveredHuman.exitCode).toBe(1);
+      expect(closeDeliveredHuman.stdout).toBe("");
+      expect(closeDeliveredHuman.stderr).toContain(inlineDeferredProgressPath);
+      expect(closeDeliveredHuman.stderr).toContain('top-level "status:" entry with an inline "#" comment at line 3');
+      expect(closeDeliveredHuman.stderr).toContain("before any file was modified");
+
+      const closeKeyComment = await runScope(
+        ["slice", "close", keyCommentName, "--mission", "m-inline-comment-progress", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      expect(closeKeyComment.exitCode).toBe(1);
+      const keyCommentError = JSON.parse(closeKeyComment.stdout) as {
+        ok: boolean;
+        error: { fact: string; consequence: string; action: string };
+      };
+      expect(keyCommentError.ok).toBe(false);
+      expect(keyCommentError.error.fact).toContain(keyCommentProgressPath);
+      expect(keyCommentError.error.fact).toContain('top-level "status:" entry with an inline "#" comment at line 3');
+      expect(keyCommentError.error.consequence).toContain("before any file was modified");
+
+      expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeManifest);
+      expect(fs.readFileSync(inlineDeferredSpecPath, "utf8")).toBe(beforeInlineDeferredSpec);
+      expect(fs.readFileSync(inlineDeferredProgressPath, "utf8")).toBe(beforeInlineDeferredProgress);
+      expect(fs.readFileSync(inlineDeferredEvidencePath, "utf8")).toBe(beforeInlineDeferredEvidence);
+      expect(fs.readFileSync(inlineDeferredJudgmentPath, "utf8")).toBe(beforeInlineDeferredJudgment);
+      expect(fs.readFileSync(keyCommentSpecPath, "utf8")).toBe(beforeKeyCommentSpec);
+      expect(fs.readFileSync(keyCommentProgressPath, "utf8")).toBe(beforeKeyCommentProgress);
+      expect(fs.readFileSync(keyCommentEvidencePath, "utf8")).toBe(beforeKeyCommentEvidence);
+      expect(fs.readFileSync(keyCommentJudgmentPath, "utf8")).toBe(beforeKeyCommentJudgment);
+      expect(readSliceReadiness(inlineDeferred.sliceDir).state).toBe("ready");
+      expect(readSliceReadiness(keyCommentDir).state).toBe("ready");
+
+      // 3. Following the repair action (moving "# current cursor" onto its own line) lets --in-place --reason deferred
+      //    reconcile cleanly as "closed" across CLI, SliceIndexer, and GET /api/slices while keeping the comment.
+      writeFile(
+        inlineDeferredProgressPath,
+        [
+          "---",
+          "doc: slice-progress",
+          "# current cursor",
+          "status: active",
+          "rail-item: PL-2727",
+          "checks:",
+          "  verdict: pass",
+          "---",
+          "# Progress — inline-comment-deferred",
+          "",
+          "- Kept author progress note.",
+          "",
+        ].join("\n"),
+      );
+      const closeRepaired = await runScope(
+        ["slice", "close", inlineDeferred.sliceName, "--mission", "m-inline-comment-progress", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      expect(closeRepaired.exitCode).toBe(0);
+
+      const doneAfterRepair = (await (await app.request("/api/slices?filter=done&refresh=1")).json()) as {
+        slices: Array<{ name: string }>;
+      };
+      expect(doneAfterRepair.slices).toEqual([]);
+
+      const closedAfterRepair = (await (await app.request("/api/slices?filter=closed&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      expect(closedAfterRepair.slices.map((s) => ({ name: s.name, status: s.status, rawStatus: s.rawStatus }))).toEqual([
+        { name: inlineDeferred.sliceName, status: "closed", rawStatus: "closed-deferred" },
+      ]);
+      expect(indexer.get(inlineDeferred.sliceName)?.status).toBe("closed");
+
+      const repairedProgress = fs.readFileSync(inlineDeferredProgressPath, "utf8");
+      expect(readFrontmatter(inlineDeferredProgressPath)).toMatchObject({
+        doc: "slice-progress",
+        status: "closed-deferred",
+        "rail-item": "PL-2727",
+        checks: { verdict: "pass" },
+      });
+      expect(repairedProgress).toContain("# current cursor");
+      expect(repairedProgress).toContain("- Kept author progress note.");
+      expect(YAML.parse(fs.readFileSync(missionManifestPath, "utf8")).metadata.status).toBe(
+        YAML.parse(beforeManifest).metadata.status,
+      );
+      expect(readSliceReadiness(inlineDeferred.sliceDir).state).toBe("ready");
+    } finally {
+      db.close();
+    }
+  });
+
   it("reports proofApplicability as unevaluated and transitions readiness to unknown when accepted evidence cites SPEC.md or mission.yaml mutated by in-place close", async () => {
     // 1. Judgment citing SPEC.md becomes unknown when delivered --in-place updates SPEC.md status/closed-on.
     expect((await runScope(["mission", "create", "m-cited-evidence", "--json"], missionsRoot)).exitCode).toBe(0);
@@ -1392,5 +1646,274 @@ describe("#2727 rig scope slice close --in-place", () => {
     const afterManifestReadiness = readSliceReadiness(citedManifestDir);
     expect(afterManifestReadiness.state).toBe("unknown");
     expect(afterManifestReadiness.items[0]!.state).toBe("unknown");
+  });
+
+  it("refuses in-place close before any mutation when SPEC.md carries an inline # comment on top-level status: so non-delivery close never appears done or triggers missing_proof, while preserving moving close", async () => {
+    expect((await runScope(["mission", "create", "m-inline-comment-node", "--json"], missionsRoot)).exitCode).toBe(0);
+    const missionDir = path.join(missionsRoot, "m-inline-comment-node");
+    const missionManifestPath = path.join(missionDir, "mission.yaml");
+
+    const createdDeferred = await runScope(
+      ["slice", "create", "m-inline-comment-node", "node-inline-deferred", "--json"],
+      missionsRoot,
+    );
+    expect(createdDeferred.exitCode).toBe(0);
+    const deferredDir = JSON.parse(createdDeferred.stdout).slice.path as string;
+    const deferredName = path.basename(deferredDir);
+    const deferredSpecPath = path.join(deferredDir, "SPEC.md");
+    const deferredProgressPath = path.join(deferredDir, "PROGRESS.md");
+    const deferredId = String(readFrontmatter(deferredSpecPath).id ?? "OPR.1.0.1.1");
+    // Remove scaffolded PROOF.md so an unblocked inline-comment write would trigger missing_proof in daemon audit.
+    fs.rmSync(path.join(deferredDir, "PROOF.md"), { force: true });
+    writeFile(
+      deferredSpecPath,
+      [
+        "---",
+        `id: ${deferredId}`,
+        "status: active  # waiting on design",
+        "---",
+        "# node-inline-deferred",
+        "",
+        "## Intent",
+        "Ensure inline # comment on SPEC.md status: refuses --in-place close before mutation.",
+        "",
+        "## Mini-requirements",
+        "1. Preserve every file byte-for-byte on refusal.",
+        "",
+        "## Proof contract",
+        "- [ ] Unstarted deferred deliverable",
+        "",
+      ].join("\n"),
+    );
+    writeFile(deferredProgressPath, "# Progress — no frontmatter status\n\n- Waiting on design.\n");
+
+    const createdMoving = await runScope(
+      ["slice", "create", "m-inline-comment-node", "node-inline-moving", "--json"],
+      missionsRoot,
+    );
+    expect(createdMoving.exitCode).toBe(0);
+    const movingDir = JSON.parse(createdMoving.stdout).slice.path as string;
+    const movingName = path.basename(movingDir);
+    const movingSpecPath = path.join(movingDir, "SPEC.md");
+    const movingId = String(readFrontmatter(movingSpecPath).id ?? "OPR.1.0.1.2");
+    writeFile(
+      movingSpecPath,
+      `---\nid: ${movingId}\nstatus: active  # waiting on triage\n---\n# node-inline-moving\n`,
+    );
+    commitAll(projectRoot, "seed node inline comment slices");
+
+    const beforeManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeDeferredSpec = fs.readFileSync(deferredSpecPath, "utf8");
+    const beforeDeferredProgress = fs.readFileSync(deferredProgressPath, "utf8");
+
+    const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
+    try {
+      const closeDeferred = await runScope(
+        ["slice", "close", deferredName, "--mission", "m-inline-comment-node", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      const doneAfterRefusal = (await (await app.request("/api/slices?filter=done&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      const daemonAuditAfterRefusal = classifyScopeItem({
+        id: deferredId,
+        path: deferredDir,
+        readmeFrontmatterRaw: `id: ${deferredId}\nstatus: active`,
+        progressFileExists: true,
+        readmeOnlyMarker: false,
+        isActiveRelease: true,
+        level: "slice",
+        proofFileExists: false,
+        proofDirExists: true,
+        proofDirHasEntries: false,
+        hasProofPacket: false,
+        sliceStatus: indexer.get(deferredName)?.rawStatus ?? null,
+      });
+
+      expect({
+        exitCode: closeDeferred.exitCode,
+        doneApiSlices: doneAfterRefusal.slices.map((s) => ({
+          name: s.name,
+          status: s.status,
+          rawStatus: s.rawStatus,
+        })),
+        indexerStatus: indexer.get(deferredName)?.status,
+        daemonAuditMissingProof: daemonAuditAfterRefusal.findings.some((f) => f.kind === "missing_proof"),
+        specUnchanged: fs.readFileSync(deferredSpecPath, "utf8") === beforeDeferredSpec,
+        progressUnchanged: fs.readFileSync(deferredProgressPath, "utf8") === beforeDeferredProgress,
+        manifestUnchanged: fs.readFileSync(missionManifestPath, "utf8") === beforeManifest,
+      }).toEqual({
+        exitCode: 1,
+        doneApiSlices: [],
+        indexerStatus: "active",
+        daemonAuditMissingProof: false,
+        specUnchanged: true,
+        progressUnchanged: true,
+        manifestUnchanged: true,
+      });
+
+      const refusalPayload = JSON.parse(closeDeferred.stdout) as {
+        ok: boolean;
+        error: { fact: string; consequence: string; action: string };
+      };
+      expect(refusalPayload.ok).toBe(false);
+      expect(refusalPayload.error.fact).toContain(deferredSpecPath);
+      expect(refusalPayload.error.fact).toContain('top-level "status:" entry with an inline "#" comment at line 3');
+      expect(refusalPayload.error.consequence).toContain("before any file was modified");
+      expect(refusalPayload.error.action).toContain('without an inline "#" comment');
+
+      // Moving close without --in-place preserves existing YAML comment-retention behavior.
+      const movingClose = await runScope(
+        ["slice", "close", movingName, "--mission", "m-inline-comment-node", "--reason", "wontfix", "--json"],
+        missionsRoot,
+      );
+      expect(movingClose.exitCode).toBe(0);
+      expect(fs.existsSync(path.join(missionDir, "closed", movingName, "SPEC.md"))).toBe(true);
+
+      // Moving the inline comment onto its own # line in SPEC.md allows --in-place --reason deferred to succeed cleanly.
+      writeFile(
+        deferredSpecPath,
+        [
+          "---",
+          `id: ${deferredId}`,
+          "# waiting on design",
+          "status: active",
+          "---",
+          "# node-inline-deferred",
+          "",
+          "## Intent",
+          "Ensure inline # comment on SPEC.md status: refuses --in-place close before mutation.",
+          "",
+          "## Mini-requirements",
+          "1. Preserve every file byte-for-byte on refusal.",
+          "",
+          "## Proof contract",
+          "- [ ] Unstarted deferred deliverable",
+          "",
+        ].join("\n"),
+      );
+      const closeRepaired = await runScope(
+        ["slice", "close", deferredName, "--mission", "m-inline-comment-node", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      expect(closeRepaired.exitCode).toBe(0);
+      const closedAfterRepair = (await (await app.request("/api/slices?filter=closed&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      expect(closedAfterRepair.slices.map((s) => ({ name: s.name, status: s.status, rawStatus: s.rawStatus }))).toEqual([
+        { name: deferredName, status: "closed", rawStatus: "closed-deferred" },
+      ]);
+      const daemonAuditAfterRepair = classifyScopeItem({
+        id: deferredId,
+        path: deferredDir,
+        readmeFrontmatterRaw: `id: ${deferredId}\nstatus: closed-deferred`,
+        progressFileExists: true,
+        readmeOnlyMarker: false,
+        isActiveRelease: true,
+        level: "slice",
+        proofFileExists: false,
+        proofDirExists: true,
+        proofDirHasEntries: false,
+        hasProofPacket: false,
+        sliceStatus: indexer.get(deferredName)?.rawStatus ?? null,
+      });
+      expect(daemonAuditAfterRepair.findings.some((f) => f.kind === "missing_proof")).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses in-place close before any mutation when LF or CRLF malformed frontmatter delimiters still expose a status: line to line-based readers, while allowing status-free CRLF malformed frontmatter", async () => {
+    expect((await runScope(["mission", "create", "m-malformed-delim", "--json"], missionsRoot)).exitCode).toBe(0);
+    const missionDir = path.join(missionsRoot, "m-malformed-delim");
+    const missionManifestPath = path.join(missionDir, "mission.yaml");
+
+    const createdLf = await runScope(["slice", "create", "m-malformed-delim", "lf-four-dash", "--json"], missionsRoot);
+    const lfDir = JSON.parse(createdLf.stdout).slice.path as string;
+    const lfName = path.basename(lfDir);
+    const lfSpecPath = path.join(lfDir, "SPEC.md");
+    const lfProgressPath = path.join(lfDir, "PROGRESS.md");
+    writeFile(lfProgressPath, "---\ndoc: slice-progress\nstatus: active\n----\n# Progress LF malformed\n");
+
+    const createdCrlf = await runScope(["slice", "create", "m-malformed-delim", "crlf-four-dash", "--json"], missionsRoot);
+    const crlfDir = JSON.parse(createdCrlf.stdout).slice.path as string;
+    const crlfName = path.basename(crlfDir);
+    const crlfSpecPath = path.join(crlfDir, "SPEC.md");
+    const crlfProgressPath = path.join(crlfDir, "PROGRESS.md");
+    writeFile(crlfProgressPath, "---\r\ndoc: slice-progress\r\nstatus: active\r\n----\r\n# Progress CRLF malformed\r\n");
+
+    const createdBenignCrlf = await runScope(["slice", "create", "m-malformed-delim", "crlf-status-free", "--json"], missionsRoot);
+    const benignDir = JSON.parse(createdBenignCrlf.stdout).slice.path as string;
+    const benignName = path.basename(benignDir);
+    const benignProgressPath = path.join(benignDir, "PROGRESS.md");
+    const beforeBenignProgress = "---\r\ndoc: slice-progress\r\nnote: no status line here\r\n----\r\n# Progress CRLF benign\r\n";
+    writeFile(benignProgressPath, beforeBenignProgress);
+
+    commitAll(projectRoot, "seed malformed delimiter slices");
+
+    const beforeManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeLfSpec = fs.readFileSync(lfSpecPath, "utf8");
+    const beforeLfProgress = fs.readFileSync(lfProgressPath, "utf8");
+    const beforeCrlfSpec = fs.readFileSync(crlfSpecPath, "utf8");
+    const beforeCrlfProgress = fs.readFileSync(crlfProgressPath, "utf8");
+
+    const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
+    try {
+      // 1. LF malformed closing delimiter with status: active refuses pre-mutation.
+      const lfClose = await runScope(
+        ["slice", "close", lfName, "--mission", "m-malformed-delim", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      expect(lfClose.exitCode).toBe(1);
+      const lfError = JSON.parse(lfClose.stdout) as { ok: boolean; error: { fact: string; consequence: string } };
+      expect(lfError.ok).toBe(false);
+      expect(lfError.error.fact).toContain(lfProgressPath);
+      expect(lfError.error.fact).toContain('frontmatter delimiter with a "status:" line');
+      expect(lfError.error.consequence).toContain("before any file was modified");
+
+      // 2. CRLF malformed closing delimiter with status: active also refuses pre-mutation so SPEC.md and PROGRESS.md never diverge.
+      const crlfClose = await runScope(
+        ["slice", "close", crlfName, "--mission", "m-malformed-delim", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      await app.request("/api/slices?refresh=1");
+      expect({
+        exitCode: crlfClose.exitCode,
+        indexerStatus: indexer.get(crlfName)?.status,
+        specUnchanged: fs.readFileSync(crlfSpecPath, "utf8") === beforeCrlfSpec,
+        progressUnchanged: fs.readFileSync(crlfProgressPath, "utf8") === beforeCrlfProgress,
+        manifestUnchanged: fs.readFileSync(missionManifestPath, "utf8") === beforeManifest,
+      }).toEqual({
+        exitCode: 1,
+        indexerStatus: "active",
+        specUnchanged: true,
+        progressUnchanged: true,
+        manifestUnchanged: true,
+      });
+      const crlfError = JSON.parse(crlfClose.stdout) as { ok: boolean; error: { fact: string; consequence: string } };
+      expect(crlfError.ok).toBe(false);
+      expect(crlfError.error.fact).toContain(crlfProgressPath);
+      expect(crlfError.error.fact).toContain('frontmatter delimiter with a "status:" line');
+
+      expect(fs.readFileSync(lfSpecPath, "utf8")).toBe(beforeLfSpec);
+      expect(fs.readFileSync(lfProgressPath, "utf8")).toBe(beforeLfProgress);
+
+      // 3. Boundary control: CRLF malformed delimiter WITHOUT a status: key is absent for slice status,
+      //    leaves PROGRESS.md untouched, and closes SPEC.md in place cleanly.
+      const benignClose = await runScope(
+        ["slice", "close", benignName, "--mission", "m-malformed-delim", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+      expect(benignClose.exitCode).toBe(0);
+      expect(fs.readFileSync(benignProgressPath, "utf8")).toBe(beforeBenignProgress);
+      const closedApi = (await (await app.request("/api/slices?filter=closed&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      expect(closedApi.slices.map((s) => ({ name: s.name, status: s.status, rawStatus: s.rawStatus }))).toEqual([
+        { name: benignName, status: "closed", rawStatus: "closed-deferred" },
+      ]);
+    } finally {
+      db.close();
+    }
   });
 });

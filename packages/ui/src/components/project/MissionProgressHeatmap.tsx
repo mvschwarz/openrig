@@ -37,7 +37,7 @@ import type { SliceListEntry } from "../../hooks/useSlices.js";
  *  the legend swatch class is always EXACTLY the same string the cell
  *  would render. Pure function of tone; no side effects. */
 function doneCellClass(tone: ProjectMetaTone): string {
-  return statusDotClass[tone === "neutral" ? "success" : tone];
+  return statusDotClass[tone];
 }
 
 interface HeatmapRow {
@@ -45,7 +45,7 @@ interface HeatmapRow {
   name: string;
   /** Display name shown in the leading column. */
   displayName: string;
-  /** Slice state ("active" | "done" | "blocked" | "draft"); drives the
+  /** Slice state ("active" | "done" | "closed" | "blocked" | "draft"); drives the
    *  state pill in the leading column + the implied tone of done cells
    *  for blocked/danger slices (so a blocked slice's "done" cells read
    *  warning-tinted rather than success-tinted). */
@@ -213,6 +213,7 @@ function HeatmapLegend() {
     >
       <LegendCell label="done (active)" tone="info" testId="legend-active" />
       <LegendCell label="done (complete)" tone="success" testId="legend-complete" />
+      <LegendCell label="done (closed)" tone="neutral" testId="legend-closed" />
       <LegendCell label="done (warning)" tone="warning" testId="legend-warning" />
       <LegendCell label="done (blocked)" tone="danger" testId="legend-blocked" />
       <LegendCell label="not done" notDone testId="legend-not-done" />
