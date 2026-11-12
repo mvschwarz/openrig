@@ -7,6 +7,7 @@ import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -15,7 +16,7 @@ import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -362,6 +363,40 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(delivered).toContain(artifacts[1]!.address);
     expect(delivered.includes(artifacts[2]!.address)).toBe(limit === "0");
     expect(delivered.includes("All 5 older recaps:")).toBe(limit !== "0");
+  });
+
+  it("rebuild: unreadable preview settings preserve delivery and successor binding with the default limit", async () => {
+    seedSeat();
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "0");
+    const configPath = new SettingsStore().configPath;
+    const originalConfig = existsSync(configPath) ? readFileSync(configPath) : undefined;
+    const artifacts = Array.from({ length: 5 }, (_, index) => ({
+      address: `/seats/dev-impl/recap-superseded/RECAP-${5000 - index}.md`,
+      label: `superseded recap (${index + 1} generations back)`,
+      optional: true as const,
+    }));
+    rebuildChain.mockReturnValue({ artifacts });
+    checkReady.mockImplementation(async () => {
+      writeFileSync(configPath, "{malformed");
+      return { ready: true };
+    });
+    try {
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+      expect(result).toMatchObject({
+        ok: true,
+        result: {
+          currentStatus: { continuityOutcome: "rebuilt", handoverResult: "complete" },
+          sourceOutcome: { primedArtifacts: artifacts, gaps: [] },
+        },
+      });
+      const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+      for (const artifact of artifacts.slice(0, 3)) expect(delivered).toContain(artifact.address);
+      for (const artifact of artifacts.slice(3)) expect(delivered).not.toContain(artifact.address);
+      expect(delivered).toContain("All 5 older recaps: /seats/dev-impl/recap-superseded/");
+    } finally {
+      if (originalConfig === undefined) rmSync(configPath, { force: true });
+      else writeFileSync(configPath, originalConfig);
+    }
   });
 
   it("rebuild: an EMPTY durable chain still executes and says so by name — in the result AND in the delivered packet", async () => {

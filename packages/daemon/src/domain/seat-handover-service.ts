@@ -1079,7 +1079,14 @@ export class SeatHandoverService {
     const newest = history[0];
     if (newest) {
       lines.push("", "Older recaps, newest first (read these only if you need the seat's history):");
-      const limit = Number(new SettingsStore().resolveOne("output.rebuild_recaps").value);
+      const settings = new SettingsStore();
+      let limit: number;
+      try {
+        limit = Number(settings.resolveOne("output.rebuild_recaps").value);
+      } catch {
+        // Optional presentation settings must not interrupt successor delivery.
+        limit = Number(settings.resolveOne("output.rebuild_recaps", {}).defaultValue);
+      }
       const folder = dirname(newest.address);
       // A folder pointer replaces paths only when it covers EVERY optional artifact.
       // Custom resolvers with other layouts retain their complete explicit list.
