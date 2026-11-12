@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { packEntry } from './npm-pack-json.mjs';
 
 const LISTING = ['packages/acp/registry/agent.json', 'packages/acp/registry/icon.svg'];
 const readJson = (root, rel) => JSON.parse(readFileSync(join(root, rel), 'utf8'));
@@ -35,8 +36,8 @@ export function packRelease(root, dest) {
   mkdirSync(dest, { recursive: true });
   // The CLI is packed as the release producer has packed it; the launcher isn't a workspace, so it's packed by path.
   // --ignore-scripts skips pack's prepack and postpack, but npm 10 still runs a `prepare`; neither package has one.
-  const pack = target => JSON.parse(execFileSync('npm', ['pack', ...target, '--ignore-scripts', '--json', '--pack-destination', dest],
-    { cwd: root, encoding: 'utf8' }))[0];
+  const pack = target => packEntry(execFileSync('npm', ['pack', ...target, '--ignore-scripts', '--json', '--pack-destination', dest],
+    { cwd: root, encoding: 'utf8' }));
   const artifacts = [pack(['--workspace', 'packages/cli']), pack(['./packages/acp'])].map(packed => {
     const path = join(dest, packed.filename);
     return { name: packed.name, version: packed.version, path, size: packed.size, sha256: sha256(path), integrity: packed.integrity };
