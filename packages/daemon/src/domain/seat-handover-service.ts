@@ -1441,10 +1441,6 @@ export class SeatHandoverService {
         };
       }
       committed = outcome;
-      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
-      // oracle sees the swap as its own event, keyed by the durable node id, identified
-      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
-      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
     } catch (err) {
       return {
         ok: false,
@@ -1452,6 +1448,16 @@ export class SeatHandoverService {
         message: `Seat handover commit failed: ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Inspect daemon logs and retry after the seat state is consistent.",
       };
+    }
+
+    // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+    // oracle sees the swap as its own event, keyed by the durable node id, identified
+    // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+    try {
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+    } catch (err) {
+      // A notification failure cannot roll back the committed binding or abandon its grant.
+      console.warn(`Seat activity swap notification failed: ${err instanceof Error ? err.name : typeof err}`);
     }
 
     this.eventBus.notifySubscribers(committed.event);

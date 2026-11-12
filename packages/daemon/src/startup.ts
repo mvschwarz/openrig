@@ -646,6 +646,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatIdentityReconciler = new SeatIdentityReconciler({
     db,
     tmux: tmuxAdapter,
+    readPiRunnerState: sessionName => piAdapter.readRunnerSidecar(sessionName).state,
   });
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
   const cmuxFactory = opts?.cmuxFactory

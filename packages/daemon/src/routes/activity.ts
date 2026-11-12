@@ -161,6 +161,11 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (grant.runId && body.runId !== undefined && body.runId !== grant.runId) {
     return refuse(409, "activity_grant_stale", "This post names another run; nothing was recorded.");
   }
+  const claimedRuntime = stringOrNull(body.runtime);
+  if (grant.binding && ((claimedRuntime && claimedRuntime !== grant.binding.runtime)
+    || (body.eventFamily === "session_identity" && !claimedRuntime))) {
+    return refuse(403, "activity_grant_runtime_mismatch", "This runner grant speaks only for its bound runtime; nothing was recorded.");
+  }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
   if ((claimedNode && claimedNode !== grant.nodeId)

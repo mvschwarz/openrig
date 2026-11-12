@@ -615,6 +615,58 @@ describe("SeatIdentityReconciler — bounded polling", () => {
 });
 
 describe("definitive Core exit ends exact run authority", () => {
+  it.each(["no reader", "unreadable", "missing", "stale", "pending", "ready", "exited"] as const)("requires current launch evidence before shell exit revocation: %s", async launch => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
+        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+      grants.activate(grant.grantId);
+      const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": "sh" } });
+      const readPiRunnerState = () => {
+        if (launch === "unreadable") throw new Error("sidecar unavailable");
+        return launch === "missing" ? null : {
+          launchId: launch === "stale" ? "predecessor" : "current", ready: launch === "ready" || launch === "stale",
+          updatedAt: NOW().toISOString(), ...(launch === "exited" ? { exited: { code: 1, at: NOW().toISOString() } } : {}),
+        };
+      };
+      await new SeatIdentityReconciler({ db, tmux, now: NOW, ...(launch === "no reader" ? {} : { readPiRunnerState }) }).reconcileAll();
+      expect(grants.standing(grant.grantId)).toBe(launch === "ready" || launch === "exited" ? "revoked" : "current");
+      // Readiness limits irreversible authority cleanup; it does not turn the shell into a live agent verdict.
+      expect(new SeatIdentityStore(db).getForNode("n1")?.verdict).toBe("mismatch");
+    } finally { db.close(); }
+  });
+
+  it.each([false, true])("preserves a starting grant through bootstrap and revokes it only on a later established shell exit, late ready=%s", async lateReady => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
+        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+      grants.activate(grant.grantId);
+      const state = { sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": "sh" } };
+      let ready = false;
+      const tmux = makeTmux(state);
+      if (lateReady) vi.mocked(tmux.listSessions).mockImplementationOnce(async () => {
+        ready = true; return [{ name: "s1@rig" }] as never;
+      });
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW,
+        readPiRunnerState: () => ({ launchId: "current", ready, updatedAt: NOW().toISOString() }) });
+      await rec.reconcileAll();
+      expect(grants.standing(grant.grantId)).toBe("current");
+      ready = true; state.paneCommand["%1"] = "node";
+      await rec.reconcileAll();
+      expect(grants.standing(grant.grantId)).toBe("current");
+      state.paneCommand["%1"] = "sh";
+      await rec.reconcileAll();
+      expect(grants.standing(grant.grantId)).toBe("revoked");
+    } finally { db.close(); }
+  });
+
   it.each([true, false])("preserves authority on transient or unconfirmed observations, transient=%s", async transient => {
     const db = createFullTestDb();
     try {

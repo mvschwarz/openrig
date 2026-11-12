@@ -162,6 +162,34 @@ describe("a seat activity grant on the hook ingress", () => {
       .toMatchObject({ status: 200, body: { tokenPersisted: true } });
   });
 
+  it.each(["claude-code", undefined])("refuses another or absent runtime identity on a Pi grant without changing the saved resume pointer: %s", async runtime => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(f.guest.id);
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.guest.id, GUEST);
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    f.sessions.updateResumeToken(row.id, "pi_session_file", "/tmp/original-pi.jsonl", "hook");
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "launch", run: {
+      runId: "pi-attempt", sessionId: row.id, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    f.grants.activate(grant.grantId);
+    const response = await f.post(grant.token, { runtime, eventFamily: "session_identity", hookEvent: "SessionStart",
+      sessionId: "12345678-1234-1234-1234-123456789abc", generation: grant.generation, runId: grant.runId });
+    expect(response).toMatchObject({ status: 403, body: { code: "activity_grant_runtime_mismatch" } });
+    expect(f.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(row.id))
+      .toEqual({ resume_type: "pi_session_file", resume_token: "/tmp/original-pi.jsonl" });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.session_identity'").get()).toEqual({ n: 0 });
+    expect(await f.post(grant.token, { runtime: "pi", eventFamily: "session_identity", hookEvent: "SessionStart",
+      sessionId: "native-id", sessionFile: "/tmp/current-pi.jsonl", generation: grant.generation, runId: grant.runId }))
+      .toMatchObject({ status: 200, body: { tokenPersisted: true } });
+    // Ordinary posts may omit runtime; a bound credential still supplies seat and generation.
+    expect(await f.post(grant.token, { eventFamily: "turn_end", hookEvent: "Stop", runId: grant.runId })).toMatchObject({ status: 200 });
+    expect(await f.post(grant.token, { runtime: "claude-code", eventFamily: "turn_end", hookEvent: "Stop", runId: grant.runId }))
+      .toMatchObject({ status: 403, body: { code: "activity_grant_runtime_mismatch" } });
+    // The install token still follows the existing identity path; it is not narrowed into a run-bound credential.
+    expect(await f.post(INSTALL_TOKEN, { runtime: "claude-code", eventFamily: "session_identity", hookEvent: "SessionStart",
+      sessionName: GUEST, sessionId: "12345678-1234-1234-1234-123456789abc", generation: grant.generation }))
+      .toMatchObject({ status: 200, body: { tokenPersisted: true } });
+  });
+
   it("accepts bound Pi usage while preserving legacy install-token usage", async () => {
     const f = fixture();
     f.db.exec(piUsageEntriesSchema.sql!);
