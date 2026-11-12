@@ -1168,11 +1168,11 @@ export class RunnerCore {
     if (!forced && entry.disposition === undefined) return;
     const ownershipUnknown = !["started", "handled"].includes(entry.disposition ?? "") || entry.preDispositionEvents === true;
     if (ownershipUnknown) this.managedQuarantined = true;
-    const completion = forced ?? (ownershipUnknown || entry.contaminated || !entry.wakeOpened ? "unknown"
+    const completion = ownershipUnknown || forced && !entry.nativeAccepted ? "unknown" : forced ?? (entry.contaminated || !entry.wakeOpened ? "unknown"
       : entry.stopReason === "stop" && entry.answer?.some(text => text.length > 0) ? "completed" : entry.stopReason === "aborted" ? "interrupted" : entry.stopReason === "error" ? "failed" : "unknown");
     entry.state = "terminal";
     entry.terminalResult = { kind: "wake", nativeTurnId: `pi-wake-${entry.frame.requestId}`,
-      completion: forced && !entry.nativeAccepted ? "unknown" : completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
+      completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
       ...(ownershipUnknown ? { ownershipUnknown: true } : {}),
       ...(forced && !entry.nativeAccepted ? { submissionUnknown: true } : {}) };
     if (entry.nativeAccepted || forced) this.reportManaged(entry, "result", entry.terminalResult);

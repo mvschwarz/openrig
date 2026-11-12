@@ -224,10 +224,10 @@ describe("the conformance check's test double against OpenRig's real permission 
 
 
 describe("run-bound native channel custody", () => {
-  async function fixture(enabled = true, runtime = "pi", runner = 2) {
+  async function fixture(enabled = true, runtime = "pi", runner = 2, file?: string) {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
-    const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanups.push(() => db.close());
+    const db = createDb(file); migrate(db, ALL_MIGRATIONS); cleanups.push(() => { if (db.open) db.close(); });
     const rigs = new RigRepository(db), rig = rigs.createRig("channel");
     const node = rigs.addNode(rig.id, "dev", { runtime });
     const registry = new SessionRegistry(db); registry.registerSession(node.id, "dev@channel");
@@ -468,6 +468,51 @@ describe("run-bound native channel custody", () => {
     expect(() => f.channel.post(f.grant.token, { type: "result", runId: "run-one", requestId: "wake", sequence: 1,
       result: { kind: "wake", completion: "completed", answer: "invented", submissionUnknown: true } })).toThrow(/uncertainty|Invalid/);
     expect(f.outbox.runnerReceipt("wake")?.stage).toBe("submitted");
+  });
+  it.each(["queued", "late-started", "owned", "noresponse"])("Pi %s child exit crosses strict Core custody and preserves uncertainty across reopen/erasure", async mode => {
+    const { RunnerCore } = await import("../src/adapters/pi-runner.js");
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
+    const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+    const dir = mkdtempSync(join(tmpdir(), "pi-exit-custody-")), file = join(dir, "proof.sqlite");
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const f = await fixture(true, "pi", 0, file);
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    const wake = f.channel.admit(f.node.id, { outboxId: "exit-wake", senderSession: "sender", destinationSession: "dev@channel", body: "question", kind: "wake", inputRoute: "native", payload: { question: "question" } });
+    f.admit("successor"); f.channel.frames(f.grant.token, 0);
+    const rpc: Record<string, unknown>[] = [], refused: unknown[] = [];
+    const core = new RunnerCore({ sendRpc: command => rpc.push(command), postRunner: async body => {
+      try { f.channel.post(f.grant.token, body); return true; } catch (error) { refused.push(error); return false; }
+    }, mirrorLine() {}, mirrorAppend() {}, postActivity() {}, writeSidecar() {}, now: () => new Date().toISOString() }, { sessionName: "dev@channel", runId: "run-one" });
+    const event = (type: string, extra = {}) => core.handlePiLine(JSON.stringify({ type, ...extra }));
+    const response = (disposition: string) => event("response", { id: "openrig-native-exit-wake", success: true, data: { disposition } });
+    core.start(); event("response", { id: "pi-runner-get-state", success: true, data: { isStreaming: false, pendingMessageCount: 0 } });
+    const frame = { version: 1, requestId: wake.requestId, sequence: wake.sequence, runId: "run-one", kind: "wake" as const, payload: { question: "question" } };
+    await core.acceptRunnerRequest(frame);
+    event("response", { id: rpc.find(command => String(command.id).startsWith("openrig-native-idle-"))!.id, success: true, data: { isStreaming: false, pendingMessageCount: 0 } });
+    if (mode === "owned") response("started");
+    event("agent_start");
+    if (mode === "queued" || mode === "late-started") response(mode === "queued" ? "queued" : "started");
+    core.handlePiExit(1); await new Promise(resolve => setImmediate(resolve));
+    expect(refused).toEqual([]);
+    expect(f.outbox.runnerReceipt(wake.requestId)).toMatchObject({ stage: "completed", result: { completion: mode === "owned" ? "failed" : "unknown", answer: null } });
+    await core.acceptRunnerRequest(frame);
+    expect(rpc.filter(command => command.type === "prompt")).toHaveLength(1);
+    f.db.close();
+    for (const erase of [false, true]) {
+      const reopened = createDb(file); cleanups.push(() => { if (reopened.open) reopened.close(); });
+      const outbox = new OutboxHandler(reopened), channel = new RunnerChannel(new ActivityGrantStore(reopened), outbox, new Set(["managed-pi"]));
+      if (erase) outbox.eraseRunner(wake.requestId, new Date().toISOString());
+      channel.post(f.grant.token, f.hello); cleanups.push(channel.connect(f.grant.token));
+      if (mode !== "owned") {
+        expect(outbox.runnerReceipt(wake.requestId)?.reconciliation).toBe("native_ownership_unknown");
+        expect(channel.capable(f.node.id, "wake")).toBe(false);
+        expect(channel.frames(f.grant.token, 0)).toEqual([]);
+        expect(outbox.runnerReceipt("successor")?.stage).toBe("pending");
+      } else expect(outbox.runnerReceipt(wake.requestId)?.reconciliation).toBeUndefined();
+      if (erase) expect(outbox.runnerReceipt(wake.requestId)).toMatchObject({ payload: {}, erasedAt: expect.any(String) });
+      reopened.close();
+    }
   });
   it("unproven native wake ownership persists run quarantine across a fresh channel without replay", async () => {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
