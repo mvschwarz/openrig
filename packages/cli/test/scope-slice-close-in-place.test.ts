@@ -471,4 +471,87 @@ describe("#2727 rig scope slice close --in-place", () => {
     expect(fs.readFileSync(closedSpecPath, "utf8")).toBe(afterMoveSpec);
     expect(fs.readFileSync(manifestPath, "utf8")).toBe(afterMoveManifest);
   });
+
+  it("refuses --in-place close when an existing slice lacks SPEC.md and README.md without mutating mission, parent, slice, or evidence files", async () => {
+    const intact = await seedAcceptedSlice("m-missing-node", "intact");
+    const createdNodeless = await runScope(["slice", "create", "m-missing-node", "nodeless", "--json"], missionsRoot);
+    expect(createdNodeless.exitCode).toBe(0);
+    const nodelessDir = JSON.parse(createdNodeless.stdout).slice.path as string;
+    const nodelessName = path.basename(nodelessDir);
+    expect(nodelessName).toBe("02-nodeless");
+
+    const evidencePath = path.join(nodelessDir, "proof", "evidence.md");
+    writeFile(evidencePath, "Preserved slice evidence bytes.\n");
+    fs.unlinkSync(path.join(nodelessDir, "SPEC.md"));
+    expect(fs.existsSync(nodelessDir)).toBe(true);
+    expect(fs.existsSync(path.join(nodelessDir, "SPEC.md"))).toBe(false);
+    expect(fs.existsSync(path.join(nodelessDir, "README.md"))).toBe(false);
+    commitAll(projectRoot, "seed existing slice without node file");
+
+    const missionManifestPath = path.join(intact.missionDir, "mission.yaml");
+    const missionSpecPath = path.join(intact.missionDir, "SPEC.md");
+    const sliceManifestPath = path.join(nodelessDir, "slice.yaml");
+    const progressPath = path.join(nodelessDir, "PROGRESS.md");
+    const proofDocPath = path.join(nodelessDir, "PROOF.md");
+    const intactSpecPath = path.join(intact.sliceDir, "SPEC.md");
+    const intactJudgmentPath = path.join(intact.sliceDir, "proof", "judgments", "00000001.md");
+
+    const beforeMissionManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeMissionSpec = fs.readFileSync(missionSpecPath, "utf8");
+    const beforeSliceManifest = fs.readFileSync(sliceManifestPath, "utf8");
+    const beforeProgress = fs.readFileSync(progressPath, "utf8");
+    const beforeProofDoc = fs.readFileSync(proofDocPath, "utf8");
+    const beforeEvidence = fs.readFileSync(evidencePath, "utf8");
+    const beforeIntactSpec = fs.readFileSync(intactSpecPath, "utf8");
+    const beforeIntactJudgment = fs.readFileSync(intactJudgmentPath, "utf8");
+
+    // 1. Delivered --in-place --json refuses on missing node file with zero changes.
+    const deliveredRes = await runScope(
+      ["slice", "close", "02-nodeless", "--mission", "m-missing-node", "--in-place", "--reason", "delivered", "--json"],
+      missionsRoot,
+    );
+    expect(deliveredRes.exitCode).toBe(1);
+    expect(JSON.parse(deliveredRes.stdout)).toEqual({
+      ok: false,
+      error: {
+        fact: `Slice "02-nodeless" at ${nodelessDir} has no SPEC.md or README.md.`,
+        consequence: "Cannot record in-place closure status without a slice node file.",
+        action: "Repair or add SPEC.md before closing --in-place.",
+      },
+    });
+
+    // 2. Non-delivery --in-place (which otherwise deactivates mission.yaml membership) also refuses before any write.
+    const deferredRes = await runScope(
+      ["slice", "close", "02-nodeless", "--mission", "m-missing-node", "--in-place", "--reason", "deferred"],
+      missionsRoot,
+    );
+    expect(deferredRes.exitCode).toBe(1);
+    expect(deferredRes.stdout).toBe("");
+    expect(deferredRes.stderr).toContain(`Slice "02-nodeless" at ${nodelessDir} has no SPEC.md or README.md.`);
+    expect(deferredRes.stderr).toContain("Cannot record in-place closure status without a slice node file.");
+    expect(deferredRes.stderr).toContain("Repair or add SPEC.md before closing --in-place.");
+
+    // Directory, missing-node state, mission membership, parent mission, slice files, and evidence stay untouched.
+    expect(fs.existsSync(nodelessDir)).toBe(true);
+    expect(fs.existsSync(path.join(intact.missionDir, "closed", "02-nodeless"))).toBe(false);
+    expect(fs.existsSync(path.join(nodelessDir, "SPEC.md"))).toBe(false);
+    expect(fs.existsSync(path.join(nodelessDir, "README.md"))).toBe(false);
+    expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
+    expect(YAML.parse(fs.readFileSync(missionManifestPath, "utf8"))).toMatchObject({
+      metadata: { status: "planned" },
+      composition: {
+        slices: [
+          { ref: "slices/01-intact/slice.yaml", active: true },
+          { ref: "slices/02-nodeless/slice.yaml", active: true },
+        ],
+      },
+    });
+    expect(fs.readFileSync(missionSpecPath, "utf8")).toBe(beforeMissionSpec);
+    expect(fs.readFileSync(sliceManifestPath, "utf8")).toBe(beforeSliceManifest);
+    expect(fs.readFileSync(progressPath, "utf8")).toBe(beforeProgress);
+    expect(fs.readFileSync(proofDocPath, "utf8")).toBe(beforeProofDoc);
+    expect(fs.readFileSync(evidencePath, "utf8")).toBe(beforeEvidence);
+    expect(fs.readFileSync(intactSpecPath, "utf8")).toBe(beforeIntactSpec);
+    expect(fs.readFileSync(intactJudgmentPath, "utf8")).toBe(beforeIntactJudgment);
+  });
 });
