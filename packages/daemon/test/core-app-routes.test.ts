@@ -134,7 +134,9 @@ describe("see and answer as self", () => {
     for (let i = 0; i < 55; i++) await f.writes.act({ verb: "annotate", qitemId: f.ask.qitemId, actorSession: PERSON, annotation: `later note ${i}` });
     expect((await f.send("/v1/answers/answer_part2", f.binding(OTHER, "q2"), f.token)).status).toBe(200);
     f.db.prepare("UPDATE core_app_submissions SET receipt_json = NULL WHERE answer_id = ?").run("answer_part1"); // immutable audit evidence still owns the original result
+    const beforeReplay = { seq: f.bus.maxSeq(), actions: f.log.countAll(), replies: f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId) };
     expect(await (await f.send("/v1/answers/answer_part1", first, f.token)).json()).toMatchObject({ submission: receipt.submission, replayed: true });
+    expect({ seq: f.bus.maxSeq(), actions: f.log.countAll(), replies: f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId) }).toEqual(beforeReplay);
     const read = await f.send(`/v1/answers/answer_part1?actor=${encodeURIComponent(OTHER)}`, undefined, f.token);
     expect(read.status).toBe(404);
   });

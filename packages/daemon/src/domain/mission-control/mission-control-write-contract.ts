@@ -107,8 +107,8 @@ export interface MissionControlActionInput {
   /** #2446, opt-in: the `decisionRevision` the caller read. A settling act then runs only on that decision; omitted, the
    *  act and its result are exactly as before. An `operationId` in `auditNotes` lets a retry be answered from the record. */
   expectedRevision?: string;
-  /** In-process app submission composition. Never accepted from legacy route input. Hooks run synchronously inside
-   * the owning mutation transaction; final receipt is also retained in the immutable audit record. */
+  /** In-process app submission composition, including reconciliation across later actions. Never accepted from legacy
+   * route input. Hooks run synchronously inside the owning mutation transaction; the immutable audit retains the receipt. */
   appSubmission?: {
     checkpoint: (item: QueueItem) => void;
     verify: () => void;
@@ -182,7 +182,11 @@ export class MissionControlWriteContract {
     const item = this.queueRepo.getById(input.qitemId);
     const current = item ? this.queueRepo.decisionRevision(item) : null;
     if (item && current !== input.expectedRevision) {
-      const last = operation ? this.actionLog.findOperation(input.qitemId, operation) : null;
+      // Stable app submissions own historical receipts. Legacy callers reconcile only the latest action: a later
+      // person's answer must still invalidate an old partial submission, even when its operation remains in history.
+      const last = input.appSubmission && operation
+        ? this.actionLog.findOperation(input.qitemId, operation)
+        : this.actionLog.listForQitem(input.qitemId, 1)[0];
       // The caller's own committed operation retried after an uncertain result: answered from its record, nothing written.
       if (operation && last?.auditNotes?.operation === operation) {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
