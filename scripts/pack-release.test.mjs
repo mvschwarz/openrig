@@ -4,12 +4,17 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { launcherMismatches, packRelease } from './pack-release.mjs';
+import { launcherMismatches, openrigPluginMismatches, packRelease, releaseBaseline } from './pack-release.mjs';
+import { snapshotPlugins } from './check-packaged-plugin-versions.mjs';
 
 const sha256 = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 
-/** A repo with an assembled CLI at `version` and a launcher whose four pins are `pins`. */
-function fixture(t, version, pins = {}, { assembled = true } = {}) {
+const MANIFESTS = ['plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.cursor-plugin/plugin.json'];
+
+/** A repo with an assembled CLI at `version` and a launcher whose four pins are `pins`. Its openrig plugin carries
+ *  `plugin.source` in source and `plugin.assembled` in the assembled CLI (both `version` by default), and its baseline is
+ *  the published `baseline.release` (0.7.10 by default) with openrig-core's `baseline.core` bytes. */
+function fixture(t, version, pins = {}, { assembled = true, plugin = {}, baseline = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pack-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const write = (rel, text) => { mkdirSync(join(root, rel, '..'), { recursive: true }); writeFileSync(join(root, rel), text); };
@@ -24,6 +29,24 @@ function fixture(t, version, pins = {}, { assembled = true } = {}) {
   json('packages/acp/registry/agent.json', { id: 'openrig', version: pins.listing ?? version,
     distribution: { npx: { package: pins.npx ?? `@openrig/acp@${version}` } } });
   write('packages/acp/registry/icon.svg', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"/>\n');
+  const plugins = (dir, openrig, core) => {
+    for (const rel of MANIFESTS) json(`${dir}/openrig/${rel}`, { name: 'openrig', version: openrig });
+    write(`${dir}/openrig/skills/team/SKILL.md`, '# team\n');
+    for (const rel of MANIFESTS.slice(1, 3)) json(`${dir}/openrig-core/${rel}`, { name: 'openrig-core', version: '0.1.28' });
+    write(`${dir}/openrig-core/skills/user/SKILL.md`, core);
+  };
+  plugins('packages/daemon/assets/plugins', plugin.source ?? version, '# user\n');
+  if (assembled) plugins('packages/cli/daemon/assets/plugins', plugin.assembled ?? plugin.source ?? version, plugin.core ?? '# user\n');
+  // The published baseline: openrig at its earlier 0.1.0, and openrig-core 0.1.28 with the bytes given.
+  const published = mkdtempSync(join(tmpdir(), 'pack-release-published-'));
+  t.after(() => rmSync(published, { recursive: true, force: true }));
+  const pub = (rel, text) => { mkdirSync(join(published, rel, '..'), { recursive: true }); writeFileSync(join(published, rel), text); };
+  for (const rel of MANIFESTS) pub(`daemon/assets/plugins/openrig/${rel}`, `${JSON.stringify({ name: 'openrig', version: '0.1.0' }, null, 2)}\n`);
+  pub('daemon/assets/plugins/openrig/skills/team/SKILL.md', '# team, 0.1.0\n');
+  for (const rel of MANIFESTS.slice(1, 3)) pub(`daemon/assets/plugins/openrig-core/${rel}`, `${JSON.stringify({ name: 'openrig-core', version: '0.1.28' }, null, 2)}\n`);
+  pub('daemon/assets/plugins/openrig-core/skills/user/SKILL.md', baseline.core ?? '# user\n');
+  json('scripts/fixtures/packaged-plugins-last-release.json', { release: baseline.release ?? '0.7.10',
+    archiveSha256: baseline.archiveSha256 ?? 'a'.repeat(64), plugins: snapshotPlugins(published) });
   return root;
 }
 
@@ -63,6 +86,41 @@ test('packs both packages at the one version, with exact paths and hashes, and t
     .map(f => join(root, 'packages/acp/registry', f)).map(p => [p, sha256(p)]));
   assert.deepEqual(manifest.publishOrder, ['@openrig/cli', '@openrig/acp', 'ACP registry listing']);
   assert.deepEqual(JSON.parse(readFileSync(join(dest, 'RELEASE-ARTIFACTS.json'), 'utf8')), manifest);
+});
+
+test("the openrig plugin's four manifests must carry the CLI version, in source and in the assembled CLI", t => {
+  const root = fixture(t, '0.7.13', {}, { plugin: { source: '0.1.0' } });
+  assert.deepEqual(openrigPluginMismatches(root, '0.7.13'), MANIFESTS.map(rel =>
+    `packages/daemon/assets/plugins/openrig/${rel} "version" is "0.1.0", not "0.7.13"`));
+  const dest = join(root, 'out');
+  assert.throws(() => packRelease(root, dest), /The openrig plugin's manifests must carry @openrig\/cli 0\.7\.13/);
+  assert.equal(existsSync(dest), false);
+  const stale = fixture(t, '0.7.13', {}, { plugin: { source: '0.7.13', assembled: '0.1.0' } });
+  assert.throws(() => packRelease(stale, join(stale, 'out')), /assembled CLI's openrig plugin is 0\.1\.0, not 0\.7\.13: run npm run build:package again/);
+  assert.deepEqual(openrigPluginMismatches(fixture(t, '0.7.13'), '0.7.13'), []);
+});
+
+test('the baseline must be an earlier published release with its archive hash, never the candidate', t => {
+  for (const [release, why] of [['0.7.13', /not a release published before 0\.7\.13/], ['0.7.14', /not a release published before/], ['candidate', /not a release published before/]]) {
+    const root = fixture(t, '0.7.13', {}, { baseline: { release } });
+    assert.throws(() => releaseBaseline(root, '0.7.13'), why);
+    assert.throws(() => packRelease(root, join(root, 'out')), /must be the last published release's packaged plugins/);
+  }
+  assert.throws(() => releaseBaseline(fixture(t, '0.7.13', {}, { baseline: { archiveSha256: '' } }), '0.7.13'), /no archive sha256/);
+  assert.equal(releaseBaseline(fixture(t, '0.7.13', {}, { baseline: { release: '0.7.9' } }), '0.7.13').release, '0.7.9');
+});
+
+test('changed plugin bytes need a greater version than the published release, and nothing is packed otherwise', t => {
+  const root = fixture(t, '0.7.13', {}, { plugin: { core: '# user, changed\n' } });
+  const dest = join(root, 'out');
+  assert.throws(() => packRelease(root, dest), /openrig-core: packaged files changed since 0\.7\.10, but version 0\.1\.28 is not greater than 0\.1\.28/);
+  assert.equal(existsSync(dest), false);
+});
+
+test('the release manifest records the baseline it was checked against and each packed plugin version', t => {
+  const root = fixture(t, '0.7.13', {}, { baseline: { release: '0.7.12', archiveSha256: 'b'.repeat(64) } });
+  const manifest = packRelease(root, join(root, 'out'));
+  assert.deepEqual(manifest.plugins, { baseline: { release: '0.7.12', archiveSha256: 'b'.repeat(64) }, packed: { openrig: '0.7.13', 'openrig-core': '0.1.28' } });
 });
 
 test('the pack step never publishes', () => {
