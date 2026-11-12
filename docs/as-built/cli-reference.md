@@ -9,7 +9,7 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: d2dfe750e06fa916a72ba6534c91b2cf6ce65369
+last-verified-against-source: 8b37bcd34f756549a0c2404ff95666b2a3d8f3b3
 last-updated: 2026-11-12
 ---
 
@@ -21,9 +21,9 @@ The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **93 top-level registrations**, **448 registered command objects**
+There are **93 top-level registrations**, **449 registered command objects**
 below `rig` (including groups and the hidden `restore apply` and `exec connector` commands), and
-**1,485 explicitly registered option objects**, including the root version
+**1,494 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec`, `environment` and `network` families, the `roster` and `telemetry` rows, the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions, the herdr-app provider's `terminal close` row and its `--app-home` options, and `scope slice close --in-place` are all counted here.
@@ -1169,7 +1169,8 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig network` | — | — |
-| `rig network connect <seat>` | — | `--hub <url>` **required**<br>`--as <participant>` **required**<br>`--token-file <path>` **required**<br>`--allow-http`<br>`--json` |
+| `rig network enroll <code>` | — | `--site <url>` **required**<br>`--allow-http`<br>`--replace`<br>`--json` |
+| `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |
 
