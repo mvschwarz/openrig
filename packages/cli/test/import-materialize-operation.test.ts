@@ -16,6 +16,7 @@ const replies = {
   empty: { status: 200, data: { replayed: true, operation: { ...operation, rigId: null, nodeIds: [], current: { rig: null, nodes: [] } } } },
 };
 let freshOperation: unknown = operation;
+let freshNodes = replies.fresh.data.nodes;
 let replayOperation: unknown = operation;
 let mode: keyof typeof replies = "fresh";
 let supportsMaterialization = true;
@@ -49,7 +50,7 @@ beforeAll(async () => {
       res.end(JSON.stringify({ contract: "operation-correlation.v1", kinds: supportsMaterialization ? ["rig.materialize"] : ["rig.import"] }));
       return;
     }
-    const reply = mode === "fresh" ? { ...replies.fresh, data: { ...replies.fresh.data, operation: freshOperation } }
+    const reply = mode === "fresh" ? { ...replies.fresh, data: { ...replies.fresh.data, nodes: freshNodes, operation: freshOperation } }
       : mode === "replay" ? { ...replies.replay, data: { replayed: true, operation: replayOperation } } : replies[mode];
     res.writeHead(reply.status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(reply.data));
@@ -63,6 +64,7 @@ afterAll(async () => { await new Promise<void>((resolve, reject) => server.close
 afterEach(() => {
   process.exitCode = priorExit; vi.restoreAllMocks(); requests.length = 0;
   supportsMaterialization = true; capabilityResponse = "json"; freshOperation = operation; replayOperation = operation;
+  freshNodes = replies.fresh.data.nodes;
 });
 
 async function run(flags: string[]) {
@@ -99,6 +101,24 @@ describe("rig import --materialize-only operation receipts", () => {
     expect(result.output.join("\n")).toContain("prepared-rig");
     expect(result.output.join("\n")).toContain("prepared-node");
     expect(result.errors).toEqual([]);
+  });
+
+  it.each([
+    { response: "fresh", target: false }, { response: "replay", target: false },
+    { response: "fresh", target: true }, { response: "replay", target: true },
+  ] as const)("confirms an empty-pod $response receipt (target: $target)", async ({ response, target }) => {
+    mode = response;
+    const emptyPodOperation = { ...operation, nodeIds: [], current: { ...operation.current, nodes: [] } };
+    freshOperation = emptyPodOperation;
+    replayOperation = emptyPodOperation;
+    freshNodes = [];
+    const result = await run(["--materialize-only", "--operation-id", operationId,
+      ...(target ? ["--target-rig", "prepared-rig"] : [])]);
+    expect(result.exitCode).not.toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(result.output).toEqual([response === "fresh"
+      ? "Rig materialized: prepared (prepared-rig)" : "Materialization replay: prepared-rig"]);
+    expect(requests[1]?.headers["x-target-rig-id"]).toBe(target ? "prepared-rig" : undefined);
   });
 
   it.each([

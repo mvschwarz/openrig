@@ -27,6 +27,48 @@ function fixture() {
 }
 
 describe("no-launch materialization operation correlation", () => {
+  const emptyPodYaml = 'version: "0.2"\nname: prepared-team\npods:\n  - id: empty\n    label: Empty\n    members: []\n    edges: []\nedges: []\n';
+
+  it.each([false, true])("records and replays a committed empty pod (existing target: %s)", async target => {
+    const { call, rigRepo, db, operationId, launch } = fixture();
+    if (target) expect((await call({ operation: randomUUID() })).status).toBe(201);
+    const targetRig = target ? rigRepo.findRigsByName("prepared-team")[0]!.id : undefined;
+    const request = { body: emptyPodYaml, target: targetRig };
+    const first = await call(request);
+    expect(first.status).toBe(201);
+    const result = await first.json();
+    const rigId = rigRepo.findRigsByName("prepared-team")[0]!.id;
+    if (target) expect(rigId).toBe(targetRig);
+    expect(result).toMatchObject({ rigId, nodes: [], operation: { operationId, rigId, nodeIds: [],
+      current: { rig: { id: rigId, exists: true, archivedAt: null }, nodes: [] } } });
+    const replay = await call(request);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ replayed: true, operation: result.operation });
+    expect(db.prepare("SELECT count(*) AS n FROM rigs").get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT count(*) AS n FROM pods").get()).toEqual({ n: target ? 2 : 1 });
+    expect(db.prepare("SELECT count(*) AS n FROM nodes").get()).toEqual({ n: target ? 1 : 0 });
+    expect(db.prepare("SELECT count(*) AS n FROM sessions").get()).toEqual({ n: 0 });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps a failed empty-pod operation unconfirmed (existing target: %s)", async target => {
+    const { call, rigRepo, db, launch } = fixture();
+    if (target) expect((await call({ operation: randomUUID() })).status).toBe(201);
+    const targetRig = target ? rigRepo.findRigsByName("prepared-team")[0]!.id : undefined;
+    db.exec("CREATE TRIGGER reject_empty_pod BEFORE INSERT ON pods WHEN NEW.namespace = 'empty' BEGIN SELECT RAISE(ABORT, 'pod failed'); END");
+    const request = { body: emptyPodYaml, target: targetRig };
+    expect((await call(request)).status).toBe(500);
+    const replay = await call(request);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ replayed: true, operation: { rigId: null, nodeIds: [],
+      current: { rig: null, nodes: [] } } });
+    expect(db.prepare("SELECT count(*) AS n FROM rigs").get()).toEqual({ n: target ? 1 : 0 });
+    expect(db.prepare("SELECT count(*) AS n FROM pods").get()).toEqual({ n: target ? 1 : 0 });
+    expect(db.prepare("SELECT count(*) AS n FROM nodes").get()).toEqual({ n: target ? 1 : 0 });
+    expect(db.prepare("SELECT count(*) AS n FROM sessions").get()).toEqual({ n: 0 });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it("recovers the exact rig and node ids after a lost response, with real destination admission and no sessions", async () => {
     const { db, rigRepo, eventBus, call, operationId, launch } = fixture();
     const queue = new QueueRepository(db, eventBus, { validateRig: makeTopologyDestinationCheck({

@@ -26,8 +26,8 @@ const materializeResult = z.object({
 });
 
 function recordedMaterializationMatches(operation: z.infer<typeof materializeOperation>): boolean {
+  // Reservations have no rig id; a committed empty pod has a rig id and zero nodes.
   return operation.rigId !== null && operation.rigId.length > 0 && operation.current.rig?.id === operation.rigId &&
-    operation.nodeIds.length > 0 &&
     new Set(operation.nodeIds).size === operation.nodeIds.length && operation.current.nodes.length === operation.nodeIds.length &&
     operation.nodeIds.every(id => operation.current.nodes.some(node => node.id === id));
 }
