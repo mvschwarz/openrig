@@ -38,7 +38,7 @@ The runner's own defaults for dsh:
 
 ## Optional native input and dedicated wake
 
-This copy also implements the staged version-1 [run-bound channel](../../harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1). Core's production availability remains disabled pending the recovery milestone. When available, choose the seat's native route explicitly; `runner: true` alone does not change its typed default. The private launch grant stays in this process and is removed from the dsh child environment.
+This copy also implements the optional version-1 [run-bound channel](../../harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1). Choose the seat's native route explicitly; `runner: true` alone does not change its typed default. The private launch grant stays in this process and is removed from the dsh child environment.
 
 Native input uses this runner's existing ACP prompt queue. A native wake gets a dedicated prompt and returns only its actual assistant message chunks after its own terminal ACP response. Later inputs wait behind it; multiple wakes are independent prompts. HTTP receipt retries and SSE reconnects reuse the live process map and do not reissue a prompt. Caller timeout does not cancel native work. Structured native text bypasses the person's slash/Ctrl-C parser, while `/abort` and Ctrl-C typed by a person remain available. Managed native cancellation is not implemented or advertised here.
 

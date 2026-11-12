@@ -19,9 +19,9 @@ export class RunnerChannel {
   private readonly connections = new Map<string, number>();
   private readonly live = new Map<string, Capabilities>();
   private readonly listeners = new Set<() => void>();
-  // Empty until actual consumers and their complete paths have passed their milestone review.
+  // Implemented contract families, not program names or inferred qualification of compatible forks.
   constructor(private readonly grants: ActivityGrantStore, readonly outbox: OutboxHandler,
-    private readonly implementedKinds: ReadonlySet<string> = new Set()) {}
+    private readonly implementedKinds: ReadonlySet<string> = new Set(["managed-pi", "preset"])) {}
 
   authenticate(token: string | undefined): ActivityGrant & { runId: string } {
     const grant = this.grants.authenticate(token);

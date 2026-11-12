@@ -3,7 +3,7 @@
 // A person's click reaches the agent, OpenRig's permit is delivered, the seat's opt-in refusal is held, and an earlier
 // occupant's request is cancelled, never asked. No model, tmux or Slack is involved.
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -224,18 +224,22 @@ describe("the conformance check's test double against OpenRig's real permission 
 
 
 describe("run-bound native channel custody", () => {
-  async function fixture(enabled = true, runtime = "pi", runner = 2, file?: string) {
+  async function fixture(enabled = true, runtime = "pi", runner = 2, file?: string,
+    retained?: { node: { id: string }; grant: import("../src/domain/activity-grants.js").ActivityGrant & { token: string } }) {
     const { RunnerChannel } = await import("../src/domain/runner-channel.js");
     const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
     const db = createDb(file); migrate(db, ALL_MIGRATIONS); cleanups.push(() => { if (db.open) db.close(); });
-    const rigs = new RigRepository(db), rig = rigs.createRig("channel");
-    const node = rigs.addNode(rig.id, "dev", { runtime });
-    const registry = new SessionRegistry(db); registry.registerSession(node.id, "dev@channel");
-    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('binding',?,'dev@channel','%1')").run(node.id);
+    const rigs = new RigRepository(db);
+    const node = retained?.node ?? rigs.addNode(rigs.createRig("channel").id, "dev", { runtime });
+    const registry = new SessionRegistry(db);
+    if (!retained) {
+      registry.registerSession(node.id, "dev@channel");
+      db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('binding',?,'dev@channel','%1')").run(node.id);
+    }
     const grants = new ActivityGrantStore(db);
-    const grant = grants.issue({ nodeId: node.id, generation: registry.currentOccupantTenure(node.id)!.generationUuid, issuedBy: "launch",
+    const grant = retained?.grant ?? grants.issue({ nodeId: node.id, generation: registry.currentOccupantTenure(node.id)!.generationUuid, issuedBy: "launch",
       run: { runId: "run-one", binding: { runtime, runner, pane: "%1", panePid: 101 } } });
-    expect(grants.activate(grant.grantId)).toBe(true);
+    if (!retained) expect(grants.activate(grant.grantId)).toBe(true);
     const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
     const outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox, enabled ? new Set([runner === 0 ? "managed-pi" : runner === 1 ? "preset" : "hosted-pi-rpc"]) : new Set());
     const { SeatDeliveryGuard, resolveGuardTarget } = await import("../src/domain/seat-delivery-guard.js");
@@ -255,6 +259,239 @@ describe("run-bound native channel custody", () => {
       kind: "input", inputRoute: "native", payload: { text: id } });
     return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport };
   }
+  async function nativeProcess(kind: "pi" | "dsh", program?: { bin: string; providerUrl: string }) {
+    const dir = mkdtempSync(join(tmpdir(), `native-recovery-${kind}-`)), file = join(dir, "core.sqlite"), log = join(dir, "native.log");
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const { mkdirSync, unlinkSync, symlinkSync } = await import("node:fs"); const bin = join(dir, "bin"); mkdirSync(bin);
+    const backend = join(bin, kind);
+    const common = `#!${process.execPath}\nconst fs=require('node:fs');const send=x=>console.log(JSON.stringify(x));const log=x=>fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(x)+'\\n');log({childToken:!!process.env.OPENRIG_ACTIVITY_HOOK_TOKEN});`;
+    // Distinct offline RPC and ACP backends. Each is exercised through its own production consumer.
+    writeFileSync(backend, kind === "pi" ? `${common}
+let busy=false;require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);log(c);
+if(c.type==='get_state')return send({type:'response',id:c.id,success:true,data:{isStreaming:busy,pendingMessageCount:0,sessionId:'fixture'}});
+if(c.type==='get_entries')return send({type:'response',id:c.id,success:true,data:{entries:[]}});if(c.type!=='prompt')return;
+if(c.message==='REFUSE')return send({type:'response',id:c.id,success:false,error:'fixture refusal'});
+send({type:'response',id:c.id,command:'prompt',success:true,data:{disposition:busy?'queued':'started'}});if(busy)return;
+busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'answer '+c.message}],stopReason:c.message==='INTERRUPT'?'aborted':'stop'}});busy=false;send({type:'agent_end'});},c.message.startsWith('SLOW')?900:80);
+});` : `${common}
+if(process.argv.includes('--version')){console.log('fixture dsh');process.exit(0);}const session='native-fixture';
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);log(c);const reply=result=>send({jsonrpc:'2.0',id:c.id,result});
+if(c.method==='initialize')return reply({protocolVersion:1,agentCapabilities:{},agentInfo:{name:'dsh',version:'fixture'}});
+if(c.method==='session/new')return reply({sessionId:session});if(c.method!=='session/prompt')return;
+const text=c.params.prompt.map(p=>p.text||'').join('');if(text==='REFUSE')return send({jsonrpc:'2.0',id:c.id,error:{code:-32602,message:'fixture refusal'}});
+send({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'answer '+text}}}});
+setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),text.startsWith('SLOW')?900:80);
+});`, { mode: 0o755 });
+    if (program && kind === "pi") {
+      unlinkSync(backend); symlinkSync(program.bin, backend);
+      const agent = join(dir, "state", "dev@channel", "agent"); mkdirSync(agent, { recursive: true });
+      writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { local: { baseUrl: program.providerUrl, api: "anthropic-messages", apiKey: "offline-dummy", models: [{ id: "fixture-model", name: "Offline fixture", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
+    }
+    let current = await fixture(true, kind, kind === "pi" ? 0 : 1, file);
+    let fault: { type: string; commit: boolean; hits: number } | null = null;
+    let lookupDelay = 0;
+    let hellos = 0;
+    const server = serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
+      const body = request.method === "POST" && new URL(request.url).pathname === "/api/activity/runner-channel" ? await request.clone().json() as { type: string } : null;
+      if (body?.type === "hello") hellos += 1;
+      const active = fault && body?.type === fault.type ? fault : null;
+      if (active) active.hits += 1;
+      if (active && !active.commit) return new Response(null, { status: 503 });
+      const response = await current.app.fetch(request);
+      if (lookupDelay && request.method === "GET" && new URL(request.url).pathname.startsWith("/api/seat/command/")) await sleep(lookupDelay);
+      return active ? new Response(null, { status: 503 }) : response;
+    } });
+    await new Promise<void>(done => server.once("listening", done));
+    cleanups.push(() => { server.closeAllConnections(); server.close(); });
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    let output = "";
+    const children: ReturnType<typeof spawn>[] = [];
+    const start = () => {
+      const f = current;
+      const child = spawn(process.execPath, kind === "pi" ? ["--import", resolve(__dirname, "../../../node_modules/tsx/dist/loader.mjs"), resolve(__dirname, "../src/adapters/pi-runner.ts"), "--session-name", "dev@channel", "--state-root", join(dir, "state"), "--cwd", dir, "--launch-id", f.grant.runId!, "--no-approve", ...(program ? ["--model", "local/fixture-model"] : [])]
+        : [resolve(__dirname, "../../../docs/reference/community-harness-examples/dsh/openrig-dsh-runner.mjs")],
+      { cwd: dir, stdio: ["pipe", "pipe", "pipe"], env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), XDG_DATA_HOME: join(dir, "data"), XDG_CACHE_HOME: join(dir, "cache"), DSH_HOME: join(dir, "dsh"), DSH_SEAT_BIN: program?.bin ?? backend, DSH_TELEMETRY_DISABLED: "1", ...(program ? { DEEPSEEK_API_KEY: "offline-dummy", DEEPSEEK_BASE_URL: program.providerUrl } : {}),
+        OPENRIG_HOME: join(dir, "home"), OPENRIG_URL: url, OPENRIG_ACTIVITY_HOOK_TOKEN: f.grant.token, OPENRIG_RUN_ID: f.grant.runId!,
+        OPENRIG_NODE_ID: f.node.id, OPENRIG_SESSION_NAME: "dev@channel", OPENRIG_OCCUPANT_GENERATION: f.grant.generation, OPENRIG_RUNTIME: kind } });
+      child.stdout!.on("data", chunk => { output += String(chunk); }); child.stderr!.on("data", chunk => { output += String(chunk); }); children.push(child); return child;
+    };
+    cleanups.push(() => { for (const child of children) child.kill("SIGKILL"); });
+    const ready = async () => { expect(await waitFor(() => current.channel.capable(current.node.id, "wake"), 6000), output).toBe(true); current.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(current.node.id); };
+    const reopen = async (grant = current.grant) => {
+      server.closeAllConnections(); await sleep(50);
+      const retained = { node: current.node, grant }; current.db.close();
+      current = await fixture(true, kind, kind === "pi" ? 0 : 1, file, retained);
+    };
+    const entries = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>) : [];
+    const prompts = () => entries().filter(entry => kind === "pi" ? entry.type === "prompt" : entry.method === "session/prompt")
+      .map(entry => kind === "pi" ? entry.message : ((entry.params as { prompt: Array<{ text: string }> }).prompt.map(p => p.text).join("")));
+    return { start, ready, reopen, url, server, prompts, entries, dir, get output() { return output; }, get f() { return current; }, get hellos() { return hellos; },
+      get fault() { return fault; }, set fault(value) { fault = value; }, set lookupDelay(value: number) { lookupDelay = value; } };
+  }
+
+  it.each(["pi", "dsh"] as const)("%s process recovers every custody window through actual Core routes with one native effect", async kind => {
+    const h = await nativeProcess(kind); h.start(); await h.ready();
+    const { SeatIdentityStore } = await import("../src/domain/seat-identity-store.js");
+    const origin = h.f.grants.get(h.f.grant.grantId)!;
+    new SeatIdentityStore(h.f.db).upsert({ nodeId: h.f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: null,
+      sessionName: "dev@channel", observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    const adopted = new SessionRegistry(h.f.db).registerClaimedSession(h.f.node.id, "dev@channel", "adopt");
+    expect(adopted.id).not.toBe(origin.sessionId);
+    expect(h.f.grants.standing(origin.grantId)).toBe("current");
+    expect(h.f.grants.get(origin.grantId)).toMatchObject({ sessionId: origin.sessionId, generation: origin.generation, runId: origin.runId });
+    // A disconnected native route refuses without typed fallback or a fabricated receipt.
+    h.server.closeAllConnections();
+    expect(await waitFor(() => !h.f.channel.capable(h.f.node.id, "input"))).toBe(true);
+    expect((await h.f.transport.send("dev@channel", "not offered", { deliveryId: "disconnected", actorSession: "sender" })).ok).toBe(false);
+    expect(h.prompts()).toEqual([]); await h.ready();
+    for (const [id, type, commit, restart] of [["offered", "ack", false, false], ["accepted", "ack", true, true], ["written", "submitted", false, true], ["result", "result", true, false]] as const) {
+      h.fault = { type, commit, hits: 0 };
+      await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
+      expect(await waitFor(() => h.fault!.hits > 0), id).toBe(true);
+      expect(h.f.outbox.runnerReceipt(id)?.stage).toBe(id === "offered" ? "offered" : id === "result" ? "completed" : "accepted");
+      if (type === "ack") expect(h.prompts()).not.toContain(id);
+      else expect(h.prompts().filter(text => text === id)).toHaveLength(1);
+      const hellos = h.hellos;
+      if (restart) await h.reopen(); else h.server.closeAllConnections();
+      expect(await waitFor(() => h.hellos > hellos)).toBe(true);
+      h.fault = null; await h.ready();
+      expect(await waitFor(() => h.f.outbox.runnerReceipt(id)?.stage === "completed"), id).toBe(true);
+      expect(h.f.outbox.runnerReceipt(id)?.result).toMatchObject({ completion: "completed", answer: `answer ${id}` });
+      const conflicting = await fetch(`${h.url}/api/activity/runner-channel`, { method: "POST", headers: { authorization: `Bearer ${h.f.grant.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ type: "result", runId: h.f.grant.runId, requestId: id, sequence: h.f.outbox.runnerReceipt(id)!.sequence, result: { kind: "wake", completion: "completed", answer: "changed result" } }) });
+      expect(conflicting.status).toBe(409);
+      await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
+      expect(h.prompts().filter(text => text === id)).toHaveLength(1);
+    }
+    await h.f.transport.send("dev@channel", "SLOW:busy", { deliveryId: "busy", actorSession: "sender" });
+    expect(await waitFor(() => h.prompts().includes("SLOW:busy"))).toBe(true);
+    await h.f.transport.send("dev@channel", "ordinary", { deliveryId: "ordinary", actorSession: "sender" });
+    await h.f.transport.sendNativeWake("dev@channel", "SLOW:wake", "wake-a", "sender");
+    await h.f.transport.sendNativeWake("dev@channel", "wake-b", "wake-b", "sender");
+    expect(await waitFor(() => h.prompts().includes("SLOW:wake"))).toBe(true);
+    // A short caller stops waiting while native work remains active; later managed input stays behind its barrier.
+    await h.f.transport.send("dev@channel", "after wake", { deliveryId: "after", actorSession: "sender" });
+    h.lookupDelay = 100;
+    await expect(fetch(`${h.url}/api/seat/command/dev%40channel?requestId=wake-a`, { signal: AbortSignal.timeout(20) })).rejects.toThrow();
+    h.lookupDelay = 0;
+    await sleep(100); expect(h.prompts()).not.toContain("after wake");
+    expect(h.f.outbox.runnerReceipt("wake-a")?.stage).not.toBe("completed");
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("after")?.stage === "completed")).toBe(true);
+    expect(h.f.outbox.runnerReceipt("wake-a")?.result).toMatchObject({ answer: "answer SLOW:wake" });
+    expect(h.f.outbox.runnerReceipt("wake-b")?.result).toMatchObject({ answer: "answer wake-b" });
+    expect(h.prompts()).toEqual(["offered", "accepted", "written", "result", "SLOW:busy", "ordinary", "SLOW:wake", "wake-b", "after wake"]);
+    for (const [id, body] of [["group-a", "source A"], ["group-b", "source B"]]) h.f.outbox.record({ outboxId: id!, senderSession: "sender", destinationSession: "dev@channel", body: body! });
+    const group = { committedOutboxIds: ["group-a", "group-b"], actorSession: "sender", queueWake: true, nativeWake: true };
+    await h.f.transport.send("dev@channel", "composed group", group);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("group-b")?.stage === "completed")).toBe(true);
+    await h.f.transport.send("dev@channel", "composed group", group);
+    expect(h.prompts().filter(text => text === "composed group")).toHaveLength(1);
+    expect(h.f.outbox.runnerReceipt("group-b")?.result).toMatchObject({ answer: "answer composed group" });
+    expect((await h.f.transport.send("dev@channel", "changed composition", group)).ok).toBe(false);
+    await h.f.transport.sendNativeWake("dev@channel", "REFUSE", "refuse", "sender");
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("refuse")?.stage === "rejected")).toBe(true);
+    await h.f.transport.sendNativeWake("dev@channel", "INTERRUPT", "interrupt", "sender");
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("interrupt")?.stage === "completed")).toBe(true);
+    expect(h.f.outbox.runnerReceipt("interrupt")?.result).toMatchObject({ completion: "interrupted", answer: null });
+    expect(h.entries().filter(entry => "childToken" in entry).every(entry => entry.childToken === false)).toBe(true);
+  }, 40000);
+
+  it.each(["pi", "dsh"] as const)("%s receiver replacement fences missing state and all cross-run/seat authority through actual routes", async kind => {
+    const h = await nativeProcess(kind), original = h.start(); await h.ready();
+    const post = (token: string, body: unknown) => fetch(`${h.url}/api/activity/runner-channel`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const get = (token: string, cursor: string) => fetch(`${h.url}/api/activity/runner-channel`, { headers: { authorization: `Bearer ${token}`, "Last-Event-ID": cursor } });
+    h.fault = { type: "ack", commit: false, hits: 0 };
+    await h.f.transport.sendNativeWake("dev@channel", "never written", "lost-map", "sender");
+    await h.f.transport.sendNativeWake("dev@channel", "successor", "successor", "sender");
+    expect(await waitFor(() => h.fault!.hits > 0)).toBe(true);
+    const old = h.f.grant;
+    for (const change of [{ runId: "wrong-run" }, { sequence: 999 }, { requestId: "unknown-request" }]) expect((await post(old.token, { type: "submitted", runId: old.runId, requestId: "lost-map", sequence: 1, ...change })).status).toBe(409);
+    const pending = h.f.grants.issue({ nodeId: h.f.node.id, generation: old.generation, issuedBy: "test", run: { runId: "run-two", binding: old.binding! } });
+    expect((await post(pending.token, { ...h.f.hello, runId: "run-two" })).status).toBe(409);
+    expect((await get(pending.token, "0")).status).toBe(409);
+    expect((await post(INSTALL, h.f.hello)).status).toBe(401);
+    for (const cursor of ["invalid", "-1", "999999"]) expect((await get(old.token, cursor)).status).toBeGreaterThanOrEqual(400);
+    const rigs = new RigRepository(h.f.db), peer = rigs.addNode(rigs.createRig("peer").id, "peer", { runtime: kind });
+    const sessions = new SessionRegistry(h.f.db); sessions.registerSession(peer.id, "peer@peer");
+    h.f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('peer',?,'peer@peer','%2')").run(peer.id);
+    const peerGrant = h.f.grants.issue({ nodeId: peer.id, generation: sessions.currentOccupantTenure(peer.id)!.generationUuid, issuedBy: "test", run: { runId: "peer-run", binding: { ...old.binding!, pane: "%2", panePid: 202 } } });
+    h.f.grants.activate(peerGrant.grantId);
+    expect((await post(peerGrant.token, { ...h.f.hello, runId: "peer-run" })).status).toBe(200);
+    expect((await post(peerGrant.token, { type: "submitted", runId: "peer-run", requestId: "lost-map", sequence: 1 })).status).toBe(409);
+    expect((await get(peerGrant.token, "1")).status).toBe(400);
+    h.f.grants.revoke({ grantId: peerGrant.grantId }, "test");
+    expect((await post(peerGrant.token, { ...h.f.hello, runId: "peer-run" })).status).toBe(401);
+    original.kill("SIGKILL"); await new Promise(resolve => original.once("exit", resolve));
+    h.fault = null; h.server.closeAllConnections(); const hellos = h.hellos; const lostReceiver = h.start();
+    expect(await waitFor(() => h.hellos > hellos && h.f.outbox.runnerReceipt("lost-map")?.reconciliation === "receiver_state_lost")).toBe(true);
+    expect(h.f.outbox.runnerReceipt("successor")?.stage).toBe("pending");
+    expect(h.prompts()).toEqual([]);
+    expect(h.f.channel.frames(old.token, 2)).toEqual([]);
+    expect((await h.f.transport.sendNativeWake("dev@channel", "never written", "lost-map", "sender")).runnerReceipt?.reconciliation).toBe("receiver_state_lost");
+    expect((await h.f.transport.sendNativeWake("dev@channel", "new admission", "no-fallback", "sender")).ok).toBe(false);
+    // A real replacement attempt in the same tenure cannot inherit or settle the old receipt.
+    expect(h.f.grants.activate(pending.grantId)).toBe(true);
+    expect((await post(old.token, { type: "result", runId: "run-one", requestId: "lost-map", sequence: 1, result: { kind: "wake", completion: "completed", answer: "late" } })).status).toBe(401);
+    expect((await post(pending.token, { ...h.f.hello, runId: "run-two" })).status).toBe(200);
+    expect((await post(pending.token, { type: "submitted", runId: "run-two", requestId: "lost-map", sequence: 1 })).status).toBe(409);
+    expect(h.f.outbox.runnerReceipt("lost-map")).toMatchObject({ runId: "run-one", reconciliation: "receiver_state_lost", payload: { question: "never written" } });
+    expect(h.f.channel.frames(pending.token, 0)).toEqual([]);
+    expect(h.prompts()).toEqual([]);
+    lostReceiver.kill("SIGKILL"); await new Promise(resolve => lostReceiver.once("exit", resolve));
+    await h.reopen(pending); h.fault = { type: "submitted", commit: false, hits: 0 };
+    const writtenReceiver = h.start(); await h.ready();
+    await h.f.transport.sendNativeWake("dev@channel", "SLOW:uncertain", "after-write", "sender");
+    expect(await waitFor(() => h.fault!.hits > 0)).toBe(true);
+    expect(h.prompts().filter(text => text === "SLOW:uncertain")).toHaveLength(1);
+    await h.f.transport.sendNativeWake("dev@channel", "pending after write", "pending-after-write", "sender");
+    writtenReceiver.kill("SIGKILL"); await new Promise(resolve => writtenReceiver.once("exit", resolve));
+    h.fault = null; h.server.closeAllConnections(); const newHellos = h.hellos; h.start();
+    expect(await waitFor(() => h.hellos > newHellos && h.f.outbox.runnerReceipt("after-write")?.reconciliation === "receiver_state_lost")).toBe(true);
+    expect(h.f.outbox.getById("after-write")?.deliveryState).toBe("indeterminate");
+    expect(h.f.channel.frames(pending.token, 2)).toEqual([]);
+    expect(h.prompts()).toEqual(["SLOW:uncertain"]);
+  }, 20000);
+
+  it.runIf(process.env["OPENRIG_NATIVE_PROGRAM_PROOF"] === "1").each(["pi", "dsh"] as const)("installed %s program answers idle and busy queued wakes using only a local fake provider", async kind => {
+    const executable = process.env[kind === "pi" ? "OPENRIG_NATIVE_PI_BIN" : "OPENRIG_NATIVE_DSH_BIN"];
+    expect(executable, "Set an explicit isolated native program path for opt-in proof").toBeTruthy();
+    const requests: Array<{ text: string; model: string }> = [];
+    const provider = serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
+      if (request.method !== "POST" || !new URL(request.url).pathname.endsWith("/messages")) return new Response(null, { status: 404 });
+      const body = await request.json() as { model: string; messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> };
+      const content = body.messages.filter(message => message.role === "user").at(-1)?.content;
+      const text = typeof content === "string" ? content : content?.find(part => part.type === "text")?.text ?? "";
+      requests.push({ text, model: body.model });
+      const answer = `native-answer: ${text}`;
+      const frames = [
+        { type: "message_start", message: { id: `offline-${requests.length}`, type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: answer } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 10 } }, { type: "message_stop" },
+      ];
+      await sleep(text.includes("SLOW:native") ? 700 : 30);
+      return new Response(frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    } });
+    await new Promise<void>(done => provider.once("listening", done)); cleanups.push(() => { provider.closeAllConnections(); provider.close(); });
+    const providerUrl = `http://127.0.0.1:${(provider.address() as { port: number }).port}`;
+    const h = await nativeProcess(kind, { bin: executable!, providerUrl });
+    const version = execFileSync(executable!, ["--version"], { encoding: "utf8", timeout: 10000, env: { PATH: process.env["PATH"], HOME: h.dir, DSH_HOME: join(h.dir, "dsh"), XDG_CONFIG_HOME: join(h.dir, "config"), XDG_DATA_HOME: join(h.dir, "data"), XDG_CACHE_HOME: join(h.dir, "cache"), DSH_TELEMETRY_DISABLED: "1" } }).trim();
+    h.start(); await h.ready();
+    await h.f.transport.sendNativeWake("dev@channel", "idle native", "idle-native", "sender");
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("idle-native")?.stage === "completed", 12000), h.output).toBe(true);
+    expect(h.f.outbox.runnerReceipt("idle-native")?.result).toMatchObject({ completion: "completed", answer: "native-answer: idle native" });
+    await h.f.transport.send("dev@channel", "SLOW:native", { deliveryId: "busy-native", actorSession: "sender" });
+    expect(await waitFor(() => requests.some(request => request.text === "SLOW:native")), h.output).toBe(true);
+    await h.f.transport.send("dev@channel", "ordinary native", { deliveryId: "ordinary-native", actorSession: "sender" });
+    await h.f.transport.sendNativeWake("dev@channel", "queued native A", "native-a", "sender");
+    await h.f.transport.sendNativeWake("dev@channel", "queued native B", "native-b", "sender");
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("native-b")?.stage === "completed", 12000), h.output).toBe(true);
+    for (const [id, text] of [["native-a", "queued native A"], ["native-b", "queued native B"]]) expect(h.f.outbox.runnerReceipt(id!)?.result).toMatchObject({ completion: "completed", answer: `native-answer: ${text}` });
+    expect(requests.some(request => request.text === "ordinary native")).toBe(true);
+    console.log(JSON.stringify({ nativeProgram: kind, version, executable, provider: "local fake Anthropic messages; no external network", prompts: requests.map(request => request.text) }));
+  }, 45000);
+
   it("pending and replacement grants cannot subscribe to or settle the retiring run's receipts", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("old");
     f.channel.frames(f.grant.token, 0);
@@ -618,7 +855,14 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',me
     expect(entries().filter(e => e.type === "abort")).toEqual([]);
     expect(f.outbox.runnerReceipt("literal")?.result).toMatchObject({ answer: "answer /abort" });
   }, 20000);
-  it("keeps capabilities disabled until complete consumers exist, and never grants cancellation", async () => {
+  it.each([["pi", 0, true], ["arbitrary-preset", 1, true], ["arbitrary-rpc", 2, false]] as const)("production channel intersects implemented families for %s/%i (enabled=%s)", async (runtime, runner, enabled) => {
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const f = await fixture(true, runtime, runner);
+    const production = new RunnerChannel(f.grants, f.outbox);
+    expect(production.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: enabled, wake: enabled, cancel: false } });
+    expect(f.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(f.node.id)).toEqual({ input_route: "typed" });
+  });
+  it("an explicitly disabled implementation never grants native input or cancellation", async () => {
     const f = await fixture(false);
     expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });
     expect(() => f.admit("one")).toThrow(/capable/);
