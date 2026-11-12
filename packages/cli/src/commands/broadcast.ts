@@ -9,7 +9,7 @@ import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-hel
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
-import { refuseEmptyMessage } from "./send.js";
+import { heldSuffix, refuseEmptyMessage } from "./send.js";
 
 /**
  * OPR.0.4.6.MH4 C3 — the cross-host broadcast deadline, named at the call
@@ -222,9 +222,12 @@ async function runCrossHostBroadcast(
  *  local route does, so per-target honesty prints identically. A partial
  *  fan-out sets a non-zero exit either way. */
 function renderBroadcastResults(data: Record<string, unknown>): void {
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; managedCompaction?: { notice?: unknown } }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; outcome?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
   for (const r of results) {
-    if (r.ok) {
+    if (r.outcome === "retained") {
+      // A guard or the seat's setting held it: nothing was typed, so it isn't "sent" (as `rig send` says).
+      console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`);
+    } else if (r.ok) {
       console.log(`${r.sessionName}: sent`);
     } else if (r.inputPhase === "attempted" || r.inputPhase === "written" || r.sent === true) {
       // The daemon records this recipient's receipt as indeterminate (#2507): its text or Enter may have reached it.
@@ -235,7 +238,7 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
     }
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
   }
-  console.log(`${data["sent"]}/${data["total"]} delivered`);
+  console.log(`${data["sent"]}/${data["total"]} delivered${heldSuffix(results)}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const advisory = data["warning"] as string | undefined;

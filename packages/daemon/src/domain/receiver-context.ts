@@ -17,8 +17,9 @@ export function askBackRoute(asked: string | null, unattributed: string, request
     return `If their answer is unclear or conditional, ask them back with an ask to ${asked} that names ${request}: `
       + `rig queue create --destination ${asked} --summary "<your question>" --body-file <file>. It reaches them where they answer (the Feed, Steering, and Slack when it's connected). ${nowhere}`;
   }
-  return `If their answer is unclear or conditional, OpenRig can't resolve a registered person to ask back about ${request}. `
-    + `Say so once, in this conversation, and keep the request and their answer waiting. The ways through are registering a person (rig gateway human add) or the request's own decision command. ${nowhere}`;
+  return `If their answer is unclear or conditional, OpenRig can't resolve a registered person to ask back about ${request}: `
+    + `nobody registered matches, or the person registry couldn't be read (rig gateway human list shows which). `
+    + `Say so once, in this conversation, and keep the request and their answer waiting. The ways through are repairing an unreadable registry, registering a person (rig gateway human add), or the request's own decision command. ${nowhere}`;
 }
 
 /** What closing a runner's permission request without a decision does: a kept answer waits (runner-permissions). */

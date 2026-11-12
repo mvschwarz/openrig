@@ -589,8 +589,8 @@ export interface QueueClaimInput {
 }
 
 export interface QueueListOptions {
-  /** Exact tag selection before the result bound (used by diagnostic occurrences). */
-  tag?: string;
+  /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
+  tag?: string | string[];
   destinationSession?: string;
   sourceSession?: string;
   state?: QueueState | QueueState[];
@@ -608,6 +608,19 @@ export interface QueueListOptions {
   /** Pick and order rows by their latest update instead of their creation, so a bounded window of closed items holds
    *  the ones closed most recently. */
   sortByUpdated?: boolean;
+}
+
+/** Adds the exact, conjunctive tag predicates shared by the bounded list paths. */
+function pushExactTagFilters(tag: string | string[] | undefined, conditions: string[], params: unknown[]): void {
+  if (tag === undefined) return;
+  const values = [...new Set(Array.isArray(tag) ? tag : [tag])];
+  if (values.some((value) => value.trim().length === 0)) {
+    throw new TypeError("tag filters cannot be blank");
+  }
+  for (const value of values) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
+    params.push(value);
+  }
 }
 
 /** Adds the handoff-successor and updated-since filters both list paths share. */
@@ -4475,6 +4488,8 @@ export class QueueRepository {
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
+    // Set inside the transaction when this click changed the answers (a declared type, so the closure's write is seen).
+    let changed = null as { summary: string | null; answered: number } | null;
     const result = this.db.transaction((): RecordHumanAnswerResult => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
@@ -4505,8 +4520,21 @@ export class QueueRepository {
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), input.qitemId);
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
+      if (item.humanAnswers?.[input.questionId] !== input.optionId) {
+        changed = { summary: item.summary ?? null, answered: item.humanQuestions.length - unansweredQuestions(item.humanQuestions, answers).length };
+      }
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
+    // The click is on the ask before anyone hears of it; a failed event never takes it back or holds up its return.
+    if (changed && result.status === "recorded") {
+      try {
+        this.eventBus.emit({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
+          questionId: input.questionId, answered: changed.answered, questions: result.questions.length,
+          complete: result.complete, summary: changed.summary });
+      } catch (error) {
+        console.warn(`[queue] ${input.qitemId}'s recorded answer has no event`, error);
+      }
+    }
     // A pending ask's interrupted close finishes here, as theirs; a park resumes with it through the reply resolver.
     if (result.status === "not-applicable" && result.answeredBy) {
       this.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser: input.primaryUser });
@@ -4862,10 +4890,7 @@ export class QueueRepository {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (opts?.tag) {
-      conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
-      params.push(opts.tag);
-    }
+    pushExactTagFilters(opts?.tag, conditions, params);
 
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -5012,6 +5037,7 @@ export class QueueRepository {
   listAttention(opts?: {
     limit?: number;
     state?: QueueState | QueueState[];
+    tag?: string | string[];
     destinationSession?: string;
     sourceSession?: string;
     targetRepo?: string;
@@ -5060,6 +5086,7 @@ export class QueueRepository {
     ];
     if (this.hasHumanIntentColumn) conditions.push("COALESCE(human_intent, 'decision') <> 'update'");
     const params: unknown[] = [...states];
+    pushExactTagFilters(opts?.tag, conditions, params);
     if (opts?.destinationSession) {
       const addresses = this.resolveSessionAddresses(opts.destinationSession);
       conditions.push(`destination_session IN (${addresses.map(() => "?").join(",")})`);
