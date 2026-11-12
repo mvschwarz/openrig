@@ -138,16 +138,28 @@ describe("PodRigInstantiator", () => {
     expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
   });
 
-  it.each(["%47", null])("forwards the Core-observed launch pane %s to the harness", async pane => {
-    const { db, inst, tmux, adapter, sessionRegistry } = setup();
+  it.each(["pi", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
+    const adapter = mockAdapter(runtime);
+    const { db, inst, tmux, sessionRegistry } = setup(undefined, { [runtime]: adapter });
     try {
-      vi.mocked(tmux.listPanes).mockResolvedValue(pane ? [{ id: pane } as Awaited<ReturnType<TmuxAdapter["listPanes"]>>[number]] : []);
-      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+      vi.mocked(tmux.listPanes).mockResolvedValue([{ id: "%47" } as Awaited<ReturnType<TmuxAdapter["listPanes"]>>[number]]);
+      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = runtime;
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
       expect(result.ok).toBe(true);
       const binding = vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0];
       expect(binding).toBeDefined();
-      expect(binding!.tmuxPane).toBe(pane);
-      expect(sessionRegistry.getBindingForNode(binding!.nodeId)?.tmuxPane).toBe(pane);
+      expect(binding!.tmuxPane).toBe(runtime === "pi" ? "%47" : null);
+      expect(sessionRegistry.getBindingForNode(binding!.nodeId)?.tmuxPane).toBe("%47");
+    } finally { db.close(); }
+  });
+
+  it("does not invent an unresolved launch pane for a grant-owning runtime", async () => {
+    const adapter = mockAdapter("pi");
+    const { db, inst } = setup(undefined, { pi: adapter });
+    try {
+      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = "pi";
+      expect((await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT)).ok).toBe(true);
+      expect(vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0].tmuxPane).toBeNull();
     } finally { db.close(); }
   });
 

@@ -1691,6 +1691,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   );
 
   const endpoint = resolveActivityEndpoint(process.env);
+  // A legacy install-token launch does not acquire run authority from inherited environment.
+  // Preserve a bound credential's supplied claim so Core can refuse a stale or mismatched report.
+  const runId = endpoint?.token.startsWith("oag_") ? process.env.OPENRIG_RUN_ID : undefined;
   const childEnv = buildPiChildEnv(process.env as Record<string, string | undefined>, {
     agentDir: paths.agentDir,
     sessionsDir: paths.sessionsDir,
@@ -1824,7 +1827,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
-      .then(async (response) => response.ok && (runtime === "omp" || process.env.OPENRIG_RUN_ID) ? await response.json() as Record<string, unknown> : null)
+      .then(async (response) => response.ok && (runtime === "omp" || runId) ? await response.json() as Record<string, unknown> : null)
       .catch(() => null)
       .finally(() => clearTimeout(timeout));
   });
@@ -1842,7 +1845,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const result = postInOrder(payload).catch(() => null);
       // Managed runs and OMP read the acknowledgement so identity delivery can retry; null
       // (transport failure or a non-OK reply) means "not yet persisted".
-      if (runtime === "omp" || process.env.OPENRIG_RUN_ID) return result;
+      if (runtime === "omp" || runId) return result;
     },
     writeSidecar: (state) => {
       try {
@@ -1891,7 +1894,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-    runId: process.env.OPENRIG_RUN_ID,
+    runId: runId,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
     requestedSessionFile: args.sessionFile });
 
@@ -1909,7 +1912,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     core.handlePiLine(line);
   });
   // Re-deliver managed run identity after pending activation/cutover, and legacy OMP identity as before.
-  const identityRetry = runtime === "omp" || process.env.OPENRIG_RUN_ID ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
+  const identityRetry = runtime === "omp" || runId ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
   const heartbeatTimer = startHeartbeatTimer(core, runtime);
   // The last few stderr lines, so an OMP that exits during startup is

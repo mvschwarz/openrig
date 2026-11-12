@@ -328,7 +328,8 @@ export class SessionRegistry {
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
-    new ActivityGrantStore(this.db).reconcileBinding(nodeId);
+    try { new ActivityGrantStore(this.db).reconcileBinding(nodeId); }
+    catch { /* Optional run attribution must not fail an already registered claimed session. */ }
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow

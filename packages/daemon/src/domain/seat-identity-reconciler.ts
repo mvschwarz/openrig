@@ -369,9 +369,15 @@ export class SeatIdentityReconciler {
     }
     const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
     if (pid === null) {
-      // The registered pane no longer resolves. Distinguish "the whole tmux
-      // session is gone" from "the pane within a live session is gone".
+      // getPanePid collapses transport/read failures into null. Only a readable census
+      // showing another pane, or a successful session snapshot proving absence, establishes loss.
       const sessionAlive = liveSessions.has(seat.session_name);
+      if (sessionAlive) {
+        const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+        if (!currentPanes?.length || currentPanes.some(pane => pane.id === seat.tmux_pane)) {
+          return this.tmuxUnavailableVerdict(seat, observedAt);
+        }
+      }
       return {
         ...base,
         verdict: "pane_missing",

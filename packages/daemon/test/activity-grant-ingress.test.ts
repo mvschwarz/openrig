@@ -180,6 +180,8 @@ describe("a seat activity grant on the hook ingress", () => {
     expect(await f.post(grant.token, { runtime: "pi", eventFamily: "session_identity", hookEvent: "SessionStart",
       sessionId: "native-id", sessionFile: "/tmp/current-pi.jsonl", generation: grant.generation, runId: grant.runId }))
       .toMatchObject({ status: 200, body: { tokenPersisted: true } });
+    expect(f.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(row.id))
+      .toEqual({ resume_type: "pi_session_file", resume_token: "/tmp/current-pi.jsonl" });
     // Ordinary posts may omit runtime; a bound credential still supplies seat and generation.
     expect(await f.post(grant.token, { eventFamily: "turn_end", hookEvent: "Stop", runId: grant.runId })).toMatchObject({ status: 200 });
     expect(await f.post(grant.token, { runtime: "claude-code", eventFamily: "turn_end", hookEvent: "Stop", runId: grant.runId }))

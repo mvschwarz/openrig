@@ -129,11 +129,18 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 
 ## 4. Activity: report turn boundaries
 
-Managed hosted Pi, Pi-RPC presets and declared community runners receive an actual-launch credential in
+Managed hosted Pi, Pi-RPC presets and declared community runners can receive an actual-launch credential in
 `OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
 process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
 never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
 credential; knowing a generation or the install token does not supply run authority.
+
+Issuing or delivering this optional credential never blocks an otherwise supported launch or restore. If the launch
+anchor, PID, generation or private credential channel is unavailable, the existing unbound install-token path remains;
+that path adds no new run-authority claim and is not attributed to a selected run. A refused bound report stays
+refused: it is never silently retried with the install token. If native dispatch already occurred before activation
+failed, Core preserves the dispatched outcome and does not replay input; cleanup addresses only that launch's grant.
+Unreadable observations cannot revoke a grant. Confirmed exit/replacement or intentional lifecycle cleanup still can.
 
 Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
 successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.

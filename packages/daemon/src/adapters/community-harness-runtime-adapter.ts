@@ -194,7 +194,12 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       }
     }
     const runId = attempt?.attempt ?? randomUUID();
-    if (preset.runner) authority = await this.deps.runnerGrants?.(binding, this.runtime, runId, 1);
+    let authorityUnavailable = false;
+    let dispatchedWithoutAuthority = false;
+    if (preset.runner) {
+      try { authority = await this.deps.runnerGrants?.(binding, this.runtime, runId, 1); }
+      catch { authorityUnavailable = true; }
+    }
     try {
       let command: string;
       try {
@@ -206,9 +211,22 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
         if (!binding.launchWrapper?.length) throw error;
         return { ok: false, error: "launch_wrapper unavailable; no agent started." };
       }
+      const fallback = command;
       if (authority) command = authority.wrap(command);
-      const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
-      if (sent.ok) authority?.dispatched();
+      let sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
+      if (!sent.ok && sent.code === "launch_path_too_long" && authority && command !== fallback) {
+        // This result proves no input was dispatched. Retry only the same pre-grant command.
+        try { await authority.finish(false); } catch { /* optional cleanup cannot block the original launch */ }
+        authority = undefined; authorityUnavailable = true;
+        sent = await this.deps.tmux.sendShellCommand(session, fallback, beforeInput, { stageIfLong: true, execInScript: true });
+      }
+      if (sent.ok) {
+        try { authority?.dispatched(); }
+        catch {
+          try { await authority?.finish(false); } catch { /* preserve the already dispatched effect */ }
+          authority = undefined; authorityUnavailable = true; dispatchedWithoutAuthority = true;
+        }
+      }
       if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
       onSent?.();
       // A runner reports its conversation in this record; without one, its seat needs a person rather than reading ready.
@@ -231,11 +249,16 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
         }
       }
       if (read.ok) { launchSucceeded = true; return { ok: true, resumeToken: read.nativeRef, resumeType: `community:${this.runtime}`, resumeProvenance: "launcher",
-        ...(authority ? { activityGrantId: authority.grantId } : {}) }; }
+        ...(authority ? { activityGrantId: authority.grantId } : {}),
+        ...(authorityUnavailable ? { warnings: [dispatchedWithoutAuthority
+          ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+          : "Run-bound reporting unavailable; using existing unbound install-token reporting."] } : {}) }; }
       const unavailable = `community harness "${this.runtime}": its launch identity is unavailable: ${read.reason}`;
       return preset.runner ? { ok: false, recovery: "attention_required", error: unavailable } : { ok: true, warnings: [unavailable] };
 
-    } finally { await authority?.finish(launchSucceeded); }
+    } finally {
+      try { await authority?.finish(launchSucceeded); } catch { /* optional reporting cannot change a native launch outcome */ }
+    }
   }
 
   /** OpenRig names the conversation: a new one gets a fresh name in OPENRIG_CONVERSATION, and a resume passes the saved name

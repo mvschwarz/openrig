@@ -2696,7 +2696,8 @@ export class PodRigInstantiator {
       nodeId: input.nodeId,
       tmuxSession: launchResult.binding.tmuxSession,
       tmuxWindow: null,
-      tmuxPane: launchResult.binding.tmuxPane,
+      // Only the run-grant launch owners need this anchor; unrelated builtins keep their existing session target.
+      tmuxPane: input.member.runtime === "pi" || isCommunityHarnessRuntime(input.member.runtime) ? launchResult.binding.tmuxPane : null,
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",

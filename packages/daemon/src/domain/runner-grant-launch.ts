@@ -38,8 +38,10 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
     const key = `OPENRIG_RUN_GRANT_${grant.grantId.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
     try { await tmux.setSessionEnv(session, key, grant.token); }
     catch {
-      grants.revoke({ grantId: grant.grantId }, "credential_distribution_failed");
-      try { await tmux.unsetSessionEnv(session, key); } catch { /* private write may have succeeded before failing */ }
+      try { grants.revoke({ grantId: grant.grantId }, "credential_distribution_failed"); }
+      finally {
+        try { await tmux.unsetSessionEnv(session, key); } catch { /* private write may have succeeded before failing */ }
+      }
       throw new Error("Runner credential distribution failed; no runner started.");
     }
     return {
@@ -48,11 +50,12 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
       wrap(command) {
         const target = shellQuote(`=${session}`);
         // No eval: token text is treated only as data. Disable tracing before reading the private value.
-        const script = `set +x; _openrig_grant=$(tmux show-environment -t ${target} ${key} 2>/dev/null) || exit 1; `
-          + `case "$_openrig_grant" in ${key}=oag_*) ;; *) exit 1;; esac; `
-          + `OPENRIG_ACTIVITY_HOOK_TOKEN=\${_openrig_grant#*=}; export OPENRIG_ACTIVITY_HOOK_TOKEN; unset _openrig_grant; `
-          + `tmux set-environment -t ${target} -u ${key} 2>/dev/null || exit 1; `
-          + `OPENRIG_RUN_ID=${shellQuote(runId)}; OPENRIG_OCCUPANT_GENERATION=${shellQuote(grant.generation)}; export OPENRIG_RUN_ID OPENRIG_OCCUPANT_GENERATION; exec ${command}`;
+        const script = `set +x; unset OPENRIG_RUN_ID; if _openrig_grant=$(tmux show-environment -t ${target} ${key} 2>/dev/null) && `
+          + `case "$_openrig_grant" in ${key}=oag_*) true;; *) false;; esac && tmux set-environment -t ${target} -u ${key} 2>/dev/null; then `
+          + `OPENRIG_ACTIVITY_HOOK_TOKEN=\${_openrig_grant#*=}; OPENRIG_RUN_ID=${shellQuote(runId)}; OPENRIG_OCCUPANT_GENERATION=${shellQuote(grant.generation)}; `
+          + `export OPENRIG_ACTIVITY_HOOK_TOKEN OPENRIG_RUN_ID OPENRIG_OCCUPANT_GENERATION; `
+          + `else tmux set-environment -t ${target} -u ${key} 2>/dev/null || :; printf '%s\\n' 'Run-bound reporting unavailable; using existing install-token reporting.' >&2; fi; `
+          + `unset _openrig_grant; exec ${command}`;
         return `/bin/sh -c ${shellQuote(script)}`;
       },
       dispatched() {
@@ -66,11 +69,15 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
       },
       async finish(ok) {
         // A staged readiness result can arrive after another cutover. It owns only this issued grant.
-        const currentGeneration = registry.currentOccupantTenure(binding.nodeId)?.generationUuid;
-        if (ok && (currentGeneration === predecessorGeneration || currentGeneration === generation)) return;
-        // The launch shell normally consumes/removes the key; unsuccessful or stale work gets cleanup here too.
-        grants.revoke({ grantId: grant.grantId }, "launch_failed_or_uncertain");
-        try { await tmux.unsetSessionEnv(session, key); } catch { /* revoked even when cleanup is unavailable */ }
+        try {
+          const currentGeneration = ok ? registry.currentOccupantTenure(binding.nodeId)?.generationUuid : undefined;
+          if (!ok || (currentGeneration !== predecessorGeneration && currentGeneration !== generation)) {
+            grants.revoke({ grantId: grant.grantId }, "launch_failed_or_uncertain");
+          }
+        } finally {
+          // Also retry cleanup when the launch shell continued without the private value.
+          try { await tmux.unsetSessionEnv(session, key); } catch { /* optional cleanup cannot undo dispatch */ }
+        }
       },
     };
   };

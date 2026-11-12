@@ -1,4 +1,4 @@
-import type { RunnerGrantIssuer } from "../domain/runner-grant-launch.js";
+import type { RunnerGrantLaunch, RunnerGrantIssuer } from "../domain/runner-grant-launch.js";
 import { piAccountSwitchStateRoot } from "../domain/pi-account-state.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
@@ -346,7 +346,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // The prior record is read FIRST so the durable catch-up cursor
     // (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
-    const authority = this.runtime !== "omp" ? await this.runnerGrants?.(binding, this.runtime, launchId, this.runtime === "pi" ? 0 : 2) : undefined;
+    let authority: RunnerGrantLaunch | undefined;
+    let authorityUnavailable = false;
+    let dispatchedWithoutAuthority = false;
+    if (this.runtime !== "omp") {
+      try { authority = await this.runnerGrants?.(binding, this.runtime, launchId, this.runtime === "pi" ? 0 : 2); }
+      catch { authorityUnavailable = true; }
+    }
     let authorizedLaunchSucceeded = false;
     try {
       const prior = this.readRunnerState(location.sessionName, location.stateRoot);
@@ -395,18 +401,30 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       let command = this.runtime !== "omp" && this.seatLaunchEnvironment
         ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
         : fallback;
+      const originalCommand = command;
       if (authority) command = authority.wrap(command);
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
       // Stage long commands without leaving a shell above the live runner.
       let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
-      if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined && !authority) {
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
+        try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original launch */ }
+        authority = undefined; authorityUnavailable = true;
+        if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
+        textResult = await this.tmux.sendShellCommand(sessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
+        if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
         textResult = await this.tmux.sendShellCommand(sessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
 
-      authority?.dispatched();
+      try { authority?.dispatched(); }
+      catch {
+        try { await authority?.finish(false); } catch { /* dispatch already happened; never retry native input */ }
+        authority = undefined; authorityUnavailable = true; dispatchedWithoutAuthority = true;
+      }
 
       // The runner writes the sidecar after its first successful get_state;
       // that sidecar (not pane content) is the token source of truth (FR-5).
@@ -438,8 +456,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
       authorizedLaunchSucceeded = true;
       return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch,
-        ...(authority ? { activityGrantId: authority.grantId } : {}) };
-    } finally { await authority?.finish(authorizedLaunchSucceeded); }
+        ...(authority ? { activityGrantId: authority.grantId } : {}),
+        ...(authorityUnavailable ? { warnings: [dispatchedWithoutAuthority
+          ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+          : "Run-bound reporting unavailable; using existing unbound install-token reporting."] } : {}) };
+    } finally {
+      try { await authority?.finish(authorizedLaunchSucceeded); } catch { /* optional reporting cannot change the native launch outcome */ }
+    }
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

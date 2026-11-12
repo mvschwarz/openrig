@@ -342,7 +342,8 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "claude-code" });
     // session listed live, but the registered pane no longer resolves.
-    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": null } });
+    const tmux = { ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": null } }),
+      listPanes: async () => [{ id: "%2" }] as never };
     const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
 
     await rec.reconcileAll();
@@ -473,7 +474,8 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     db.prepare(
       "INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body) VALUES (?, ?, ?, ?, ?, ?, ?)",
     ).run("q1", "2026-07-02T12:00:00Z", "2026-07-02T12:00:00Z", "op@rig", "s1@rig", "pending", "do work");
-    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": null } });
+    const tmux = { ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": null } }),
+      listPanes: async () => [{ id: "%2" }] as never };
     const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
 
     await rec.reconcileAll();
@@ -615,6 +617,31 @@ describe("SeatIdentityReconciler — bounded polling", () => {
 });
 
 describe("definitive Core exit ends exact run authority", () => {
+
+  it.each(["present", "unreadable"] as const)("does not revoke on unreadable pane PID when session census is %s, then recovers", async census => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
+        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+      grants.activate(grant.grantId);
+      const state = { sessions: ["s1@rig"], panePid: { "%1": null as number | null }, paneCommand: { "%1": "node" } };
+      const tmux = { ...makeTmux(state), listPanes: async () => {
+        if (census === "unreadable") throw new Error("transport unavailable");
+        return [{ id: "%1" }] as never;
+      } };
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+      await rec.reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("n1")?.verdict).toBe("tmux_unavailable");
+      expect(grants.get(grant.grantId)?.revokedAt).toBeNull();
+      state.panePid["%1"] = 101;
+      await rec.reconcileAll();
+      expect(grants.standing(grant.grantId)).toBe("current");
+    } finally { db.close(); }
+  });
+
   it.each(["no reader", "unreadable", "missing", "stale", "pending", "ready", "exited"] as const)("requires current launch evidence before shell exit revocation: %s", async launch => {
     const db = createFullTestDb();
     try {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 // The seat activity grant's store and the only activity values a guest receives.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
@@ -30,6 +30,16 @@ function fixture() {
 }
 
 describe("issuing a seat activity grant", () => {
+
+  it.each(["claude-code", "codex", "terminal", "stub"])("does no run-binding work for an unrelated %s registration", runtime => {
+    const f = fixture(); f.db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, f.node.id);
+    const legacy = f.grants.issue({ nodeId: f.node.id, generation: f.generation, issuedBy: "legacy" });
+    const session = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig");
+    expect(session.status).toBe("running");
+    expect(f.grants.get(legacy.grantId)?.revokedAt).toBeNull();
+    expect(f.db.prepare("SELECT count(*) AS n FROM activity_grants WHERE run_id IS NOT NULL").get()).toEqual({ n: 0 });
+  });
+
   it("returns the token once and stores only its sha256", () => {
     const f = fixture();
     const issued = f.grants.issue({ nodeId: f.node.id, generation: f.generation, issuedBy: "driver@test" });
@@ -171,6 +181,128 @@ describe("actual run grants", () => {
     f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id = ?").run(f.node.id);
     f.sessions.markIntentionallyStopped(adopted.id);
     expect(f.grants.standing(first.grantId)).toBe("revoked");
+  });
+
+
+  it("preserves an active grant through unreadable binding evidence and recovery", () => {
+    const f = run(), grant = f.issue("current"); f.grants.activate(grant.grantId);
+    const prepare = f.db.prepare.bind(f.db);
+    let bindingReads = 0;
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SELECT s.id, s.session_name") && ++bindingReads > 1) throw new Error("observation read unavailable");
+      return prepare(sql);
+    }) as typeof f.db.prepare);
+    try {
+      f.grants.reconcileBinding(f.node.id);
+      expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+      expect(f.grants.standing(grant.grantId)).toBe("stale"); // refusal is not revocation
+    } finally { spy.mockRestore(); }
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+  });
+
+  it("does not fail claimed registration because optional grant reconciliation cannot read", () => {
+    const f = run();
+    const spy = vi.spyOn(ActivityGrantStore.prototype, "reconcileBinding").mockImplementation(() => { throw new Error("grant table unavailable"); });
+    try {
+      const claimed = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig");
+      expect(claimed.status).toBe("running");
+      expect(f.sessions.currentOccupantTenure(f.node.id)).toBeTruthy();
+    } finally { spy.mockRestore(); }
+  });
+
+
+  it("does not activate an older pending grant when the newer active binding cannot be read", () => {
+    const f = run(), older = f.issue("older"), newer = f.issue("newer"); f.grants.activate(newer.grantId);
+    const prepare = f.db.prepare.bind(f.db); let bindingReads = 0;
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SELECT s.id, s.session_name") && ++bindingReads === 2) throw new Error("newer binding unreadable");
+      return prepare(sql);
+    }) as typeof f.db.prepare);
+    try { expect(f.grants.activate(older.grantId)).toBe(false); }
+    finally { spy.mockRestore(); }
+    expect(f.grants.standing(newer.grantId)).toBe("current");
+    expect(f.grants.standing(older.grantId)).toBe("pending");
+  });
+
+  it.each(["missing", "stale"])("preserves adopted authority when identity evidence is %s, then recovers", missing => {
+    const f = run(), grant = f.issue("adopted"); f.grants.activate(grant.grantId);
+    const evidence = { nodeId: f.node.id, verdict: "unconfirmed" as const, evidenceSource: "pane_process" as const,
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } };
+    new SeatIdentityStore(f.db).upsert(evidence);
+    f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
+    f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id = ?").run(f.node.id);
+    if (missing === "stale") new SeatIdentityStore(f.db).upsert({ ...evidence, sessionName: "prior-session" });
+    f.grants.reconcileBinding(f.node.id);
+    f.grants.revokeForSession(f.session.id, "old_session_stopped");
+    expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+    expect(f.grants.standing(grant.grantId)).toBe("stale");
+    new SeatIdentityStore(f.db).upsert(evidence);
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+  });
+
+
+  it.each(["anchor", "pid", "generation"] as const)("does not issue weaker authority when %s is missing", async missing => {
+    const f = run();
+    if (missing === "generation") f.db.prepare("DELETE FROM occupant_tenures WHERE node_id = ?").run(f.node.id);
+    const setSessionEnv = vi.fn(async () => {});
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => missing === "pid" ? null : 101,
+      setSessionEnv, unsetSessionEnv: async () => {} });
+    await expect(begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: missing === "anchor" ? null : "%1" } as never,
+      "synth", "unbound", 1)).rejects.toThrow(/authority needs/);
+    expect(setSessionEnv).not.toHaveBeenCalled();
+    expect(f.db.prepare("SELECT count(*) AS n FROM activity_grants").get()).toEqual({ n: 0 });
+  });
+
+  it.each(["read", "partial read", "remove"] as const)("executes unbound with the original install token when private credential %s fails", async failure => {
+    const f = run(), dir = mkdtempSync(join(tmpdir(), "grant-fallback-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "tmux"), '#!/bin/sh\ncase "$1" in show-environment) [ "$TEST_FAIL" = read ] && exit 1; printf "%s=%s\\n" "$TEST_KEY" "$TEST_PRIVATE"; [ "$TEST_FAIL" != "partial read" ];; set-environment) [ "$TEST_FAIL" != remove ];; *) exit 1;; esac\n');
+    chmodSync(join(dir, "tmux"), 0o700);
+    let token = "", key = "";
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async () => 101,
+      setSessionEnv: async (_session, name, value) => { key = name; token = value; }, unsetSessionEnv: async () => {} });
+    const launch = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never, "synth", "not-claimed", 1);
+    const program = `printf '%s' "$OPENRIG_ACTIVITY_HOOK_TOKEN|\${OPENRIG_RUN_ID-unset}|$OPENRIG_OCCUPANT_GENERATION"`;
+    const result = spawnSync("/bin/sh", ["-xc", launch.wrap(`/bin/sh -c ${shellQuote(program)}`)], { encoding: "utf8", env: {
+      ...process.env, PATH: `${dir}:${process.env.PATH}`, OPENRIG_ACTIVITY_HOOK_TOKEN: "legacy-install", OPENRIG_RUN_ID: "stale-run",
+      OPENRIG_OCCUPANT_GENERATION: "legacy-generation", TEST_FAIL: failure, TEST_KEY: key, TEST_PRIVATE: token,
+    } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("legacy-install|unset|legacy-generation");
+    expect(result.stderr).not.toContain(token);
+    expect(result.stderr).toContain("using existing install-token reporting");
+    await launch.finish(false);
+  });
+
+  it.each([false, true])("preserves an adopted grant when declaration is unavailable, without hiding positive replacement=%s", replaced => {
+    const f = run(), grant = f.issue("adopted"); f.grants.activate(grant.grantId);
+    f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id = ?").run(f.node.id);
+    f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
+    expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+    expect(f.grants.standing(grant.grantId)).toBe("stale");
+    if (replaced) {
+      f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
+      f.grants.reconcileBinding(f.node.id);
+      expect(f.grants.standing(grant.grantId)).toBe("revoked");
+      return;
+    }
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process",
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    f.grants.reconcileBinding(f.node.id);
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+  });
+
+  it("preserves authority through an unavailable occupant generation and recovery", () => {
+    const f = run(), grant = f.issue("current"); f.grants.activate(grant.grantId);
+    const spy = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockReturnValue(null);
+    try {
+      f.grants.reconcileBinding(f.node.id);
+      expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+      expect(f.grants.standing(grant.grantId)).toBe("stale");
+    } finally { spy.mockRestore(); }
+    expect(f.grants.standing(grant.grantId)).toBe("current");
   });
 
   it("records a Core-selected runner declaration on a previously registered empty launch row", async () => {

@@ -192,6 +192,36 @@ it("finalizes its exact community grant when post-dispatch standing refuses", as
   const finish = vi.fn(async (_ok: boolean) => {});
   const f = seat(good, `${PRESET}runner: true\n`, async () => ({ grantId: "refused", generation: "generation", wrap: command => command,
     dispatched: () => { throw new Error("binding changed"); }, finish }));
-  await expect(f.app.launchHarness(binding, { name: "w@r" })).rejects.toThrow("binding changed");
+  expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+  expect(f.sendShellCommand).toHaveBeenCalledOnce();
   expect(finish).toHaveBeenCalledWith(false);
+});
+
+
+describe("community reporting grants are optional to native launch", () => {
+  it("retries only its original command when the optional grant wrapper cannot be staged", async () => {
+    const finish = vi.fn(async () => {}), dispatched = vi.fn();
+    const issue: RunnerGrantIssuer = async () => ({ grantId: "own", generation: "g", wrap: command => `private-wrapper ${command}`, dispatched, finish });
+    const f = seat(good, `${PRESET}runner: true\n`, issue);
+    f.sendShellCommand.mockImplementationOnce(async () => ({ ok: false, code: "launch_path_too_long", message: "not dispatched" }) as never);
+    expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+    expect(f.sendShellCommand).toHaveBeenCalledTimes(2);
+    expect(f.sendShellCommand.mock.calls[0]![1]).toBe(`private-wrapper ${f.sendShellCommand.mock.calls[1]![1]}`);
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+
+  it.each(["setup", "activation"] as const)("preserves one dispatched native launch when grant %s fails", async failure => {
+    const finish = vi.fn(async () => {});
+    const issue: RunnerGrantIssuer = async () => {
+      if (failure === "setup") throw new Error("credential environment unavailable");
+      return { grantId: "affected", generation: "g", wrap: command => command,
+        dispatched: () => { throw new Error("activation failed after send"); }, finish };
+    };
+    const f = seat(good, `${PRESET}runner: true\n`, issue);
+    expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+    expect(f.sendShellCommand).toHaveBeenCalledOnce();
+    expect(f.sendShellCommand.mock.calls[0]![1]).not.toContain("OPENRIG_RUN_ID=");
+    if (failure === "activation") expect(finish).toHaveBeenCalledWith(false);
+  });
 });

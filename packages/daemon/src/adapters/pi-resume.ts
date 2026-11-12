@@ -109,9 +109,11 @@ export class PiResumeAdapter {
     // read FIRST so the durable catch-up cursor (lastEntryId, FR-5) survives.
     const launchId = (this.options.newLaunchId ?? (() => randomUUID()))();
     let authority: RunnerGrantLaunch | undefined;
+    let authorityUnavailable = false;
+    let dispatchedWithoutAuthority = false;
     if (this.runtime === "pi") {
       try { authority = await this.options.runnerGrant?.(tmuxSessionName, launchId, cwd); }
-      catch { return { ok: false, code: "resume_failed", message: "Pi resume authority is unavailable; no runner started." }; }
+      catch { authorityUnavailable = true; }
     }
     let launchSucceeded = false;
     try {
@@ -163,20 +165,35 @@ export class PiResumeAdapter {
       let command = this.runtime === "pi" && this.options.seatLaunchEnvironment
         ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome, ...(authority ? { generation: authority.generation } : {}) })
         : fallback;
+      const originalCommand = command;
       if (authority) command = authority.wrap(command);
       // Short commands retain the direct path; long commands exec from a private script.
       let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
-      if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined && !authority) {
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
+        try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original resume */ }
+        authority = undefined; authorityUnavailable = true;
+        textResult = await this.tmux.sendShellCommand(tmuxSessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
         textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok) {
         return { ok: false, code: "resume_failed", message: textResult.message };
       }
-      authority?.dispatched();
+      try { authority?.dispatched(); }
+      catch {
+        try { await authority?.finish(false); } catch { /* native dispatch already happened; never replay */ }
+        authority = undefined; authorityUnavailable = true; dispatchedWithoutAuthority = true;
+      }
       const result = await this.verifyResume(tmuxSessionName, sessionFile, launchId);
       launchSucceeded = result.ok;
-      return result.ok ? { ...result, appliedLaunch } : result;
-    } finally { await authority?.finish(launchSucceeded); }
+      return result.ok ? { ...result, appliedLaunch,
+        ...(authorityUnavailable ? { warnings: [dispatchedWithoutAuthority
+          ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+          : "Run-bound reporting unavailable; using existing unbound install-token reporting."] } : {}) } : result;
+    } finally {
+      try { await authority?.finish(launchSucceeded); } catch { /* optional reporting cannot turn a completed resume into failure */ }
+    }
   }
 
   // Poll the runner's launch-scoped sidecar ONLY — never stale pane

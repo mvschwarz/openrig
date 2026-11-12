@@ -113,7 +113,7 @@ export class ActivityGrantStore {
       if (!grant?.runId || grant.revokedAt || !this.matchesBinding(grant, false, !grant.activatedAt)) return false;
       if (grant.activatedAt) return true;
       const active = this.activeForNode(grant.nodeId);
-      if (active?.runId && active.grantId > grant.grantId && this.matchesBinding(active, true)) return false;
+      if (active?.runId && active.grantId > grant.grantId && this.bindingMatch(active, true) !== false) return false;
       const session = this.currentSession(grant.nodeId)!;
       // Only this pending, Core-selected launch may fill an empty declaration; never overwrite a conflicting record.
       if (grant.binding!.runtime !== "pi" && session.agent_app == null && session.agent_runner == null) {
@@ -133,13 +133,14 @@ export class ActivityGrantStore {
    * matching launch may restore its recorded runner declaration onto that new session row. */
   reconcileBinding(nodeId: string): void {
     if (!hasActivityGrantsTable(this.db) || !this.hasRunColumns()) return;
-    this.db.transaction(() => {
+    try { this.db.transaction(() => {
+      const grants = (this.db.prepare("SELECT * FROM activity_grants WHERE node_id = ? AND run_id IS NOT NULL AND revoked_at IS NULL")
+        .all(nodeId) as Row[]).map(toGrant);
+      if (grants.length === 0) return;
       const session = this.currentSession(nodeId);
       if (!session) return;
       const registry = new SessionRegistry(this.db);
       const generation = registry.currentOccupantTenure(nodeId)?.generationUuid;
-      const grants = (this.db.prepare("SELECT * FROM activity_grants WHERE node_id = ? AND run_id IS NOT NULL AND revoked_at IS NULL")
-        .all(nodeId) as Row[]).map(toGrant);
       const candidates = grants.filter(grant => grant.binding?.pane === session.tmux_pane && grant.binding.runtime === session.runtime
         && (grant.generation === generation || (grant.activatedAt && registry.isOccupantContinuedByAdoption(nodeId, grant.generation)
           && this.adoptionAnchorMatches(grant, session.session_name))));
@@ -152,9 +153,9 @@ export class ActivityGrantStore {
         if (!grant.activatedAt) this.activate(grant.grantId);
       }
       for (const grant of grants) {
-        if (grant.activatedAt && !this.matchesBinding(grant, true)) this.revoke({ grantId: grant.grantId }, "binding_replaced");
+        if (grant.activatedAt && this.bindingMatch(grant, true) === false) this.revoke({ grantId: grant.grantId }, "binding_replaced");
       }
-    })();
+    })(); } catch { /* Optional reconciliation cannot turn an unreadable binding into revocation or fail registration. */ }
   }
 
   /** Pending issuance IDs for a Core-reserved operation, captured before its recovery awaits.
@@ -174,7 +175,7 @@ export class ActivityGrantStore {
     const grants = (this.db.prepare("SELECT * FROM activity_grants WHERE node_id = ? AND run_id IS NOT NULL AND revoked_at IS NULL")
       .all(row.node_id) as Row[]).map(toGrant);
     for (const grant of grants) {
-      if ((grant.sessionId === sessionId && (current?.id === sessionId || !this.matchesBinding(grant, true)))
+      if ((grant.sessionId === sessionId && (current?.id === sessionId || this.bindingMatch(grant, true) === false))
         || (grant.activatedAt && current?.id === sessionId)) {
         this.revoke({ grantId: grant.grantId }, reason);
       }
@@ -201,29 +202,47 @@ export class ActivityGrantStore {
   }
 
   private matchesBinding(grant: ActivityGrant, allowAdoption: boolean, allowUnrecorded = false): boolean {
+    return this.bindingMatch(grant, allowAdoption, allowUnrecorded) === true;
+  }
+
+  /** Unknown evidence refuses reports, but cannot authorize destructive lifecycle cleanup. */
+  private bindingMatch(grant: ActivityGrant, allowAdoption: boolean, allowUnrecorded = false): boolean | null {
     try {
       const anchor = grant.binding, session = this.currentSession(grant.nodeId);
-      if (!anchor || !session || session.tmux_pane !== anchor.pane || session.runtime !== anchor.runtime
-        || (anchor.runtime !== "pi" && (session.agent_app !== anchor.runtime || session.agent_runner !== anchor.runner)
-          && !(allowUnrecorded && session.agent_app == null && session.agent_runner == null && [1, 2].includes(anchor.runner)))) return false;
+      if (!anchor || !session || session.tmux_pane !== anchor.pane || session.runtime !== anchor.runtime) return false;
+      if (anchor.runtime !== "pi" && ((session.agent_app != null && session.agent_app !== anchor.runtime)
+        || (session.agent_runner != null && session.agent_runner !== anchor.runner))) return false;
+      const declarationMissing = anchor.runtime !== "pi" && (session.agent_app == null || session.agent_runner == null)
+        && !(allowUnrecorded && session.agent_app == null && session.agent_runner == null && [1, 2].includes(anchor.runner));
       const registry = new SessionRegistry(this.db);
       const current = registry.currentOccupantTenure(grant.nodeId)?.generationUuid;
+      if (!current) return null;
       const adoption = current !== grant.generation;
       if (adoption && (!allowAdoption || !registry.isOccupantContinuedByAdoption(grant.nodeId, grant.generation))) return false;
       if (!adoption && grant.sessionId && grant.sessionId !== session.id) return false;
       const evidence = new SeatIdentityStore(this.db).getForNode(grant.nodeId);
-      if (adoption && !this.adoptionAnchorMatches(grant, session.session_name)) return false;
+      if (adoption) {
+        const match = this.adoptionAnchorMatch(grant, session.session_name);
+        if (match !== true) return match;
+      }
       if (evidence?.sessionName === session.session_name && evidence.evidence.registeredPane === anchor.pane
         && Date.parse(evidence.observedAt) >= Date.parse(grant.issuedAt)
         && evidence.evidence.observedPanePid != null && evidence.evidence.observedPanePid !== anchor.panePid) return false;
-      return true;
-    } catch { return false; }
+      // Missing declaration is unknown only after ruling out positive binding/tenure/process replacement.
+      return declarationMissing ? null : true;
+    } catch { return null; }
   }
 
   private adoptionAnchorMatches(grant: ActivityGrant, sessionName: string): boolean {
+    return this.adoptionAnchorMatch(grant, sessionName) === true;
+  }
+
+  private adoptionAnchorMatch(grant: ActivityGrant, sessionName: string): boolean | null {
     const store = new SeatIdentityStore(this.db), evidence = store.getForNode(grant.nodeId);
     const process = store.getProcessEvidence(grant.nodeId);
-    return !!grant.binding && evidence?.sessionName === sessionName && process?.sessionName === sessionName
+    if (!evidence || !process || evidence.sessionName !== sessionName || process.sessionName !== sessionName
+      || evidence.evidence.observedPanePid == null || process.panePid == null) return null;
+    return !!grant.binding && evidence.sessionName === sessionName && process.sessionName === sessionName
       && evidence.evidence.registeredPane === grant.binding.pane
       && evidence.evidence.observedPanePid === grant.binding.panePid && process.panePid === grant.binding.panePid;
   }
