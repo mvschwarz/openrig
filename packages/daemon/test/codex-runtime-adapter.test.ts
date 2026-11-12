@@ -2832,6 +2832,9 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
     expect(await adapterFor(mockFs(), mockTmux(), "0.165.2").guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
     expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding(), { resuming: true })).toEqual({ file: null });
+    // A resume of the seat's own conversation (a restore, `rig up --existing`) chooses as a fresh launch does; a fork doesn't.
+    expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding(), { resuming: true, resumingConversation: true })).toEqual({ file: null, launchInstructions: true });
+    expect(await adapterFor(mockFs(), mockTmux(), "0.163.9").guidanceFileFor(makeBinding(), { resuming: true, resumingConversation: true })).toEqual({ file: null });
     expect(await adapterFor(mockFs(), mockTmux(), "0.163.9").guidanceFileFor(makeBinding())).toEqual({ file: null });
     expect(await adapterFor(mockFs(), mockTmux(), null).guidanceFileFor(makeBinding())).toEqual({ file: null });
   });
@@ -2882,6 +2885,31 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(text).not.toContain("Seat skills line.");
     // Still read as a fresh launch by the process-lineage readers.
     expect(codexCommandResumeToken(sent)).toBeUndefined();
+  });
+
+  it("a resume with the choice carries the guidance as developer instructions and leaves the person's tracked AGENTS.md as it is", async () => {
+    const own = "# Our repository\n\nRun the tests with make test.\n";
+    const fs = mockFs({ "/spec/SOP.md": "How work flows here.", "/project/AGENTS.md": own }) as CodexAdapterFsOps & { _store: Record<string, string> };
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: fs, codexHome: HOME, listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
+      sleep: async () => {}, resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }) });
+    const binding = { ...makeBinding(), guidanceFile: null, guidanceLaunchInstructions: true } as NodeBinding;
+    await adapter.project(plan([]), binding);
+    await adapter.deliverStartup([{ ...startupFile("SOP.md", "/spec/SOP.md"), appliesOn: ["restore"] },
+      { ...startupFile("gone.md", "/spec/gone.md"), required: false }], binding);
+    expect(fs._store["/project/AGENTS.md"]).toBe(own);
+    expect((await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" })).ok).toBe(true);
+    const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1] as string).find((call) => call.includes("sess-456"))!;
+    // Still a resume of that conversation to the process-lineage readers, which read the codex process's own command line
+    // (no shell quotes, and no `env CODEX_HOME=…` prefix).
+    expect(codexCommandResumeToken(sent.replace(/^env \S+ /, "").replace(/'/g, ""))).toBe("sess-456");
+    expect(sent.indexOf(" resume 'sess-456'")).toBeLessThan(sent.indexOf("developer_instructions="));
+    expect(instructionsIn(sent)).toContain("How work flows here.");
+    expect(fs._store["/project/AGENTS.md"]).toBe(own);
+    // #3039: its record names what the launch sent, once; an optional file it couldn't read isn't in it.
+    expect(adapter.launchGuidanceSent("r01-qa")).toEqual(["SOP.md"]);
+    expect(adapter.launchGuidanceSent("r01-qa")).toBeUndefined();
   });
 
   it("a launch without the choice (a resume, a restore, an older Codex) sends no developer instructions and merges into AGENTS.md as before", async () => {

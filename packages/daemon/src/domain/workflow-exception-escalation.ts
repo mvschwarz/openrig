@@ -1,5 +1,5 @@
 import { packetScopeTags, readInstanceScope } from "./workflow-scope.js";
-import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { findQueueRecovery, freshRecoveryId, recoveryTag } from "./queue-recovery.js";
 // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items for
 // STUCK/OVERDUE instances.
 //
@@ -140,7 +140,9 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
     // Routed to the person, a stuck workflow is an approval whose wait costs now: alert them.
     const createItem = (destination: string, tier: string, toPerson: boolean) =>
       deps.queueRepo.create({
-        qitemId: recoveryId(deps.db, e.packetId),
+        // Past a per-row stuck-sweep finding folded into a backlog notice (#2988): the lookup above skips it, and its id
+        // isn't this episode's to reuse.
+        qitemId: freshRecoveryId(deps.db, e.packetId),
         sourceSession: input.createdBySession,
         destinationSession: destination,
         body,

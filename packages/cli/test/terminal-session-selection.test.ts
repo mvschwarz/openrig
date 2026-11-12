@@ -56,7 +56,7 @@ describe("terminal --session", () => {
     const f = fixture();
     await f.run(["open", "prod", "--provider", "herdr", "--session", "prod", "--json"]);
     expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/preview?view=prod&provider=herdr&session=prod");
-    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "prod", provider: "herdr", session: "prod", expectedPlan: "plan-prod" }, { timeoutMs: 45_000 });
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "prod", provider: "herdr", session: "prod", expectedPlan: "plan-prod", reuseLive: true }, { timeoutMs: 45_000 });
     expect(f.exec).not.toHaveBeenCalled();
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, session: "prod" });
   });

@@ -360,6 +360,15 @@ not the destination's file contents.)
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or
 - `rig handover <seat> --source rebuild --reason <text>`, which carries durable context.
 
+A rebuild lists the current recap, lineage lessons and restore packet as required
+priming. Superseded recaps are optional history, newest first. The briefing shows
+the newest `output.rebuild_recaps` paths (default 3) and their shared
+`recap-superseded/` folder when that pointer covers the complete history. Other
+layouts retain the full list. Set `rig config set output.rebuild_recaps 0` to
+always list every path; `OPENRIG_OUTPUT_REBUILD_RECAPS` overrides the setting.
+This changes only the briefing: the handover result still records every resolved
+artifact, and no recap file is removed.
+
 For Codex rebuilds, OpenRig also carries a complete supported native permission policy read from the live
 predecessor's own conversation and process, without adding fresh-launch grants. A later recorded seat permission
 or policy choice, or a differing declared successor profile, takes precedence. Missing, stale or unsupported observations keep the existing launch
@@ -615,13 +624,22 @@ daemon's `CODEX_HOME`, else `~/.codex`.
 The guidance still goes to the repository `AGENTS.md`, as before, when:
 
 - a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
-- the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
-  resume puts the guidance back in the repository `AGENTS.md`;
-- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+- the launch forks a conversation. Developer instructions on a fork haven't been tested;
+- the seat is restored and the restore starts a new conversation. A restore keeps the guidance file its launch
   recorded, which for Codex is the repository `AGENTS.md`;
 - a handover successor starts (fresh, fork or rebuild). Its launch carries no guidance of its own, so the handover
   first puts the seat's missing blocks back in the repository `AGENTS.md` from its saved startup context;
 - Codex is older than 0.164.0, or its version is unknown.
+
+A resume of the seat's own conversation, on a snapshot restore or `rig up --existing`, chooses as a fresh launch
+does: on Codex 0.164.0 or later with none configured, the guidance blocks the repository `AGENTS.md` doesn't hold go
+with the resume as `-c developer_instructions=…` instead of being put back in that file, and the guidance file its
+launch recorded isn't changed. A file that already holds blocks keeps them: a block OpenRig wrote whose source has
+changed is refreshed, and one edited by hand, or with no record of OpenRig writing it, is left as it is and named. A
+block whose source is gone or can't be read isn't sent, and the restore reports it as missing. A seat in a rig without
+pods starts its resumed conversation before its startup runs, so its missing blocks are still put back in the
+repository `AGENTS.md`. Whether Codex keeps the earlier session's developer instructions as well isn't documented
+by Codex; the text sent with the resume is the current one.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.
