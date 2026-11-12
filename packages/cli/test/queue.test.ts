@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { CommanderError } from "commander";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -1670,6 +1671,47 @@ describe("rig queue CLI", () => {
     expect(call).toBeDefined();
     const params = new URLSearchParams(call!.path.split("?")[1]);
     expect(params.getAll("tag")).toEqual(["fresh"]);
+  });
+
+  it.each([
+    {
+      after: "an invalid option argument",
+      abortedArgs: ["node", "rig", "queue", "list", "--tag", "stale", "--limit", "0"],
+      exitCode: "commander.invalidArgument",
+      nextArgs: ["node", "rig", "queue", "list", "--all", "--all-rigs", "--json"],
+      expectedTags: [],
+    },
+    {
+      after: "help following tag and mission collection",
+      abortedArgs: ["node", "rig", "queue", "list", "--tag", "stale", "--mission", "old", "--help"],
+      exitCode: "commander.helpDisplayed",
+      nextArgs: ["node", "rig", "queue", "list", "--all", "--all-rigs", "--slice", "fresh", "--json"],
+      expectedTags: ["slice:fresh"],
+    },
+  ])("issue2728 clears list tags after $after when reusing the same command", async ({ abortedArgs, exitCode, nextArgs, expectedTags }) => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    program.commands.find((command) => command.name() === "queue")!.commands.find((command) => command.name() === "list")!.exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    let abortedWith: unknown;
+    try {
+      await program.parseAsync(abortedArgs);
+    } catch (error) {
+      abortedWith = error;
+    }
+    expect(abortedWith).toBeInstanceOf(CommanderError);
+    expect((abortedWith as CommanderError).code).toBe(exitCode);
+    expect(calls).toHaveLength(0);
+
+    await program.parseAsync(nextArgs);
+
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(expectedTags);
+    expect(params.has("tag")).toBe(expectedTags.length > 0);
   });
 
   it("issue2728 does not print rows when a daemon returns a row missing a requested tag", async () => {

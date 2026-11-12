@@ -1968,6 +1968,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     return [...previous, value];
   };
 
+  cmd.hook("preSubcommand", (_parent, subcommand) => {
+    if (subcommand.name() === "list") listTagFiltersInArgumentOrder.length = 0;
+  });
+
   cmd
     .command("list")
     .description("List qitems (default: active + compact + current-rig; like 'docker ps')")
