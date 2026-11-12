@@ -220,6 +220,26 @@ providers. Cached plugin versions are excluded from that duplicate-provider chec
 constructs the service while building the daemon's dependencies and doesn't catch that
 rejection, so a duplicate vendored hook stops daemon creation.
 
+Vendoring at daemon start (`ensureVendored` in `plugin-vendor-service.ts`) seeds a bundled
+plugin that isn't installed, and refreshes an installed one only when the bundled manifest
+version is strictly newer, backing up what it replaces. At an equal version it leaves the
+installed content unchanged, though it may reconcile file modes on byte-identical files; a newer
+installed version is left as it is. That describes this start-time path only, not every way a
+plugin can be installed or updated. The `openrig` plugin ships inside the CLI, so its four
+manifests carry the CLI's release version, set in release preparation; `openrig-core` keeps its
+own `0.1.x` line. So each release refreshes an older installed `openrig` plugin, while a daemon
+run from development source, whose `openrig` manifests stay at `0.1.0`, leaves a newer released
+install as it is rather than downgrading it. `npm run pack:release` refuses a missing `openrig`
+manifest, or one that doesn't carry the CLI's version, in source or in the assembled CLI. It also
+refuses a baseline (`scripts/fixtures/packaged-plugins-last-release.json`) whose release isn't
+earlier than the CLI's, or that has no archive hash or plugins, and changed plugin bytes without a
+greater version than that release's. Those baseline checks read the file's own fields: they don't
+prove the baseline is the published, latest or complete release archive, so a successful pack
+prints the baseline it used, to confirm against the registry. Refresh the baseline from the
+published archive with the snapshot, validate and replace steps at the end of
+[`scripts/check-packaged-plugin-versions.mjs`](../../../scripts/check-packaged-plugin-versions.mjs);
+`--snapshot` on its own only prints the JSON.
+
 `packages/daemon/src/routes/plugins.ts` exposes GET-only inspection at `/api/plugins`:
 list, detail, used-by and file list/read. The file routes use the discovered plugin root as
 their path allowlist. `?cwd=` supplies rig-cwd discovery roots.
