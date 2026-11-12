@@ -331,8 +331,15 @@ export class RunnerPermissions {
     const changed = new Promise<void>((resolve) => { release = resolve; });
     let liveId = askId; // after a route or handoff, the colleague's row is where the answer lands
     const unsubscribe = this.deps.eventBus.subscribe((event) => {
-      const changedId = (event as { type?: string; qitemId?: string }).type === "queue.updated" ? (event as { qitemId?: string }).qitemId : undefined;
-      if (changedId === askId || changedId === liveId) release();
+      const { type, qitemId } = event as { type?: string; qitemId?: string };
+      // A handoff while this read waits (the person's answer going to the receiving agent) moves the request to a new
+      // row: follow it, so the decision recorded there wakes this read rather than its next one.
+      if (type === "queue.handed_off" && (qitemId === askId || qitemId === liveId)) {
+        const asked = this.deps.queueRepo.getById(askId);
+        liveId = (asked ? this.liveEnd(asked)?.qitemId : undefined) ?? liveId;
+        return;
+      }
+      if (type === "queue.updated" && (qitemId === askId || qitemId === liveId)) release();
     });
     try {
       const now = this.withWords(askId, this.read(seat, askId));

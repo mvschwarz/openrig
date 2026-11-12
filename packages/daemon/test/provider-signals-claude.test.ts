@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { claudeStatuslineSignals } from "../src/domain/provider/provider-signals.js";
+import { CLAUDE_UNKNOWN_REASON, claudeStatuslineSignals } from "../src/domain/provider/provider-signals.js";
 
 // Slice-04 (OPR.0.5.0.4) — Claude statusline lane normalization (§2 Claude lane + the
 // 2026-07-31 RESEARCH verdict). Proof item 6: the statusline sidecar's rate_limits object
@@ -66,6 +66,22 @@ describe("claudeStatuslineSignals — Claude lane honesty", () => {
     });
     expect(sigs).toHaveLength(1);
     expect(sigs[0].sourceClass).toBe("unknown");
+    expect(sigs[0].usedPercent).toBeUndefined();
+    expect(sigs[0].automationUse).toBe("do_not_automate");
+    expect(sigs[0].unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+  });
+
+  it("an unreadable cache gets its own reason, not the empty-reading one", () => {
+    const sigs = claudeStatuslineSignals({
+      seatSession: "dev-impl@rig",
+      cachePresent: true,
+      cacheUnreadable: true,
+      asOf: ASOF,
+    });
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0].sourceClass).toBe("unknown");
+    expect(sigs[0].unknownReason).toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
+    expect(sigs[0].unknownReason).not.toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
     expect(sigs[0].usedPercent).toBeUndefined();
     expect(sigs[0].automationUse).toBe("do_not_automate");
   });

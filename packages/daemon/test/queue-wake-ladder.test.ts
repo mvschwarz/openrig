@@ -275,6 +275,56 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls.some((c) => c.target === "worker@r")).toBe(false);
   });
 
+  it("UNKNOWN READS UNKNOWN: a baton whose recorded wake result no reader recognises escalates past the window, never re-sent, and the notice says the outcome is unknown", async () => {
+    const baton = await mkBaton();
+    setNudgeResult(baton.qitemId, "accepted-by-some-new-route", 45);
+    ageCreated(baton.qitemId, 45);
+    await tick();
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(0);
+    const rungs = markersOf(baton.qitemId, LADDER_RUNG_PREFIX);
+    expect(rungs).toHaveLength(1);
+    expect(rungs[0]).toMatch(/wake outcome unknown \(unrecognised result "accepted-by-some-new-route"\)/);
+    expect(calls.some((c) => c.target === "worker@r")).toBe(false);
+  });
+
+  it("UNKNOWN READS UNKNOWN (negative controls): inside the window, or once claimed, an unrecognised result gets nothing", async () => {
+    const fresh = await mkBaton();
+    setNudgeResult(fresh.qitemId, "accepted-by-some-new-route", 5);
+    const claimed = await mkBaton("other@r");
+    setNudgeResult(claimed.qitemId, "accepted-by-some-new-route", 45);
+    ageCreated(claimed.qitemId, 45);
+    repo.claim({ qitemId: claimed.qitemId, destinationSession: "other@r" });
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(fresh.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+    expect(markersOf(claimed.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+  });
+
+  it("KNOWN OUTCOMES KEEP THEIR PATH: a verified wake, a hosted trigger's accepted ring and an unroutable address never enter the ladder", async () => {
+    const batons = [];
+    for (const [idx, result] of ["verified", "wake-accepted:webhook (hook) answered 202; pickup is the member's claim on this row",
+      "unroutable: 'w2@r' has no terminal transport on this daemon"].entries()) {
+      const baton = await mkBaton(`w${idx}@r`);
+      setNudgeResult(baton.qitemId, result, 45);
+      ageCreated(baton.qitemId, 45);
+      batons.push(baton);
+    }
+    await tick();
+    expect(calls).toHaveLength(0);
+    for (const baton of batons) {
+      expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(0);
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+    }
+  });
+
+  it("A WEBHOOK FAILURE AFTER THE POST KEEPS THE FAILED PATH: its effect is unknown, but it is retried as it always was", async () => {
+    const baton = await mkBaton();
+    setNudgeResult(baton.qitemId, "failed:webhook (hook) answered 500", 10);
+    await tick();
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(1);
+    expect(calls).toEqual([{ qitemId: baton.qitemId, target: "worker@r" }]);
+  });
+
   it("DELIVERY MACHINERY IS NOT PICKUP: a relay-owner-notification-transport-failed note on an unconfirmed or held baton does not count as pickup evidence", async () => {
     const mod = await ladderMod();
     for (const [idx, result] of ["gateway-owned: virtual destination", "retained:typing_guard"].entries()) {
