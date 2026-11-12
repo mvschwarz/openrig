@@ -272,6 +272,25 @@ describe("Send CLI", () => {
     else { expect(result.stdout.join("\n")).toContain("Recorded, not delivered"); expect(result.stderr.join("\n")).toContain("No live seat"); }
   });
 
+  it.each([false, true])("native pending and unknown receipts bypass every pane check and remedial Enter (json=%s)", async json => {
+    for (const unknown of [false, true]) {
+      const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+      const receipt = { version: 1, requestId: "native-id", stage: unknown ? "completed" : "pending", ...(unknown ? { result: { completion: "unknown", submissionUnknown: true } } : {}) };
+      const client = { post: async (path: string, body: Record<string, unknown>) => {
+        posts.push({ path, body });
+        return path === "/api/transport/capture" ? { status: 200, data: { content: "❯ make test" } }
+          : { status: 200, data: { ok: true, sessionName: "native@r", verified: false, runnerReceipt: receipt } };
+      } } as unknown as DaemonClient;
+      const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "native@r", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]));
+      expect(posts.filter(post => post.path === "/api/transport/capture" || post.body["submitOnly"])).toEqual([]);
+      expect(result.logs.join("\n")).not.toContain("Sent to");
+      if (json) expect(JSON.parse(result.logs.find(line => line.startsWith("{"))!)).toMatchObject({ runnerReceipt: receipt, verified: false });
+      else expect(result.logs.join("\n")).toContain("Native input receipt");
+      expect(result.exitCode).toBe(unknown ? 1 : undefined);
+    }
+  });
   it("a terminal seat: sends exactText beside the envelope, prints the note, and --verify checks the exact text", async () => {
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let captures = 0;

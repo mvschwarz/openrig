@@ -87,6 +87,8 @@ export class RunnerChannel {
       if (!body.result || typeof body.result !== "object" || Array.isArray(body.result)) throw new RunnerChannelError("invalid_runner_result", "Supply a native result.", 400);
       const receipt = this.outbox.runnerReceipt(body.requestId);
       const result = body.result as Record<string, unknown>;
+      if (result.submissionUnknown !== undefined && (result.submissionUnknown !== true || result.completion !== "unknown" || result.accepted === true))
+        throw new RunnerChannelError("invalid_runner_result", "Submission uncertainty cannot claim native acceptance or a completed answer.", 400);
       if (receipt?.kind === "wake" && stage === "completed" && (result.kind !== "wake"
         || !["completed", "interrupted", "failed", "unknown"].includes(String(result.completion))
         || !(typeof result.answer === "string" || result.answer === null)

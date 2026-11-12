@@ -323,6 +323,24 @@ permission or input handling in existing built-in runtimes or require every poss
   - without a TTY, input is read line by line;
   - this isn't a binary-safe channel.
 
+### Optional run-bound native input and wake (version 1)
+
+The staged native-channel implementation uses the launch's `OPENRIG_RUN_ID` and private `OPENRIG_ACTIVITY_HOOK_TOKEN` grant. The runner retains them; its native child and tools do not receive the credential. `GET /api/activity/runner-channel` is run-filtered SSE, and one `POST` resource at that same path carries hello, acceptance, submitted and result messages. There is no command file or global event-feed subscription.
+
+Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,wake,cancel}}`. Capabilities are explicit booleans intersected with the recorded runner kind and Core implementation availability. They describe this live implementation, not native identity or program qualification. The production availability gate remains disabled during the staged recovery review; cancellation is false. Built-in managed Pi and the dsh example have independently authored consumers. Other programs, including Pi-compatible forks and OMP, require their own adoption and evidence.
+
+Every seat still defaults to `typed`. Once Core enables a complete implementation and a capable runner is connected, `rig seat set-input-route <seat> --route native --reason ...` explicitly selects native input. Native requests retain the existing sender, original-conversation constraint and interruption/held policy. The saved request ID's route is immutable: a preference change applies to a new ID. A native refusal or uncertain effect never types a fallback, and `--verify` never invokes a terminal-pane verifier for a native receipt.
+
+A request frame contains `{version:1, runId, requestId, sequence, kind, payload}`. Input payload is `{text}`; wake payload is `{question}`. The request ID is its existing outbox operation ID. A combined send retains one primary ID plus its ordered source-member links. Sequence is run-local and ordered; an SSE cursor is not acceptance. The live receiver retains every immutable ID/payload and result for its process lifetime, acknowledges custody by POST, and waits for Core's durable acceptance response before writing the native prompt. It retries saved HTTP receipts after lost replies; it never repeats a native write to repair HTTP delivery. Restarting a runner creates a new run, not a persistent receiver command journal.
+
+After native protocol submission/acceptance the runner posts `submitted`; native delivery is not model-work completion. A terminal result whose submission could not be established may instead carry `{completion:"unknown", submissionUnknown:true}` from accepted custody. Core retains that terminal uncertainty as outbox `indeterminate`, never `delivered`; it cannot include a successful wake answer or an acceptance claim. Known pre-effect native rejection is separate. Erased native content remains an unavailable opaque custody tombstone, not an executable request.
+
+`POST /api/seat/command/:seatRef` accepts `{requestId,type:"wake",question}` and returns its saved custody stage. `GET` at the same resource with `?requestId=...` reads its result. `rig ask <rig> <question> --wake <seat>` uses this live path only for a current declared native capability/selection. Historical Claude/Codex one-shot wakes and raw session tokens retain their existing semantics.
+
+A wake waits for the current execution to finish and then gets its own native prompt. Pi's ordinary busy input continues to steer; dsh's ordinary busy input continues to queue. During the dedicated wake, later managed input waits. Pi gates the dedicated prompt on native control-state evidence and pending person/startup preflight, not on a guessed idle flag. Person controls remain usable; a person steering into the wake makes its attribution unknown. Only that prompt's actual assistant text and terminal native outcome become `{kind:"wake",answer:string|null,nativeTurnId,completion:"completed"|"interrupted"|"failed"|"unknown"}`. Tools, old output and partial streaming text are not substituted for an answer. Every terminal native outcome releases the managed barrier. A caller timeout returns the request ID and latest saved stage for lookup; it neither clears the native barrier nor cancels the prompt.
+
+Consumer fixtures exercise Pi RPC shapes from the installed Pi 1.5.0 SDK and dsh's ACP implementation at 0.2.1-rc.2. Stand-in native backends prove the runner/Core plumbing, not actual program or provider qualification. Native program sequencing against an isolated fake provider, when performed, is separate evidence and does not promote any program's default.
+
 ## 6. Cancel: requested isn't the same as done
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),

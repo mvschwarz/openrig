@@ -1393,3 +1393,81 @@ describe("managed run identity retries", () => {
     expect(count()).toBe(initial + 1);
   });
 });
+
+
+describe("managed Pi input and attributed wake", () => {
+  function managed() {
+    const f = fakeIo(), posts: Record<string, unknown>[] = [];
+    let nativeBusy = false;
+    const core = new RunnerCore({ ...f.io, sendRpc: command => {
+      f.rpc.push(command);
+      if (command.type === "get_state" && String(command.id).startsWith("openrig-native-idle-"))
+        queueMicrotask(() => core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true, data: { isStreaming: nativeBusy, pendingMessageCount: 0 } })));
+    }, postActivity: async body => { f.activity.push(body); return { tokenPersisted: true }; }, postRunner: async (body: Record<string, unknown>) => { posts.push(body); return true; } },
+      { sessionName: SESSION, runId: "run" });
+    core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "native", isStreaming: false, pendingMessageCount: 0 } }));
+    const frame = (id: string, sequence: number, kind: "input" | "wake") => ({ version: 1, requestId: id, runId: "run", sequence, kind,
+      payload: kind === "wake" ? { question: id } : { text: id } });
+    const event = (type: string, extra = {}) => {
+      if (type === "agent_start") nativeBusy = true; else if (type === "agent_end") nativeBusy = false;
+      core.handlePiLine(JSON.stringify({ type, ...extra }));
+    };
+    const response = (id: string, success = true) => event("response", { id: `openrig-native-${id}`, command: "prompt", success, data: { disposition: "started" } });
+    return { ...f, posts, core, frame, event, response };
+  }
+  it("a person/startup preflight cannot race a dedicated wake before agent_start", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(0);
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: true, data: { disposition: "started" } });
+    f.event("agent_start"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+  });
+  it("person steering stays usable but mixed output is not returned as the dedicated answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.handleUserBlock("person steer");
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "mixed output" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person steer" }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it("queues busy wakes, protects the dedicated answer, and deduplicates offers", async () => {
+    const f = managed(); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("steer", 1, "input"));
+    expect(f.rpc).toContainEqual({ id: "openrig-native-steer", type: "prompt", message: "steer", streamingBehavior: "steer" });
+    f.response("steer");
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 3, "input"));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "toolResult", content: [{ type: "text", text: "unrelated tool" }] } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "actual answer" }], stopReason: "stop" } });
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ kind: "wake", answer: "actual answer", completion: "completed" }) }));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(1);
+  });
+  it("a native end without assistant text gives no fabricated wake answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "assistant", content: [], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it.each(["aborted", "error"])("a terminal %s releases the barrier with no fabricated answer", async stopReason => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("next", 2, "wake"));
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: stopReason === "aborted" ? "interrupted" : "failed" }) }));
+    expect(f.rpc.filter(r => r.message === "next")).toHaveLength(1);
+  });
+});

@@ -2254,6 +2254,8 @@ export interface CaptureResult {
 }
 
 export interface BroadcastResult {
+  pendingNative?: number;
+  indeterminateNative?: number;
   total: number;
   sent: number;
   retained?: number;
@@ -2880,7 +2882,7 @@ export class SessionTransport {
   private nativeResult(sessionName: string, receipt: import("./outbox-handler.js").RunnerReceipt): SendResult {
     const rejected = receipt.stage === "rejected";
     return { ok: !rejected, sessionName, verified: false, outboxIds: receipt.memberIds ?? [receipt.requestId], runnerReceipt: receipt,
-      ...(receipt.stage === "submitted" || receipt.stage === "completed" ? { sent: true } : rejected ? { sent: false } : {}),
+      ...(!receipt.result?.submissionUnknown && (receipt.stage === "submitted" || receipt.stage === "completed") ? { sent: true } : rejected ? { sent: false } : {}),
       reason: receipt.reconciliation ?? `native_${receipt.stage}` };
   }
 
@@ -4871,9 +4873,13 @@ export class SessionTransport {
       results.push(result);
     }
 
+    const indeterminateNative = results.filter(r => r.runnerReceipt && (r.runnerReceipt.reconciliation || r.runnerReceipt.erasedAt || r.runnerReceipt.result?.submissionUnknown)).length;
+    const pendingNative = results.filter(r => r.runnerReceipt && !r.runnerReceipt.reconciliation && !r.runnerReceipt.erasedAt
+      && ["pending", "offered", "accepted"].includes(r.runnerReceipt.stage)).length;
     return {
+      ...(pendingNative ? { pendingNative } : {}), ...(indeterminateNative ? { indeterminateNative } : {}),
       total: results.length,
-      sent: results.filter((r) => r.ok && r.outcome !== "retained").length,
+      sent: results.filter((r) => r.ok && (r.runnerReceipt ? r.sent === true : r.outcome !== "retained")).length,
       retained: results.filter(r => r.outcome === "retained").length,
       failed: results.filter((r) => !r.ok).length,
       results,

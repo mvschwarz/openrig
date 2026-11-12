@@ -459,6 +459,89 @@ describe("run-bound native channel custody", () => {
     expect(f.channel.post(f.grant.token, { ...f.hello, capabilities: { input: false, wake: false, cancel: false } }))
       .toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });
   });
+  it("submission uncertainty cannot accompany a fabricated completed wake answer", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.channel.admit(f.node.id, { outboxId: "wake", senderSession: "sender", destinationSession: "dev@channel", body: "question", kind: "wake", inputRoute: "native", payload: { question: "question" } });
+    f.channel.frames(f.grant.token, 0);
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "wake", sequence: 1, state: "accepted" });
+    f.channel.post(f.grant.token, { type: "submitted", runId: "run-one", requestId: "wake", sequence: 1 });
+    expect(() => f.channel.post(f.grant.token, { type: "result", runId: "run-one", requestId: "wake", sequence: 1,
+      result: { kind: "wake", completion: "completed", answer: "invented", submissionUnknown: true } })).toThrow(/uncertainty|Invalid/);
+    expect(f.outbox.runnerReceipt("wake")?.stage).toBe("submitted");
+  });
+  it("broadcast counts pending and unknown native custody without claiming delivery or failure", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    const options = { deliveryId: "fan", actorSession: "sender" };
+    expect(await f.transport.broadcast({ sessions: ["dev@channel"] }, "broadcast", options)).toMatchObject({ sent: 0, failed: 0, pendingNative: 1 });
+    const id = "fan:dev@channel"; f.channel.frames(f.grant.token, 0);
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: id, sequence: 1, state: "accepted" });
+    f.channel.post(f.grant.token, { type: "result", runId: "run-one", requestId: id, sequence: 1,
+      result: { kind: "input", completion: "unknown", submissionUnknown: true } });
+    const unknown = await f.transport.broadcast({ sessions: ["dev@channel"] }, "broadcast", options);
+    expect(unknown).toMatchObject({ sent: 0, failed: 0, indeterminateNative: 1 });
+    expect(unknown.results[0]?.sent).toBeUndefined();
+  });
+  it("the actual Pi runner delivers busy input and dedicated wakes through real Core routes", async () => {
+    const f = await fixture(true, "pi", 0);
+    const dir = mkdtempSync(join(tmpdir(), "pi-native-channel-")), bin = join(dir, "bin"), log = join(dir, "native.log");
+    const { mkdirSync } = await import("node:fs"); mkdirSync(bin);
+    const fake = join(bin, "pi");
+    writeFileSync(fake, `#!${process.execPath}
+const fs=require('node:fs');const send=v=>console.log(JSON.stringify(v));const log=v=>fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(v)+'\\n');let busy=false;
+log({childToken:!!process.env.OPENRIG_ACTIVITY_HOOK_TOKEN});
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);log(c);
+if(c.type==='get_state')return send({type:'response',id:c.id,success:true,data:{isStreaming:busy,pendingMessageCount:0,sessionId:'native-fixture',sessionFile:${JSON.stringify(join(dir, "native.jsonl"))}}});
+if(c.type==='get_entries')return send({type:'response',id:c.id,success:true,data:{entries:[]}});
+if(c.type!=='prompt')return;
+if(c.message==='HANDLED')return send({type:'response',id:c.id,command:'prompt',success:true,data:{disposition:'handled'}});
+send({type:'response',id:c.id,command:'prompt',success:true,data:{disposition:busy?'queued':'started'}});if(busy)return;
+busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',message:{role:'toolResult',content:[{type:'text',text:'not the answer'}]}});send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'answer '+c.message}],stopReason:'stop'}});busy=false;send({type:'agent_end'});},c.message==='BUSY'?500:100);
+});`, { mode: 0o755 });
+    let lostAck = false, lostResult = false;
+    const server = serve({ fetch: async request => {
+      const post = request.method === "POST" && new URL(request.url).pathname === "/api/activity/runner-channel"
+        ? await request.clone().json() as { type?: string; requestId?: string } : null;
+      const response = await f.app.fetch(request);
+      if (post?.type === "ack" && !lostAck) { lostAck = true; return new Response(null, { status: 503 }); }
+      if (post?.type === "result" && post.requestId === "wake-a" && !lostResult) { lostResult = true; return new Response(null, { status: 503 }); }
+      return response;
+    }, port: 0, hostname: "127.0.0.1" });
+    await new Promise<void>(resolve => server.once("listening", resolve));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const child = spawn(process.execPath, ["--import", "tsx", resolve(__dirname, "../src/adapters/pi-runner.ts"),
+      "--session-name", "dev@channel", "--state-root", join(dir, "state"), "--cwd", dir, "--launch-id", "run-one", "--no-approve"],
+      { cwd: resolve(__dirname, "../../.."), stdio: ["pipe", "pipe", "pipe"], env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir,
+        OPENRIG_HOME: join(dir, "home"), OPENRIG_URL: url, OPENRIG_ACTIVITY_HOOK_TOKEN: f.grant.token, OPENRIG_RUN_ID: "run-one",
+        OPENRIG_NODE_ID: f.node.id, OPENRIG_SESSION_NAME: "dev@channel", OPENRIG_OCCUPANT_GENERATION: f.grant.generation } });
+    let output = ""; child.stdout.on("data", chunk => { output += String(chunk); }); child.stderr.on("data", chunk => { output += String(chunk); });
+    cleanups.push(() => { child.kill("SIGKILL"); server.closeAllConnections(); server.close(); rmSync(dir, { recursive: true, force: true }); });
+    const entries = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) : [];
+    expect(await waitFor(() => f.channel.capable(f.node.id, "input"), 4000), output).toBe(true);
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    await f.transport.send("dev@channel", "BUSY", { deliveryId: "busy", actorSession: "sender" });
+    expect(await waitFor(() => entries().some(e => e.message === "BUSY")), output).toBe(true);
+    await f.transport.send("dev@channel", "STEER", { deliveryId: "steer", actorSession: "sender" });
+    await f.transport.sendNativeWake("dev@channel", "WAKE:A", "wake-a", "sender");
+    await f.transport.sendNativeWake("dev@channel", "WAKE:B", "wake-b", "sender");
+    expect(await waitFor(() => f.outbox.runnerReceipt("wake-b")?.stage === "completed"), output).toBe(true);
+    expect(f.outbox.runnerReceipt("wake-a")?.result).toMatchObject({ kind: "wake", completion: "completed", answer: "answer WAKE:A" });
+    expect(f.outbox.runnerReceipt("wake-b")?.result).toMatchObject({ completion: "completed", answer: "answer WAKE:B" });
+    expect(entries().filter(e => e.type === "prompt").map(e => e.message)).toEqual(["BUSY", "STEER", "WAKE:A", "WAKE:B"]);
+    expect(entries()).toContainEqual({ childToken: false });
+    expect(lostAck && lostResult).toBe(true);
+    server.closeAllConnections();
+    expect(await waitFor(() => !f.channel.capable(f.node.id, "input")), output).toBe(true);
+    expect(await waitFor(() => f.channel.capable(f.node.id, "input")), output).toBe(true);
+    await f.transport.sendNativeWake("dev@channel", "WAKE:A", "wake-a", "sender");
+    expect(entries().filter(entry => entry.message === "WAKE:A")).toHaveLength(1);
+    await f.transport.sendNativeWake("dev@channel", "HANDLED", "handled", "sender");
+    await f.transport.sendNativeWake("dev@channel", "/abort", "literal", "sender");
+    expect(await waitFor(() => f.outbox.runnerReceipt("literal")?.stage === "completed"), output).toBe(true);
+    expect(f.outbox.runnerReceipt("handled")?.result).toMatchObject({ answer: null, completion: "unknown" });
+    expect(entries().filter(e => e.type === "abort")).toEqual([]);
+    expect(f.outbox.runnerReceipt("literal")?.result).toMatchObject({ answer: "answer /abort" });
+  }, 20000);
   it("keeps capabilities disabled until complete consumers exist, and never grants cancellation", async () => {
     const f = await fixture(false);
     expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });

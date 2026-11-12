@@ -569,6 +569,18 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       if (printRecordedSend(res.data, session, Boolean(opts.json), Boolean(opts.verify))) return;
+      const native = res.data["runnerReceipt"] as { requestId?: string; stage?: string; reconciliation?: string; erasedAt?: string; result?: { submissionUnknown?: boolean } } | undefined;
+      if (native) {
+        const unknown = !!(native.reconciliation || native.erasedAt || native.result?.submissionUnknown);
+        if (opts.json) console.log(JSON.stringify({ ...res.data, verified: false }));
+        else {
+          console.log(`Native input receipt for ${session}: ${unknown ? "effect unknown" : native.stage ?? "unavailable"}; request ${native.requestId ?? "unknown"}`);
+          if (opts.verify) console.log("Verified: no (native receipt)");
+          printCompactionNotice(console.log);
+        }
+        if (unknown || res.status >= 400 || native.stage === "rejected") process.exitCode = 1;
+        return; // Native custody never invokes the terminal-pane verifier or its remedial Enter.
+      }
 
       // S3 wave-1 fix (r2 F2): effect classification runs BEFORE any output
       // encoding or routing, so the human and JSON encoders render the same

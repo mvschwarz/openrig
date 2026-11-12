@@ -167,7 +167,8 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
-    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: false } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }

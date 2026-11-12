@@ -301,7 +301,9 @@ export class OutboxHandler {
         return receipt;
       }
       if (stage !== "rejected" && stages.indexOf(stage) <= stages.indexOf(receipt.stage)) return receipt;
-      if (stage !== "rejected" && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
+      const unknownSubmission = stage === "completed" && receipt.stage === "accepted" && evidence.result?.submissionUnknown === true
+        && evidence.result?.completion === "unknown";
+      if (stage !== "rejected" && !unknownSubmission && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
         throw new OutboxHandlerError("runner_stage_conflict", "Native receipt skipped a required custody stage.");
       if (stage === "rejected" && ["submitted", "completed"].includes(receipt.stage))
         throw new OutboxHandlerError("runner_stage_conflict", "Submitted effects cannot become pre-effect rejection.");
@@ -312,7 +314,7 @@ export class OutboxHandler {
       this.writeRunner(updated);
       if (stage === "submitted" || stage === "completed" || stage === "rejected") for (const memberId of receipt.memberIds ?? [id])
         this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=? WHERE outbox_id=?")
-          .run(stage === "rejected" ? "failed" : "delivered", stage === "rejected" ? null : at, memberId);
+          .run(unknownSubmission ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || stage === "rejected" ? null : at, memberId);
       return updated;
     })();
   }

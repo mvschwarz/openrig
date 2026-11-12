@@ -274,6 +274,82 @@ async function main() {
   child.stdin.on("error", () => {});
   const peer = new AgentPeer(child, (line) => say(`[dsh] ${line}`));
   const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0, asking: 0, waiting: 0, resolvedAsk: null };
+  const managed = new Map();
+  const channelStop = new AbortController();
+  let activeManaged = null;
+  const channelPost = async (body) => {
+    while (!channelStop.signal.aborted) {
+      const result = await callOpenRig("POST", "/api/activity/runner-channel", body, POST_TIMEOUT_MS);
+      if (result.status >= 200 && result.status < 300) return true;
+      if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending"].includes(result.body?.code)) return false;
+      await sleep(250);
+    }
+    return false;
+  };
+  const report = (entry, type, result) => {
+    const f = entry.frame;
+    if (result) entry.result = result;
+    entry.reports = entry.reports.then(() => channelPost({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
+      ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}), ...(result ? { result } : {}) }));
+  };
+  const submitted = (entry) => {
+    if (!entry || entry.submitted) return;
+    entry.submitted = true; report(entry, "submitted");
+  };
+  const acceptFrame = async (raw) => {
+    if (agentExited || stopping || raw.version !== 1 || raw.runId !== env.OPENRIG_RUN_ID || !["input", "wake"].includes(raw.kind)
+      || !Number.isSafeInteger(raw.sequence) || raw.sequence < 1 || typeof raw.requestId !== "string"
+      || typeof (raw.kind === "wake" ? raw.payload?.question : raw.payload?.text) !== "string") return;
+    const frame = { version: 1, runId: raw.runId, requestId: raw.requestId, sequence: raw.sequence, kind: raw.kind,
+      payload: raw.kind === "wake" ? { question: raw.payload.question } : { text: raw.payload.text } };
+    if ([...managed.values()].some(entry => entry.frame.sequence === frame.sequence && entry.frame.requestId !== frame.requestId)) throw new Error("Conflicting native sequence");
+    const old = managed.get(frame.requestId);
+    if (old) { if (JSON.stringify(old.frame) !== JSON.stringify(frame)) throw new Error("Conflicting native request"); await old.acceptance; return; }
+    const entry = { frame, state: "accepting", reports: Promise.resolve(), answer: [] };
+    managed.set(frame.requestId, entry);
+    entry.acceptance = (async () => {
+      if (!await channelPost({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" })) { entry.state = "unavailable"; return; }
+      entry.state = "queued";
+      const before = state.queue.findIndex(other => typeof other !== "string" && other.frame.sequence > frame.sequence);
+      if (before < 0) state.queue.push(entry); else state.queue.splice(before, 0, entry);
+      pump();
+    })();
+    await entry.acceptance;
+  };
+  const connectChannel = async () => {
+    let retained = false, cursor = 0;
+    const endpoint = openrigEndpoint();
+    if (!endpoint || !env.OPENRIG_RUN_ID || !env.OPENRIG_ACTIVITY_HOOK_TOKEN) return;
+    while (!channelStop.signal.aborted) {
+      try {
+        const hello = await callOpenRig("POST", "/api/activity/runner-channel", { type: "hello", version: 1, runId: env.OPENRIG_RUN_ID, retained,
+          capabilities: { input: true, wake: true, cancel: false } }, POST_TIMEOUT_MS);
+        if ([401, 403].includes(hello.status)) return;
+        if (hello.status !== 200) throw new Error("Channel handshake unavailable");
+        retained = true;
+        const response = await fetch(`${endpoint.base}/api/activity/runner-channel`, { signal: channelStop.signal,
+          headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
+        if (!response.ok || !response.body) throw new Error("Channel unavailable");
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
+        try {
+          for (;;) {
+            const part = await reader.read(); if (part.done) break;
+            buffer += part.value.replace(/\r/g, "");
+            if (buffer.length > 2 * 1024 * 1024) throw new Error("Channel frame too large");
+            let end;
+            while ((end = buffer.indexOf("\n\n")) >= 0) {
+              const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+              const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+              if (!data) continue;
+              const frame = JSON.parse(data); if (frame.runId !== env.OPENRIG_RUN_ID || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
+              cursor = Math.max(cursor, frame.sequence); void acceptFrame(frame).catch(() => {});
+            }
+          }
+        } finally { await reader.cancel().catch(() => {}); }
+      } catch { /* Reconnect with this process's retained map; never replay native operations. */ }
+      if (!channelStop.signal.aborted) await sleep(250);
+    }
+  };
   const inflight = new Set();
   const track = (promise) => { inflight.add(promise); promise.finally(() => inflight.delete(promise)); return promise; };
   let agentExited = false;
@@ -295,7 +371,8 @@ async function main() {
     clearInterval(heartbeat);
     clearInterval(workBeat);
     restoreTty();
-    await Promise.race([Promise.allSettled([...inflight, activity.flushed()]), sleep(2_000)]);
+    await Promise.race([Promise.allSettled([...inflight, activity.flushed(), ...[...managed.values()].map(entry => entry.reports)]), sleep(2_000)]);
+    channelStop.abort();
     process.exit(code);
   };
   const fatal = async (message, code) => {
@@ -324,9 +401,13 @@ async function main() {
   peer.onNotification("session/update", (params) => {
     if (params.sessionId !== state.sessionId || !params.update) return;
     const update = params.update;
+    if (activeManaged) submitted(activeManaged);
     const reporting = working();
     if (update.sessionUpdate === "agent_message_chunk") {
-      if (update.content?.type === "text") process.stdout.write(update.content.text);
+      if (update.content?.type === "text") {
+        process.stdout.write(update.content.text);
+        if (activeManaged?.frame.kind === "wake") activeManaged.answer.push(update.content.text);
+      }
       if (reporting && Date.now() - state.lastActive >= ACTIVE_EVERY_MS) { state.lastActive = Date.now(); activity.post("active", "agent_message"); }
     } else if (update.sessionUpdate === "tool_call") {
       say(`\n[tool] ${update.title ?? "tool"} (${update.kind ?? "other"})`);
@@ -476,7 +557,10 @@ async function main() {
     for (const ask of state.asks) ask.end("turn_cancelled");
   };
 
-  const runTurn = async (text) => {
+  const runTurn = async (input) => {
+    const entry = typeof input === "string" ? null : input;
+    const text = entry ? (entry.frame.kind === "wake" ? entry.frame.payload.question : entry.frame.payload.text) : input;
+    activeManaged = entry;
     state.running = true;
     state.turn += 1;
     state.holding = false;
@@ -486,18 +570,33 @@ async function main() {
     state.cancelRequestedAt = null;
     state.lastActive = 0;
     const turnId = String(state.turn);
+    if (entry) { entry.state = "writing"; entry.nativeTurnId = `dsh-prompt-${state.turn}`; }
     say(`\nyou ▸ ${firstLine(text)}`);
     activity.post("UserPromptSubmit", "accepted", { turnId });
     let stopReason;
     try {
       const result = await peer.request("session/prompt", { sessionId: state.sessionId, prompt: [{ type: "text", text }] });
+      if (entry) submitted(entry);
       stopReason = String(result?.stopReason ?? "unreported");
     } catch (error) {
-      if (agentExited) return;
+      if (entry && !entry.submitted && [-32600, -32601, -32602].includes(error.code)) {
+        entry.rejected = true; report(entry, "rejected", { kind: entry.frame.kind, reason: "native_prompt_rejected" });
+      }
+      if (agentExited && !entry) return;
       say(`\n[openrig-dsh] the turn failed: ${error.message}`);
       activity.post("Notification", "runtime_error", { turnId });
       stopReason = "error";
     }
+    if (entry && !entry.rejected) {
+      const completion = !entry.submitted ? "unknown" : stopReason === "cancelled" || state.cancelRequestedAt ? "interrupted"
+        : stopReason === "end_turn" && (entry.frame.kind !== "wake" || entry.answer.some(text => text.length > 0)) ? "completed"
+          : stopReason === "error" ? "failed" : "unknown";
+      report(entry, "result", { kind: entry.frame.kind, nativeTurnId: entry.nativeTurnId, completion,
+        ...(entry.frame.kind === "wake" ? { answer: completion === "completed" ? entry.answer.join("") : null } : { accepted: entry.submitted === true }),
+        ...(!entry.submitted ? { submissionUnknown: true } : {}) });
+    }
+    if (entry) entry.state = "terminal";
+    activeManaged = null;
     state.running = false;
     for (const ask of state.asks) ask.end("turn_ended");
     say(`\n── turn end (${stopReason}) ──`);
@@ -508,6 +607,8 @@ async function main() {
 
   const pump = () => {
     if (state.running || agentExited || state.queue.length === 0) return;
+    const next = state.queue[0];
+    if (typeof next !== "string" && [...managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < next.frame.sequence)) return;
     void runTurn(state.queue.shift());
   };
 
@@ -576,6 +677,7 @@ async function main() {
   say(`[openrig-dsh] DSH_HOME ${home} · DSH_PERMISSION_MODE ${agentEnv.DSH_PERMISSION_MODE}`);
   say("[openrig-dsh] each submitted message is one prompt; /abort or Ctrl-C cancels the running turn");
 
+  void connectChannel();
   heartbeat = setInterval(() => { if (!state.running && !state.holding && !agentExited) postIdle("idle_heartbeat"); }, BEAT_MS);
   // While a turn runs and nothing waits on a person: the turn is still outstanding and dsh is alive. Not progress.
   workBeat = setInterval(() => {

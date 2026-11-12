@@ -61,6 +61,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const text = message.params.prompt.map((part) => part.text).join("");
       const end = (stopReason) => reply({ stopReason });
       if (text.includes("EXIT")) process.exit(0);
+      if (text === "BUSY") { say("old unrelated output"); return setTimeout(() => end("end_turn"), 150); }
+      if (text.startsWith("WAKE:")) { if (text !== "WAKE:EMPTY") say("actual " + text); return setTimeout(() => text === "WAKE:FAIL" ? send({ id: message.id, error: { code: -32603, message: "turn failed" } }) : end(text === "WAKE:CANCEL" ? "cancelled" : text === "WAKE:UNKNOWN" ? "unreported" : "end_turn"), 100); }
       const two = ["TWOASK", "TWOTALK", "TWOQUIT"].find((word) => text.includes(word));
       if (two) {
         // Two permission requests at once; the turn ends once both are answered. After the first answer, TWOTALK says
@@ -721,5 +723,71 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(loadCommunityHarnessPreset("dsh", EXAMPLE)).toMatchObject({ ok: true, preset: {
       command: "openrig-dsh-runner.mjs", runner: true, launchResult: true, namesConversation: false, resume: false, firstInput: true,
     } });
+  });
+});
+
+
+async function nativeChannelFixture() {
+  const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
+  const streams = new Set<import("node:http").ServerResponse>();
+  let lostAck = false, lostResult = false;
+  const offer = () => {
+    const frame = frames.find(f => stages.get(String(f.requestId)) === "offered") ?? frames.find(f => !stages.has(String(f.requestId)));
+    if (!frame) return; stages.set(String(frame.requestId), "offered");
+    for (const stream of streams) stream.write(`event: request\nid: ${frame.sequence}\ndata: ${JSON.stringify(frame)}\n\n`);
+  };
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
+      res.writeHead(200, { "content-type": "text/event-stream" }); res.flushHeaders(); streams.add(res); offer(); req.on("close", () => streams.delete(res)); return;
+    }
+    let raw = ""; req.on("data", chunk => { raw += chunk; }); req.on("end", () => {
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      const reply = (value: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
+      if (req.url !== "/api/activity/runner-channel") return reply({ ok: true, tokenPersisted: true });
+      posts.push(body);
+      if (body.type === "hello") return reply({ capabilities: { input: true, wake: true, cancel: false }, receipts: [] });
+      stages.set(String(body.requestId), String(body.type));
+      if (body.type === "ack") { offer(); if (!lostAck) { lostAck = true; res.destroy(); return; } }
+      if (body.type === "result" && body.requestId === "WAKE:A" && !lostResult) { lostResult = true; res.destroy(); return; }
+      reply({ receipt: { stage: body.type } });
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => { for (const stream of streams) stream.destroy(); server.closeAllConnections(); server.close(); });
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, posts,
+    push: (ids: string[], payloadText?: string) => { for (const id of ids) frames.push({ version: 1, runId: "native-run", requestId: id, sequence: frames.length + 1,
+      kind: id.startsWith("WAKE:") ? "wake" : "input", payload: id.startsWith("WAKE:") ? { question: payloadText ?? id } : { text: payloadText ?? id } }); offer(); },
+    reconnect: () => { for (const stream of streams) stream.end(); } };
+}
+
+describe("the actual dsh runner native channel", () => {
+  it("uses one native prompt per request, queues busy wakes, and returns only dedicated answers despite lost receipt replies", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "LATER"), "all native results");
+    const prompts = requests(runner.log(), "session/prompt").map(p => (p.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts).toEqual(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    for (const id of ["WAKE:A", "WAKE:B"]) expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: id,
+      result: expect.objectContaining({ kind: "wake", answer: `actual ${id}`, completion: "completed" }) }));
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(4);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+  it("structured slash text never invokes the person's global abort parser", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:CONTROL"], "/abort");
+    await waitFor(() => channel.posts.find(post => post.type === "result" && post.requestId === "WAKE:CONTROL"), "literal answer");
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")[0]).toMatchObject({ params: { prompt: [{ type: "text", text: "/abort" }] } });
+  });
+  it.each([["CANCEL", "interrupted"], ["FAIL", "failed"], ["UNKNOWN", "unknown"], ["EMPTY", "unknown"]] as const)("terminal %s releases the wake barrier without an answer", async (suffix, completion) => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push([`WAKE:${suffix}`, "WAKE:AFTER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: `WAKE:${suffix}`, result: expect.objectContaining({ answer: null, completion }) }));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
   });
 });

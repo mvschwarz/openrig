@@ -1,10 +1,43 @@
+import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { resolveIdentitySource } from "./whoami.js";
-import { runWake, defaultWakeRunner, defaultWakeFileLocator, type WakeRunner } from "../ask-wake.js";
+import { runWake, DEFAULT_WAKE_TIMEOUT_MS, defaultWakeRunner, defaultWakeFileLocator, type WakeRunner } from "../ask-wake.js";
+
+interface NativeWakeReceipt { requestId: string; stage: string; erasedAt?: string; result?: { kind?: string; completion?: string; answer?: string | null } }
+async function askLiveRunner(client: DaemonClient, seat: string, question: string, timeoutMs: number, json: boolean): Promise<boolean> {
+  const view = await client.get<{ inputRoute?: string; nativeInput?: { wake?: boolean } }>(`/api/seat/status/${encodeURIComponent(seat)}`);
+  if (view.status >= 400 || !view.data.nativeInput?.wake && view.data.inputRoute !== "native") return false;
+  const requestId = `wake-${randomUUID()}`, path = `/api/seat/command/${encodeURIComponent(seat)}`;
+  let receipt: NativeWakeReceipt | undefined;
+  const show = (extra: Record<string, unknown> = {}) => {
+    if (json) console.log(JSON.stringify({ requestId, ...(receipt ? { receipt } : {}), ...extra }));
+    else if (receipt?.result?.completion === "completed" && typeof receipt.result.answer === "string") console.log(receipt.result.answer);
+    else console.error(`Native wake ${requestId}: ${String(extra.error ?? (extra.timedOut ? "caller wait timed out; native work remains recorded" : receipt?.result?.completion ?? receipt?.stage ?? "outcome unavailable"))}`);
+  };
+  try {
+    const submitted = await client.post<{ runnerReceipt?: NativeWakeReceipt; error?: string; reason?: string }>(path, { requestId, type: "wake", question });
+    receipt = submitted.data.runnerReceipt;
+    if (submitted.status >= 400) { show({ error: submitted.data.error ?? submitted.data.reason ?? "native wake refused" }); process.exitCode = 2; return true; }
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (receipt && receipt.requestId !== requestId) throw new Error("Native wake receipt names another request");
+      if (receipt?.erasedAt) { show({ unavailable: true, error: "native request content was erased" }); process.exitCode = 2; return true; }
+      if (receipt && ["completed", "rejected"].includes(receipt.stage)) {
+        show(); if (receipt.result?.kind !== "wake" || receipt.result.completion !== "completed" || typeof receipt.result.answer !== "string") process.exitCode = 2;
+        return true;
+      }
+      if (Date.now() >= deadline) { show({ timedOut: true }); process.exitCode = 2; return true; }
+      const lookup = await client.get<{ receipt?: NativeWakeReceipt }>(`${path}?requestId=${encodeURIComponent(requestId)}`);
+      if (lookup.status >= 400 || !lookup.data.receipt) throw new Error("Retained native result is unavailable; refresh this request ID");
+      receipt = lookup.data.receipt;
+      if (!["completed", "rejected"].includes(receipt.stage)) await new Promise(resolve => setTimeout(resolve, Math.min(100, Math.max(0, deadline - Date.now()))));
+    }
+  } catch (error) { show({ unavailable: true, error: (error as Error).message }); process.exitCode = 2; return true; }
+}
 
 interface AskRigInfo {
   name: string;
@@ -160,6 +193,7 @@ Exit codes:
         }
         const client = deps.clientFactory(getDaemonUrl(status));
         const { seat, generation } = parseSeatGen(target);
+        if (generation === undefined && await askLiveRunner(client, seat, question, timeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS, opts.json ?? false)) return;
         const res = await client.post<WakeResolution>("/api/wake-resolve", { seat, generation });
         if (res.status >= 400) {
           console.error(`Failed to resolve seat (HTTP ${res.status}). Check daemon status with: rig status`);

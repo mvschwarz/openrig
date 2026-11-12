@@ -210,6 +210,13 @@ describe("native runner receipts", () => {
     expect(outbox.runnerReceipt("second")).toBeNull();
     expect(outbox.claimForDelivery("second")).toBe(false);
   });
+  it("retains terminal native submission uncertainty without claiming delivery", () => {
+    outbox.admitRunner(input()); outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted");
+    const result = { kind: "input", completion: "unknown", submissionUnknown: true };
+    expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result }).result).toEqual(result);
+    expect(outbox.getById("native-1")?.deliveryState).toBe("indeterminate");
+  });
   it("reconciles lost receiver memory as uncertainty without reoffering", () => {
     outbox.admitRunner(input());
     outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
