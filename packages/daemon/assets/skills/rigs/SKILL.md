@@ -62,7 +62,9 @@ person needs in their project or home folder and name that path.
   start" in https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md#before-you-start. Setup
   checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen harness (with npm) if
   either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`), and adds an OpenRig
-  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
+  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`. A login it reports
+  missing isn't harmless: say which one, and that a team may need it (`starter` runs its reviewer on Codex). Pass it on
+  in the handoff so the operator fits the team before anything starts.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -167,7 +169,8 @@ person needs in their project or home folder and name that path.
   (never the logical ID or a guessed name) and send:
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
   If the person stays here, replace "The person will answer in your pane" with "The person stays with me; send me your questions and
-  results to relay." Carry their constraints and any permission choice they made, chosen or declined, in either handoff.
+  results to relay." Carry their constraints, which logins they have (an installed provider that isn't signed in
+  doesn't count), and any permission choice they made, chosen or declined, in either handoff.
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay

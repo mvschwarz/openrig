@@ -674,7 +674,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       console.log("");
       console.log(healthy ? "No failures in the checks above. Review any WARN or SKIP rows." : "Some checks failed. Review the FAIL rows and their fixes above.");
       console.log("Authentication checks report local provider facts; no agent task or provider request was tested.");
-      console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
+      console.log("A harness needs a login only when a seat you start runs on it. A built-in team can use one you didn't select: starter runs its reviewer on Codex. `rig specs preview <team> --kind rig --json` lists each seat's runtime.");
       console.log("A credential variable being set does not prove the provider accepts it or that managed seats receive it.");
       console.log("Inspect your team with `rig ps --nodes --rig <rig>` and `rig capture <seat> --lines 30`.");
       if (!healthy) process.exitCode = 1;
