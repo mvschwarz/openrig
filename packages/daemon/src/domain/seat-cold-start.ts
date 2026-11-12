@@ -35,6 +35,7 @@
 import type Database from "better-sqlite3";
 import { parseSessionName } from "./session-name.js";
 import type { RigSpec } from "./types.js";
+import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
@@ -155,6 +156,7 @@ export function classifyColdStartLaunch(logicalId: string, result: ColdStartLaun
 
 export interface SeatColdStartDeps {
   db: Database.Database;
+  deliveryGuard: Pick<SeatDeliveryGuard, "lifecycle">;
   /** The existing single-seat launch door (`rig launch`): resumes or fresh-primes per restore policy. */
   launchSingleNode: (rigId: string, logicalId: string) => Promise<ColdStartLaunchResult>;
   /** Live tmux probe; the same adapter the queue's transport uses. */
@@ -235,18 +237,27 @@ export class SeatColdStarter {
     const now = this.currentTime();
     try {
       if (!await this.eligible(seat, now)) return;
-      // Claim the attempt window BEFORE the (slow) launch. The in-memory join above covers
-      // simultaneous arrivals; this row covers a second drain pass, a ladder retry, or a
-      // restart mid-launch, so one dormant seat still gets exactly one launch per window.
-      this.record(seat.nodeId, "launching", "in_flight", now.toISOString());
-      const result = await this.deps.launchSingleNode(seat.rigId, seat.logicalId);
-      const outcome = classifyColdStartLaunch(seat.logicalId, result);
-      const success = outcome.kind === "resumed" || outcome.kind === "fresh_primed" || outcome.kind === "already_running";
-      const label = outcome.kind === "failed" || outcome.kind === "awaiting_decision"
-        ? `${outcome.kind}:${outcome.error}`
-        : outcome.kind;
-      this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
-      this.log(`${seat.logicalId}: ${label}`);
+      await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+        // No await between the final eligibility read and the launch door. The door joins
+        // this same lease, so a supported stop cannot commit in its launch preflight.
+        const current = this.resolveSeat(seat.logicalId, seat.rigName, seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`);
+        if (!current || current.nodeId !== seat.nodeId || current.rigId !== seat.rigId
+          || current.logicalId !== seat.logicalId || current.boundSession !== seat.boundSession) return;
+        const refusal = this.selectionRefusal(current) ?? this.ledgerRefuses(seat.nodeId, this.currentTime());
+        if (refusal) { this.log(`${seat.logicalId}: not cold-starting: ${refusal}`); return; }
+        // Claim the attempt window BEFORE the (slow) launch. The in-memory join above covers
+        // simultaneous arrivals; this row covers a second drain pass, a ladder retry, or a
+        // restart mid-launch, so one dormant seat still gets exactly one launch per window.
+        this.record(seat.nodeId, "launching", "in_flight", now.toISOString());
+        const result = await this.deps.launchSingleNode(seat.rigId, seat.logicalId);
+        const outcome = classifyColdStartLaunch(seat.logicalId, result);
+        const success = outcome.kind === "resumed" || outcome.kind === "fresh_primed" || outcome.kind === "already_running";
+        const label = outcome.kind === "failed" || outcome.kind === "awaiting_decision"
+          ? `${outcome.kind}:${outcome.error}`
+          : outcome.kind;
+        this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
+        this.log(`${seat.logicalId}: ${label}`);
+      });
     } catch (err) {
       this.record(seat.nodeId, "failed:exception", "failed", this.currentTime().toISOString());
       this.log(`${seat.logicalId}: attempt threw: ${err instanceof Error ? err.message : String(err)}`);
@@ -265,25 +276,8 @@ export class SeatColdStarter {
     if (ledger === "interval") return refuse("an attempt was made recently");
     if (ledger === "failures") return refuse("too many consecutive failed attempts");
 
-    // Opt-in: the seat must still be in its persisted rig spec with the flag set
-    // (member wins over pod default). No recipe — pre-recipe seat, terminal node,
-    // or a member removed from the spec (deleted seat) — never cold-starts.
-    const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
-    const dot = seat.logicalId.indexOf(".");
-    const podId = dot > 0 ? seat.logicalId.slice(0, dot) : seat.logicalId;
-    const memberId = dot > 0 ? seat.logicalId.slice(dot + 1) : seat.logicalId;
-    const specPod = recipe?.rigSpec.pods.find(pod => pod.id === podId);
-    const specMember = specPod?.members.find(member => member.id === memberId);
-    if (!recipe || !specMember) return refuse("seat is not in the current rig spec");
-    if (!((specMember.coldStart ?? specPod?.coldStart) === true)) return refuse("no cold_start opt-in for this seat");
-
-    // WHO stopped the seat decides whether new work may wake it (maintainer term 1).
-    const stop = classifyColdStartStop(this.deps.db, seat.nodeId);
-    if (stop.kind === "intentional") {
-      return refuse(stop.operator
-        ? `seat was stopped intentionally by '${stop.operator}'${stop.reason ? ` (${stop.reason})` : ""}`
-        : "seat was stopped intentionally (no revivable daemon stop recorded)");
-    }
+    const selection = this.selectionRefusal(seat);
+    if (selection) return refuse(selection);
 
     // The queue said no receiver; verify — a live session means someone is there.
     const physical = seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`;
@@ -300,6 +294,29 @@ export class SeatColdStarter {
       try { if (await this.deps.hasSession(peer.session_name)) return true; } catch { /* try the next peer */ }
     }
     return refuse("no other seat of this rig is live (rig down)");
+  }
+
+  private selectionRefusal(seat: SeatRow): string | null {
+    // Opt-in: the seat must still be in its persisted rig spec with the flag set
+    // (member wins over pod default). No recipe — pre-recipe seat, terminal node,
+    // or a member removed from the spec (deleted seat) — never cold-starts.
+    const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
+    const dot = seat.logicalId.indexOf(".");
+    const podId = dot > 0 ? seat.logicalId.slice(0, dot) : seat.logicalId;
+    const memberId = dot > 0 ? seat.logicalId.slice(dot + 1) : seat.logicalId;
+    const specPod = recipe?.rigSpec.pods.find(pod => pod.id === podId);
+    const specMember = specPod?.members.find(member => member.id === memberId);
+    if (!recipe || !specMember) return "seat is not in the current rig spec";
+    if (!((specMember.coldStart ?? specPod?.coldStart) === true)) return "no cold_start opt-in for this seat";
+
+    // WHO stopped the seat decides whether new work may wake it (maintainer term 1).
+    const stop = classifyColdStartStop(this.deps.db, seat.nodeId);
+    if (stop.kind === "intentional") {
+      return stop.operator
+        ? `seat was stopped intentionally by '${stop.operator}'${stop.reason ? ` (${stop.reason})` : ""}`
+        : "seat was stopped intentionally (no revivable daemon stop recorded)";
+    }
+    return null;
   }
 
   /** Durable ledger: the attempt window opens at launch, then records the outcome.

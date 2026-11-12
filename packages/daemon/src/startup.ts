@@ -863,6 +863,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // closed to awaiting-decision).
   let coldStartLaunch: ((rigId: string, logicalId: string) => Promise<{ ok: boolean; code?: string; message?: string }>) | undefined;
   const seatColdStarter = new SeatColdStarter({
+    deliveryGuard,
     db,
     launchSingleNode: (rigId, logicalId) => coldStartLaunch
       ? coldStartLaunch(rigId, logicalId)

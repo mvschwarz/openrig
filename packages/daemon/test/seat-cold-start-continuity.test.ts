@@ -11,7 +11,7 @@
 // These tests drive the real RestoreOrchestrator.launchSingleNode over a real migrated
 // database and a real captured snapshot; only tmux and the Pi resume adapter are fakes.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -24,8 +24,10 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import { SeatColdStarter } from "../src/domain/seat-cold-start.js";
 import { QueueRepository as QueueRepo } from "../src/domain/queue-repository.js";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import type { RigSpec } from "../src/domain/types.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 const RIG = "pi-continuity";
 const SEAT_SESSION = "dev-impl@pi-continuity";
@@ -74,12 +76,15 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
   let rigId: string;
   let implNodeId: string;
   let implSessionIdValue: string;
+  let deliveryGuard: SeatDeliveryGuard;
 
   beforeEach(() => {
-    db = createFullTestDb();
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
+    deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
     snapshotRepo = new SnapshotRepository(db);
     snapshotCapture = new SnapshotCapture({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore: new CheckpointStore(db),
@@ -113,6 +118,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
 
   function orchestratorWith(pi: PiResumeAdapter): RestoreOrchestrator {
     const tmux = tmuxWithLivePeer();
+    tmux.deliveryGuard = deliveryGuard;
     return new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
       checkpointStore: new CheckpointStore(db),
@@ -128,6 +134,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     const tmux = tmuxWithLivePeer();
     return new SeatColdStarter({
       db,
+      deliveryGuard,
       launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId),
       hasSession: name => tmux.hasSession(name),
       getNodeLaunchRecipe: () => recipeWithColdStart(),

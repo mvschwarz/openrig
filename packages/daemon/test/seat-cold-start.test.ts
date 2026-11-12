@@ -15,6 +15,7 @@ import {
   type SeatColdStartDeps,
 } from "../src/domain/seat-cold-start.js";
 import type { RigSpec } from "../src/domain/types.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 function specWith(coldStart: { member?: boolean; pod?: boolean }): { rigSpec: RigSpec } {
   return {
@@ -90,6 +91,7 @@ function fixture(opts?: FixtureOptions): Fixture {
   const logs: string[] = [];
   const deps: SeatColdStartDeps = {
     db,
+    deliveryGuard: new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target)),
     launchSingleNode: async (rigId, logicalId) => {
       launches.push({ rigId, logicalId });
       return { ok: true, launched: [{ logicalId, status: "resumed" }] };
@@ -307,6 +309,44 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     const f = fixture();
     f.setLiveSessions(["dev-impl@fleet", "dev-rev@fleet"]);
     f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    f.db.close();
+  });
+
+  it.each(["stop", "opt-out", "identity"])("rechecks %s after awaited probes and before launch", async change => {
+    const f = fixture();
+    f.deps.hasSession = async name => {
+      if (name !== "dev-rev@fleet") return false;
+      if (change === "stop") f.db.prepare("UPDATE sessions SET intentionally_stopped=1 WHERE id='s1'").run();
+      if (change === "opt-out") f.setRecipe(specWith({ member: false }));
+      if (change === "identity") f.db.prepare("UPDATE nodes SET logical_id='dev.replacement' WHERE id='n1'").run();
+      return true;
+    };
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    f.db.close();
+  });
+
+  it("rechecks a stop committed while waiting for the lifecycle lease", async () => {
+    const f = fixture();
+    const guard = new SeatDeliveryGuard(f.db, target => resolveGuardTarget(f.db, target));
+    f.deps.deliveryGuard = guard;
+    let release = (): void => {};
+    let holding = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const stopping = guard.lifecycle(["n1"], async () => {
+      holding = true;
+      await gate;
+      f.db.prepare("UPDATE sessions SET intentionally_stopped=1 WHERE id='s1'").run();
+    });
+    await vi.waitFor(() => expect(holding).toBe(true));
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    release();
+    await stopping;
     await flush();
     expect(f.launches).toHaveLength(0);
     f.db.close();
