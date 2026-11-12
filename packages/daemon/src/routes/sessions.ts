@@ -51,14 +51,18 @@ const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.C
 /** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
  *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
  *  /healthz, a queue read) waited for all of them; now it waits for one step. Steps that await I/O run outside. */
-let inventoryTurn: Promise<unknown> = Promise.resolve();
-function inventoryStep<T>(work: () => T): Promise<Awaited<T>> {
-  const run = inventoryTurn.then(async () => {
+let inventoryTurn: Promise<void> = Promise.resolve();
+async function inventoryStep<T>(work: () => T): Promise<Awaited<T>> {
+  const previous = inventoryTurn;
+  let release = () => {};
+  inventoryTurn = new Promise<void>((resolve) => { release = () => resolve(); });
+  try {
+    await previous;
     await new Promise<void>((resolve) => setImmediate(resolve));
     return await work();
-  });
-  inventoryTurn = run.catch(() => {});
-  return run;
+  } finally {
+    release();
+  }
 }
 
 function terminalAuthGuard(): MiddlewareHandler {
