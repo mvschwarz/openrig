@@ -49,7 +49,7 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
   it("records the principal only for transport:v1 from a loopback peer with the closed shape; otherwise exactly today's stamp", () => {
     const direct = { "X-OpenRig-Session": "alice@team", "X-OpenRig-Principal": ALICE };
     const attributed = { provenance: "transport:v1" as const };
-    expect(resolveRecordedIdentity(request(direct), attributed)).toEqual({ identityProvenance: "principal:v1", identityPrincipal: ALICE });
+    expect(resolveRecordedIdentity(request(direct), attributed)).toEqual({ identityProvenance: "principal:v1", identityPrincipal: ALICE, claimedOrigin: null });
     expect(resolveRecordedIdentity(request(direct, "::ffff:127.0.0.1"), attributed).identityProvenance).toBe("principal:v1");
     expect(resolveRecordedIdentity(request({ ...direct, "X-OpenRig-Principal": GRANT_SERVICE }, "::1"), attributed).identityPrincipal).toBe(GRANT_SERVICE);
 
@@ -65,7 +65,7 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
         [`a forwarded request (${name})`, request({ ...direct, [name]: "203.0.113.7" }), attributed, "transport:v1"] as [string, Context, typeof attributed, string]),
     ];
     for (const [, c, identity, expected] of unchanged) {
-      expect(resolveRecordedIdentity(c, identity)).toEqual({ identityProvenance: expected, identityPrincipal: null });
+      expect(resolveRecordedIdentity(c, identity)).toEqual({ identityProvenance: expected, identityPrincipal: null, claimedOrigin: null });
     }
   });
 

@@ -14,7 +14,7 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, claimedOriginFor, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -840,7 +840,7 @@ export function queueRoutes(): Hono {
     { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
       const recorded = resolveRecordedIdentity(c, identity);
-      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", recorded.identityProvenance, recorded.identityPrincipal);
+      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", recorded.identityProvenance, recorded.identityPrincipal, recorded.claimedOrigin);
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -1093,6 +1093,7 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+        claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
       });
       const advisory = destinationAdvisory(c, result.created.destinationSession);
       return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
@@ -1599,6 +1600,7 @@ export function queueRoutes(): Hono {
         urgency: body.urgency,
         auditPointer: body.auditPointer,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 (or relay:v1 on a relayed hop) — no body sender is read, so claimed:v1 cannot arise here
+        claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
       });
       return c.json(entry, 201);
     } catch (err) {
@@ -1676,6 +1678,7 @@ export function queueRoutes(): Hono {
       urgency: body.urgency,
       auditPointer: body.auditPointer,
       identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+      claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
     });
     return c.json(entry, 201);
   });

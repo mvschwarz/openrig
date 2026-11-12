@@ -1972,6 +1972,8 @@ export interface SendOpts {
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
   identityPrincipal?: string;
+  /** Internal: the claimed origin a non-local caller reported (`#3018`), recorded as evidence only, never the actor. */
+  claimedOrigin?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;
   /** Internal: this send is OpenRig's own (a watchdog, a scheduler wake, a notice, the compaction enforcer). Never accepted
@@ -2784,7 +2786,7 @@ export class SessionTransport {
           if (opts?.committedOutboxIds && !prior) throw new DeliveryGuardError("delivery_identity_conflict", "Committed input ID is missing.");
           outbox.bindExpectedIdentity(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
             outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text,
-            identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal,
+            identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, claimedOrigin: opts?.claimedOrigin,
           }, expected!);
         }
       })();
@@ -2913,7 +2915,7 @@ export class SessionTransport {
             if (opts?.committedOutboxIds && (!prior || prior.destinationSession !== sessionName)) throw new Error("Committed wake target/ID mismatch");
             outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
-              identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
+              identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, claimedOrigin: opts?.claimedOrigin, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds, { sameSend: ids });
           }
         })();

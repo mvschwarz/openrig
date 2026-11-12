@@ -19,6 +19,8 @@ export interface InboxEntry {
   deniedAt: string | null;
   deniedReason: string | null;
   auditPointer: string | null;
+  /** The origin a non-local sender reported about itself (`#3018`), claimed evidence: never verified, never the actor. */
+  claimedOrigin: string | null;
 }
 
 interface InboxEntryRow {
@@ -35,6 +37,7 @@ interface InboxEntryRow {
   denied_at: string | null;
   denied_reason: string | null;
   audit_pointer: string | null;
+  claimed_origin?: string | null;
 }
 
 export interface InboxDropInput {
@@ -48,6 +51,8 @@ export interface InboxDropInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (senderSession derived from the transport
    *  header chokepoint). Written onto the channel-of-record row; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity). Absent or invalid reads as unknown. */
+  claimedOrigin?: string | null;
 }
 
 export class InboxHandlerError extends Error {
@@ -82,6 +87,7 @@ export class InboxHandler {
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
+  private readonly hasClaimedOriginColumn: boolean;
 
   constructor(
     db: Database.Database,
@@ -97,6 +103,9 @@ export class InboxHandler {
     this.hasIdentityProvenanceColumn = (
       this.db.prepare("PRAGMA table_info(inbox_entries)").all() as Array<{ name: string }>
     ).some((col) => col.name === "identity_provenance");
+    this.hasClaimedOriginColumn = (
+      this.db.prepare("PRAGMA table_info(inbox_entries)").all() as Array<{ name: string }>
+    ).some((col) => col.name === "claimed_origin");
   }
 
   drop(input: InboxDropInput): InboxEntry {
@@ -110,11 +119,13 @@ export class InboxHandler {
     const urgency = input.urgency ?? "routine";
 
     if (this.hasIdentityProvenanceColumn) {
+      // The claimed origin is evidence beside the stamp, never part of it: recorded only where the column exists.
+      const claimedOrigin = this.hasClaimedOriginColumn ? input.claimedOrigin ?? null : null;
       this.db
         .prepare(
           `INSERT INTO inbox_entries (
-            inbox_id, destination_session, sender_session, body, tags, urgency, ts_dropped, audit_pointer, identity_provenance
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            inbox_id, destination_session, sender_session, body, tags, urgency, ts_dropped, audit_pointer, identity_provenance${claimedOrigin ? ", claimed_origin" : ""}
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${claimedOrigin ? ", ?" : ""})`
         )
         .run(
           id,
@@ -125,7 +136,8 @@ export class InboxHandler {
           urgency,
           ts,
           input.auditPointer ?? null,
-          input.identityProvenance ?? null
+          input.identityProvenance ?? null,
+          ...(claimedOrigin ? [claimedOrigin] : [])
         );
     } else {
       this.db
@@ -307,6 +319,7 @@ export class InboxHandler {
       deniedAt: row.denied_at,
       deniedReason: row.denied_reason,
       auditPointer: row.audit_pointer,
+      claimedOrigin: row.claimed_origin ?? null,
     };
   }
 }

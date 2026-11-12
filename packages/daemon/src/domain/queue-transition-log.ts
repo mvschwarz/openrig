@@ -221,6 +221,9 @@ export interface QueueTransition {
   /** With `principal:v1`: the caller the local MCP adapter checked a grant for (JSON: source, id, and for a
    *  grant-service grant its id and version). Null on every other row. */
   identityPrincipal: string | null;
+  /** The origin a non-local caller reported about itself (`#3018`), recorded as CLAIMED: the third segment of a
+   *  session-with-origin transport header. Never verified, never an actor/permission input; null = unknown. */
+  claimedOrigin: string | null;
   ownerNotificationKind: string | null;
   ownerNotificationLevel: OwnerNotificationLevel;
 }
@@ -237,6 +240,9 @@ export interface QueueTransitionInput {
   identityProvenance?: string | null;
   /** Recorded only with identityProvenance `principal:v1` (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** The reported origin of a non-local caller (resolveRecordedIdentity). Recorded as claimed evidence; absent or
+   *  invalid reads as unknown. */
+  claimedOrigin?: string | null;
   ownerNotificationKind?: string | null;
   ownerNotificationLevel?: OwnerNotificationLevel | null;
 }
@@ -278,6 +284,7 @@ interface QueueTransitionRow {
   closure_target: string | null;
   identity_provenance?: string | null;
   identity_principal?: string | null;
+  claimed_origin?: string | null;
   owner_notification_kind?: string | null;
   owner_notification_level?: string | null;
 }
@@ -375,6 +382,7 @@ export class QueueTransitionLog {
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly hasIdentityPrincipalColumn: boolean;
+  private readonly hasClaimedOriginColumn: boolean;
   private readonly historySource: string;
   /** The history tables this schema has: the live table, and the archive where it exists. */
   private readonly historyTables: string[];
@@ -389,10 +397,11 @@ export class QueueTransitionLog {
     );
     this.hasOwnerNotificationColumns = columns.has("owner_notification_kind") && columns.has("owner_notification_level");
     this.hasIdentityPrincipalColumn = columns.has("identity_principal");
+    this.hasClaimedOriginColumn = columns.has("claimed_origin");
     // One explicit projection for all history readers, including old nullable schemas.
     // SELECT * cannot union the archive's extra archived_at column with the live table.
     const fields = ["transition_id", "qitem_id", "ts", "state", "transition_note", "actor_session",
-      "closure_reason", "closure_target", "identity_provenance", "identity_principal", "owner_notification_kind", "owner_notification_level"];
+      "closure_reason", "closure_target", "identity_provenance", "identity_principal", "claimed_origin", "owner_notification_kind", "owner_notification_level"];
     this.historyTables = [];
     const sources = ["queue_transitions", "queue_transitions_archive"].flatMap((table) => {
       const available = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
@@ -430,6 +439,12 @@ export class QueueTransitionLog {
     if (principal) {
       columns.push("identity_principal");
       values.push(principal);
+    }
+    // Claimed evidence, kept whether or not a principal was: a schema without the column records today's row instead.
+    const claimedOrigin = this.hasClaimedOriginColumn ? input.claimedOrigin ?? null : null;
+    if (claimedOrigin) {
+      columns.push("claimed_origin");
+      values.push(claimedOrigin);
     }
     if (this.hasOwnerNotificationColumns) {
       columns.push("owner_notification_kind", "owner_notification_level");
@@ -842,6 +857,7 @@ export class QueueTransitionLog {
       closureTarget: row.closure_target,
       identityProvenance: row.identity_provenance ?? null,
       identityPrincipal: row.identity_principal ?? null,
+      claimedOrigin: row.claimed_origin ?? null,
       ownerNotificationKind: row.owner_notification_kind ?? null,
       ownerNotificationLevel: OWNER_NOTIFICATION_LEVELS.includes(row.owner_notification_level as OwnerNotificationLevel)
         ? row.owner_notification_level as OwnerNotificationLevel

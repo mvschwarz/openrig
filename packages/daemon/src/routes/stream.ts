@@ -4,7 +4,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import { StreamCursorExpiredError, type StreamStore } from "../domain/stream-store.js";
 import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
 import { ReaderActionError, readerActions, recordReaderAction } from "../domain/stream-reader-actions.js";
-import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, claimedOriginFor } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
 
 const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -86,6 +86,7 @@ export function streamRoutes(): Hono {
       hintTags: body.hintTags ?? null,
       interrupt: body.interrupt,
       identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+      claimedOrigin: claimedOriginFor(c),
     });
     return c.json(item, 201);
   });

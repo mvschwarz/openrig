@@ -2,7 +2,7 @@ import { expectedConversation, type ExpectedConversation } from "../domain/expec
 import { Hono, type Context } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import { requireSenderIdentity, resolveRecordedIdentity, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedIdentity, claimedOriginFor, transportSenderSession } from "./require-sender-identity.js";
 import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
@@ -112,9 +112,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // The MCP adapter's caller, on a direct attributed send, for every outbox row this send writes (guarded, retained or the
     // audit record below); otherwise the stamp this route has always recorded.
     const attributed = derivedActor ? resolveRecordedIdentity(c, { provenance: "transport:v1" }) : null;
+    // The claimed origin rides beside the stamp on every row this send writes: claimed evidence, never identity.
+    const claimedOrigin = claimedOriginFor(c) ?? undefined;
     const sendIdentity = attributed?.identityPrincipal
-      ? { identityProvenance: "principal:v1", identityPrincipal: attributed.identityPrincipal }
-      : derivedActor ? { identityProvenance: "transport:v1" } : {};
+      ? { identityProvenance: "principal:v1", identityPrincipal: attributed.identityPrincipal, claimedOrigin }
+      : derivedActor ? { identityProvenance: "transport:v1", claimedOrigin } : {};
     // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
     const db = c.get("db" as never) as Database.Database;
     const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
@@ -396,7 +398,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       actorSession: derivedActor, // transport-derived, never the body claim
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
-      ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
+      ...(derivedActor ? { identityProvenance: "transport:v1", claimedOrigin: claimedOriginFor(c) ?? undefined } : {}),
       // Recipients not yet started when the caller goes away are not written; started ones keep their results.
       signal: c.req.raw.signal,
     });
@@ -419,6 +421,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
               destinationSession: r.sessionName,
               body: body.text,
               identityProvenance: "transport:v1",
+              claimedOrigin: claimedOriginFor(c) ?? undefined,
             });
             if (r.ok) outbox.markDelivered(entry.outboxId);
             else if (r.inputPhase === "attempted" || r.inputPhase === "written" || r.sent === true) outbox.markIndeterminate(entry.outboxId);

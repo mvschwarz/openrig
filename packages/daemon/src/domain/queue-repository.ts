@@ -467,6 +467,9 @@ export interface QueueCreateInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity): the origin a non-local caller reported. Recorded
+   *  unvalidated; absent or invalid reads as unknown, and it never derives the actor. */
+  claimedOrigin?: string | null;
 }
 
 export interface QueueUpdateInput {
@@ -533,6 +536,9 @@ export interface QueueUpdateInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity): the origin a non-local caller reported. Recorded
+   *  unvalidated; absent or invalid reads as unknown, and it never derives the actor. */
+  claimedOrigin?: string | null;
   /** System-owned ceremony kind. Never exposed as a free-form route field. */
   ownerNotificationKind?: "human-decision-resolved";
 }
@@ -563,6 +569,9 @@ export interface QueueHandoffInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity): the origin a non-local caller reported. Recorded
+   *  unvalidated; absent or invalid reads as unknown, and it never derives the actor. */
+  claimedOrigin?: string | null;
   /** As on create: a handoff to a person lands on Steering, and true also sends one Slack alert. */
   humanAlert?: boolean;
 }
@@ -584,6 +593,9 @@ export interface QueueClaimInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity): the origin a non-local caller reported. Recorded
+   *  unvalidated; absent or invalid reads as unknown, and it never derives the actor. */
+  claimedOrigin?: string | null;
 }
 
 export interface QueueListOptions {
@@ -2447,6 +2459,7 @@ export class QueueRepository {
       transitionNote: "created",
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       identityPrincipal: input.identityPrincipal ?? null,
+      claimedOrigin: input.claimedOrigin ?? null,
       ownerNotificationKind: notification?.kind,
       ownerNotificationLevel: notification?.level,
     });
@@ -2622,6 +2635,7 @@ export class QueueRepository {
         closureTarget: input.toSession,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
+        claimedOrigin: input.claimedOrigin ?? null,
       });
 
       // OPR.0.5.8.1 S1b — THE ROUTE THE FOUNDING SPECIMEN TOOK. Row b7a70333 went
@@ -2667,6 +2681,7 @@ export class QueueRepository {
         transitionNote: `handoff from ${source.qitemId}`,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
+        claimedOrigin: input.claimedOrigin ?? null,
         ownerNotificationKind: successorNotification?.kind,
         ownerNotificationLevel: successorNotification?.level,
       });
@@ -2806,6 +2821,7 @@ export class QueueRepository {
         closureTarget: input.toSession,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
+        claimedOrigin: input.claimedOrigin ?? null,
       });
 
       // OPR.0.5.8.1 S1b — same structural bypass as handoff(): own transaction,
@@ -3197,6 +3213,7 @@ export class QueueRepository {
         closureTarget: qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
+        claimedOrigin: input.claimedOrigin ?? null,
       });
 
       // OPR.0.5.8.1 S1b — CLAIM-RESUME. A blocked row is claimable ("only
@@ -3222,7 +3239,7 @@ export class QueueRepository {
     return this.getByIdOrThrow(input.qitemId);
   }
 
-  unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null, identityPrincipal?: string | null): QueueItem {
+  unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null, identityPrincipal?: string | null, claimedOrigin?: string | null): QueueItem {
     const qitem = this.getById(qitemId);
     if (!qitem) {
       throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
@@ -3257,6 +3274,7 @@ export class QueueRepository {
         transitionNote: `unclaimed: ${reason}`,
         identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: identityPrincipal ?? null,
+        claimedOrigin: claimedOrigin ?? null,
       });
 
       return this.eventBus.persistWithinTransaction({
@@ -3440,6 +3458,7 @@ export class QueueRepository {
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
         identityProvenance: input.identityProvenance ?? null,
         identityPrincipal: input.identityPrincipal ?? null,
+        claimedOrigin: input.claimedOrigin ?? null,
       });
       const persistedEvent = this.eventBus.persistWithinTransaction({
         type: "queue.updated",
@@ -3831,6 +3850,7 @@ export class QueueRepository {
       closureTarget: validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       identityPrincipal: input.identityPrincipal ?? null,
+      claimedOrigin: input.claimedOrigin ?? null,
       ownerNotificationKind: notification?.kind,
       ownerNotificationLevel: notification?.level,
     });

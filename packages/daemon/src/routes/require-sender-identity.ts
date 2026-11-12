@@ -64,6 +64,32 @@ export function transportSenderSession(c: Context): string | undefined {
   return raw ? canonicalSenderSession(raw) : undefined;
 }
 
+/**
+ * `#3018` reported-origin evidence — the bound and the alphabet a reported origin must fit. It is a host id, so it
+ * uses the registry's own id alphabet (letters, digits, dot, underscore, dash, starting with a letter or digit: the
+ * rules hosts-registry-reader.ts enforces on `id`/`hostId`), bounded so a garbage header can't store a wall of text.
+ * FORM ONLY: passing these rules never means the hop was reached, and nothing here is a permission input.
+ */
+export const MAX_CLAIMED_ORIGIN_LENGTH = 128;
+const CLAIMED_ORIGIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The origin a REMOTE caller reported about itself, from the session-with-origin form (`seat@rig@originHost`) of the
+ * transport header. The third segment is what the caller CLAIMS its origin hop was — the receiving hop cannot verify
+ * it, so it is recorded as claimed evidence and never as identity. Returns null (unknown) for every other shape: a
+ * bare/2-part session, empty parts, a non-host third segment, or one past the bound. A malformed claim is unknown,
+ * never a reason to refuse the write.
+ */
+export function parseClaimedOrigin(sessionHeader: string | undefined): string | null {
+  const raw = sessionHeader?.trim();
+  if (!raw) return null;
+  const parts = raw.split("@");
+  if (parts.length !== 3 || parts.some((part) => !part)) return null;
+  const origin = parts[2];
+  if (!origin || origin.length > MAX_CLAIMED_ORIGIN_LENGTH) return null;
+  return CLAIMED_ORIGIN_PATTERN.test(origin) ? origin : null;
+}
+
 function transportProvenance(c: Context): Exclude<IdentityProvenance, "relay:v1"> {
   return c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? "origin-unknown:v1" : "transport:v1";
 }
@@ -250,19 +276,43 @@ function fromLoopbackPeer(c: Context): boolean {
  *  local client, whatever its address. A forwarder that adds none can't be told apart here. */
 const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via"];
 
+/** Whether this request is a direct local client: a loopback peer that carries no forwarding header. */
+function fromDirectLocalClient(c: Context): boolean {
+  return fromLoopbackPeer(c) && !FORWARDING_HEADERS.some((name) => c.req.header(name) !== undefined);
+}
+
+/**
+ * `#3018` — the reported origin this request carries, or null (unknown). Recorded ONLY when the request did not come
+ * from a direct local client: a direct local request's session already lives on this host, so its third segment is not
+ * an origin claim (and the self-id suffix is stripped by canonicalSenderSession anyway). Everything else — a
+ * non-loopback peer, a loopback peer with forwarding headers — is another hop, and the session-with-origin form's third
+ * segment is that hop's CLAIM about where the caller came from. It is recorded as-is or not at all: this is evidence,
+ * never identity, and it takes no part in permission, actor derivation, or refusal.
+ */
+export function claimedOriginFor(c: Context): string | null {
+  if (fromDirectLocalClient(c)) return null;
+  return parseClaimedOrigin(c.req.header(SENDER_IDENTITY_HEADER));
+}
+
 /**
  * What one of those four stores records for a request: `principal:v1` with the principal only when the request is DIRECT
  * and ATTRIBUTED (resolveRecordedProvenance says transport:v1: the header named the seat at this hop, not relayed, not
  * origin-unknown, not claimed), its peer is loopback with no forwarding header, and its principal header is exactly the
  * closed shape. Otherwise exactly what resolveRecordedProvenance records today, and no principal. Nothing here can
  * strengthen a relayed, unknown-origin or claimed actor, and a remote or forwarded caller can't supply the principal.
+ *
+ * `claimedOrigin` rides beside both, decided by its own rule (claimedOriginFor): the origin a remote caller reported,
+ * labelled claimed by its column and never folded into the provenance, the principal, or the actor.
  */
 export function resolveRecordedIdentity(
   c: Context,
   identity: { provenance: Exclude<IdentityProvenance, "relay:v1"> },
-): { identityProvenance: RecordedProvenance; identityPrincipal: string | null } {
+): { identityProvenance: RecordedProvenance; identityPrincipal: string | null; claimedOrigin: string | null } {
   const provenance = resolveRecordedProvenance(c, identity);
-  const local = fromLoopbackPeer(c) && !FORWARDING_HEADERS.some((name) => c.req.header(name) !== undefined);
+  const local = fromDirectLocalClient(c);
   const principal = provenance === "transport:v1" && local ? parseIdentityPrincipal(c.req.header(IDENTITY_PRINCIPAL_HEADER)) : null;
-  return principal ? { identityProvenance: "principal:v1", identityPrincipal: principal } : { identityProvenance: provenance, identityPrincipal: null };
+  const claimedOrigin = claimedOriginFor(c);
+  return principal
+    ? { identityProvenance: "principal:v1", identityPrincipal: principal, claimedOrigin }
+    : { identityProvenance: provenance, identityPrincipal: null, claimedOrigin };
 }

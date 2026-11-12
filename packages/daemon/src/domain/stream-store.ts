@@ -43,6 +43,8 @@ export interface StreamItem {
   archivedAt: string | null;
   /** Present when the body was over the cap and is stored truncated: the bytes kept and the bytes emitted. */
   bodyTruncated?: { keptBytes: number; originalBytes: number };
+  /** The origin a non-local source reported about itself (`#3018`), claimed evidence: never verified, never the actor. */
+  claimedOrigin: string | null;
 }
 
 export interface StreamEmitInput {
@@ -58,6 +60,8 @@ export interface StreamEmitInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
    *  header chokepoint). Written onto the stream row; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** `#3018` claimed-origin evidence (resolveRecordedIdentity). Absent or invalid reads as unknown. */
+  claimedOrigin?: string | null;
 }
 
 export interface StreamListOptions {
@@ -87,6 +91,7 @@ interface StreamItemRow {
   archived_at: string | null;
   body_kept_bytes?: number | null;
   body_original_bytes?: number | null;
+  claimed_origin?: string | null;
 }
 
 /**
@@ -101,6 +106,7 @@ export class StreamStore {
   private readonly hasIdentityProvenanceColumn: boolean;
   /** Slice 22: absent on a curated test DB without migration 130; the marker in the body still says it. */
   private readonly hasTruncationColumns: boolean;
+  private readonly hasClaimedOriginColumn: boolean;
 
   constructor(db: Database.Database, eventBus: EventBus) {
     this.db = db;
@@ -108,6 +114,7 @@ export class StreamStore {
     const columns = (this.db.prepare("PRAGMA table_info(stream_items)").all() as Array<{ name: string }>).map((col) => col.name);
     this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
     this.hasTruncationColumns = columns.includes("body_original_bytes");
+    this.hasClaimedOriginColumn = columns.includes("claimed_origin");
   }
 
   /**
@@ -127,12 +134,13 @@ export class StreamStore {
 
     const persistTxn = this.db.transaction(() => {
       if (this.hasIdentityProvenanceColumn) {
+        const claimedOrigin = this.hasClaimedOriginColumn ? input.claimedOrigin ?? null : null;
         this.db
           .prepare(
             `INSERT INTO stream_items (
               stream_item_id, ts_emitted, stream_sort_key, source_session, body,
-              format, hint_type, hint_urgency, hint_destination, hint_tags, interrupt, identity_provenance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              format, hint_type, hint_urgency, hint_destination, hint_tags, interrupt, identity_provenance${claimedOrigin ? ", claimed_origin" : ""}
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${claimedOrigin ? ", ?" : ""})`
           )
           .run(
             id,
@@ -146,7 +154,8 @@ export class StreamStore {
             input.hintDestination ?? null,
             tagsJson,
             interrupt,
-            input.identityProvenance ?? null
+            input.identityProvenance ?? null,
+            ...(claimedOrigin ? [claimedOrigin] : [])
           );
       } else {
         this.db
@@ -282,6 +291,7 @@ export class StreamStore {
       interrupt: row.interrupt === 1,
       archivedAt: row.archived_at,
       ...(row.body_original_bytes != null ? { bodyTruncated: { keptBytes: row.body_kept_bytes ?? 0, originalBytes: row.body_original_bytes } } : {}),
+      claimedOrigin: row.claimed_origin ?? null,
     };
   }
 }

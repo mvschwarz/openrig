@@ -8,10 +8,10 @@ import { EnvironmentError, EnvironmentPlatform, identifier, regularBytes, relati
 export type ArtifactSchema = { format: "json-object/v1"; fields: Record<string, "string" | "number" | "boolean">; required: string[] };
 export type EnvironmentArtifactRequest = { operationId: string; taskId: string; generation: string; path: string;
   sha256: string; bytes: number; schema: ArtifactSchema; context: Record<string, string | number | boolean> };
-export type ArtifactCaller = { actor: string; identityProvenance: QueueUpdateInput["identityProvenance"]; identityPrincipal: string | null };
+export type ArtifactCaller = { actor: string; identityProvenance: QueueUpdateInput["identityProvenance"]; identityPrincipal: string | null; claimedOrigin?: string | null };
 export type EnvironmentArtifactReceipt = { version: 1; operationId: string; bindingId: string; nodeId: string;
   generation: string; taskId: string; path: string; guestPath: string; sha256: string; bytes: number; actor: string;
-  identityProvenance: QueueUpdateInput["identityProvenance"]; identityPrincipal: string | null };
+  identityProvenance: QueueUpdateInput["identityProvenance"]; identityPrincipal: string | null; claimedOrigin: string | null };
 const stable = (v: unknown): string => JSON.stringify(v, (_key, x) => x && typeof x === "object" && !Array.isArray(x)
   ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x);
 function refuse(code: string, message: string, status = 409): never { throw new EnvironmentError(code, message, status); }
@@ -94,7 +94,7 @@ export class EnvironmentArtifacts {
     const directory = openSync(targetDir, "r"); try { fsyncSync(directory); } finally { closeSync(directory); }
     const receipt: EnvironmentArtifactReceipt = { version: 1, operationId: input.operationId, bindingId, nodeId: binding.nodeId,
       generation: input.generation, taskId: input.taskId, path: target, guestPath: posix.join(binding.guestRoot, "work/artifacts", input.path),
-      sha256: input.sha256, bytes: input.bytes, actor: caller.actor, identityProvenance: caller.identityProvenance, identityPrincipal: caller.identityPrincipal };
+      sha256: input.sha256, bytes: input.bytes, actor: caller.actor, identityProvenance: caller.identityProvenance, identityPrincipal: caller.identityPrincipal, claimedOrigin: caller.claimedOrigin ?? null };
     let events: PersistedEvent[] = [];
     const saved = db.transaction(() => {
       unchanged();
@@ -103,7 +103,7 @@ export class EnvironmentArtifacts {
       const note = `Environment artifact ${input.operationId}: ${JSON.stringify(receipt)}`;
       // Only the receipt/note changes; never close the child's work on behalf of its owner.
       const result = this.queue.updateWithinTransaction({ qitemId: input.taskId, actorSession: caller.actor, transitionNote: note,
-        identityProvenance: caller.identityProvenance, identityPrincipal: caller.identityPrincipal });
+        identityProvenance: caller.identityProvenance, identityPrincipal: caller.identityPrincipal, claimedOrigin: caller.claimedOrigin ?? null });
       events = result.persistedEvents;
       db.prepare("UPDATE environment_operations SET state = 'confirmed', receipt_json = ? WHERE operation_id = ?").run(JSON.stringify(receipt), input.operationId);
       return receipt;
