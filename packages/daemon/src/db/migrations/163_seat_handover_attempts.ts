@@ -34,6 +34,10 @@ export const seatHandoverAttemptsSchema: Migration = {
       launch_notes_json TEXT,
       started_without_required_json TEXT,
       applied_launch_json TEXT,
+      -- The launch's frozen executable (#2341: the realpath it ran) and whether it is a #! script, as the Claude adapter's
+      -- readiness proves a wrapper launch with them; NULL and 0 for a classic launch.
+      executable TEXT,
+      executable_is_script INTEGER NOT NULL DEFAULT 0 CHECK (executable_is_script IN (0, 1)),
       departing_process TEXT NOT NULL CHECK (departing_process IN ('ended-graceful', 'ended-forced')),
       failed_step TEXT NOT NULL,
       failure_code TEXT NOT NULL,

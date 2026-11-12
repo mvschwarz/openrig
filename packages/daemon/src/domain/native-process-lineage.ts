@@ -749,8 +749,9 @@ export type NativeRejection =
   | { kind: "rotation_process_mismatch"; conversation: string };
 
 export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
-  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string): NativeRejection {
-  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
+  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string,
+  scriptLaunch?: boolean): NativeRejection {
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable, scriptLaunch);
   const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return { kind: "no_single_process" };
   const { process } = chain[0]!;

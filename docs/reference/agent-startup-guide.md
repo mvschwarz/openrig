@@ -284,11 +284,15 @@ already ended, the new one may be working there without being registered as the 
 handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
 **Adopting the successor of a failed handover.** When a handover fails after its successor was launched in the
-respawned pane (the readiness window closed, the context packet didn't land, or the final binding step refused), it
-records the attempt, and its guidance names `rig seat handover <seat> --recover --reason <why>`. That adopts the
-successor that is running there and keeps its conversation. It first proves, reading only, that the attempt still
-replaces the seat's current occupant and that the pane is the seat session's only pane, with exactly one foreground
-Claude that names the session id OpenRig generated for that launch, the same process in two samples. Then it commits
+respawned pane (the readiness window closed, the context packet didn't land, or the final binding step refused for a
+reason that can change), it records the attempt for a Claude Code successor whose launch named its session id, and its
+guidance leads with `rig seat handover <seat> --recover --reason <why>` and says not to retry the handover, which
+would end that successor. The recovery adopts the successor that is running there and keeps its conversation. It
+first proves, reading only, that the attempt still replaces the seat's current occupant and that the pane is the seat
+session's only pane, with exactly one foreground Claude that names the session id OpenRig generated for that launch,
+the same process in two samples, proven as the launch's readiness proves it (a `#!` wrapper that starts Claude
+without exec included). A `/clear` in the successor before the recovery is followed: the conversation it adopts is
+the one Claude's own session file for that process names, when it is newer than the process. Then it commits
 the handover with the occupant generation the attempt reserved, so the successor's identity hooks are accepted from
 then on. It types nothing into the pane, and a packet the failed handover didn't deliver is not delivered: the result
 says so, and a rebuild whose priming never arrived is recorded as fresh. Anything it can't prove, such as another

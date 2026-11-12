@@ -6,6 +6,8 @@
 // Process startup and pane bytes are modeled; no native Claude. The fixture is the #2985 one of
 // claude-handover-readiness.test.ts, on a fully migrated database, with the real activity route and relay.
 import { createRequire } from "node:module";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -25,7 +27,9 @@ import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { activityRoutes } from "../src/routes/activity.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { openHandoverAttempt } from "../src/domain/seat-handover-attempts.js";
+import { abandonOpenHandoverAttempt, openHandoverAttempt } from "../src/domain/seat-handover-attempts.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
+import { SessionAddressConflict } from "../src/domain/session-registry.js";
 
 const relay = createRequire(import.meta.url)(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")) as {
   buildSessionIdentityPayload(p: unknown, env: Record<string, string>): Record<string, unknown> | null;
@@ -88,11 +92,19 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   }
   let tmuxRef: TmuxAdapter;
 
+  /** A managed launch through a `#!` wrapper (#2341): the launch's frozen executable is the script. */
+  const WRAPPER = "/home/user/.local/bin/claude-wrap";
+  let managedLaunch: { executable: string; executableIsScript: boolean } | null;
+
   function service(): SeatHandoverService {
     const listProcesses = () => paneProcesses();
     const fsError = () => { throw new Error("unexpected filesystem access"); };
-    const claude = new ClaudeCodeAdapter({ tmux: tmuxRef, fsOps: { exists: () => false, readFile: fsError,
-      writeFile: fsError, mkdirp: fsError, copyFile: fsError }, listProcesses, sleep: async () => {}, sessionIdFactory: () => successorToken });
+    const managed = managedLaunch ? { claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`,
+      assertCurrent: () => {}, configDir: "/fixture", ...managedLaunch }) } as never } : {};
+    const claude = new ClaudeCodeAdapter({ tmux: tmuxRef, fsOps: managedLaunch
+      ? { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} }
+      : { exists: () => false, readFile: fsError, writeFile: fsError, mkdirp: fsError, copyFile: fsError },
+      listProcesses, sleep: async () => {}, sessionIdFactory: () => successorToken, ...managed });
     return new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmuxRef, now: () => new Date("2026-11-10T16:21:00Z"), newSuccessorId: () => "01SUCCID0",
       runtimeAdapters: { "claude-code": claude as unknown as RuntimeAdapter },
@@ -105,7 +117,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   }
 
   /** The successor's Claude SessionStart, through the shipped relay and the real activity route. */
-  async function sessionStart(generation: string, token = successorToken) {
+  async function sessionStart(generation: string, token = successorToken, source = "startup") {
     const app = new Hono();
     app.use("*", async (c, go) => {
       c.set("agentActivityStore" as never, new AgentActivityStore({ db, eventBus }) as never);
@@ -116,7 +128,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     });
     app.route("/api/activity", activityRoutes);
     const env = { OPENRIG_SESSION_NAME: SEAT, OPENRIG_NODE_ID: nodeId, OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: generation };
-    const payload = relay.buildSessionIdentityPayload({ hook_event_name: "SessionStart", session_id: token, source: "startup" }, env);
+    const payload = relay.buildSessionIdentityPayload({ hook_event_name: "SessionStart", session_id: token, source }, env);
     const res = await app.request("/api/activity/hooks", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer fixture" }, body: JSON.stringify(payload) });
     return await res.json() as Record<string, unknown>;
   }
@@ -164,6 +176,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     elapsed = 0;
     requested = false;
     nativeAt = ISSUE_NATIVE_AT;
+    managedLaunch = null;
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
@@ -305,7 +318,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     const failed = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
     expect(failed).toMatchObject({ ok: false, code: "discovered_not_active" });
     if (failed.ok) throw new Error("expected a refusal");
-    expect(failed.guidance).toContain(`Once what refused it is resolved: If the successor is running there, adopt it`);
+    expect(failed.guidance).toMatch(/^If the successor is running there, adopt it/);
     expect(openHandoverAttempt(db, nodeId)).toMatchObject({ failedStep: "finalize", failureCode: "discovered_not_active", contextDelivery: "unconfirmed" });
     // While the live owner holds the claim, the recovery refuses the same way (#987) and the attempt stays open.
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "discovered_not_active" });
@@ -336,9 +349,178 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(await service().recover({ seatRef: SEAT, reason: " " })).toMatchObject({ ok: false, code: "missing_reason" });
   });
 
-  it("the failure's guidance names the recovery once the attempt is recorded", async () => {
+  it("the failure's guidance leads with the recovery once the attempt is recorded, and does not say to retry", async () => {
     const result = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
     if (result.ok) throw new Error("expected failure");
-    expect(result.guidance).toContain(`rig seat handover '${SEAT}' --recover --reason`);
+    expect(result.guidance).toMatch(new RegExp(`^If the successor is running there, adopt it .*rig seat handover '${SEAT}' --recover --reason`));
+    expect(result.guidance).toContain("do not retry the handover");
+    expect(result.guidance!.replace("do not retry the handover", "")).not.toMatch(/retr/i);
+  });
+  // Should S3 of the review of #3044: the commit transaction checks again that the attempt still replaces the seat's
+  // occupant, after the proof. Something that takes the seat between the proof and the transaction (the presence probe
+  // is the last await) must leave nothing adopted, the attempt abandoned and the recovery's own code.
+  it.each([
+    ["another occupant registers", () => { sessionRegistry.registerClaimedSession(nodeId, SEAT, "handover"); },
+      "another occupant took the seat during the recovery"],
+    ["the attempt is closed concurrently", () => { abandonOpenHandoverAttempt(db, nodeId, "concurrent"); }, "concurrent"],
+  ])("refuses when, between the proof and the commit, %s (the CAS inside the transaction)", async (_name, race, outcome) => {
+    const generation = await failedHandover();
+    let snapshot: ReturnType<typeof state> | null = null;
+    (tmuxRef as unknown as { hasSession: unknown }).hasSession = vi.fn(async () => { race(); snapshot = state(); return true; });
+    const before = inputs();
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "handover_attempt_superseded" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("while the recovery was proving");
+    expect(tmuxRef.hasSession).toHaveBeenCalled(); // the proof passed: the refusal is the transaction's
+    expect(snapshot).not.toBeNull();
+    expect(state()).toEqual(snapshot); // rolled back: nothing adopted
+    expect(sessionRegistry.isOccupantGenerationRegistered(nodeId, generation)).toBe(false);
+    expect(inputs()).toEqual(before);
+    expect(db.prepare("SELECT phase, resume_token, outcome FROM seat_handover_attempts").all())
+      .toEqual([{ phase: "abandoned", resume_token: null, outcome }]);
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "no_handover_to_recover" });
+  });
+
+  // Should S4, S5 and S6: each finalize refusal that can change records the attempt and offers --recover first, without
+  // telling to retry the handover (that ends the running successor, #2985); a refusal outside the set records nothing.
+  // successor_tmux_absent is outside it: the seat's session is gone, so there is no successor to adopt (S5).
+  /** Arms `setup` right after the launcher's discovery upsert, the launch's last step before finalize. */
+  function beforeFinalize(setup: (row: { id: string }) => void) {
+    const real = discoveryRepo.upsertDiscoveredSession.bind(discoveryRepo);
+    let arm: typeof setup | null = setup;
+    vi.spyOn(discoveryRepo, "upsertDiscoveredSession").mockImplementation((d) => {
+      const row = real(d); const go = arm; arm = null; go?.(row); return row;
+    });
+  }
+  const recoverable: Array<[string, () => void]> = [
+    ["discovered_not_active", () => beforeFinalize(row => discoveryRepo.markVanished([row.id]))],
+    ["successor_already_managed", () => beforeFinalize(() => {
+      const other = rigRepo.addNode(rigRepo.createRig("other-rig").id, "dev.other", { runtime: "claude-code", cwd: "/other" });
+      sessionRegistry.updateBinding(other.id, { tmuxSession: SEAT, tmuxPane: "%1" });
+    })],
+    ["address_conflict", () => beforeFinalize(() => {
+      vi.spyOn(sessionRegistry, "assertAddressAvailable").mockImplementationOnce(() => { throw new SessionAddressConflict(SEAT); });
+    })],
+    ["tmux_probe_failed", () => beforeFinalize(() => { (tmuxRef.hasSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("tmux busy")); })],
+    ["handover_commit_failed", () => beforeFinalize(() => {
+      vi.spyOn(sessionRegistry, "registerClaimedSession").mockImplementationOnce(() => { throw new Error("boom"); });
+    })],
+  ];
+  it.each(recoverable)("a %s refusal after the successor is ready records the attempt and leads with --recover", async (code, arm) => {
+    nativeAt = 0;
+    arm();
+    const failed = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
+    expect(failed).toMatchObject({ ok: false, code });
+    if (failed.ok) throw new Error("expected a refusal");
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ failedStep: "finalize", failureCode: code });
+    expect(failed.guidance).toMatch(/^If the successor is running there, adopt it .* --recover --reason/);
+    expect(failed.guidance).toContain("do not retry the handover; it ends the running successor");
+    expect(failed.guidance!.replace("do not retry the handover", "")).not.toMatch(/retr/i);
+  });
+
+  it.each([
+    ["successor_tmux_absent", () => beforeFinalize(() => { (tmuxRef.hasSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false); })],
+    ["runtime_mismatch", () => {
+      const real = discoveryRepo.upsertDiscoveredSession.bind(discoveryRepo);
+      beforeFinalize(() => { real({ tmuxSession: SEAT, tmuxPane: "%9", runtimeHint: "codex", confidence: "high" }); });
+    }],
+  ] as Array<[string, () => void]>)("a %s refusal records nothing and offers no --recover", async (code, arm) => {
+    nativeAt = 0;
+    arm();
+    const failed = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
+    expect(failed).toMatchObject({ ok: false, code });
+    if (failed.ok) throw new Error("expected a refusal");
+    expect(openHandoverAttempt(db, nodeId)).toBeNull();
+    expect(failed.guidance ?? "").not.toContain("--recover");
+  });
+
+  // Should S2: a /clear in the successor before the recovery rotates its conversation, and its SessionStart is held back
+  // (generation_uncommitted). The argv still names the launch's id, so the proof passes; the recovery then takes the
+  // process's current conversation from Claude's sessions/<pid>.json (read only, as the resume refresher reads it).
+  describe("a /clear before the recovery", () => {
+    let configDir: string;
+    const T2 = otherToken;
+    beforeEach(() => {
+      configDir = mkdtempSync(path.join(os.tmpdir(), "recover-clear-"));
+      mkdirSync(path.join(configDir, "sessions"));
+      vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(configDir, { recursive: true, force: true });
+    });
+    // Relative to the process start as ps prints it (local time), so the case holds in any time zone.
+    const pidFile = (record: Record<string, unknown>, mtime = new Date(Date.parse(startedAt) + 60_000)) => {
+      const file = path.join(configDir, "sessions", "102.json");
+      writeFileSync(file, JSON.stringify(record));
+      utimesSync(file, mtime, mtime);
+    };
+    const resumeTarget = () => (db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId) as { resume_token: string }).resume_token;
+
+    it("adopts the successor with the conversation it holds now (T2), not the launch's", async () => {
+      const generation = await failedHandover();
+      expect(await sessionStart(generation, successorToken, "startup")).toMatchObject({ code: "generation_uncommitted" });
+      expect(await sessionStart(generation, T2, "clear")).toMatchObject({ code: "generation_uncommitted" });
+      pidFile({ name: SEAT, sessionId: T2 });
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      expect(result).toMatchObject({ ok: true });
+      expect(resumeTarget()).toBe(T2);
+    });
+
+    it("refuses, adopting nothing, when the process changes while its current conversation is read", async () => {
+      await failedHandover();
+      pidFile({ name: SEAT, sessionId: T2 });
+      let listed = 0;
+      const before = state();
+      paneProcesses = () => [
+        { pid: 100, ppid: 1, pgid: 100, tpgid: 102, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+        // the proof's two samples see one process; the observation that brackets the file read sees another
+        ++listed <= 2 ? claudeIn(successorToken) : { ...claudeIn(successorToken), startedAt: "Tue Nov 10 16:22:00 2026" },
+      ];
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+      if (result.ok) throw new Error("expected a refusal");
+      expect(result.message).toContain("current conversation was being read");
+      expect(state()).toEqual(before);
+    });
+
+    it("keeps the launch's conversation when the file names the retiring occupant's", async () => {
+      await failedHandover();
+      pidFile({ name: SEAT, sessionId: previousToken });
+      expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+      expect(resumeTarget()).toBe(successorToken);
+    });
+
+    it.each([
+      ["a file older than the process (a reused pid)", () => pidFile({ name: SEAT, sessionId: T2 }, new Date(Date.parse(startedAt) - 86_400_000))],
+      ["a file of another session", () => pidFile({ name: "someone@else", sessionId: T2 })],
+      ["no file", () => {}],
+    ])("keeps the launch's conversation with %s", async (_name, write) => {
+      await failedHandover();
+      write();
+      expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+      expect(resumeTarget()).toBe(successorToken);
+    });
+  });
+
+  // Should S1: a successor launched through a `#!` wrapper that starts Claude without exec (#2341) is proven the way
+  // readiness proves it: the attempt keeps the launch's frozen executable and whether it is a script.
+  it("adopts a successor launched through a #! wrapper without exec, proven like readiness proves it", async () => {
+    managedLaunch = { executable: WRAPPER, executableIsScript: true };
+    new NativePermissionStore(db).write(nodeId, { runtime: "claude-code", mode: "auto" }, "fixture", "wrapper launch");
+    const launched = `--permission-mode auto --session-id ${successorToken} --name ${SEAT}`;
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? [
+        { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/bin/sh ${WRAPPER} ${launched}`, executableName: "claude", startedAt },
+        { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `/opt/claude-runtime/2.1.316 ${launched}`, executableName: "2.1.316", startedAt },
+      ] as NativeProcessRow[] : []),
+    ];
+    const generation = await failedHandover();
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: WRAPPER, executableIsScript: true });
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt the wrapper's successor" });
+    expect(result).toMatchObject({ ok: true });
+    expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation, kind: "handover" });
   });
 });
