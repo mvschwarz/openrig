@@ -47,8 +47,8 @@ function markerSource(kind: "BEGIN" | "END", blockId: string): string {
   return `<!--\\s*${kind}\\s+(?:OpenRig|RIGGED)\\s+MANAGED\\s+BLOCK:\\s*${escapeRegex(blockId)}\\s*-->`;
 }
 
-/** One `blockId` block in a file: where it starts and ends, and the text between its markers. */
-export interface FoundManagedBlock { start: number; end: number; body: string }
+/** One `blockId` block in a file: where it and its body start and end, and the text between its markers. */
+export interface FoundManagedBlock { start: number; end: number; bodyStart: number; bodyEnd: number; body: string }
 
 /** Every `blockId` block in `content`, in order: each BEGIN paired with the next marker when that marker is an END. A
  *  marker left without a pair (an END with no BEGIN before it, or a BEGIN followed by another BEGIN or by nothing) is
@@ -62,7 +62,8 @@ export function findManagedBlocks(content: string, blockId: string): { blocks: F
     const marker = markers[i]!;
     const next = markers[i + 1];
     if (marker.begin && next && !next.begin) {
-      blocks.push({ start: marker.index, end: next.index + next.length, body: content.slice(marker.index + marker.length, next.index) });
+      const bodyStart = marker.index + marker.length;
+      blocks.push({ start: marker.index, end: next.index + next.length, bodyStart, bodyEnd: next.index, body: content.slice(bodyStart, next.index) });
       i++;
     } else {
       unpaired++;
@@ -79,16 +80,22 @@ export function damagedManagedBlockNote(targetPath: string, blockId: string): st
 
 /**
  * `existing` with `blockId`'s block written as `block`, or null when it can't be written without a second copy: the file
- * has a marker of that block without its pair, and no complete copy. The first copy is replaced in place and every later
- * copy is removed with the separator before it, so a file that collected copies keeps one. Blocks of `replaceBlockIds`
- * (older ids) are removed. A file with none of these gets the block at its end.
+ * has a marker of that block without its pair, and no complete copy. The first copy is replaced in place and a later copy
+ * is removed with the separator before it, so a file that collected copies keeps one; with `keepLater`, a later copy it
+ * names stays, unless it repeats one already kept. Blocks of `replaceBlockIds` (older ids) are removed. A file with none
+ * of these gets the block at its end.
  */
-export function mergeManagedBlockText(existing: string, blockId: string, block: string, replaceBlockIds: readonly string[] = []): string | null {
+export function mergeManagedBlockText(existing: string, blockId: string, block: string, replaceBlockIds: readonly string[] = [],
+  keepLater?: (body: string) => boolean): string | null {
   const own = findManagedBlocks(existing, blockId);
   if (own.blocks.length === 0 && own.unpaired > 0) return null;
-  const edits: Array<{ start: number; end: number; text: string }> = own.blocks.map((found, i) => i === 0
-    ? { start: found.start, end: found.end, text: block }
-    : { start: withSeparator(existing, found.start), end: found.end, text: "" });
+  const keptLater: string[] = [];
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  own.blocks.forEach((found, i) => {
+    if (i === 0) edits.push({ start: found.start, end: found.end, text: block });
+    else if (keepLater?.(found.body) && !keptLater.some((body) => managedBlockBodyMatches(body, found.body))) keptLater.push(found.body);
+    else edits.push({ start: withSeparator(existing, found.start), end: found.end, text: "" });
+  });
   for (const id of new Set(replaceBlockIds)) {
     if (id === blockId) continue;
     for (const found of findManagedBlocks(existing, id).blocks) edits.push({ start: found.start, end: found.end, text: "" });
@@ -133,13 +140,36 @@ export function mergeManagedBlock(
     return true;
   }
 
-  const merged = mergeManagedBlockText(fs.readFile(targetPath), blockId, block, options?.replaceBlockIds ?? []);
+  const existing = fs.readFile(targetPath);
+  const merged = mergeManagedBlockText(existing, blockId, block, options?.replaceBlockIds ?? []);
   if (merged === null) {
     options?.warnings?.push(damagedManagedBlockNote(targetPath, blockId));
     return false;
   }
   fs.writeFile(targetPath, merged);
+  if (findManagedBlocks(existing, blockId).unpaired > 0) options?.warnings?.push(unpairedMarkerNote(targetPath, blockId));
   return true;
+}
+
+/** The note for a marker without its pair left beside a block that was written. */
+export function unpairedMarkerNote(targetPath: string, blockId: string): string {
+  return `guidance_block_marker_unpaired: ${targetPath}: ${blockId} was written, and a BEGIN or END marker of it without its `
+    + "pair was left as it is; remove it or restore its pair";
+}
+
+/** `content` with each `blockId` block whose markers an editor rewrapped written back in OpenRig's own form, its body
+ *  exactly as it is. Markers already in the current or legacy form stay as they are. */
+export function withCanonicalMarkers(content: string, blockId: string): string {
+  let updated = content;
+  for (const found of findManagedBlocks(content, blockId).blocks.reverse()) {
+    const begin = content.slice(found.start, found.bodyStart);
+    const end = content.slice(found.bodyEnd, found.end);
+    const exact = (begin === MANAGED_BLOCK_START(blockId) && end === MANAGED_BLOCK_END(blockId))
+      || (begin === LEGACY_BLOCK_START(blockId) && end === LEGACY_BLOCK_END(blockId));
+    if (exact) continue;
+    updated = `${updated.slice(0, found.start)}${MANAGED_BLOCK_START(blockId)}${found.body}${MANAGED_BLOCK_END(blockId)}${updated.slice(found.end)}`;
+  }
+  return updated;
 }
 
 /** Each `blockId` block in `content` (current markers): the whole block and the text between its markers. */

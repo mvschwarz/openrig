@@ -253,7 +253,8 @@ export function appendIsCleanupSafe(content: string, blocks: Array<{ blockId: st
 
 /** Put back the missing managed guidance blocks. With `records` (#2456), a block already there that OpenRig wrote is
  *  refreshed from its changed source, and one edited since, or with no record, is kept and named (`decideManagedBlock`).
- *  Without them a block already there is left as it is, as before. Any other text in the file is left exactly as it is,
+ *  Without them a block already there keeps its text. Either way a block left in place loses its exact repeats, and
+ *  OpenRig's own copies beside an edited one, and rewrapped markers go back to OpenRig's form (`pruneKeptManagedBlock`). Any other text in the file is left exactly as it is,
  *  and nothing is written unless cleanup would later remove exactly what was written. Never throws: a failure becomes a
  *  reported gap. */
 export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps, records?: ManagedBlockRecords): GuidanceRepair {
@@ -271,21 +272,27 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   for (const item of guidance.items) {
     const state = states.get(item.blockId);
     if (state === "complete") {
-      if (!records || item.unresolved) continue;
+      if (item.unresolved) continue;
       let source: string;
       try {
         if (!fs.exists(item.sourcePath)) continue;
         source = fs.readFile(item.sourcePath);
       } catch { continue; }
+      // Without records the block's text stays as it is; only its exact repeats and rewrapped markers are tidied.
+      if (!records) {
+        pruneKeptManagedBlock(fs, guidance.targetPath, item.blockId, source, undefined, repair.kept);
+        continue;
+      }
       // #2456: the same decision every adapter's guidance write makes; an exact resume and a handover keep an unrecorded block.
       const decision = decideManagedBlock(existing ?? "", item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
       if (decision.note) repair.kept.push(decision.note);
-      if (!decision.write && (decision.standing === "edited" || decision.standing === "unrecorded")) {
-        try { pruneKeptManagedBlock(fs, guidance.targetPath, item.blockId, source, records, repair.kept); }
-        catch (err) { repair.gaps.push(`${item.blockId}: its repeated copies weren't removed: ${(err as Error).message}`); }
+      if (decision.write && decision.standing !== "current") {
+        toWrite.push({ blockId: item.blockId, content: source, refresh: true });
+        continue;
       }
-      else if (decision.standing === "current") recordManagedBlockWrite(records, guidance.targetPath, item.blockId, source, repair.kept);
-      else if (decision.write) toWrite.push({ blockId: item.blockId, content: source, refresh: true });
+      if (decision.standing === "current") recordManagedBlockWrite(records, guidance.targetPath, item.blockId, source, repair.kept);
+      // A block left as it is (current, edited or unrecorded) keeps one copy of each distinct text, in OpenRig's markers.
+      pruneKeptManagedBlock(fs, guidance.targetPath, item.blockId, source, records, repair.kept);
       continue;
     }
     if (state === "incomplete") {

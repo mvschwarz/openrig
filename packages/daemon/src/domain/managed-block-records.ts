@@ -3,7 +3,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
 import { damagedManagedBlockNote, frameManagedBlockBody, managedBlockBodyMatches, managedBlockStanding, mergeManagedBlock, pruneManagedBlockCopies,
-  type ManagedBlockMergeFsOps, type ManagedBlockStanding } from "./managed-blocks.js";
+  withCanonicalMarkers, type ManagedBlockMergeFsOps, type ManagedBlockStanding } from "./managed-blocks.js";
 
 /** #2456: OpenRig's record of what it last wrote in each managed guidance block, so a later start, exact resume, handover
  *  or runtime switch can tell a block it wrote (refreshed when its source changes) from a block a person edited (kept). */
@@ -106,20 +106,30 @@ export function decideManagedBlock(content: string, blockId: string, source: str
   return { standing, write: true };
 }
 
-/** A block kept as it is can still carry extra copies: take out the ones that repeat a kept copy, and OpenRig's own
- *  (its source's text, or what it last wrote) beside an edited one, so the file keeps one copy of each distinct text.
- *  Nothing a person wrote is removed. Returns whether the file changed. */
+/** A block that isn't rewritten (current, edited or unrecorded) can still carry extra copies, or markers an editor
+ *  rewrapped: take out the copies that repeat a kept one, and OpenRig's own (its source's text, or what it last wrote)
+ *  beside an edited one, so the file keeps one copy of each distinct text, and put the markers in OpenRig's form. Nothing
+ *  a person wrote is removed. Best effort: a file that can't be read or written is named in `notes` and left as it is,
+ *  and the block's own decision stands. Returns whether the file changed. */
 export function pruneKeptManagedBlock(files: ManagedBlockMergeFsOps, targetPath: string, blockId: string, source: string,
   records: ManagedBlockRecords | undefined, notes?: string[]): boolean {
   let recorded: string | undefined;
   try { recorded = records?.get(targetPath, blockId); } catch { /* unreadable: only the source's text counts as OpenRig's */ }
-  const existing = files.exists(targetPath) ? files.readFile(targetPath) : "";
-  const pruned = pruneManagedBlockCopies(existing, blockId,
-    (body) => managedBlockBodyMatches(body, source) || (recorded !== undefined && managedBlockBodyHash(body) === recorded));
-  if (pruned === null) return false;
-  files.writeFile(targetPath, pruned);
-  notes?.push(`guidance_block_copies_removed: ${targetPath}: ${blockId} had repeated copies; the repeats were removed and every edited copy was kept`);
-  return true;
+  try {
+    const existing = files.exists(targetPath) ? files.readFile(targetPath) : "";
+    const pruned = pruneManagedBlockCopies(existing, blockId,
+      (body) => managedBlockBodyMatches(body, source) || (recorded !== undefined && managedBlockBodyHash(body) === recorded));
+    const tidy = withCanonicalMarkers(pruned ?? existing, blockId);
+    if (tidy === existing) return false;
+    files.writeFile(targetPath, tidy);
+    if (pruned !== null) {
+      notes?.push(`guidance_block_copies_removed: ${targetPath}: ${blockId} had repeated copies; the repeats were removed and every edited copy was kept`);
+    }
+    return true;
+  } catch (err) {
+    notes?.push(`guidance_block_copies_not_removed: ${targetPath}: ${blockId}'s repeated copies or markers couldn't be tidied (${(err as Error).message}); the file was left as it is`);
+    return false;
+  }
 }
 
 /** #2456: the one write of a managed guidance block that every adapter's guidance merge goes through. Without `records` it's

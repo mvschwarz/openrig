@@ -246,16 +246,34 @@ describe("InstallEngine", () => {
       "# Header\n\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nUpdated guidance.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer\n");
   });
 
-  it("adds no copy beside a block whose END was lost: the install stops, names the file, and leaves it", () => {
+  it("keeps a later copy someone edited, and every different edit, with the text between", () => {
     const pkg = seedPackage();
     const sourcePath = writeSource("guidance/AGENTS.md", "Updated guidance.");
     const targetPath = path.join(repoRoot, "AGENTS.md");
-    const text = "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nOld content.\n# Footer\n";
-    fs.writeFileSync(targetPath, text);
+    const copy = (body: string) => `<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\n${body}\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->`;
+    fs.writeFileSync(targetPath, `# Header\n\n${copy("Old content.")}\n\nmine\n\n${copy("Old content, with my rule.")}\n\n${copy("Another edit.")}\n`);
     const entry = makeEntry({ exportType: "guidance", classification: "managed_merge", targetPath, sourcePath });
-    expect(() => new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot))
-      .toThrow(/^guidance_block_markers_damaged: .*AGENTS\.md: test-pkg has a BEGIN or END marker without its pair/);
-    expect(fs.readFileSync(targetPath, "utf8")).toBe(text);
+    new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot);
+    expect(fs.readFileSync(targetPath, "utf8")).toBe(
+      `# Header\n\n${copy("Updated guidance.")}\n\nmine\n\n${copy("Old content, with my rule.")}\n\n${copy("Another edit.")}\n`);
+  });
+
+  it("installs the rest when a guidance block lost its END: that file is left as it is and named, with no copy added", () => {
+    const pkg = seedPackage();
+    const skillSource = writeSource("skills/foo/SKILL.md", "# Foo Skill");
+    const skillTarget = path.join(repoRoot, ".agents/skills/foo/SKILL.md");
+    const guidanceSource = writeSource("guidance/AGENTS.md", "Updated guidance.");
+    const guidanceTarget = path.join(repoRoot, "AGENTS.md");
+    const text = "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nOld content.\n# Footer\n";
+    fs.writeFileSync(guidanceTarget, text);
+    const skill = makeEntry({ exportName: "foo", targetPath: skillTarget, sourcePath: skillSource });
+    const guidance = makeEntry({ exportType: "guidance", classification: "managed_merge", targetPath: guidanceTarget, sourcePath: guidanceSource });
+    const result = new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([skill, guidance]), makePlan([skill, guidance]), pkg.id, repoRoot);
+    expect(fs.readFileSync(guidanceTarget, "utf8")).toBe(text);
+    expect(fs.readFileSync(skillTarget, "utf8")).toBe("# Foo Skill");
+    expect(result.applied.map((e) => e.targetPath)).toEqual([skillTarget]);
+    expect(result.notes).toEqual([expect.stringMatching(/^guidance_block_markers_damaged: .*AGENTS\.md: test-pkg has a BEGIN or END marker without its pair/)]);
+    expect(installRepo.getInstall(result.installId)?.status).toBe("applied");
   });
 
   // Test 7: Backup created before overwrite

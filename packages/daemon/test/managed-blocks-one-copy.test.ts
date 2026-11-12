@@ -38,12 +38,14 @@ describe("the writer keeps one copy", () => {
     const touched = "# Notes\n\n<!--\n  BEGIN OpenRig MANAGED BLOCK: CULTURE.md\n-->\nold culture\n<!--   END OpenRig  MANAGED BLOCK:  CULTURE.md -->\n\nafter\n";
     const fs = memory({ [FILE]: touched });
     const sizes: number[] = [];
+    const written: unknown[] = [];
     for (let launch = 0; launch < 4; launch++) {
-      expect(mergeManagedBlock(fs, FILE, "CULTURE.md", "new culture")).toBe(true);
+      written.push(mergeManagedBlock(fs, FILE, "CULTURE.md", "new culture"));
       sizes.push(fs.files[FILE]!.length);
     }
     expect(fs.files[FILE]).toBe(`# Notes\n\n${managedBlockText("CULTURE.md", "new culture")}\n\nafter\n`);
     expect(new Set(sizes).size).toBe(1);
+    expect(written).toEqual([true, true, true, true]);
   });
 
   it("collapses copies that collected to the first, and keeps a person's text before, between and after them", () => {
@@ -59,17 +61,22 @@ describe("the writer keeps one copy", () => {
   ])("adds no copy beside %s, at any launch, and names it", (_name, text) => {
     const fs = memory({ [FILE]: text });
     const warnings: string[] = [];
-    for (let launch = 0; launch < 3; launch++) expect(mergeManagedBlock(fs, FILE, "CULTURE.md", "culture", { warnings })).toBe(false);
+    const written: unknown[] = [];
+    for (let launch = 0; launch < 3; launch++) written.push(mergeManagedBlock(fs, FILE, "CULTURE.md", "culture", { warnings }));
     expect(fs.files[FILE]).toBe(text);
     expect(warnings).toHaveLength(3);
+    expect(written).toEqual([false, false, false]);
     expect(warnings[0]).toMatch(/^guidance_block_markers_damaged: \/repo\/AGENTS\.md: CULTURE\.md has a BEGIN or END marker without its pair/);
   });
 
-  it("still replaces a complete copy when a lost marker sits beside it, and leaves that marker", () => {
+  it("still replaces a complete copy when a lost marker sits beside it, leaves that marker, and names it", () => {
     const lone = "<!-- BEGIN OpenRig MANAGED BLOCK: CULTURE.md -->\nstray\n";
     const fs = memory({ [FILE]: `${lone}\n${managedBlockText("CULTURE.md", "old")}\n` });
-    expect(mergeManagedBlock(fs, FILE, "CULTURE.md", "new")).toBe(true);
+    const warnings: string[] = [];
+    const written = mergeManagedBlock(fs, FILE, "CULTURE.md", "new", { warnings });
     expect(fs.files[FILE]).toBe(`${lone}\n${managedBlockText("CULTURE.md", "new")}\n`);
+    expect(written).toBe(true);
+    expect(warnings).toEqual([expect.stringMatching(/^guidance_block_marker_unpaired: \/repo\/AGENTS\.md: CULTURE\.md was written/)]);
   });
 
   it("appends to a file with no marker at all, as before", () => {
@@ -127,14 +134,46 @@ describe("a launch's guidance write keeps a person's edit and drops only repeats
     const fs = memory({ [FILE]: text });
     const records = recordsOf();
     const warnings: string[] = [];
-    for (let i = 0; i < 3; i++) expect(launch(fs, records, "culture", warnings)).toBe(false);
+    const written: unknown[] = [];
+    for (let i = 0; i < 3; i++) written.push(launch(fs, records, "culture", warnings));
     expect(fs.files[FILE]).toBe(text);
+    expect(written).toEqual([false, false, false]);
     expect(records.entries).toEqual({});
     expect(warnings.every((w) => w.startsWith("guidance_block_markers_damaged: "))).toBe(true);
+  });
+
+  it("keeps going when the file can't be written: the edited block is kept as decided, and the tidy is named", () => {
+    const formatted = managedBlockText("CULTURE.md", "- culture, reformatted");
+    const text = `${formatted}\n\n${formatted}\n`;
+    const fs = memory({ [FILE]: text });
+    fs.writeFile = () => { throw new Error("EACCES: permission denied"); };
+    const warnings: string[] = [];
+    expect(launch(fs, recordsOf({ [`${FILE}#CULTURE.md`]: managedBlockBodyHash("* culture") }), "* culture", warnings)).toBe(false);
+    expect(fs.files[FILE]).toBe(text);
+    expect(warnings.map((w) => w.split(":")[0])).toEqual(["guidance_block_edited", "guidance_block_copies_not_removed"]);
   });
 });
 
 describe("restore keeps one copy", () => {
+  it("removes repeats of a current block, and a second restore changes nothing", () => {
+    const current = managedBlockText("CULTURE.md", "* culture");
+    const fs = memory({ [FILE]: `# Notes\n\n${current}\n\nmine\n\n${current}\n`, [SOURCE]: "* culture" });
+    const records = recordsOf({ [`${FILE}#CULTURE.md`]: managedBlockBodyHash("* culture") });
+    const guidance = { targetPath: FILE, items: [{ blockId: "CULTURE.md", sourcePath: SOURCE }] };
+    restoreMissingGuidance(guidance, fs, records);
+    const once = fs.files[FILE];
+    restoreMissingGuidance(guidance, fs, records);
+    expect(once).toBe(`# Notes\n\n${current}\n\nmine\n`);
+    expect(fs.files[FILE]).toBe(once);
+  });
+
+  it("without write records keeps the block's text, and still removes its exact repeats and puts rewrapped markers back", () => {
+    const rewrapped = "<!--\n BEGIN OpenRig MANAGED BLOCK: CULTURE.md -->\nmy edit\n<!-- END OpenRig MANAGED BLOCK: CULTURE.md -->";
+    const fs = memory({ [FILE]: `${rewrapped}\n\n${managedBlockText("CULTURE.md", "my edit")}\n`, [SOURCE]: "* culture" });
+    restoreMissingGuidance({ targetPath: FILE, items: [{ blockId: "CULTURE.md", sourcePath: SOURCE }] }, fs);
+    expect(fs.files[FILE]).toBe(`${managedBlockText("CULTURE.md", "my edit")}\n`);
+  });
+
   it("removes a kept block's repeats, and puts back nothing beside a lost marker", () => {
     const formatted = managedBlockText("CULTURE.md", "- culture, reformatted");
     const fs = memory({

@@ -302,6 +302,7 @@ packagesRoutes.post("/install", async (c) => {
     conflicts: result.conflicts,
     verification,
     ...(policyResult.rejected.length > 0 ? { policyRejected: policyResult.rejected } : {}),
+    ...(result.notes?.length ? { notes: result.notes } : {}),
   }, 201);
 });
 

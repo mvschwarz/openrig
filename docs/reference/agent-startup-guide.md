@@ -408,7 +408,7 @@ Each startup file and action specifies when it applies:
 **A file keeps one copy of each block.**
 - **Touched markers:** a marker an editor or formatter rewrapped, with spaces or line breaks inside the comment, still reads as its block, and the next write puts it back in OpenRig's form.
 - **Collected copies:** they're reduced to the first. Beside a copy you edited, OpenRig's own unedited copies and exact repeats are removed, and every different edited copy stays (`guidance_block_copies_removed`).
-- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` stops on such a file and names it.
+- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
 
 An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 
