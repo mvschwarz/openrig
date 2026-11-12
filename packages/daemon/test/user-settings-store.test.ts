@@ -611,6 +611,19 @@ describe("SettingsStore (User Settings v0)", () => {
     }
   });
 
+  it("a non-string provider.selected in config.json falls back to the default with a warning", () => {
+    writeFileSync(configPath, JSON.stringify({ provider: { selected: ["claude"] } }));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const store = new SettingsStore(configPath);
+      expect(store.resolveOne("provider.selected")).toMatchObject({ value: "", source: "default" });
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for provider.selected rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("a quoted in-range port in config.json keeps its port, and the CLI target and daemon bind agree", () => {
     writeFileSync(configPath, JSON.stringify({ daemon: { port: "7434" } }));
     const store = new SettingsStore(configPath);

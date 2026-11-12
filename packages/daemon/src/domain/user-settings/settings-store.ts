@@ -850,6 +850,7 @@ function choiceConstraint(choices: readonly string[], message: (raw: string) => 
     if (!choices.includes(trim ? (raw ?? "").trim() : raw)) throw new Error(message(raw));
   });
 }
+const PROVIDER_SELECTED_CHOICES: readonly string[] = ["", "claude", "codex", "claude,codex", "codex,claude"];
 
 function positiveIntegerConstraint(key: string) {
   return (raw: string, coerced: string | number | boolean): void => {
@@ -942,8 +943,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, KeyConstraint>> = {
   // "80.5" → 80) is not safe for a key the daemon's compaction trigger
   // reads at every poll tick; runtime validator rejects what the
   // contract forbids per banked feedback_static_gates_mirror_runtime_validators.
-  "provider.selected": choiceConstraint(["", "claude", "codex", "claude,codex", "codex,claude"],
-    () => "Invalid provider.selected: use claude, codex, claude,codex, or an empty string for no recorded choice"),
+  // Checks the typed value too: a config.json array would otherwise pass as its String() form.
+  "provider.selected": described({ choices: PROVIDER_SELECTED_CHOICES }, (_raw, value) => {
+    if (typeof value !== "string" || !PROVIDER_SELECTED_CHOICES.includes(value)) {
+      throw new Error("Invalid provider.selected: use claude, codex, claude,codex, or an empty string for no recorded choice");
+    }
+  }),
   "policies.claude_compaction.preparation_root": described({ format: "absolute-path-or-empty" }, (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid policies.claude_compaction.preparation_root: use an absolute path or an empty string for the default");
