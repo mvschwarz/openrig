@@ -248,7 +248,9 @@ export interface RuntimeAdapter {
   skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
   /** #875: where this seat's managed guidance should go, decided at a fresh launch and recorded with its startup context.
    *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
-  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
+  /** `resuming`: a resume, fork or startup continuation. `resumingConversation`: of those, a resume of the seat's own
+   *  conversation (a restore or `rig up --existing`), which launches and can carry guidance as a fresh launch does. */
+  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

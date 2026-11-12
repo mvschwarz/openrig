@@ -1167,8 +1167,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, loginShellArg, daemonOptOut, effort } = prepared;
     // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
     // from a path with a space.
+    // A resume whose startup queued the managed guidance carries it as developer instructions, as a fresh launch does.
     return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}${loginShellArg}`, daemonOptOut, effort)
-      + gitDirArg + seatFolderArg;
+      + gitDirArg + seatFolderArg + (binding.guidanceLaunchInstructions && binding.tmuxSession ? this.developerInstructionsArg(binding.tmuxSession) : "");
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string, launchShell?: string): Promise<string> {
@@ -1603,10 +1604,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** #875: whether a fresh launch can carry this seat's managed guidance as developer instructions instead of writing the
    *  repository AGENTS.md: Codex 0.164.0 or later (where `developer_instructions` is a declared key), and no visible config
    *  layer sets one, since the launch value would replace it. Anything else, or anything unreadable, keeps AGENTS.md. */
-  guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
-    // A resume or fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the
-    // repository path, answered at once.
-    if (opts?.resuming || !binding.tmuxSession) return { file: null };
+  guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
+    // A fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the repository
+    // path, answered at once. A resume of the seat's own conversation (a restore, `rig up --existing`) chooses as a fresh
+    // launch does, so its guidance stays out of the repository AGENTS.md too.
+    if (!binding.tmuxSession || (opts?.resuming && !opts.resumingConversation)) return { file: null };
     return this.freshGuidanceChoice(binding);
   }
 

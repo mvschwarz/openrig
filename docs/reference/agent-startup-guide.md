@@ -610,13 +610,17 @@ daemon's `CODEX_HOME`, else `~/.codex`.
 The guidance still goes to the repository `AGENTS.md`, as before, when:
 
 - a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
-- the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
-  resume puts the guidance back in the repository `AGENTS.md`;
-- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+- the launch forks a conversation. Developer instructions on a fork haven't been tested;
+- the seat is restored and the restore starts a new conversation. A restore keeps the guidance file its launch
   recorded, which for Codex is the repository `AGENTS.md`;
 - a handover successor starts (fresh, fork or rebuild). Its launch carries no guidance of its own, so the handover
   first puts the seat's missing blocks back in the repository `AGENTS.md` from its saved startup context;
 - Codex is older than 0.164.0, or its version is unknown.
+
+A resume of the seat's own conversation, on a snapshot restore or `rig up --existing`, chooses as a fresh launch
+does: on Codex 0.164.0 or later with none configured, its guidance goes with the resume as `-c developer_instructions=…`,
+and the guidance file its launch recorded isn't changed. Whether Codex keeps the earlier session's developer
+instructions as well isn't documented by Codex; the text sent with the resume is the current one.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.
