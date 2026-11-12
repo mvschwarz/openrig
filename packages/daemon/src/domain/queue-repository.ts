@@ -104,6 +104,7 @@ import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
+import { askBackRoute, RUNNER_CLOSE_WAITS, terminalAnswerMeaning } from "./receiver-context.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
 function humanAnswerId(askId: string, episodeKey?: string): string {
@@ -2518,6 +2519,14 @@ export class QueueRepository {
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
+  /** The registered person an address names, so an ask back reaches them; null for anyone else, the unattributed
+   *  terminal actor included (it's a person address, but nothing is delivered there). */
+  reachablePerson(address: string | null | undefined): string | null {
+    if (!address || address === UNATTRIBUTED_ACTOR) return null;
+    const registry = this.loadHumanRegistryFn();
+    return registry.ok ? resolveRegisteredHumanAddress(address, registry.entities) : null;
+  }
+
   /** Who may answer an ask: the asked person, and any other registered person in this workspace, who's recorded as
    *  themselves with the asked person kept (one trusted workspace, equal authority). A shared channel never answers. */
   answersAsk(item: QueueItem, actorSession: string): boolean {
@@ -4259,6 +4268,9 @@ export class QueueRepository {
       : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).trim()}"`
       : "answered without a choice or words";
     const person = input.actorSession;
+    // Who to ask back: the person who answered when OpenRig can name them, else the person the request went to.
+    const unattributed = person === UNATTRIBUTED_ACTOR;
+    const askBack = (unattributed ? null : this.reachablePerson(person)) ?? this.reachablePerson(item.destinationSession);
     // A handoff that fails after persisting its events rolls them back with its savepoint: discardOnThrow takes their
     // tokens out of the caller's notify envelope too, so the kept answer below still commits.
     try { this.eventBus.discardOnThrow(() => this.handoffNow({
@@ -4274,8 +4286,12 @@ export class QueueRepository {
         "",
         `Their whole answer is recorded on the request: rig queue show ${answered.qitemId} --full.`,
         `Decide with: rig seat decide-permission ${item.qitemId} --option <id> --reason "<why>"`,
-        "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer. If their words are unclear or conditional, ask them back, naming this request, then decide.",
+        `- **Who's who:** ${root.sourceSession} is the agent asking to run the tool; ${item.destinationSession} is the person it asked; ${person} answered.`,
+        ...(unattributed ? [terminalAnswerMeaning(UNATTRIBUTED_ACTOR)] : []),
+        "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer.",
+        `${askBackRoute(askBack, UNATTRIBUTED_ACTOR, `request ${item.qitemId}`)} Then decide on what they answer.`,
         "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
+        RUNNER_CLOSE_WAITS,
       ].join("\n"),
     })); } catch (error) {
       // Kept, and committed with the answer's own write (a throw here would roll it back): the request stays open, and
