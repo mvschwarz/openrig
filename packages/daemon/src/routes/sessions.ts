@@ -55,7 +55,7 @@ let inventoryTurn: Promise<unknown> = Promise.resolve();
 function inventoryStep<T>(work: () => T): Promise<Awaited<T>> {
   const run = inventoryTurn.then(async () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
-    return work();
+    return await work();
   });
   inventoryTurn = run.catch(() => {});
   return run;
