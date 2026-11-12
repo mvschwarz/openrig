@@ -90,10 +90,11 @@ function isRevivableStop(operator: string, reason: string): boolean {
  * Classify why a seat is not running, keyed on WHO stopped it.
  *
  * The stop path records a boolean intent on the session row (`intentionally_stopped`) and,
- * for `rig seat stop`, a `session.stopped` event carrying the operator and reason. The
+ * a `session.stopped` event carrying the session id, operator and reason. The
  * boolean alone cannot express the difference the maintainer asked for — the reaper and a
- * human both set it — so eligibility reads the event when the flag is set. A stop with no
- * attributable event (a rig-wide down, a node removal) is conservative: intentional.
+ * human both set it — so eligibility reads the event when the flag is set. Attribution
+ * uses the existing transactional event ledger, not a reusable tmux name: a missing or
+ * legacy event without this exact session id is conservative, never revivable.
  */
 export function classifyColdStartStop(db: Database.Database, nodeId: string): ColdStartStopIntent {
   const latest = db.prepare(`SELECT id AS sessionId, session_name AS sessionName, status, intentionally_stopped AS intentionallyStopped
@@ -112,12 +113,12 @@ export function classifyColdStartStop(db: Database.Database, nodeId: string): Co
     .get(nodeId) as { payload: string } | undefined;
   if (event) {
     try {
-      const payload = JSON.parse(event.payload) as { operator?: string | null; reason?: string | null; sessionName?: string | null };
+      const payload: unknown = JSON.parse(event.payload);
       // Only an event for this exact session row attributes this stop. An older event cannot
       // explain a newer flag, so it stays intentional rather than reviving on stale evidence.
-      if (payload.sessionName === latest.sessionName) {
-        const operator = payload.operator ?? null;
-        const reason = payload.reason ?? null;
+      if (typeof payload === "object" && payload !== null && "sessionId" in payload && payload.sessionId === latest.sessionId) {
+        const operator = "operator" in payload && typeof payload.operator === "string" ? payload.operator : null;
+        const reason = "reason" in payload && typeof payload.reason === "string" ? payload.reason : null;
         if (operator && reason && isRevivableStop(operator, reason)) return { kind: "daemon_reclaim", operator, reason };
         return { kind: "intentional", operator, reason };
       }

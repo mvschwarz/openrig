@@ -322,9 +322,13 @@ export class RigTeardownOrchestrator {
   }
 
   /** Atomically record the supported stop and clear its binding. */
-  private atomicNodeCleanup(session: Pick<LatestNodeSession, "sessionId" | "nodeId">): void {
+  private atomicNodeCleanup(session: Pick<LatestNodeSession, "sessionId" | "nodeId" | "sessionName">): void {
     const tx = this.db.transaction(() => {
       this.deps.sessionRegistry.markIntentionallyStopped(session.sessionId);
+      const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(session.nodeId) as { rig_id: string };
+      this.deps.eventBus.persistWithinTransaction({ type: "session.stopped", rigId: node.rig_id,
+        nodeId: session.nodeId, sessionId: session.sessionId, sessionName: session.sessionName,
+        operator: "rig-teardown", reason: "rig_down" });
       this.deps.sessionRegistry.clearBinding(session.nodeId);
     });
     tx();
@@ -338,7 +342,6 @@ export class RigTeardownOrchestrator {
     const eligible = this.db.prepare(`
       SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
-        AND s.intentionally_stopped = 0
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `);
@@ -368,6 +371,9 @@ export class RigTeardownOrchestrator {
           // A superseded row stays superseded: restore skips it and keeps reading the seat's own history.
           if (row.status === "superseded") this.deps.sessionRegistry.recordStopIntent(row.id);
           else this.deps.sessionRegistry.markIntentionallyStopped(row.id);
+          this.deps.eventBus.persistWithinTransaction({ type: "session.stopped", rigId,
+            nodeId: row.node_id, sessionId: row.id, sessionName: row.session_name,
+            operator: "rig-teardown", reason: "rig_down" });
           this.deps.sessionRegistry.clearBinding(row.node_id);
         }
       })();

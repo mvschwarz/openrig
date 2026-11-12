@@ -42,11 +42,11 @@ function specWith(coldStart: { member?: boolean; pod?: boolean }): { rigSpec: Ri
 
 const STOPPED_AT = "2026-11-11T22:00:00.000Z";
 
-function insertStopEvent(db: Database.Database, opts: { sessionName: string; operator: string | null; reason: string }): void {
+function insertStopEvent(db: Database.Database, opts: { sessionName: string; sessionId?: string; operator: string | null; reason: string }): void {
   db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES ('r1','n1','session.stopped', ?)")
     .run(JSON.stringify({
       type: "session.stopped", rigId: "r1", nodeId: "n1",
-      sessionName: opts.sessionName, reason: opts.reason, operator: opts.operator,
+      sessionName: opts.sessionName, sessionId: opts.sessionId ?? "s1", reason: opts.reason, operator: opts.operator,
     }));
 }
 
@@ -54,7 +54,7 @@ interface FixtureOptions {
   /** The seat's latest session was marked intentionally stopped after `rig seat stop`. */
   intentionallyStopped?: boolean;
   /** Latest stop attribution written by `rig seat stop`. */
-  stopEvent?: { sessionName: string; operator: string | null; reason: string };
+  stopEvent?: { sessionName: string; sessionId?: string; operator: string | null; reason: string };
   /** Latest session row status (default `exited`). */
   status?: string;
 }
@@ -263,7 +263,7 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
   it("ignores a stale stop event from another session of the same seat", async () => {
     const f = fixture({
       intentionallyStopped: true,
-      stopEvent: { sessionName: "dev-impl@fleet--old", operator: "daemon:seat-reaper", reason: "idle_reap" },
+      stopEvent: { sessionName: "dev-impl@fleet", sessionId: "old-generation", operator: "daemon:seat-reaper", reason: "idle_reap" },
     });
     f.starter.notify("dev.impl@fleet");
     await flush();
@@ -275,6 +275,17 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     const f = fixture({ status: "superseded" });
     f.starter.notify("dev.impl@fleet");
     await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    f.db.close();
+  });
+
+  it.each(["rig down", "human stop", "crash"])("uses only the new generation's intent after reaper, relaunch, then %s", async end => {
+    const f = fixture({ intentionallyStopped: true,
+      stopEvent: { sessionName: "dev-impl@fleet", operator: "daemon:seat-reaper", reason: "idle_reap" } });
+    f.db.prepare(`INSERT INTO sessions(id,node_id,session_name,status,created_at,intentionally_stopped)
+      VALUES ('s3','n1','dev-impl@fleet','exited','2026-11-12T00:00:00.000Z',?)`).run(end === "crash" ? 0 : 1);
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(end === "crash" ? 1 : 0);
     f.db.close();
   });
 
