@@ -16,7 +16,7 @@ import { NetworkBindingStore, networkCredentialFile } from "../src/domain/networ
 import { Hono } from "hono";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
-import { NetworkConnectorService, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
+import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
 const PARTICIPANT = "alex@team";
 
@@ -422,6 +422,16 @@ describe("network connector", () => {
       last_error: `The hub item was closed elsewhere (done, canceled) before this result reached it. The result stays on ${local!.qitemId}.`,
     });
     expect(repo.getById(local!.qitemId)!.resolution).toBe("Here it is.");
+  });
+
+  it("closed-elsewhere conflicts are listed by when they settled, and ones that settled in the same millisecond by local item", () => {
+    const add = db.prepare(`INSERT INTO network_receipts (local_qitem_id, binding_id, hub_qitem_id, created_at, settled_at, outcome)
+      VALUES (?, 'netb-order', ?, '2026-11-11T19:00:00.000Z', ?, 'closed_on_hub')`);
+    // The latest has the first id, and the two that tie were recorded, and name hub items, out of local-item order.
+    add.run("qitem-net-a", "hub-1", "2026-11-11T19:00:00.001Z");
+    add.run("qitem-net-c", "hub-2", "2026-11-11T19:00:00.000Z");
+    add.run("qitem-net-b", "hub-3", "2026-11-11T19:00:00.000Z");
+    expect(networkClosedElsewhere(db, "netb-order").map((c) => c.localItem)).toEqual(["qitem-net-b", "qitem-net-c", "qitem-net-a"]);
   });
 
   it("a hub item already failed elsewhere gets no write and isn't our result, and a close that loses a race is read back as closed elsewhere", async () => {

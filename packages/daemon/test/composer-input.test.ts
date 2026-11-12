@@ -68,6 +68,44 @@ describe("cursor-bound composer input", () => {
     }
   });
 
+  it.each([
+    "✘ Auto-update failed · Run claude doctor",
+    "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
+    "✘ Auto-update failed: claude.exe in use (close other Claude Code sessions, including VS Code) · Run claude doctor",
+    "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code",
+    "✘ Auto-update failed · Try claude doctor or cd ~/.claude/local && npm update @anthropic-ai/claude-code",
+  ])("reads a complete auto-update failure footer row (%s), preserving draft text", warning => {
+    const frame = (body: string, footer = warning) => {
+      const snapshot = claude(body, undefined, 200);
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `? for shortcuts\n${footer}\n`);
+      return snapshot;
+    };
+    expect(inspectComposerInput(frame(""), "claude-code").state).toBe("empty");
+    expect(inspectComposerInput(frame("person's draft"), "claude-code").state).toBe("text");
+    expect(inspectComposerInput(claude(warning, undefined, 200), "claude-code").state).toBe("text");
+    for (const nearMiss of [warning + " now", warning.replace("failed", "succeeded"), warning.replace("doctor", "doctors")]) {
+      expect(inspectComposerInput(claude(nearMiss, undefined, 200), "claude-code").state).toBe("text");
+      expect(inspectComposerInput(frame("", nearMiss), "claude-code").state).toBe("unknown");
+    }
+  });
+
+  it.each(["", "person's draft"])("reads the observed clipped auto-update footer with input %j", body => {
+    // A complete synthetic frame; the retained partial capture cannot supply physical cursor rows.
+    const snapshot = claude(body);
+    snapshot.screen = snapshot.screen.replace("? for shortcuts", "⏵⏵ accept edits on (shift+tab to cycle)\n✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…");
+    expect(inspectComposerInput(snapshot, "claude-code").state).toBe(body ? "text" : "empty");
+  });
+
+  it("keeps near misses unknown below the footer and warning text inside a draft", () => {
+    const warning = "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…";
+    for (const nearMiss of [warning + " now", warning.replace("doctor", "doctors"), warning.replace("claude-c…", "other…")]) {
+      const snapshot = claude("");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts", `? for shortcuts\n${nearMiss}`);
+      expect(inspectComposerInput(snapshot, "claude-code").state).toBe("unknown");
+    }
+    expect(inspectComposerInput(claude(warning, undefined, 100), "claude-code").state).toBe("text");
+  });
+
   it("reads Claude's context hint below a named composer without skipping arbitrary rows", () => {
     const frame = (body: string, styled = false, hint = "~66k uncached · /clear to start fresh"): ComposerSnapshot => ({
       screen: [...Array<string>(22).fill(""),

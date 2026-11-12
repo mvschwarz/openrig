@@ -34,6 +34,7 @@ import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSucce
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
+import { readWakeOutcome } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -470,8 +471,9 @@ function deliveryResolutionEvidence(
     if (row.claimedAt) return `source claimed at ${row.claimedAt}`;
     if (row.state === "blocked") return "source parked";
     if (kind === "undelivered-wake") {
-      if (row.lastNudgeResult === "verified") return "source wake verified";
-      if (row.lastNudgeResult?.startsWith("wake-accepted:")) return "source wake accepted by its hosted trigger";
+      const wake = readWakeOutcome(row.lastNudgeResult);
+      if (wake?.fact === "accepted" && wake.renderVerified) return "source wake verified";
+      if (wake?.fact === "accepted" && wake.route === "hosted-trigger") return "source wake accepted by its hosted trigger";
     }
   }
   if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";

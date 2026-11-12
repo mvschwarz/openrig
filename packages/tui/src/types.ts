@@ -94,7 +94,8 @@ export interface HostNode {
   name: string;
   /** Operator-configured name for presentation, never a routing key. */
   displayName?: string;
-  reachable: boolean;
+  /** true/false only when a probe answered; null keeps missing or unknown distinct. */
+  reachable: boolean | null;
   rigs: RigNode[];
 }
 

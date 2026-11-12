@@ -2,7 +2,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
-import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
@@ -1361,7 +1361,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity; unscoped rows excluded" } : {}),
     view: "execution",
     readiness,
-    project_readiness: missionsRoot ? readProjectReadiness(missionsRoot, readPolicy) : null,
+    project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,
     // Authored guidance is carried verbatim in meaning, never parsed into edges or acceptance.
     planning_guidance: arrangement?.state === "valid" ? arrangement.guidance : [],
     mission,

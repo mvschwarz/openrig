@@ -84,11 +84,23 @@ so its rate-limit hook is attributed to that seat too. This is appropriate when
 the helper uses the same login, since the quota belongs to the account. A
 helper on a different login is attributed the same way, so its rate limit can
 hold pending handoffs to every seat in that seat's Claude pool for one retry
-interval, even when the seat's own login still has room. This attribution does
-not bind the hook to Claude's own native session.
+interval, even when the seat's own login still has room. A reset time the
+helper's message states is not used: OpenRig keeps a stated reset only when the
+hook's Claude `session_id` is the seat's own resume token, so a helper never
+holds the pool past that one interval.
 
-The event carries no usage percentage, account identity or reset timestamp.
-It marks the Claude provider pool as limited and preserves a current
+The event carries no usage percentage or account identity. When the seat's own
+Claude states when the limit resets (for example `resets Nov 10, 4pm
+(America/Sao_Paulo)`, `resets in 2h 30m`, or the older `usage limit
+reached|<epoch>`), the hook relay reads that time on the seat's machine and
+forwards only the resulting timestamp (`resetsAt`), never the message text. It
+reads the reset only after the typed `rate_limit` failure; the text never
+decides that a seat is limited. A reset it can't read completely (an unknown or
+truncated time zone, an unsupported unit, a date that doesn't exist such as Feb
+30) or that is in the past or more than eight days away gives no reset. The
+daemon applies the same eight-day bound to any sender.
+
+The event marks the Claude provider pool as limited and preserves a current
 `agentActivity.reason` of `usage_limit` over a cached idle reading. It does not
 count as a request for human input; a newer permission prompt still takes
 precedence in the seat's activity display. Conflicting seat windows retain the
@@ -99,13 +111,15 @@ Pending work handled by the wake ladder uses the existing local Claude pool
 declare different Claude config directories. If reset windows conflict within
 a proposed shared pool, only the seats reporting exhaustion are held; another
 seat's pending handoffs can still retry. An exhausted status line window with
-a known reset supplies the timer. Otherwise a typed failure uses
+a known reset supplies the timer, and so does a reset the seat's own typed
+failure stated (`provider-reset`). Otherwise a typed failure uses
 `queue.wake_retry_interval_seconds` (default 300) from the event time, plus the
 existing wake jitter, and records `config-fallback`. That is a retry time, not a
 claim that the provider's quota will reset then. The timer releases the shared
 blocker once and retains the existing durable wake delivery behavior.
 
 Authentication, billing and overloaded errors are not classified as usage
-limits. Claude limit banners are not scraped, and older runtimes or failures
-that do not emit this hook still depend on status line data. Without either
+limits. Claude limit banners are not scraped from the terminal, and older
+runtimes or failures that do not emit this hook still depend on status line
+data. Without either
 source, provider usage remains unknown.
