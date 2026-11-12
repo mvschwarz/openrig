@@ -1,6 +1,7 @@
 # Queue-driven seat cold start: review fixes (#2829 slice 1)
 
-**A–G implemented; focused gates pass. Not pushed; no PR opened.**
+**A–G implemented; CRITICAL stop-attribution spoofing and drain-pass TTL warning fixed;
+focused gates pass. Not pushed; no PR opened.**
 
 - Branch: `feat/seat-cold-start`.
 - Upstream base merged, not rebased: `c00289e2687ac2880b2595d159f2b2272a08c48f`.
@@ -43,7 +44,7 @@ The final status-only commit records this package; it does not change the tested
 | C — eligibility checked before awaited probes | Starter takes the existing delivery-guard lifecycle lease and synchronously rechecks current seat identity, persisted opt-in, stop intent and attempt ledger immediately before calling the existing launch door. The door joins the same lease. | Stop/opt-out/identity changes during probes refuse. A stop committed while waiting for the actual lifecycle lease refuses. Pi continuity tests share the real guard with the door. |
 | D — permanent three-failure disable | Positive target liveness clears failures. Failure counts also expire after 15 quiet minutes, covering successful operator lifetimes never observed by queue wakes. | Capped seat → observed operator run → dormant → launch; unobserved-life cap expiry; existing three-failure and success-reset cases. |
 | E — only five peers checked | Probe each distinct latest running peer session, bounded by actual rig size, stopping on the first live one. | Five stale peers followed by a live sixth, seven probes including the target, launches. |
-| F — refusal work repeated for waiting rows | Drain-pass evaluation tokens plus TTL-bounded in-memory memoization before seat resolution; dot/dash canonical addresses coalesce. New passes recheck immediately; entries expire after one second. Queue receiver classification itself is still re-read. | Resolution/probe/log counts for repeated refusals, TTL expiry, immediate next-pass liveness recheck, real queue drain token sharing/renewal. |
+| F — refusal work repeated for waiting rows | Drain-pass evaluation tokens before seat resolution; dot/dash canonical addresses coalesce for the entire token lifetime. New passes recheck immediately; the one-second TTL applies only outside a pass. Queue receiver classification itself is still re-read. | Resolution/probe/log counts for repeated refusals, same-pass notifications 1,001 ms apart, outside-pass TTL expiry, immediate next-pass liveness recheck, real queue drain token sharing/renewal. |
 | G — constants and documentation | Existing named 60-second and three-failure constants retained; named failure-window/TTL constants added. Classifier now has the eligibility table; reference docs and PR body state the single-seat limitation. | Exact minimum-interval boundary, failure cap tests, single-seat-rig refusal. Prose is reviewed, not pinned by text assertions. |
 
 Generation attribution uses the existing transactional event ledger instead of a new table.
@@ -284,3 +285,136 @@ tail) and `.omo/evidence/npm-test-postmerge.log`, `lint-postmerge.log`,
 
 **Still outstanding:** a multi-rig/fleet run on the operator's pi fleet (this used one
 scratch daemon and two seats), and independent post-fix review.
+
+## Security closure and drain-pass warning — 2026-11-12
+
+Latest implementation: `538ebf7e1b28120a3734a65db32a45fb1705dbbf`, branch
+`feat/seat-cold-start`, clean tracked tree at binding, 2026-11-12T10:35:54Z.
+Implementer self-check, not independent security approval. Starting head was
+`bbc9e5327` (the live-demo status commit after the supplied `ec622c97b`).
+
+### CRITICAL: caller-controlled reaper attribution — CLOSED
+
+A caller could POST `operator: daemon:seat-reaper` and `reason: idle_reap` to
+the seat-stop route, producing an exact-generation revivable stop. Queued wake
+notifications could then relaunch a deliberately stopped seat. Runtime-custody
+middleware did not establish authority to claim a daemon identity.
+
+`e54f1ffbc` — `fix(daemon): reserve internal stop attribution at the HTTP boundary`
+
+- `packages/daemon/src/routes/seat.ts:570`: the stop route ignores body operator
+  claims and records the transport sender, or null when absent. It also strips
+  `daemon:*` transport identities: that header is caller-controlled, not authentication.
+  Reason text and checked-stop preconditions retain their existing handling.
+- Internal `SeatLifecycleService.stopSeat` calls are unchanged; the exact-generation
+  `daemon:seat-reaper` / `idle_reap` attribution remains the only revivable stop.
+- CLI `runLifecycleVerb("stop", ...)` posts to this route, so `--operator` cannot
+  bypass it. The current MCP server exposes no separate seat-stop tool or direct
+  lifecycle stop writer. No CLI/MCP command or rig-level verb was changed.
+- Cost: body-supplied stop labels are no longer recorded, even ordinary labels;
+  callers without a transport identity are recorded as unattributed intentional stops.
+
+Tests in `seat-cold-start-stop-generations.test.ts`:
+
+- `keeps a caller stop intentional when daemon attribution is supplied: $operator / $sender`
+  runs real HTTP routing, SQLite persistence, lifecycle writing and the delivery lease,
+  then a cold-start wake notification. Four cases cover missing, normal and forged
+  transport identity, plus another reserved daemon name. They assert no launch and
+  persisted non-revivable attribution bound to the exact session id.
+- `revives the exact generation stopped by an internal reaper-style call` proves the
+  direct internal writer still records reaper attribution and the wake launches once.
+
+### WARNING: TTL expiry inside a slow drain pass — CLOSED
+
+`538ebf7e1` — `fix(daemon): retain cold-start refusals for the whole drain pass`
+
+`packages/daemon/src/domain/seat-cold-start.ts:225` expires evaluations only when
+no drain token is supplied. The WeakMap retains each token's evaluations for its
+lifetime without adding timers or scheduling. The existing test
+`rechecks liveness on the next drain pass without waiting for the TTL` now advances
+the injected clock 1,001 ms between same-pass notifications and asserts one recipe
+evaluation, two liveness probes (target and peer), and one refusal log. A new token
+still rechecks immediately; the separate outside-pass TTL test still passes.
+
+### Verification tails
+
+Red before production edits: the two focused files reported
+`Tests 5 failed | 46 passed (51)`. Three forged-reaper route cases launched once
+instead of zero; the other reserved-name case persisted the body identity;
+the slow-pass case evaluated the recipe twice instead of once. The internal-reaper
+regression already passed. Green after edits: both focused files pass.
+
+`npm run build` — exit 0:
+
+```text
+✓ built in 3.79s
+> @openrig/cli@0.7.1 build
+> tsc && node ../../scripts/prepare-workspace-build.mjs cli
+> @openrig/tui@0.1.0 build
+> tsc && node ../../scripts/prepare-workspace-build.mjs tui
+```
+
+Non-blocking UI warnings: stale Browserslist data and a minified chunk over 500 kB.
+No dependency or UI changes were made.
+
+`npm run lint` — exit 0:
+
+```text
+> npm run typecheck:prep && tsc --noEmit --project packages/daemon/tsconfig.json && tsc --noEmit --project packages/ui/tsconfig.json && tsc --noEmit --project packages/cli/tsconfig.json && tsc --noEmit --project packages/tui/tsconfig.json
+> openrig@0.7.1 typecheck:prep
+> npm run build -w packages/daemon
+> @openrig/daemon@0.7.1 build
+> tsc && node scripts/copy-workflow-specs.mjs
+```
+
+Focused and stop-path suites — exit 0:
+
+```sh
+npx vitest run packages/daemon/test/seat-cold-start \
+  packages/daemon/test/queue-cold-start-hook.test.ts \
+  packages/daemon/test/rigspec-cold-start.test.ts \
+  packages/daemon/test/seat-lifecycle-service.test.ts \
+  packages/daemon/test/rig-teardown.test.ts \
+  packages/daemon/test/checked-seat-stop.test.ts \
+  packages/daemon/test/rig-lifecycle-route.test.ts \
+  packages/daemon/test/seat-delivery-guard.test.ts \
+  packages/daemon/test/wake-recovery-no-receiver.test.ts \
+  packages/daemon/test/migration-fixture-parity.test.ts \
+  packages/cli/test/seat-lifecycle-verbs.test.ts
+```
+
+```text
+✓ |@openrig/daemon| test/seat-lifecycle-service.test.ts (37 tests) 1641ms
+✓ |@openrig/daemon| test/rig-lifecycle-route.test.ts (23 tests) 1667ms
+✓ |@openrig/daemon| test/rig-teardown.test.ts (113 tests) 8234ms
+Test Files  13 passed (13)
+     Tests  362 passed (362)
+  Duration  10.77s
+```
+
+Negative CLI option tests emit expected required-option errors; existing mocked
+tmux/claim paths emit scope/probe warnings. No test failures. LSP error diagnostics
+on all four changed TypeScript files: none. `git diff --check`: exit 0.
+
+### Alignment and residual risks
+
+- Req 1, reserved caller attribution non-forgeable: SATISFIED by route + persisted
+  event assertions in `e54f1ffbc`; both body and header spoofing are covered.
+- Req 2, internal reaper stop still revives: SATISFIED by the direct lifecycle regression.
+- Req 3, per-token refusal lifetime with outside-pass TTL: SATISFIED by `538ebf7e1`
+  and both cache tests in the executed selection.
+- Req 4, build/lint/focused stop suites and recorded tails: SATISFIED above.
+- Req 5, intentional-stop refusal/delivery guard preserved, no scheduler or rig-level
+  verbs, no weakened tests, no secrets: SATISFIED by the four-file implementation diff
+  and the executed lifecycle/teardown/guard suites.
+- Req 6, no push, PR or GitHub comment: SATISFIED; no publishing command was run.
+
+Self-review: route owns caller stop attribution; starter owns cold-start admission;
+tests own the corresponding regressions. No new tagged variants, casts, helpers,
+dependencies, error handling or logging. Existing manual request parsing is retained.
+Pure-LOC measurement: route 536, starter 296, existing cold-start tests 498, generation
+tests 140. The first three are inherited oversized files; this bounded security fix
+does not restructure them. No full-suite or new native-runtime/fleet acceptance is
+claimed: the HTTP/lifecycle/SQLite/guard surface is real, tmux and the launch callback
+are simulated. Independent review remains recommended. Recommendation: accept these
+two bounded fixes for independent review, not fleet acceptance or publication.
