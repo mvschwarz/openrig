@@ -250,12 +250,12 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(rows()).toBe(3);
     });
 
-    it("names the candidates when one name reaches two seats, and writes nothing", async () => {
+    it("names the candidates when a name matches no seat exactly and two by slug, and writes nothing", async () => {
       namedSeat("team-a", "reviewer", "reviewer@team-a");
       namedSeat("team-a", "reviewer-two", "Reviewer@team-a");
       const { url } = await listen();
       const ask = await connect(url);
-      const refused = await ask("rig_queue_create", { destination: "reviewer", body: "Which one?" });
+      const refused = await ask("rig_queue_create", { destination: "REVIEWER", body: "Which one?" });
       expect(refused.structured).toMatchObject({ code: "destination_ambiguous" });
       expect([...refused.structured.candidates].sort()).toEqual(["Reviewer@team-a", "reviewer@team-a"]);
       expect(rows()).toBe(0);
@@ -277,6 +277,42 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(rows()).toBe(0);
       expect((await ask("rig_queue_create", { destination: "lead", body: "Reached" })).isError).toBe(false);
       expect(rows()).toBe(1);
+    });
+
+    it("an exact name wins over another seat's slug twin, as a name alone and as the configured receiver", async () => {
+      namedSeat("team-a", "lead", "pod-lead@team-a");
+      namedSeat("team-a", "other", "Pod.Lead@team-a");
+      const { url } = await listen(undefined, "pod-lead@team-a");
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-exact-name", destination: "pod-lead", body: "Exact" })).isError).toBe(false);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-exact-receiver", body: "Receiver" })).isError).toBe(false);
+      for (const qitemId of ["qitem-exact-name", "qitem-exact-receiver"]) expect(repo.getById(qitemId)).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    });
+
+    it("a pod-member name that reached one seat still does beside a self-attached slug twin", async () => {
+      namedSeat("team-a", "lead", "lead@team-a");
+      namedSeat("team-a", "twin", "Pod_Lead@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-pod-member-kept", destination: "pod-lead", body: "As before" })).isError).toBe(false);
+      expect(repo.getById("qitem-pod-member-kept")).toMatchObject({ destinationSession: "lead@team-a" });
+    });
+
+    it("without team/list, another caller's name answers the same whether or not its seat exists, before the team is read", async () => {
+      let nodeReads = 0;
+      broken = (req) => { if (/\/api\/rigs\/[^/]+\/nodes$/.test(new URL(req.url).pathname)) nodeReads++; return undefined; };
+      const { url } = await listen();
+      const ask = await connect(url);
+      const answers = async () => Promise.all(["cus-other-connection", "Cus_Other_Connection"].map(async (destination) =>
+        (await ask("rig_queue_create", { destination, body: "Hidden?" })).structured));
+      const absent = await answers();
+      namedSeat("team-a", "other-connection", "cus-other-connection@team-a");
+      const present = await answers();
+      expect(present).toEqual(absent);
+      // As written it's out of scope, without a read; a slug of it reads as no seat at all.
+      expect(absent.map((answer) => answer.code)).toEqual(["out_of_scope", "destination_not_found"]);
+      expect(nodeReads).toBe(2);
+      expect(rows()).toBe(0);
     });
   });
 

@@ -650,17 +650,18 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
 }
 
 /** The seats of `rigName` that `name` names, each as its actual session: its node's canonical session, or the
- *  pod-member form while the node has no session yet. A name matches a seat's pod-member form (logical id `pod.member`
- *  written `pod-member`), its session's own name before `@`, or that name's slug, so a seat attached under its own name
- *  is found by the name its team shows. No topology relationship, name convention for a lead, caller identity or task
- *  history supplies a seat. Throws when the rig isn't one active rig here or its node list can't be read. */
+ *  pod-member form while the node has no session yet. A name matches, in this order, a seat's session's own name before
+ *  `@`, its pod-member form (logical id `pod.member` written `pod-member`), or that own name's slug, so a seat attached
+ *  under its own name is found by the name its team shows. The first of these that any seat matches decides, so another
+ *  seat's slug never makes an exact name ambiguous. No topology relationship, name convention for a lead, caller identity
+ *  or task history supplies a seat. Throws when the rig isn't one active rig here or its node list can't be read. */
 async function namedSeats(client: DaemonClient, rigName: string, name: string): Promise<string[]> {
   const rig = await resolveRigHandle(client, rigName, { strict: true });
   if (rig.kind !== "resolved") throw new Error(`rig ${rigName} isn't one active rig here`);
   const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
   if (nodes.status !== 200 || !Array.isArray(nodes.data)) throw new Error(`the node list for ${rigName} answered HTTP ${nodes.status}`);
   const wanted = seatSlug(name);
-  const found = new Set<string>();
+  const [byOwn, byPodMember, bySlug] = [new Set<string>(), new Set<string>(), new Set<string>()];
   for (const entry of nodes.data as unknown[]) {
     const { logicalId, rigName: inRig, canonicalSessionName } = (entry ?? {}) as Record<string, unknown>;
     if (typeof logicalId !== "string" || inRig !== rigName) throw new Error(`the node list for ${rigName} has a malformed entry`);
@@ -670,9 +671,11 @@ async function namedSeats(client: DaemonClient, rigName: string, name: string): 
     const session = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
       && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : `${podMember}@${rigName}`;
     const own = session.slice(0, -(rigName.length + 1));
-    if (name === podMember || name === own || (wanted !== "" && wanted === seatSlug(own))) found.add(session);
+    if (name === own) byOwn.add(session);
+    else if (name === podMember) byPodMember.add(session);
+    else if (wanted !== "" && wanted === seatSlug(own)) bySlug.add(session);
   }
-  return [...found];
+  return [...(byOwn.size > 0 ? byOwn : byPodMember.size > 0 ? byPodMember : bySlug)];
 }
 
 /** A seat name as a slug: lowercase, with each run of other characters a single hyphen. */
@@ -1394,6 +1397,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const rigName = receiver && receiver.slice(0, receiverAt) === named ? receiver.slice(receiverAt + 1)
           : access.rigs.length === 1 ? access.rigs[0] : undefined;
         if (!rigName) return outOfScope(`Destination ${named}`, omitHint);
+        // A name this connection may not address as written (another caller's seat without team/list, or its own) is
+        // refused before the team is read, so the answer doesn't say whether such a seat exists.
+        if (named !== "" && !scope?.destination(`${named}@${rigName}`)) return outOfScope(`Destination ${named}`, omitHint);
         let seats: string[];
         try {
           seats = named === "" ? [] : await namedSeats(client, rigName, named);
@@ -1407,7 +1413,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           return errorResult(JSON.stringify({ ok: false, code: "destination_ambiguous", message, candidates: reachable }),
             "destination_ambiguous", message, { candidates: reachable });
         }
-        if (reachable.length === 0 && seats.length > 0) return outOfScope(`Destination ${named}`, omitHint);
+        // A seat it may not address reads as no seat at all, so a hidden seat's name says nothing about it.
         if (reachable.length === 0) {
           const where = offered("rig_team") ? " rig_team lists the seats you can reach and their names." : " Check the name the person gave.";
           const message = `No seat here is named '${named}', so nothing was written.${where}${omitHint ? ` ${omitHint}` : ""}`;

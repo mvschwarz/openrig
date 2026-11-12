@@ -175,10 +175,12 @@ and nothing else is offered:
   `rig_queue_create` that leaves out `destination` goes to that receiver. The operator sets it; a caller can't. It must be
   exactly one existing local node within that request's grant, or nothing is written. An explicit `destination` works as
   before.
-- **A seat by its name:** a `destination` with no `@` names a seat as its team shows it: its session's own name, that
-  name's slug, or its pod-member form, in the connection's one rig or the configured receiver's. The item is stored under
-  that seat's actual session. A name two seats match returns `destination_ambiguous` with the candidates, a name no seat
-  has returns `destination_not_found`, and a seat the grant can't reach stays `out_of_scope`.
+- **A seat by its name:** a `destination` with no `@` names a seat as its team shows it: its session's own name, then its
+  pod-member form, then that name's slug, in the connection's one rig or the configured receiver's. The first of these
+  that any seat matches decides, so another seat's slug never makes an exact name ambiguous. The item is stored under that
+  seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
+  seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
+  or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
