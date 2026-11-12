@@ -219,3 +219,68 @@ the merged upstream base `c00289e26`.
 without a session id cannot authorize reaper revival. Independent post-fix review
 and real-fleet resume/pickup are still needed. This is a local review package, not
 a release or merge commitment.
+
+---
+
+## Live Pi end-to-end demonstration (native runtime, single-host)
+
+Run 2026-11-12 after the merge, on this checkout's built daemon (head `ec622c97b`,
+implementation `c55f67be3` code included), Node v22.23.4, tmux 3.5a. This closes the
+"live fleet e2e pending" item for one seat; it does **not** claim a 9-rig fleet run.
+
+**Setup.** A scratch daemon from this checkout only (never the installed daemon), its
+own private tmux socket and scratch `OPENRIG_HOME`/`HOME` (the repo's hermetic scenario
+scaffold), an ephemeral loopback port, and a two-seat rig `coldrig`:
+`dev.keeper` (pi, stays live) and `dev.sleeper` (pi, `cold_start: true`), both real
+native `pi` 5.1.48 (OmO fork) processes against the zai provider, with the seat's own
+managed `PI_CODING_AGENT_DIR` auth.json. A `rig snapshot coldrig` was taken while both
+seats were live (the launch door needs a restore-usable snapshot).
+
+**Sequence and observed result (four consecutive runs):**
+
+1. Both seats reached `running`; the sleeper's runner-state sidecar recorded
+   `sessionFile=<…>.jsonl` and `ready:true`.
+2. The sleeper's tmux session was killed out-of-band (the issue's "no
+   continuity-preserving option today" case), then the daemon was restarted — the boot
+   reconciler recorded the seat `detached` with `intentionally_stopped=0`, the exact
+   state a crashed/rebooted seat has. The keeper stayed live, so the rig still counted
+   as running.
+3. `rig queue create --destination dev-sleeper@coldrig` (sourced from the keeper).
+4. The wake failed against the missing session; the queue's positive no-receiver
+   evidence triggered the cold start. `seat_cold_starts` recorded
+   `last_outcome:"resumed"`, `consecutive_failures:0`, `last_success_at` set — in
+   09:03:29, 09:09:03, 09:12:41 and 09:21:16 runs.
+5. The relaunched seat's runner-state reported the **same** `sessionFile` as before
+   (`SAME CONVERSATION: true`) and `ready:true`; the pi seat resumed its conversation
+   rather than starting fresh.
+6. The queued row then reached the revived seat on the wake ladder's normal retry
+   cadence (~5 min, not instantly) and the **pi seat itself claimed it**
+   (`claimed_at` set, state `in-progress`/`done`); the pane shows the agent working the
+   row.
+
+**Receipts (local, not part of the branch):** `.omo/evidence/coldstart-demo.log` (the
+final evidence-complete run: before/after session file, ledger, claimed row, pane
+tail) and `.omo/evidence/npm-test-postmerge.log`, `lint-postmerge.log`,
+`ui-postmerge.log`.
+
+**What the live run caught that unit tests could not:**
+
+- **A real wiring defect:** the first live attempts failed with
+  `awaiting_decision:… (no pi adapter available)` — the cold-start call into
+  `launchSingleNode` did not thread the runtime adapters map, so a pod-aware resume
+  could not verify continuity. Fixed by wiring the adapters (and `fsOps`) into the
+  late-bound launcher exactly as the HTTP launch routes do; the fix is commit
+  `2396eafe0`, and the four resumed runs above are after it. Behaviour without it was
+  correct-but-unhelpful: fail closed to `awaiting-decision`, never a silent fresh start.
+- **Snapshot dependency is real:** on a rig that had never been snapshotted, the door
+  answered `failed:no_usable_snapshot` (fail closed, documented limit above). Operators
+  get cold start only with a restore-usable snapshot; the fix is a snapshot policy, not
+  a code change here.
+- **Dormancy needs a daemon-observed state:** an out-of-band kill leaves
+  `sessions.status='running'` until the boot reconciler (or a daemon-recorded stop, as
+  slice 2's reaper will write) records it. The intended production path is a recorded
+  stop; out-of-band teardown cold-starts after the next daemon start. Recorded as a
+  limit, not silently papered over.
+
+**Still outstanding:** a multi-rig/fleet run on the operator's pi fleet (this used one
+scratch daemon and two seats), and independent post-fix review.
