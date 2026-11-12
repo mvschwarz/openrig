@@ -15,7 +15,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containedArgv, probeContainment } from "./harness/contain.mjs";
@@ -119,35 +119,51 @@ async function runSuite(opts) {
   const containment = opts["no-contain"] ? { ok: false, reason: "--no-contain given" } : probeContainment();
   pins.containment = containment;
 
+  // Every program is pinned before the first cell runs.
+  const programs = ["claude", "codex"].flatMap((kind) => list(opts[kind]).map((version) => {
+    const entry = installs && installEntry(installs, kind, version);
+    const programPin = entry && existsSync(entry) ? pin(kind, entry) : null;
+    pins.programs[`${kind}-${version}`] = programPin ?? { missing: entry };
+    return { kind, version, entry, programPin };
+  }));
+
+  // A stop (SIGTERM, SIGINT) is passed to the running cell, which closes itself; no further cell starts, and the
+  // result written says the run was stopped.
+  let stopped = null;
+  const stop = (signal) => { stopped = signal; current?.kill("SIGTERM"); };
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
+
   const cells = [];
-  for (const kind of ["claude", "codex"]) {
-    for (const version of list(opts[kind])) {
-      const entry = installs && installEntry(installs, kind, version);
-      const programPin = entry && existsSync(entry) ? pin(kind, entry) : null;
-      pins.programs[`${kind}-${version}`] = programPin ?? { missing: entry };
-      for (const c of cases) {
-        const cellId = `${c.id}-${kind}-${version}`;
-        const base = { case: c.id, title: c.title, program: kind, version, level: LEVEL };
-        if (!c.programs.includes(kind)) { cells.push({ ...base, result: "NOT RUN", reason: `${c.id} isn't defined for ${kind}` }); continue; }
-        if (!programPin) { cells.push({ ...base, result: "NOT RUN", reason: `${kind} ${version} isn't installed (run.mjs install)` }); continue; }
-        if (!containment.ok) { cells.push({ ...base, result: "NOT RUN", reason: `no loopback-only namespace: ${containment.reason}` }); continue; }
-        console.log(`cell ${cellId} ...`);
-        cells.push({ ...base, ...(await runCell({ cellId, out, caseId: c.id, kind, version, programEntry: entry, openrigEntry, realTmux: pins.host.tmuxPath,
-          ...(opts["cell-timeout"] ? { timeoutMs: Number(opts["cell-timeout"]) * 1000 } : {}) })) });
-        console.log(`cell ${cellId}: ${cells.at(-1).result}${cells.at(-1).reason ? ` (${cells.at(-1).reason})` : ""}`);
-      }
+  for (const { kind, version, entry, programPin } of programs) {
+    for (const c of cases) {
+      const cellId = `${c.id}-${kind}-${version}`;
+      const base = { case: c.id, title: c.title, program: kind, version, level: LEVEL };
+      if (stopped) { cells.push({ ...base, result: "NOT RUN", reason: `the run was stopped (${stopped})` }); continue; }
+      if (!c.programs.includes(kind)) { cells.push({ ...base, result: "NOT RUN", reason: `${c.id} isn't defined for ${kind}` }); continue; }
+      if (!programPin) { cells.push({ ...base, result: "NOT RUN", reason: `${kind} ${version} isn't installed (run.mjs install)` }); continue; }
+      if (!containment.ok) { cells.push({ ...base, result: "NOT RUN", reason: `no loopback-only namespace: ${containment.reason}` }); continue; }
+      console.log(`cell ${cellId} ...`);
+      cells.push({ ...base, ...(await runCell({ cellId, out, caseId: c.id, kind, version, programEntry: entry, openrigEntry, realTmux: pins.host.tmuxPath,
+        ...(opts["cell-timeout"] ? { timeoutMs: Number(opts["cell-timeout"]) * 1000 } : {}) })) });
+      console.log(`cell ${cellId}: ${cells.at(-1).result}${cells.at(-1).reason ? ` (${cells.at(-1).reason})` : ""}`);
     }
   }
-  const result = { generatedAt: new Date().toISOString(), pins, cells };
+  const result = { generatedAt: new Date().toISOString(), ...(stopped ? { stopped } : {}), pins, cells };
   writeFileSync(join(out, "RESULT.json"), JSON.stringify(result, null, 1));
   writeFileSync(join(out, "RESULT.md"), resultMarkdown(result));
   console.log(`wrote ${join(out, "RESULT.json")} and RESULT.md`);
 }
 
-/** One cell in its own contained process, so a crash, a hang or a leak ends with it. */
-/** One cell in its own contained process, so a crash, a hang or a leak ends with it. Only a verdict written by this
- *  spawn counts. After the process ends, for any reason, whatever it left running is reaped from here by the cell's
- *  identity, and recorded. */
+/** The cell process running now, so a stop can reach it. */
+let current = null;
+
+/** One cell in its own contained process (and its own process group, so a kill aimed at the runner doesn't cut a cell
+ *  off mid-close), so a crash, a hang or a leak ends with it. The parent decides the outcome:
+ *  - a timed-out cell is NOT RUN, whatever it wrote;
+ *  - otherwise only a verdict this spawn wrote, and that parses, counts; anything else is NOT RUN;
+ *  - whatever the cell left running is always reaped from here afterwards, and a cleanup that can't be done or
+ *    confirmed marks the cell cleanupUncertain. */
 function runCell({ cellId, out, caseId, kind, version, programEntry, openrigEntry, realTmux, timeoutMs = 15 * 60_000 }) {
   const dir = join(out, "cells", cellId);
   mkdirSync(dir, { recursive: true });
@@ -159,25 +175,38 @@ function runCell({ cellId, out, caseId, kind, version, programEntry, openrigEntr
   // node:sqlite reads the daemon's records; its experimental-feature notice isn't evidence.
   const argv = containedArgv([process.execPath, "--disable-warning=ExperimentalWarning", fileURLToPath(import.meta.url), "cell", join(dir, "cell-spec.json")]);
   return new Promise((done) => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "inherit", "inherit"], env: { PATH: "/usr/bin:/bin", USER: process.env.USER ?? "delivery" } });
+    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "inherit", "inherit"], detached: true, env: { PATH: "/usr/bin:/bin", USER: process.env.USER ?? "delivery" } });
+    current = child;
     let timedOut = false;
     // On the timeout the cell gets SIGTERM and time to close itself normally; SIGKILL only if it doesn't.
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 120_000).unref(); }, timeoutMs);
     child.on("exit", async (code, signal) => {
       clearTimeout(timer);
-      let outcome = null;
-      if (existsSync(verdictPath)) {
-        const written = JSON.parse(readFileSync(verdictPath, "utf8"));
-        if (written.spawnId === spawnId) outcome = written;
+      current = null;
+      let outcome;
+      try {
+        if (timedOut) outcome = { result: "NOT RUN", reason: `the cell timed out after ${Math.round(timeoutMs / 1000)} s` };
+        else {
+          let written = null;
+          try { written = existsSync(verdictPath) ? JSON.parse(readFileSync(verdictPath, "utf8")) : null; } catch { written = null; }
+          outcome = written?.spawnId === spawnId ? written
+            : { result: "NOT RUN", reason: `the cell process ended (${signal ?? `exit ${code}`}) without a readable verdict of its own` };
+        }
+      } finally {
+        outcome ??= { result: "NOT RUN", reason: "the cell's outcome couldn't be read" };
+        try {
+          const identityPath = join(dir, "world", "identity.json");
+          if (existsSync(identityPath)) {
+            const { reapByIdentity } = await import("./harness/world.mjs");
+            const reaped = await reapByIdentity(JSON.parse(readFileSync(identityPath, "utf8")));
+            if (reaped.length) outcome.parentReaped = reaped;
+          }
+        } catch (error) {
+          outcome = { ...outcome, resultBeforeDowngrade: outcome.result, result: "NOT RUN", cleanupUncertain: true,
+            reason: `${outcome.reason ? `${outcome.reason}; ` : ""}the cell's leftovers couldn't be reaped: ${String(error.message ?? error)}` };
+        }
+        done(outcome);
       }
-      outcome ??= { result: "NOT RUN", reason: `the cell process ended (${timedOut ? "timed out, " : ""}${signal ?? `exit ${code}`}) before a verdict` };
-      const identityPath = join(dir, "world", "identity.json");
-      if (existsSync(identityPath)) {
-        const { reapByIdentity } = await import("./harness/world.mjs");
-        const reaped = await reapByIdentity(JSON.parse(readFileSync(identityPath, "utf8")));
-        if (reaped.length) outcome.parentReaped = reaped;
-      }
-      done(outcome);
     });
   });
 }
@@ -191,13 +220,21 @@ async function cellMain(specPath) {
   const { bankCell } = await import("./harness/evidence.mjs");
   const c = CASES.find((x) => x.id === spec.caseId);
   const verdictPath = join(spec.dir, "verdict.json");
-  const write = (outcome) => writeFileSync(verdictPath, JSON.stringify({ ...outcome, spawnId: spec.spawnId }, null, 1));
+  // Written whole or not at all: a reader never sees half a verdict.
+  const write = (outcome) => {
+    const temp = `${verdictPath}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify({ ...outcome, spawnId: spec.spawnId }, null, 1));
+    renameSync(temp, verdictPath);
+  };
+  let stopping = false;
   let cell = null;
   let ctx = null;
   let outcome;
   // A timeout's SIGTERM: no verdict is credited, and the cell still stops what it started, within a bound.
   process.once("SIGTERM", async () => {
-    write({ result: "NOT RUN", reason: "the cell timed out", partial: ctx?.verdict.toJSON() ?? null });
+    // From here the normal path writes nothing: this NOT RUN is the cell's last word.
+    stopping = true;
+    write({ result: "NOT RUN", reason: "the cell was stopped (timeout or run stop)", partial: ctx?.verdict.toJSON() ?? null });
     if (cell) await Promise.race([closeCell(cell).catch(() => {}), new Promise((r) => setTimeout(r, 90_000))]);
     process.exit(0);
   });
@@ -213,7 +250,9 @@ async function cellMain(specPath) {
       await c.run(ctx);
       outcome = ctx.verdict.toJSON();
     } catch (error) {
-      outcome = { ...(ctx?.verdict.toJSON() ?? {}), result: "FAIL", reason: `the case stopped on an error: ${String(error.message ?? error)}`, detail: String(error.stack ?? error).slice(0, 4000) };
+      outcome = error?.notRun
+        ? { ...(ctx?.verdict.toJSON() ?? {}), result: "NOT RUN", reason: error.message }
+        : { ...(ctx?.verdict.toJSON() ?? {}), result: "FAIL", reason: `the case stopped on an error: ${String(error.message ?? error)}`, detail: String(error.stack ?? error).slice(0, 4000) };
     }
     if (ctx) {
       await ctx.screen.stop();
@@ -224,7 +263,10 @@ async function cellMain(specPath) {
     const { conversation } = await import("./harness/oracle.mjs");
     const standInErrors = cell.standIn.errors();
     if (standInErrors.length) notRun(`the stand-in failed: ${standInErrors[0].message}`);
-    else if (outcome.result !== "NOT RUN" && !conversation(cell.standIn.requests()).identified) notRun("the seat's conversation couldn't be identified in the stand-in's log");
+    else if (outcome.result !== "NOT RUN") {
+      const seen = conversation(cell.standIn.requests());
+      if (!seen.identified) notRun(`the seat's conversation couldn't be identified in the stand-in's log (threads carrying OpenRig's identity prompt: ${seen.anchored.length ? seen.anchored.join(", ") : "none"})`);
+    }
     try {
       const manifest = bankCell(cell, join(spec.dir, "bank"), { "verdict.json": outcome });
       outcome.bank = { path: "bank", credentialScan: manifest.credentialScan, files: manifest.files.length };
@@ -232,7 +274,7 @@ async function cellMain(specPath) {
     } catch (error) { outcome.bankError = String(error.message ?? error); notRun("the cell's evidence wasn't banked"); }
     try { await closeCell(cell); } catch (error) { outcome.closeError = String(error.message ?? error); }
   }
-  write(outcome);
+  if (!stopping) write(outcome);
 }
 
 function resultMarkdown({ generatedAt, pins, cells }) {

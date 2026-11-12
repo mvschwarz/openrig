@@ -14,6 +14,8 @@ import { arrivedAs, conversation, deliveriesOf, markersIn, orderAndMerge, partWi
 import { containedArgv } from "../../test-system/delivery/harness/contain.mjs";
 import { composerText } from "../../test-system/delivery/harness/screen.mjs";
 import { ownsEnviron, parseStat } from "../../test-system/delivery/harness/world.mjs";
+import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
+import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
 
@@ -94,6 +96,12 @@ describe("delivery harness: the receiver-side oracle", () => {
     expect(seatThread(requests)).toBeNull();
     expect(conversation(requests)).toMatchObject({ identified: false, items: [] });
     expect(deliveriesOf(requests, "DLV-D01-q-1")).toMatchObject({ identified: false, turns: [] });
+  });
+
+  it("leaves the conversation unidentified when two threads carry OpenRig's identity prompt, rather than taking the first", () => {
+    const requests = [codexReq([identity(), codexMsg("Delivery check DLV-D01-a-1")], "t1"), codexReq([identity(), codexMsg("Delivery check DLV-D01-a-1")], "t2")];
+    expect(seatThread(requests)).toBeNull();
+    expect(conversation(requests)).toMatchObject({ identified: false, anchored: ["t1", "t2"] });
   });
 
   it("never reads a same-thread request without tools, or one asking for a JSON-schema answer, as the conversation", () => {
@@ -195,6 +203,31 @@ describe("delivery harness: the cell's surroundings", () => {
       expect(rec.last()).toBeNull();
       expect(rec.failures()).toBeGreaterThan(0);
     } finally { await rec.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("makes a cell NOT RUN, never a verdict, when it can't observe the screen or read the input box after an action", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delivery-observe-"));
+    let screen: string | null = "no prompt row here";
+    const cell = { session: "s", logs: dir, record: () => {}, standIn: { requests: () => [] },
+      tmux: async (args: string[]) => { if (screen === null) throw new Error("no server"); return args[0] === "capture-pane" ? screen : "0\t80x24"; } };
+    const ctx = caseContext(cell, { caseId: "T", kind: "claude", version: "x" });
+    try {
+      await expect(ctx.readComposer()).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/input box couldn't be read/) });
+      screen = "● ok\n────────\n❯ typed text\n────────";
+      expect(await ctx.readComposer()).toBe("typed text");
+      expect(await ctx.settle({ quietMs: 50, timeoutMs: 2000 })).toBe(true);
+      screen = null;
+      await new Promise((r) => setTimeout(r, 400));
+      await expect(ctx.observe({ timeoutMs: 300 })).rejects.toMatchObject({ notRun: true });
+      await expect(ctx.settle({ quietMs: 50, timeoutMs: 300 })).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/no screen observation/) });
+    } finally { await ctx.screen.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("takes only the contract's refusal at a dialog as a refusal", () => {
+    expect(isRefusal({ ok: false, sent: false, reason: "target_needs_input" })).toBe(true);
+    expect(isRefusal({ ok: false, sent: false, reason: "daemon_unreachable" })).toBe(false);
+    expect(isRefusal({ ok: false, reason: "target_needs_input" })).toBe(false);
+    expect(isRefusal(null)).toBe(false);
   });
 
   it("reads a process's name and parent from /proc stat even when the name holds parentheses and spaces", () => {

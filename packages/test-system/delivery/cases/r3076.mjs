@@ -6,6 +6,8 @@
 // control: text already present before the read, broker input before or after the guard's final check, and a real
 // plain `tmux attach` client typing.
 //
+import { NotRun } from "../harness/case-context.mjs";
+
 // Two cases, each with its own verdict: the same gap for an ordinary `rig send` (the send control), and for an actual
 // watchdog-originated notice (the automatic-notice leg). No version's outcome is assumed.
 
@@ -21,14 +23,17 @@ async function judgeGap(ctx, { draft, marker, since }) {
     inputBeforeTyping: ctx.composerOf(fired.screenBeforeTyping), inputBeforePaste: ctx.composerOf(fired.screenBeforePaste) });
   await ctx.sleep(4000);
   await ctx.settle({ timeoutMs: 20_000 });
-  const after = ctx.composer() ?? "";
+  // An unreadable input box is unknown, never empty: readComposer makes the cell NOT RUN instead.
+  const after = await ctx.readComposer();
   verdict.info("the input box afterwards, exactly", { text: after, bytes: Buffer.byteLength(after) });
   // The input box must hold the draft and nothing else. A program can show a paste as a placeholder rather than its
   // text (Claude Code: "[Pasted text #1 +6 lines]"), so any residue counts, not only OpenRig's marker; the empty
   // box's own placeholder, as seen before the person typed, doesn't.
   const normal = (text) => (text ?? "").replaceAll("\u00a0", " ").trim();
   const residue = normal(normal(after).replace(draft, ""));
-  const contaminated = residue.length > 0 && residue !== normal(ctx.composerOf(fired.screenBeforeTyping));
+  const emptyBox = ctx.composerOf(fired.screenBeforeTyping);
+  if (emptyBox === null) throw new NotRun("the empty input box wasn't readable before the person typed");
+  const contaminated = residue.length > 0 && residue !== normal(emptyBox);
   verdict.check("contamination: nothing but the person's draft is in the input box", !contaminated, { after, residue });
   const merged = ctx.requests().filter((r) => r.body && JSON.stringify(r.body).includes(draft) && JSON.stringify(r.body).includes(marker));
   verdict.check("contamination: the draft and OpenRig's text never reached the model together", merged.length === 0, merged.map((r) => r.seq));
@@ -46,7 +51,7 @@ async function prepare(ctx) {
   await ctx.setGuard("draft-aware");
   await ctx.setDraftDelivery("refuse");
   await ctx.settle();
-  const input = ctx.composer() ?? "";
+  const input = await ctx.readComposer();
   ctx.verdict.info("the input box before the gap", { text: input });
 }
 

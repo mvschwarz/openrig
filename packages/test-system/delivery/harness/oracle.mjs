@@ -23,11 +23,17 @@ export const IDENTITY = /OpenRig session identity:\s*\n- rig: dlv\b/;
 /** A request the conversation is made of: it offers the seat's tools and isn't asking for a JSON-schema answer. */
 const isConversationRequest = (r) => r.body && typeof r.body === "object" && !r.served && r.request?.tools > 0 && !r.request?.structuredOutput;
 
-/** The seat's conversation thread: the one whose request carries OpenRig's identity prompt; null when none does. */
+/** Every distinct thread whose conversation requests carry OpenRig's identity prompt, in first-seen order. */
+export function anchoredThreads(requests) {
+  return [...new Set(requests.filter((r) => isConversationRequest(r) && r.request.thread
+    && userItems(r.body).some((parts) => parts.some((p) => p.source === "text" && IDENTITY.test(p.text)))).map((r) => r.request.thread))];
+}
+
+/** The seat's conversation thread: the one thread carrying OpenRig's identity prompt. Null when none does, and when
+ *  more than one does (a second seat generation, a fork): the conversation is then ambiguous, never guessed. */
 export function seatThread(requests) {
-  const anchor = requests.find((r) => isConversationRequest(r) && r.request.thread
-    && userItems(r.body).some((parts) => parts.some((p) => p.source === "text" && IDENTITY.test(p.text))));
-  return anchor?.request.thread ?? null;
+  const anchored = anchoredThreads(requests);
+  return anchored.length === 1 ? anchored[0] : null;
 }
 
 const textOf = (blocks, types) => (Array.isArray(blocks) ? blocks : []).filter((b) => types.includes(b?.type) && typeof b.text === "string").map((b) => b.text);
@@ -53,7 +59,7 @@ const itemKey = (parts) => sha256(parts.map((p) => `${p.source}:${p.text}`).join
  *  arrived in and how many requests carried it. */
 export function conversation(requests) {
   const thread = seatThread(requests);
-  if (!thread) return { thread: null, identified: false, items: [] };
+  if (!thread) return { thread: null, identified: false, anchored: anchoredThreads(requests), items: [] };
   const inThread = requests.filter((r) => isConversationRequest(r) && r.request.thread === thread);
   const last = inThread.at(-1);
   if (!last) return { thread, identified: true, items: [] };

@@ -4,6 +4,8 @@
 
 // Each program's own wording for the dialog, exactly: a looser pattern can match the message or the command text
 // before the dialog has drawn.
+import { NotRun } from "../harness/case-context.mjs";
+
 const APPROVAL = [/Do you want to proceed\?/, /Would you like to run the following command\?/];
 const PICKER = [/Select model/i, /Select Model and Effort/];
 
@@ -14,19 +16,29 @@ function dialogRegion(screen, pattern) {
   return start < 0 ? null : rows.slice(start).join("\n").trimEnd();
 }
 
+/** The contract's refusal of an ordinary send at a dialog, exactly: refused, not sent, `target_needs_input`. */
+export function isRefusal(json) {
+  return json?.ok === false && json?.sent === false && json?.reason === "target_needs_input";
+}
+
 /** An ordinary send while a dialog is up: refused before any input, nothing typed, the dialog unchanged, no turn. */
 async function sendIntoDialog(ctx, label, dialogPattern) {
   const { verdict } = ctx;
   await ctx.settle({ timeoutMs: 15_000 });
-  const before = dialogRegion(ctx.screen.last()?.screen, dialogPattern);
+  const before = dialogRegion((await ctx.observe()).screen, dialogPattern);
+  if (before === null) throw new NotRun("the dialog wasn't on screen when the send was about to go");
   const marker = ctx.mark(label);
   const since = ctx.nowNs();
   const sent = await ctx.send(`Delivery check ${marker}: an ordinary message while a dialog is open.`);
-  verdict.check("the ordinary send was refused, not delivered", sent.exit !== 0 || sent.json?.ok === false, { exit: sent.exit, json: sent.json });
-  verdict.info("the refusal's reason", sent.json?.reason ?? sent.json?.code ?? sent.json?.error ?? null);
+  const sentAt = performance.now();
+  // The contract's refusal, exactly: anything else (an unreadable result, another failure) proves nothing either way.
+  const refused = isRefusal(sent.json);
+  if (!refused && sent.json?.ok !== true) throw new NotRun(`the send failed for another reason, so the refusal is unproven: ${JSON.stringify(sent.json ?? sent.stdout ?? sent.stderr).slice(0, 300)}`);
+  verdict.check("the ordinary send was refused before any input (target_needs_input)", refused, { exit: sent.exit, json: sent.json });
+  verdict.info("the activity reason beside the refusal", sent.json?.activity?.reason ?? null);
   await ctx.sleep(3000);
   verdict.check("nothing was typed into the pane for it", ctx.paneWrites(since).length === 0, ctx.paneWrites(since));
-  const after = dialogRegion(ctx.screen.last()?.screen, dialogPattern);
+  const after = dialogRegion((await ctx.observe({ after: sentAt + 3000 })).screen, dialogPattern);
   verdict.check("the dialog is still open", after !== null, null);
   verdict.check("the dialog is unchanged (no option chosen or moved)", after === before, after === before ? { region: after } : { before, after, screenAfter: ctx.screen.last()?.screen });
   verdict.check("the message didn't reach the model", ctx.deliveries(marker).turns.length === 0, ctx.deliveries(marker).turns.map((t) => t.seq));
@@ -99,7 +111,8 @@ export const CASES = [
       // Leave through the dialog's ordinary exit, as a person would.
       await ctx.personKeys("Escape");
       await ctx.settle({ timeoutMs: 15_000 });
-      verdict.check("the dialog closed through its own exit", !PICKER.some((p) => p.test(ctx.screen.last()?.screen ?? "")), null);
+      const closed = await ctx.observe();
+      verdict.check("the dialog closed through its own exit", !PICKER.some((p) => p.test(closed.screen)), null);
       await resendOnce(ctx, pending);
     },
   },

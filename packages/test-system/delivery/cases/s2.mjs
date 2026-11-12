@@ -66,7 +66,7 @@ export const CASES = [
       sendAccepted(ctx, sent, "the message");
       await deliveredOnce(ctx, marker, body);
       ctx.verdict.check("the reply reached the screen", await ctx.waitScreen(`ack ${marker}`), `ack ${marker}`);
-      ctx.verdict.check("the seat returned to idle (screen settled)", await ctx.settle({ timeoutMs: 30_000 }), null);
+      ctx.verdict.check("the seat returned to idle (screen settled)", await ctx.settle({ timeoutMs: 30_000, optional: true }), null);
       ctx.verdict.info("not exercised here: a doorbell pointing at an owned fixture row (later case set)", null);
     },
   },
@@ -133,9 +133,10 @@ export const CASES = [
       verdict.check("the message reached the model exactly once (no loss)", turns.length === 1, turns.map((t) => t.seq));
       const turn = turns[0] ?? seen.turns[0];
       const merged = !!turn && turn.parts.some((p) => p.source === "text" && p.text.includes(draftMarker));
-      const draftStillTyped = (ctx.composer() ?? "").includes(draftMarker);
+      const input = await ctx.readComposer();
+      const draftStillTyped = input.includes(draftMarker);
       verdict.check("the person's draft wasn't deleted (submitted with the message, or still in the input)", merged || draftStillTyped,
-        { merged, draftStillTyped, composer: ctx.composer() });
+        { merged, draftStillTyped, input });
       verdict.info("outcome under the default", merged ? "MERGED: draft and message submitted together (documented)" : "SEPARATE: the draft stayed in the input");
     },
   },
@@ -174,7 +175,8 @@ export const CASES = [
       verdict.check("the held message didn't reach the model", ctx.deliveries(held).turns.length === 0, ctx.deliveries(held).turns.map((t) => t.seq));
       const listed = await ctx.heldMessages();
       verdict.check("the retained message is readable with rig seat held-messages", JSON.stringify(listed).includes(held), JSON.stringify(listed).slice(0, 600));
-      verdict.check("the draft is untouched", (ctx.composer() ?? "").includes(draftMarker) || !!(await ctx.waitScreen(draftMarker, { timeoutMs: 2000 })), ctx.composer());
+      const input = await ctx.readComposer();
+      verdict.check("the draft is untouched", input.includes(draftMarker), input);
 
       await ctx.eraseDraft(draft.length + 2);
       await ctx.settle();
@@ -278,7 +280,8 @@ export const CASES = [
         const { part } = partWith(turn, marker, body);
         verdict.info("the delivered part around the message (exact bytes in the stand-in log)", part?.text);
       }
-      verdict.check("nothing was left unsubmitted in the input", !(ctx.composer() ?? "").includes("still-text"), ctx.composer());
+      const input = await ctx.readComposer();
+      verdict.check("nothing was left unsubmitted in the input", !input.includes("still-text"), input);
       verdict.info("#2800 control (unreadable input: --dangerously-interact pastes with a warning and no Enter) is not run in this cell: it needs an unreadable-input state the harness doesn't produce yet", null);
     },
   },

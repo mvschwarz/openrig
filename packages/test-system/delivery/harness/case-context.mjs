@@ -10,6 +10,12 @@ import { deliveryEvents } from "./evidence.mjs";
 import { composerText, recordScreen } from "./screen.mjs";
 import { RIG, sleep } from "./world.mjs";
 
+/** Thrown when a case can't observe what it needs to judge: the cell is NOT RUN with this reason, never PASS or FAIL
+ *  on evidence it doesn't have. */
+export class NotRun extends Error {
+  constructor(reason) { super(reason); this.notRun = true; }
+}
+
 export function caseContext(cell, { caseId, kind, version }) {
   const verdict = new Verdict();
   const screen = recordScreen(cell, join(cell.logs, "screen-frames.jsonl"));
@@ -66,8 +72,10 @@ export function caseContext(cell, { caseId, kind, version }) {
 
     /** Wait until the screen has stopped changing for `quietMs` (the probe oracle's readiness settle). */
     /** Settled means a capture taken after this call succeeded and the screen hasn't changed for `quietMs`, counted
-     *  from this call at the earliest: an action just taken (a key, a send) may not have redrawn the screen yet. */
-    async settle({ quietMs = 1250, timeoutMs = 60_000 } = {}) {
+     *  from this call at the earliest: an action just taken (a key, a send) may not have redrawn the screen yet. With no
+     *  capture after the call, the cell is NOT RUN. A screen that never settles is NOT RUN too, unless `optional`, for
+     *  a case whose finding that is: then it returns false. */
+    async settle({ quietMs = 1250, timeoutMs = 60_000, optional = false } = {}) {
       const started = performance.now();
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
@@ -75,7 +83,29 @@ export function caseContext(cell, { caseId, kind, version }) {
         if (last && screen.okAt() > started && performance.now() - Math.max(last.monotonicMs, started) >= quietMs) return true;
         await sleep(100);
       }
-      return false;
+      if (!(screen.okAt() > started)) throw new NotRun("no screen observation after the action");
+      if (optional) return false;
+      throw new NotRun(`the screen never settled within ${Math.round(timeoutMs / 1000)} s`);
+    },
+
+    /** The screen as a capture taken after `after` (performance.now()) shows it; NOT RUN if none succeeds in time. */
+    async observe({ after = performance.now(), timeoutMs = 10_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const last = screen.last();
+        if (last && screen.okAt() > after) return last;
+        await sleep(50);
+      }
+      throw new NotRun("no screen observation after the action");
+    },
+
+    /** The input box's text from a capture taken now or later. NOT RUN when it can't be read: an unreadable input box is
+     *  unknown, never empty. */
+    async readComposer(options) {
+      const frame = await ctx.observe(options);
+      const text = composerText(kind, frame.screen);
+      if (text === null) throw new NotRun("the input box couldn't be read on screen");
+      return text;
     },
 
     /** Wait until the screen shows `text`; returns the frame or null. */
