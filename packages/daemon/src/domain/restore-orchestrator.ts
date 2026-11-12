@@ -15,7 +15,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
-import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
+import { readRegularCustomPolicyFile, resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
@@ -2484,7 +2484,7 @@ export class RestoreOrchestrator {
           rigDeclaringDir: rigProv?.declaringDir ?? null,
           rigRef,
         },
-        { readFile: (target) => readFileSync(target, "utf-8") },
+        { readFile: readRegularCustomPolicyFile },
       );
     } catch { /* posture resolution must never block a restore */ }
     // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked

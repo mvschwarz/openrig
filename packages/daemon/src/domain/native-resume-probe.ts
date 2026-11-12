@@ -55,6 +55,7 @@ export interface CodexResumeDisplayInput {
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
   recordedLaunch?: AppliedLaunchObservation | null;
+  launchWrapper?: readonly string[] | null;
 }
 
 export interface CodexResumeDisplay {
@@ -91,6 +92,13 @@ function formatRecordedCodexFlags(
   return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox} (approval unrecorded)`;
 }
 
+const CODEX_LAUNCH_WRAPPER_OMISSION_LABEL = "omits launch_wrapper (managed resume uses the wrapper)";
+
+function composeCodexResumeLabel(baseLabel: string | null, hasLaunchWrapper: boolean): string | null {
+  if (!hasLaunchWrapper) return baseLabel;
+  return baseLabel ? `${baseLabel}; ${CODEX_LAUNCH_WRAPPER_OMISSION_LABEL}` : CODEX_LAUNCH_WRAPPER_OMISSION_LABEL;
+}
+
 export function buildCodexResumeDisplay(
   resumeToken: string,
   input: CodexResumeDisplayInput = {},
@@ -125,9 +133,10 @@ export function buildCodexResumeDisplay(
     postureArg,
     daemonOptOut,
   );
+  const hasLaunchWrapper = Boolean(input.launchWrapper && input.launchWrapper.length > 0);
 
   let currentSandbox: string | null = null;
-  let currentApproval: CodexObservedApprovalPolicy | null = null;
+  let currentApproval: CodexObservedApprovalPolicy | null | undefined = null;
   let currentFlags: string;
   if (envelope) {
     currentSandbox = envelope.sandboxPolicy.type;
@@ -152,7 +161,11 @@ export function buildCodexResumeDisplay(
     && recorded.value !== null;
 
   if (!hasObservedRecord) {
-    return { command, status: "no_recorded_launch", label: "flags from current settings" };
+    return {
+      command,
+      status: "no_recorded_launch",
+      label: composeCodexResumeLabel("flags from current settings", hasLaunchWrapper),
+    };
   }
 
   const recordedApproval = recorded.approvalPolicy ?? null;
@@ -164,7 +177,11 @@ export function buildCodexResumeDisplay(
     && recordedApproval !== null
     && recordedApproval === currentApproval
   ) {
-    return { command, status: "recorded_match", label: null };
+    return {
+      command,
+      status: "recorded_match",
+      label: composeCodexResumeLabel(null, hasLaunchWrapper),
+    };
   }
 
   const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
@@ -176,7 +193,7 @@ export function buildCodexResumeDisplay(
   return {
     command,
     status: isSameSandboxUnrecordedApproval ? "recorded_uncertain" : "recorded_difference",
-    label: `launched with ${recordedFlags}; a resume now uses ${currentFlags}`,
+    label: composeCodexResumeLabel(`launched with ${recordedFlags}; a resume now uses ${currentFlags}`, hasLaunchWrapper),
   };
 }
 
@@ -189,6 +206,7 @@ export function buildNativeResumeDisplay(
   codexDaemonOptOut?: boolean,
   claudeMcp?: ClaudeMcp | null,
   codexDisplay?: CodexResumeDisplayInput,
+  launchWrapper?: readonly string[] | null,
 ): { command: string; label: string | null; status?: CodexResumeLabelStatus } | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -204,6 +222,7 @@ export function buildNativeResumeDisplay(
       ...codexDisplay,
       codexConfigProfile: codexDisplay?.codexConfigProfile !== undefined ? codexDisplay.codexConfigProfile : codexConfigProfile,
       codexDaemonOptOut: codexDisplay?.codexDaemonOptOut !== undefined ? codexDisplay.codexDaemonOptOut : codexDaemonOptOut,
+      launchWrapper: codexDisplay?.launchWrapper !== undefined ? codexDisplay.launchWrapper : launchWrapper,
     });
   }
   return null;
@@ -218,6 +237,7 @@ export function buildNativeResumeCommand(
   codexDaemonOptOut?: boolean,
   claudeMcp?: ClaudeMcp | null,
   codexDisplay?: CodexResumeDisplayInput,
+  launchWrapper?: readonly string[] | null,
 ): string | null {
   return buildNativeResumeDisplay(
     runtime,
@@ -227,6 +247,7 @@ export function buildNativeResumeCommand(
     codexDaemonOptOut,
     claudeMcp,
     codexDisplay,
+    launchWrapper,
   )?.command ?? null;
 }
 

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { resolvePermissionPolicyAttachment, type PolicyResolveDeps } from "./policy-ref.js";
 import type { LaunchPosture } from "./policy-spec.js";
 
@@ -19,11 +20,25 @@ function asKnownLaunchPosture(value: string | null | undefined): LaunchPosture |
 }
 
 /**
+ * Synchronous custom-policy reader shared by RestoreOrchestrator and node-inventory.
+ * Rejects non-regular files (such as FIFOs, sockets, device nodes, or directories) via statSync
+ * before opening the path so special files cannot block synchronous reads; callers catch any
+ * stat/read failure and retain the persisted posture.
+ */
+export function readRegularCustomPolicyFile(target: string): string {
+  if (!fs.statSync(target).isFile()) {
+    throw new Error(`Custom policy target is not a regular file: ${target}`);
+  }
+  return fs.readFileSync(target, "utf-8");
+}
+
+/**
  * OPR.0.4.8.3 Seam B — shared persisted-provenance posture resolution used by both
  * RestoreOrchestrator.resolveRestorePosture and node-inventory resume command projection:
  *   1. Persisted node provenance (`nodeOrigin` + `nodeLaunchPosture` non-null) wins over rig
  *      provenance. Readable valid custom policies (`origin === "custom"`) reopen and re-derive
- *      their posture; unreadable or invalid files retain the persisted posture.
+ *      their posture only when the resolved ref itself has `origin === "custom"`; non-regular,
+ *      unreadable, invalid, or mismatched builtin/none refs retain the persisted posture.
  *   2. With no node provenance, persisted rig provenance (`rigOrigin` + `rigLaunchPosture`
  *      non-null) applies with the same custom re-derivation rule.
  *   3. No saved provenance (including legacy `permission_policy` rows with NULL provenance, or
@@ -50,7 +65,7 @@ export function resolvePersistedRestorePosture(
             const rederived = resolvePermissionPolicyAttachment(ref, snapshot.nodeDeclaringDir, {
               readFile: () => body,
             });
-            if (rederived.contentResolved) return rederived.launchPosture;
+            if (rederived.contentResolved && rederived.origin === "custom") return rederived.launchPosture;
           }
         }
       }
@@ -70,7 +85,7 @@ export function resolvePersistedRestorePosture(
           const rederived = resolvePermissionPolicyAttachment(snapshot.rigRef, snapshot.rigDeclaringDir, {
             readFile: () => body,
           });
-          if (rederived.contentResolved) return rederived.launchPosture;
+          if (rederived.contentResolved && rederived.origin === "custom") return rederived.launchPosture;
         }
       }
       return asKnownLaunchPosture(snapshot.rigLaunchPosture) ?? "floor";

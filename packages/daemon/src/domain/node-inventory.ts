@@ -32,7 +32,7 @@ import {
 } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
-import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
+import { readRegularCustomPolicyFile, resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -147,7 +147,7 @@ function resolveBasePolicyPosture(row: InventoryRow): "floor" | "full_bypass" | 
       rigDeclaringDir: row.rig_policy_declaring_dir,
       rigRef: row.rig_permission_policy,
     },
-    { readFile: (target) => fs.readFileSync(target, "utf-8") },
+    { readFile: readRegularCustomPolicyFile },
   );
 }
 
@@ -159,6 +159,7 @@ function resolveCodexResumeResolution(
   row: InventoryRow,
   recordedLaunch: StoredAppliedLaunchObservation | undefined,
   selection: { runtime: string; mode: string } | undefined,
+  launchWrapper?: readonly string[] | null,
 ): CodexResumeResolution {
   // Match NativePermissionStore.launchOverride + RestoreOrchestrator.attemptResume validation and precedence so
   // display never fabricates a floor command when real resume refuses invalid or conflicting settings.
@@ -202,6 +203,7 @@ function resolveCodexResumeResolution(
     codexDaemonOptOut: recordedLaunch?.daemonOptOut,
     recordedLaunch: recordedLaunch ?? null,
     nonInterruptive,
+    ...(launchWrapper && launchWrapper.length > 0 ? { launchWrapper } : {}),
   };
   if (selection !== undefined) {
     return {
@@ -752,11 +754,7 @@ export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: stri
 
 // -- Public API --
 
-/**
- * Get the canonical node inventory for a rig.
- * Single source of truth consumed by CLI, UI, and MCP.
- */
-export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
+function projectRigInventoryItems(db: Database.Database, rigId: string): ProjectedNodeInventoryItem[] {
   // Resolve the rig's latest usable snapshot once for the whole projection so per-node
   // recoverability checks share the same source of truth without N extra queries.
   const usableSnapshot = findLatestUsableSnapshot(db, rigId);
@@ -778,7 +776,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   const rows = queryInventoryRows(db, rigId);
 
   return rows.map((row) =>
-    buildInventoryEntry(db, row, {
+    buildInventoryItem(db, row, {
       usableSnapshot,
       workspaceSpec,
       identityVerdicts,
@@ -788,6 +786,14 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       permissionSelections,
     }),
   );
+}
+
+/**
+ * Get the canonical node inventory for a rig.
+ * Single source of truth consumed by CLI, UI, and MCP.
+ */
+export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
+  return projectRigInventoryItems(db, rigId).map((item) => item.entry);
 }
 
 /**
@@ -920,16 +926,22 @@ interface InventoryBuildContext {
   permissionSelections: Map<string, { runtime: string; mode: string }>;
 }
 
+interface ProjectedNodeInventoryItem {
+  entry: NodeInventoryEntry;
+  codexResolution?: CodexResumeResolution;
+  codexDaemonOptOut?: boolean;
+}
+
 /**
  * Build the shared inventory projection from a registration and its rig context.
  * Apply only current-occupant identity evidence and retain stored status alongside
  * effective status so readers can distinguish absence from registration history.
  */
-function buildInventoryEntry(
+function buildInventoryItem(
   db: Database.Database,
   row: InventoryRow,
   ctx: InventoryBuildContext,
-): NodeInventoryEntry {
+): ProjectedNodeInventoryItem {
   const {
     usableSnapshot,
     workspaceSpec,
@@ -944,11 +956,13 @@ function buildInventoryEntry(
     throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
   }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
+  const recordedLaunch = currentLaunchObservations.get(row.node_id);
   const codexResolution = row.runtime === "codex"
     ? resolveCodexResumeResolution(
       row,
-      currentLaunchObservations.get(row.node_id),
+      recordedLaunch,
       permissionSelections.get(row.node_id),
+      launchWrapper,
     )
     : undefined;
   const resumeDisplay = codexResolution && !codexResolution.ok
@@ -961,6 +975,7 @@ function buildInventoryEntry(
       codexResolution?.input.codexDaemonOptOut,
       row.claude_mcp,
       codexResolution?.input,
+      launchWrapper,
     );
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
@@ -994,7 +1009,7 @@ function buildInventoryEntry(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
-  return {
+  const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
     rigName: row.rig_name,
@@ -1072,6 +1087,19 @@ function buildInventoryEntry(
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
+  return {
+    entry,
+    codexResolution,
+    codexDaemonOptOut: recordedLaunch?.daemonOptOut,
+  };
+}
+
+function buildInventoryEntry(
+  db: Database.Database,
+  row: InventoryRow,
+  ctx: InventoryBuildContext,
+): NodeInventoryEntry {
+  return buildInventoryItem(db, row, ctx).entry;
 }
 
 /** #2456: the required startup files the seat's current occupant started without, as its handover recorded them. Only
@@ -1199,10 +1227,12 @@ export function getNodeDetail(
     installedResourcesOverride?: Array<{ id: string; category: string; targetPath: string }>;
   },
 ): NodeDetailEntry | null {
-  // Get the inventory entry first
-  const allEntries = getNodeInventory(db, rigId);
-  const entry = allEntries.find((e) => e.logicalId === logicalId);
-  if (!entry) return null;
+  // Project the rig's inventory once and reuse the target seat's resolved Codex inputs for recoveryGuidance.
+  const allItems = projectRigInventoryItems(db, rigId);
+  const allEntries = allItems.map((item) => item.entry);
+  const targetItem = allItems.find((item) => item.entry.logicalId === logicalId);
+  if (!targetItem) return null;
+  const entry = targetItem.entry;
 
   // Find the node ID
   const nodeRow = db.prepare(
@@ -1340,16 +1370,6 @@ export function getNodeDetail(
     guidanceCount: installedResources.filter((r) => r.category === "guidance" || r.category === "guidance_merge").length,
   };
 
-  const codexDetailRow = entry.runtime === "codex"
-    ? runInventoryRowQuery(db, "WHERE n.id = ?", "n.created_at", [nodeId])[0]
-    : undefined;
-  const currentObs = entry.runtime === "codex"
-    ? new AppliedLaunchObservationStore(db).readCurrent(nodeId) ?? undefined
-    : undefined;
-  const codexResolution = codexDetailRow
-    ? resolveCodexResumeResolution(codexDetailRow, currentObs, readPermissionSelectionsMap(db).get(nodeId))
-    : undefined;
-
   return {
     ...entry,
     // OPR.0.4.0.26: the LIST omits recoveryGuidance to stay slim; the
@@ -1361,8 +1381,8 @@ export function getNodeDetail(
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
-      codexDaemonOptOut: currentObs?.daemonOptOut,
-      codexResolution,
+      codexDaemonOptOut: targetItem.codexDaemonOptOut,
+      codexResolution: targetItem.codexResolution,
       claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
     }),
     binding,
