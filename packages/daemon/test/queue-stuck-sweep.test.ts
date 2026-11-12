@@ -1767,6 +1767,36 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
+  it.each(["", ".", ",", ";", ":", ")"])("CUSTODY PUNCTUATION: a closing note accepts the exact target followed by %j", async (punctuation) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${punctuation} registered-host read confirmed the successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it.each(["x.", ".other.", ":123)"])("CUSTODY PUNCTUATION: extra target characters %j do not verify a prefix", async (suffix) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${suffix} registered-host read confirmed another successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("CUSTODY PUNCTUATION: a shortened target is not an exact target", async () => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target.slice(0, -1)}. checked elsewhere` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
   it("DISPOSITION CLOSES THE OPEN FINDING: verification landing after the finding minted auto-closes it on the next sweep, and the finding taught the recipe", async () => {
     const row = await mkRow();
     const missing = "qitem-20990101000000-precon02";

@@ -712,7 +712,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
     expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
-  it("shows a quiet community harness as unknown, never idle, and leaves built-in rows as they were", async () => {
+  it("shows a quiet seat the daemon reads as unknown as unknown, never idle, for a community harness and a built-in runtime alike", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const quiet = { startupStatus: "ready", sessionStatus: "running", terminalActive: false, agentActivity: { state: "unknown" },
       activityState: { activity: "unknown", display: "unknown", needsInput: { count: 0, reason: null }, decidedBy: null } };
@@ -729,8 +729,28 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       "dev.app-quiet": "unknown",
       "dev.app-moving": "active",
       "dev.app-prompt": "needs_input",
-      "dev.pi-quiet": "idle",
-      "dev.claude-quiet": "idle",
+      "dev.pi-quiet": "unknown",
+      "dev.claude-quiet": "unknown",
+    });
+  });
+
+  it("keeps the daemon's idle and working words, and the screen fallback only for a daemon that serves no activity word", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const running = { startupStatus: "ready", sessionStatus: "running", runtime: "claude-code", agentActivity: { state: "unknown" } };
+    const served = (display: string) => ({ activity: display === "idle" ? "idle-at-prompt" : display, display, needsInput: { count: 0, reason: null }, decidedBy: null });
+    const nodes = [
+      { ...base, ...running, logicalId: "dev.served-idle", terminalActive: false, activityState: served("idle") },
+      { ...base, ...running, logicalId: "dev.served-working", terminalActive: false, activityState: served("working") },
+      { ...base, ...running, logicalId: "dev.unknown-moving", terminalActive: true, activityState: served("unknown") },
+      { ...base, ...running, logicalId: "dev.legacy-quiet", terminalActive: false, activityState: undefined },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const statuses = Object.fromEntries(myrig(snap).pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    expect(statuses).toEqual({
+      "dev.served-idle": "idle",
+      "dev.served-working": "active",
+      "dev.unknown-moving": "active",
+      "dev.legacy-quiet": "idle",
     });
   });
 

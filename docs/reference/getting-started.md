@@ -342,9 +342,16 @@ startup reconcile leaves when every kernel terminal is gone, for example after a
 reboot. It does not detect a reboot as such. It uses the same restore as
 `rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
 until the seats are ready. A kernel stopped with `rig down kernel`, including
-one whose seats were already detached, stays down on later starts. So do a kernel
-with only some seats stopped and seats you unclaimed. Start one again with
-`rig up kernel --existing`.
+one whose seats were already detached, stays down on later starts; start it again
+with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+While the kernel's other seats are running, `rig up kernel --existing` refuses
+(it restores only a kernel with no live session), so start one stopped seat with
+`rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
+kernel's latest restore-usable snapshot and resumes its saved conversation; a seat
+it can't resume is reported as waiting for a decision, not as started.
+`rig seat launch <seat> --fresh --reason "…"` instead starts a new conversation
+with no continuity source: use it only when you want a fresh occupant, since the
+seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
 empty server and probe again. It records the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux
