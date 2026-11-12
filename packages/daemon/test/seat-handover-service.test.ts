@@ -1266,6 +1266,20 @@ describe("SeatHandoverService", () => {
       detail: expect.stringContaining("without additional writable directory grants, as on a read-only fresh launch") } } } });
   });
 
+  it("rebuild keeps the saved filesystem policy instead of carrying a broader observed predecessor", async () => {
+    const { node } = seedSeat();
+    const own = { approval: "never", filesystem: { ":minimal": "read", "/work": "write", "/work/private": "deny" }, network_access: false };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope: { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } },
+      profile: null, processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used",
+      detail: expect.stringContaining("explicit filesystem policy and no additional writable directory grants") } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.codexRebuildPermissions).toBeUndefined();
+    expect(binding.codexPermissions).toEqual(own);
+  });
+
   it.each(["observed", "unverified"] as const)("rebuild keeps saved-envelope launch additions when predecessor permissions are %s", async state => {
     const { node } = seedSeat({ codexConfigProfile: "locked" });
     const own = { sandbox: "workspace-write", approval: "on-request", writable_roots: ["/shared/state"],

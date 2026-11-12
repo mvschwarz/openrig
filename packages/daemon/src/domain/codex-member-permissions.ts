@@ -4,6 +4,8 @@ import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
+import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 /** A Codex seat's own sandbox and approval choice, emitted as explicit flags on its managed launches and resumes.
@@ -25,9 +27,19 @@ export interface CodexFilesystemPermissions {
   filesystem: Record<string, CodexFilesystemAccess>;
   approval: CodexSandboxPermissions["approval"];
   network_access?: boolean;
+  sandbox?: never;
+  writable_roots?: never;
+  exclude_tmpdir_env_var?: never;
+  exclude_slash_tmp?: never;
 }
 
 export type CodexMemberPermissions = CodexSandboxPermissions | CodexFilesystemPermissions;
+
+export function assertCodexFilesystemProfileCompatible(permissions: CodexMemberPermissions, profile: unknown): void {
+  if ("filesystem" in permissions && typeof profile === "string" && profile.trim()) {
+    throw new Error("Filesystem codex_permissions cannot be combined with codex_config_profile; clear the configuration profile or use the legacy sandbox envelope");
+  }
+}
 
 const KEYS = ["sandbox", "approval", "network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
 const WORKSPACE_ONLY = ["network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
@@ -95,6 +107,30 @@ export function codexMemberEnvelope(permissions: CodexSandboxPermissions): Codex
   return { approvalPolicy: permissions.approval, sandboxPolicy: { type: "workspace-write",
     writable_roots: permissions.writable_roots ?? [], network_access: permissions.network_access === true,
     exclude_tmpdir_env_var: permissions.exclude_tmpdir_env_var === true, exclude_slash_tmp: permissions.exclude_slash_tmp === true } };
+}
+
+/** Invocation-local profile: never written into the account home or the shared project. */
+export const CODEX_SEAT_PERMISSION_PROFILE = "openrig-seat";
+
+export function codexFilesystemProfile(permissions: CodexFilesystemPermissions) {
+  return { filesystem: permissions.filesystem, network: { enabled: permissions.network_access === true } };
+}
+
+export function codexFilesystemOverrides(permissions: CodexFilesystemPermissions): string[] {
+  const entries = Object.entries(permissions.filesystem).map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
+  return [`default_permissions=${JSON.stringify(CODEX_SEAT_PERMISSION_PROFILE)}`,
+    `permissions={${JSON.stringify(CODEX_SEAT_PERMISSION_PROFILE)}={filesystem={${entries}},network={enabled=${permissions.network_access === true}}}}`];
+}
+
+/** The same authored choice reaches launch, both resumes and the status plan. This reports argv, not enforcement. */
+export function codexMemberLaunch(permissions: CodexMemberPermissions): { args: string; observation: AppliedLaunchObservation; suppressAutoAddDirs: boolean } {
+  if ("filesystem" in permissions) {
+    return { args: ` -a ${permissions.approval}` + codexFilesystemOverrides(permissions).map(value => ` -c ${shellQuote(value)}`).join(""),
+      observation: { runtime: "codex", axis: "sandbox", state: "observed", value: `permissions:${CODEX_SEAT_PERMISSION_PROFILE}`,
+        reason: "emitted_launch_arguments", ...(permissions.approval === "never" ? { approvalPolicy: "never" } : {}) }, suppressAutoAddDirs: true };
+  }
+  const envelope = codexMemberEnvelope(permissions);
+  return { args: codexEnvelopeArgs(envelope), observation: observeCodexEnvelope(envelope), suppressAutoAddDirs: permissions.sandbox === "read-only" };
 }
 
 /** What an emitted envelope's arguments ask for; the native result still needs its own observation. */

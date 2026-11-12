@@ -4,7 +4,7 @@ import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
-import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
+import { assertCodexFilesystemProfileCompatible, validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
   LegacyRigSpecNode,
@@ -549,7 +549,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
   if (member["codex_permissions"] !== undefined) {
     if (member["runtime"] !== "codex") errors.push(`${prefix}.codex_permissions: only valid when runtime is "codex"`);
-    try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
+    try { assertCodexFilesystemProfileCompatible(validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`), member["codex_config_profile"]); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["launch_wrapper"] !== undefined) {
@@ -1456,7 +1456,7 @@ export class LegacyRigSpecSchema {
         }
         if (node["codex_permissions"] !== undefined) {
           if (node["runtime"] !== "codex") errors.push(`nodes.${nodeWhere}.codex_permissions: only valid when runtime is "codex"`);
-          try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
+          try { assertCodexFilesystemProfileCompatible(validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`), node["codex_config_profile"]); }
           catch (error) { errors.push((error as Error).message); }
         }
         if (node["launch_wrapper"] !== undefined) {

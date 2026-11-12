@@ -11,8 +11,8 @@ import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
-import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
+import { codexMemberLaunch, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
+import { verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -40,6 +40,7 @@ interface CodexResumeOptions {
   readNetworkDefault?: CodexNetworkDefaultReader;
   /** launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off. */
   codexLoginShell?: () => boolean;
+  verifyFilesystemPolicy?: CodexFilesystemVerifier;
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
    *  seat's own home when it has one. */
   ensureManagedConfig?: (codexHome?: string) => Promise<void>;
@@ -94,6 +95,13 @@ export class CodexResumeAdapter {
       return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
     const codexHome = seatCodexHome ?? this.options.codexHome;
+    if (codexPermissions && "filesystem" in codexPermissions) {
+      if (codexConfigProfile?.trim()) return { ok: false, code: "resume_failed", message: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify it. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
+      try {
+        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: codexPermissions, cwd, codexHome, launchPath: this.options.launchPath });
+        if (!verified.ok) return { ok: false, code: "resume_failed", message: verified.error };
+      } catch (error) { return { ok: false, code: "resume_failed", message: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
+    }
 
     // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
     await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
@@ -120,15 +128,15 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const envelope = codexPermissions ? codexMemberEnvelope(codexPermissions) : undefined;
-    const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, process.env, resolvedPosture);
-    const appliedLaunch = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", envelope ? { nonInterruptive }
+    const choice = codexPermissions ? codexMemberLaunch(codexPermissions) : undefined;
+    const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = choice ? choice.observation : observeCodexSandbox(posture);
+    const postureArg = posture + operationalLaunchArg("codex", choice ? { nonInterruptive }
       : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const readNetworkDefault = this.options.readNetworkDefault;
-    const networkArg = envelope ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
+    const networkArg = choice ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
       appliedLaunch, cwd, tmuxSessionName);
-    const workspaceArg = !envelope && teamPermissionDefault && !codexConfigProfile?.trim()
+    const workspaceArg = !choice && teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
     // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology

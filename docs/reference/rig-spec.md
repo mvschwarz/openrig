@@ -324,6 +324,57 @@ envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after
 the seat launches without it. The field is also supported on legacy flat Codex nodes; other
 runtimes reject it.
 
+For an explicit filesystem policy, use `filesystem` **instead of** `sandbox` and its
+workspace-write fields. This is the same per-seat selection and audited setter:
+
+```yaml
+cwd: /workspace/shared
+env:
+  CODEX_HOME: /accounts/codex       # existing account home; never copied
+codex_permissions:
+  approval: never
+  filesystem:
+    ":minimal": read
+    ":workspace_roots": write
+    "/workspace/shared/private": deny
+  network_access: false
+```
+
+The mapping accepts native `read`, `write` and `deny` values at absolute paths,
+`~/path`, or `:root`, `:minimal`, `:workspace_roots`, `:tmpdir` and `:slash_tmp`.
+It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
+of this option. Omitted network access becomes `false`. Include the read access
+your tools and installed Codex executable need; this custom profile adds no
+workspace, temporary, queue-state, seat-folder or Git-directory write grants of
+its own. Native Codex decides whether the host can enforce the supplied rules.
+
+OpenRig emits the policy as invocation-local `permissions.openrig-seat` and
+`default_permissions` overrides, with the selected approval. It writes no policy
+file, so two seats can share both `CODEX_HOME` and `cwd` without overwriting each
+other. Clearing the selection changes only that seat's record. Existing
+account-scoped `codex_config_fragment` resources and their root-key rejection
+stay unchanged.
+
+Before dispatch, Codex's native configuration reader must report the selected
+profile, approval, filesystem and network settings exactly as supplied. A lower
+layer's extra grant, inherited policy, legacy sandbox setting, unreadable result
+or unsupported managed constraint refuses the launch; the policy is never
+silently replaced with a broader fallback. This check requires an explicit
+absolute `CODEX_HOME` in member/rig `env:` or the daemon environment. It also
+refuses a named `codex_config_profile`: the native reader cannot load that
+profile on the supported path. Clear the configuration profile before selecting
+`filesystem`, or keep the legacy `sandbox` envelope. The spec and setters reject
+this combination early, and launch checks stored records defensively.
+
+The filesystem selection replaces permission-mode and team/kernel defaults,
+including ambient YOLO. Fresh launches, both resume paths and restore emit the
+same selection. A rebuild uses the saved filesystem policy ahead of an observed
+predecessor sandbox; clearing or replacing the policy after a snapshot takes
+effect on restore. Status reports the plan and its limits, not observed native
+enforcement. Configuration can change between the preflight and native startup;
+the read and launch are not atomic. Codex's sandbox governs local command
+execution, not every connector, account or external service.
+
 For an existing seat, put the envelope in a JSON file, or change its profile, with the existing
 audited permission command:
 

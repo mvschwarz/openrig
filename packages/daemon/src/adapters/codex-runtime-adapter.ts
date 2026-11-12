@@ -1,5 +1,6 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
+import { codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
+import { verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -176,6 +177,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // the real probe by default.
   private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
   private profileFingerprint: (path: string) => Promise<ProfileFingerprint>;
+  private verifyFilesystemPolicy: CodexFilesystemVerifier;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -238,6 +240,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
     /** The setter's optional profile hash; defaults to a bounded, non-blocking read. */
     profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
+    verifyFilesystemPolicy?: CodexFilesystemVerifier;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     codexLoginShell?: () => boolean;
@@ -275,6 +278,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.codexHome = deps.codexHome;
     this.seatHome = deps.seatHome;
     this.profileFingerprint = deps.profileFingerprint ?? readProfileFingerprint;
+    this.verifyFilesystemPolicy = deps.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
@@ -1091,15 +1095,23 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    // A handover rebuild's observed predecessor envelope, else the seat's own envelope, replaces the posture decision.
-    const memberEnvelope = binding.codexRebuildPermissions || !binding.codexPermissions ? undefined : codexMemberEnvelope(binding.codexPermissions);
-    const envelope = binding.codexRebuildPermissions ?? memberEnvelope;
-    const posture = envelope
+    const filesystemPermissions = binding.codexPermissions && "filesystem" in binding.codexPermissions ? binding.codexPermissions : undefined;
+    if (filesystemPermissions) {
+      if (profile) return { ok: false, error: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify that configuration profile. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
+      try {
+        const verified = await this.verifyFilesystemPolicy({ permissions: filesystemPermissions, cwd: binding.cwd, codexHome: home, launchPath: this.launchPath });
+        if (!verified.ok) return verified;
+      } catch (error) { return { ok: false, error: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
+    }
+    // An authored filesystem policy always wins over a stale observed legacy envelope. Legacy rebuilds keep their carry behavior.
+    const memberChoice = binding.codexPermissions && (!binding.codexRebuildPermissions || filesystemPermissions) ? codexMemberLaunch(binding.codexPermissions) : undefined;
+    const envelope = memberChoice ? undefined : binding.codexRebuildPermissions;
+    const posture = memberChoice ? profileArg + memberChoice.args : envelope
       ? profileArg + codexEnvelopeArgs(envelope)
       : codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch: AppliedLaunchObservation = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    const appliedLaunch: AppliedLaunchObservation = memberChoice?.observation ?? (envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture));
     // The seat's envelope is not full access, so a policy's full_bypass extras don't follow it.
-    const postureArg = posture + operationalLaunchArg(this.runtime, memberEnvelope ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
+    const postureArg = posture + operationalLaunchArg(this.runtime, memberChoice ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
@@ -1107,10 +1119,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // conversation id, as on every resume, so the resume proof reads the id even when a dir has a space.
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
         queueStateDirArg: "",
-        gitDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
+        gitDirArg: (filesystemPermissions ? [] : running.addDirs).map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
         seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
-        networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "",
+        networkArg: !filesystemPermissions && running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "",
         loginShellArg: running.nonLoginShell ? codexNonLoginShellArg : "" };
     }
 
@@ -1130,7 +1142,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
     // A seat envelope states its sandbox: read-only gets no generated roots; workspace-write keeps them.
-    const suppressAutoAddDirs = memberEnvelope ? memberEnvelope.sandboxPolicy.type === "read-only"
+    const suppressAutoAddDirs = memberChoice ? memberChoice.suppressAutoAddDirs
       : Boolean(!binding.codexRebuildPermissions && profile && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
     // Issue #121: fresh, resume and fork get the same git metadata dirs, so a restored or forked seat can still commit.
     // A rebuild keeps the writable roots its observed envelope names instead.
@@ -1139,7 +1151,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The seat's own topology folder, so it can keep its LEARNED.md and recap: the same launches and the same suppression.
     const seatFolder = binding.codexRebuildPermissions || suppressAutoAddDirs ? undefined : this.prepareSeatFolder?.(name);
     const seatFolderArg = seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "";
-    const teamWorkspaceArg = !envelope && binding.teamPermissionDefault && !profile
+    const teamWorkspaceArg = !memberChoice && !envelope && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
@@ -1153,7 +1165,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
     // #275: on the plain floor, network access unless Codex reports an opt-out or policy. An envelope states its own.
-    const networkArg = envelope ? ""
+    const networkArg = memberChoice || envelope ? ""
       : await codexNetworkDefaultArg(own && this.readNetworkDefault ? ((cwd: string) => this.readNetworkDefault!(cwd, own)) : this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.

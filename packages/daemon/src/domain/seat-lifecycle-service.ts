@@ -1,6 +1,6 @@
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
-import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { assertCodexFilesystemProfileCompatible, clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
@@ -951,8 +951,9 @@ export class SeatLifecycleService {
       let persisted: PersistedEvent | null = null;
       const result = this.db.transaction(() => {
         // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
-        const row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null } | undefined;
+        const row = this.db.prepare("SELECT codex_permissions_json, codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null; codex_config_profile: string | null } | undefined;
         if (!row) throw new Error("Seat runtime changed; the envelope was not changed.");
+        assertCodexFilesystemProfileCompatible(to, row.codex_config_profile);
         let from: unknown = null;
         try { from = readCodexMemberPermissions(this.db, seat.nodeId) ?? null; }
         catch { from = { state: "invalid", stored: row.codex_permissions_json }; }
@@ -968,7 +969,7 @@ export class SeatLifecycleService {
             nodeId: seat.nodeId, from, to, ...(replaced ? { replaced } : {}), actor, reason, effect: "future_launches_only" });
         }
         return { ok: true as const, seat, from, to, changed, ...(replaced ? { replaced } : {}),
-          effect: `The envelope applies at the next separately authorized managed launch or resume, as explicit sandbox and approval flags that a profile or policy posture doesn't override.${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
+          effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, after the native config preflight verifies the exact filesystem policy." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       return result;
@@ -1007,6 +1008,10 @@ export class SeatLifecycleService {
         }
         const row = this.db.prepare("SELECT codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_config_profile: string | null } | undefined;
         if (!row) throw new Error("Seat runtime changed; the profile was not changed.");
+        // Malformed old envelopes keep the existing profile-setter behavior; managed launch still refuses them.
+        let permissions;
+        try { permissions = readCodexMemberPermissions(this.db, seat.nodeId); } catch { /* repaired by the envelope setter */ }
+        if (permissions) assertCodexFilesystemProfileCompatible(permissions, to);
         const from = row.codex_config_profile;
         // Re-recording the same profile compares its bytes with the last recorded observation, in the same home.
         const last = this.db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.codex_profile_changed' ORDER BY seq DESC LIMIT 1").get(seat.nodeId) as { payload: string } | undefined;

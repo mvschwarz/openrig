@@ -4,8 +4,7 @@
 import type Database from "better-sqlite3";
 import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
 import { claudePostureFlag, codexPostureArg, planModelAliasNotice, yoloEnabled } from "../adapters/yolo-mode.js";
-import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
-import { codexMemberEnvelope } from "./codex-member-permissions.js";
+import { codexMemberLaunch } from "./codex-member-permissions.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
 import { RigRepository } from "./rig-repository.js";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -94,7 +93,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   // A Codex seat's envelope replaces the posture decision with its own flags, as the launch does.
   const envelope = runtime === "codex" ? planned.codexPermissions : undefined;
   const nativeArgument = runtime === "claude-code" ? claudePostureFlag(env, posture, mode)
-    : envelope ? `${profile ? ` -p ${profile}` : ""}${codexEnvelopeArgs(codexMemberEnvelope(envelope))}`.trim()
+    : envelope ? `${profile ? ` -p ${profile}` : ""}${codexMemberLaunch(envelope).args}`.trim()
     : codexPostureArg(profile ? ` -p ${profile}` : "", env, posture).trim();
   const openRigAdds: PermissionAccount["openRigAdds"] = { claudeAllow: [], claudeAsk: [], notes: [] };
   const unknown = [NOT_READ, UNVERIFIED,
@@ -119,7 +118,11 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     controls.push(`rig seat set-permissions ${seat} --rules <file.json> --reason "<why>"`);
   }
   if (envelope) {
-    openRigAdds.notes.push(envelope.sandbox === "workspace-write"
+    if ("filesystem" in envelope) openRigAdds.notes.push(
+      "Invocation-local filesystem policy; OpenRig adds no writable directories or network grant. No shared policy file is written.",
+      "Each launch reads native configuration and refuses a legacy sandbox or a merged policy mismatch. A named codex_config_profile is unsupported with this choice.",
+      "This status describes the saved plan; native enforcement is not observed here.");
+    else openRigAdds.notes.push(envelope.sandbox === "workspace-write"
       ? "Extra writable roots for OpenRig's queue state, and git metadata folders on a fresh launch, beside the envelope's own roots."
       : "No extra writable roots: the envelope is read-only.",
     `Network access ${envelope.sandbox === "workspace-write" && envelope.network_access ? "on" : "off"}, as the envelope states; OpenRig adds no network setting of its own.`,

@@ -518,7 +518,9 @@ export class SeatHandoverService {
       if (permissionOverride.codexPermissions) {
         // Saved envelopes retain ordinary launch additions; only an observed predecessor
         // policy uses the exact carry path. Describe policy, not an observed native delta.
-        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+        const directoryPolicy = "filesystem" in permissionOverride.codexPermissions
+          ? "with its explicit filesystem policy and no additional writable directory grants"
+          : permissionOverride.codexPermissions.sandbox === "workspace-write"
           ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
           : "without additional writable directory grants, as on a read-only fresh launch";
         permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`

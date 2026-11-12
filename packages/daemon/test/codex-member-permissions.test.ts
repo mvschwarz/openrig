@@ -107,6 +107,21 @@ describe("a seat's explicit filesystem policy", () => {
     expect(store.launchOverride(f.b.id, "codex").codexPermissions).toEqual(other);
   });
 
+  it("refuses named-profile combinations in either setter direction and keeps the previous choice", async () => {
+    const f = fixture();
+    await f.service.setPermissions(set(reader));
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "named", actor: "operator@codex-team", reason: "Select" }))
+      .toMatchObject({ ok: true });
+    expect(await f.service.setPermissions(set(policy))).toMatchObject({ ok: false, message: expect.stringContaining("codex_config_profile") });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toEqual(reader);
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "inherit", actor: "operator@codex-team", reason: "Clear" }))
+      .toMatchObject({ ok: true });
+    expect(await f.service.setPermissions(set(policy))).toMatchObject({ ok: true });
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "named", actor: "operator@codex-team", reason: "Conflict" }))
+      .toMatchObject({ ok: false, message: expect.stringContaining("codex_config_profile") });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toEqual(policy);
+  });
+
   it.each([
     { ...policy, sandbox: "workspace-write" },
     { ...policy, writable_roots: ["/another/root"] },
@@ -294,7 +309,7 @@ describe("a Codex seat's current profile", () => {
 });
 
 describe("both writers: the spec at creation, the setter afterwards, every launch reading the seat's record", () => {
-  const authored = (profile: string, permissions?: CodexMemberPermissions) => ({ version: "0.2", name: "authored", pods: [{ id: "dev", label: "Dev", members: [
+  const authored = (profile: string | undefined, permissions?: CodexMemberPermissions) => ({ version: "0.2", name: "authored", pods: [{ id: "dev", label: "Dev", members: [
     { id: "impl", agent_ref: "local:impl.agent.yaml", profile: "default", runtime: "codex", cwd: "/same/project", codex_config_profile: profile,
       ...(permissions ? { codex_permissions: permissions } : {}) },
   ], edges: [] }], edges: [] });
@@ -335,6 +350,19 @@ describe("both writers: the spec at creation, the setter afterwards, every launc
     expect(member.codexConfigProfile).toBe("seat-profile");
     const wrongRuntime = structuredClone(authored("p", lease)); wrongRuntime.pods[0]!.members[0]!.runtime = "claude-code";
     expect(RigSpecSchema.validate(wrongRuntime).errors.join(" ")).toContain("codex_permissions");
+  });
+
+  it("materializes and exports the filesystem choice, refusing a conflicting named profile", async () => {
+    const f = fixture();
+    const policy: CodexMemberPermissions = { approval: "never", filesystem: { ":minimal": "read", "/lease/a": "write", "/lease/a/private": "deny" }, network_access: false };
+    const raw = authored(undefined, policy);
+    expect(RigSpecSchema.validate(raw).valid).toBe(true);
+    const { setup, node, rigId } = await materialize(f.db, raw);
+    expect(readCodexMemberPermissions(f.db, node.id)).toEqual(policy);
+    const exported = new RigSpecExporter({ rigRepo: setup.rigRepo, sessionRegistry: setup.sessionRegistry, podRepo: new PodRepository(f.db) }).exportRig(rigId);
+    const decoded = RigSpecSchema.normalize(RigSpecCodec.parse(RigSpecCodec.serialize(exported as import("../src/domain/types.js").RigSpec)));
+    expect(decoded.pods[0]!.members[0]!.codexPermissions).toEqual(policy);
+    expect(RigSpecSchema.validate(authored("named", policy)).errors.join(" ")).toContain("codex_config_profile");
   });
 
   it("restores with the seat's current profile, so an older snapshot can't bring back a replaced one", async () => {
