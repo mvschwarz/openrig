@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serve, type ServerType } from "@hono/node-server";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,15 +19,21 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { GatewaySubsystem } from "../src/domain/gateway/gateway-subsystem.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
-import { addHumanFragment, loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, loadHumanRegistry, resolveSlackHandle, setHumanField } from "../src/domain/gateway/human-registry.js";
+import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
+import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import {
   encodeRelayReplyRef,
   hashRelayReplyRef,
   prepareRelayDecision,
+  relayStatePaths,
   type RelayReplyRefPayload,
 } from "../src/domain/gateway/relay-outbound.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { nodeSecretFs } from "../src/domain/gateway/slack/secrets.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import {
   RELAY_INBOUND_SEEN_FILE,
@@ -287,6 +293,7 @@ async function createAskWithAcceptedRelayRef(
     body?: string;
     humanIntent?: "decision" | "update";
     recordViaPendingBufferOnly?: boolean;
+    markAttempted?: boolean;
   },
 ): Promise<{ qitemId: string; replyRef: string; payload: RelayReplyRefPayload }> {
   const destinationSession = opts?.destinationSession ?? "founder@external";
@@ -354,6 +361,7 @@ async function createAskWithAcceptedRelayRef(
           body: item.body,
           humanIntent: item.humanIntent,
           ownerNotificationKind: isUpdate ? "human-update" : "human-required",
+          ownerNotificationLevel: "ALERT",
         },
         enqueuedAt: new Date().toISOString(),
       },
@@ -364,6 +372,12 @@ async function createAskWithAcceptedRelayRef(
       },
     );
     buffer.enqueue(prepared);
+    if (opts?.markAttempted !== false) {
+      new SeenStore(relayStatePaths(f.home).attemptedPath).mark(
+        decisionId,
+        `attempted:${connectorRef}:interrupt`,
+      );
+    }
   } else {
     f.daemon.queueRepo.recordRelayOwnerNotificationAccepted({
       qitemId: created.qitemId,
@@ -2388,5 +2402,866 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(seen.statuses().get(computeRelayEventKey("relay-main", dbFailEventId))).toBeUndefined();
     expect(f.daemon.queueRepo.getById(digAsk2.qitemId)?.state).toBe("pending");
     expect(f.daemon.missionControlActionLog.listForQitem(digAsk2.qitemId, 5)).toHaveLength(0);
+  });
+
+  it("supports pull-mode GET /api/gateway/relay/outbox (read-only FIFO, cross-connector isolation, > 64 KiB, limit validation) and POST /api/gateway/relay/outbox/ack (custody receipt, update close, duplicate & archived-receipt reconciliation)", async () => {
+    const f = await createRelayFixture({
+      mainVars: {
+        OPENRIG_RELAY_MODE: "pull",
+        OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001",
+      },
+      registerSecondaryRelay: true,
+      secondaryVars: {
+        OPENRIG_RELAY_MODE: "pull",
+        OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-sec-token-002",
+      },
+    });
+
+    // Pull-mode readiness reports ready with endpointUrl: null
+    const readinessRes = await fetch(`${f.baseUrl}/api/gateway/human/founder/readiness`);
+    expect(readinessRes.status).toBe(200);
+    expect(await readinessRes.json()).toMatchObject({
+      ok: true,
+      readiness: {
+        state: "ready",
+        ready: true,
+        connector: { kind: "relay", ref: "relay-main" },
+      },
+    });
+
+    const longBody = "PULL-CJK-測試-🚀-".repeat(4500) + "PULL-TAIL-MARKER";
+    const mainAsk = await createAskWithAcceptedRelayRef(f, {
+      destinationSession: "founder@external",
+      connectorRef: "relay-main",
+      summary: "Pull ask > 64 KiB",
+      body: longBody,
+      humanIntent: "decision",
+      recordViaPendingBufferOnly: true,
+    });
+    const mainUpdate = await createAskWithAcceptedRelayRef(f, {
+      destinationSession: "founder@external",
+      connectorRef: "relay-main",
+      summary: "Pull informational update",
+      body: "Informational notice body",
+      humanIntent: "update",
+      recordViaPendingBufferOnly: true,
+    });
+    const secAsk = await createAskWithAcceptedRelayRef(f, {
+      destinationSession: "ops@external",
+      connectorRef: "relay-sec",
+      summary: "Secondary connector ask",
+      body: "Secondary body",
+      humanIntent: "decision",
+      recordViaPendingBufferOnly: true,
+    });
+
+    // Unauthorized and browser-origin checks on GET /api/gateway/relay/outbox and POST /api/gateway/relay/outbox/ack
+    const unauthList = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`);
+    expect(unauthList.status).toBe(401);
+    const originList = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        Origin: "https://evil.example",
+      },
+    });
+    expect(originList.status).toBe(403);
+
+    const invalidLimitRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox?limit=0`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(invalidLimitRes.status).toBe(400);
+    expect(await invalidLimitRes.json()).toMatchObject({ error: "invalid_limit" });
+
+    // Read-only listing: returns only relay-main's 2 pending envelopes in FIFO order; repeated read changes nothing
+    const list1 = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(list1.status).toBe(200);
+    const list1Body = (await list1.json()) as {
+      ok: boolean;
+      connectorRef: string;
+      deliveries: Array<{ deliveryId: string; intent: string; body: string; replyRef: string | null }>;
+    };
+    expect(list1Body.ok).toBe(true);
+    expect(list1Body.connectorRef).toBe("relay-main");
+    expect(list1Body.deliveries.map((d) => d.deliveryId)).toEqual([
+      mainAsk.payload.decisionId,
+      mainUpdate.payload.decisionId,
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(list1Body.deliveries[0]), "utf8")).toBeGreaterThan(65_536);
+    expect(list1Body.deliveries[0]!.body).toContain("PULL-TAIL-MARKER");
+
+    const listLimit1 = await fetch(`${f.baseUrl}/api/gateway/relay/outbox?limit=1`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listLimit1.status).toBe(200);
+    const listLimit1Body = (await listLimit1.json()) as { deliveries: Array<{ deliveryId: string }> };
+    expect(listLimit1Body.deliveries.map((d) => d.deliveryId)).toEqual([mainAsk.payload.decisionId]);
+
+    // Repeat full list: still has both items untouched, and zero acceptance receipts recorded yet
+    const list2 = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(list2.status).toBe(200);
+    const list2Body = (await list2.json()) as { deliveries: Array<{ deliveryId: string }> };
+    expect(list2Body.deliveries.map((d) => d.deliveryId)).toEqual([
+      mainAsk.payload.decisionId,
+      mainUpdate.payload.decisionId,
+    ]);
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(mainAsk.qitemId, mainAsk.payload.episodeKey),
+    ).toBe(false);
+
+    // Cross-connector ack attempt is rejected with 404 unknown_delivery (leaks nothing about other connectors)
+    const crossAckRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: secAsk.payload.decisionId }),
+    });
+    expect(crossAckRes.status).toBe(404);
+    expect(await crossAckRes.json()).toMatchObject({ error: "unknown_delivery" });
+
+    // Closed schema validation and unknown deliveryId check (answered without scanning queue_transitions)
+    const findReceiptSpy = vi.spyOn(
+      f.daemon.queueRepo,
+      "findRelayOwnerNotificationReceiptByDeliveryId",
+    );
+    const extraKeyAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: mainAsk.payload.decisionId, extra: true }),
+    });
+    expect(extraKeyAck.status).toBe(400);
+
+    const unknownAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: "dec-does-not-exist-999" }),
+    });
+    expect(unknownAck.status).toBe(404);
+    expect(await unknownAck.json()).toMatchObject({ error: "unknown_delivery" });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
+
+    // Acknowledge mainAsk (decision) and mainUpdate (informational update)
+    const ackAskRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: mainAsk.payload.decisionId }),
+    });
+    expect(ackAskRes.status).toBe(200);
+    expect(await ackAskRes.json()).toEqual({
+      ok: true,
+      deliveryId: mainAsk.payload.decisionId,
+      connectorRef: "relay-main",
+      alreadyAccepted: false,
+    });
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(mainAsk.qitemId, mainAsk.payload.episodeKey),
+    ).toBe(true);
+    // Custody ack does NOT close a decision item
+    expect(f.daemon.queueRepo.getById(mainAsk.qitemId)?.state).toBe("pending");
+
+    const ackUpdateRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: mainUpdate.payload.decisionId }),
+    });
+    expect(ackUpdateRes.status).toBe(200);
+    expect(await ackUpdateRes.json()).toEqual({
+      ok: true,
+      deliveryId: mainUpdate.payload.decisionId,
+      connectorRef: "relay-main",
+      alreadyAccepted: false,
+    });
+    // Informational update is closed as delivered upon custody ack (same as push 2xx)
+    expect(f.daemon.queueRepo.getById(mainUpdate.qitemId)?.state).toBe("done");
+
+    // Outbox for relay-main is now empty; relay-sec still has secAsk pending
+    const listMainAfter = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(((await listMainAfter.json()) as { deliveries: unknown[] }).deliveries).toEqual([]);
+
+    const listSecAfter = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenSecondary}` },
+    });
+    expect(
+      ((await listSecAfter.json()) as { deliveries: Array<{ deliveryId: string }> }).deliveries.map(
+        (d) => d.deliveryId,
+      ),
+    ).toEqual([secAsk.payload.decisionId]);
+
+    // Duplicate ack after transition archival still reconciles idempotently (alreadyAccepted: true)
+    // and answers directly from deliveredStore + attemptedStore without scanning history
+    const oldIso = "2025-01-01T00:00:00.000Z";
+    f.db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(oldIso, mainUpdate.qitemId);
+    f.db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(oldIso, mainUpdate.qitemId);
+    expect(
+      archiveAgedTerminalTransitions(f.db, { nowIso: "2026-11-07T00:00:00.000Z" }).archivedQitems,
+    ).toBeGreaterThanOrEqual(1);
+
+    findReceiptSpy.mockClear();
+    const dupUpdateAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: mainUpdate.payload.decisionId }),
+    });
+    expect(dupUpdateAck.status).toBe(200);
+    expect(await dupUpdateAck.json()).toEqual({
+      ok: true,
+      deliveryId: mainUpdate.payload.decisionId,
+      connectorRef: "relay-main",
+      alreadyAccepted: true,
+    });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
+
+    // Cross-connector duplicate ack for relay-main's already-accepted deliveryId is still rejected with 404 without scanning history
+    const crossAcceptedAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenSecondary}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: mainUpdate.payload.decisionId }),
+    });
+    expect(crossAcceptedAck.status).toBe(404);
+    expect(await crossAcceptedAck.json()).toMatchObject({ error: "unknown_delivery" });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
+    findReceiptSpy.mockRestore();
+
+    // Non-loopback TCP peers are rejected with 403 loopback_peer_required on /relay/outbox, /relay/outbox/ack, and /relay/inbound
+    const nonLoopbackEnv = { incoming: { socket: { remoteAddress: "198.51.100.42" } } };
+    for (const [path, method] of [
+      ["/api/gateway/relay/outbox", "GET"],
+      ["/api/gateway/relay/outbox/ack", "POST"],
+      ["/api/gateway/relay/inbound", "POST"],
+    ] as const) {
+      const res = await f.daemon.app.request(
+        new Request(`http://127.0.0.1${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+          ...(method === "POST" ? { body: "{}" } : {}),
+        }),
+        undefined,
+        nonLoopbackEnv,
+      );
+      expect(res.status, `${method} ${path} from non-loopback peer`).toBe(403);
+      expect(await res.json()).toMatchObject({ error: "loopback_peer_required" });
+    }
+
+    // An unacknowledged ask to a pull-mode profile aged past 120s is NOT never-posted and NOT in findUndelivered
+    f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(secAsk.qitemId);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(secAsk.qitemId)).toBeNull();
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: secAsk.qitemId })).toHaveLength(0);
+  });
+
+  it("finishes partial receipt and drain sequence on retry after mid-ack failure and never shows unreadable storage as an empty outbox", async () => {
+    const f = await createRelayFixture({
+      mainVars: {
+        OPENRIG_RELAY_MODE: "pull",
+        OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001",
+      },
+    });
+
+    const dig1 = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Pull digest item 1",
+      body: "Body 1",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const dig2 = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Pull digest item 2",
+      body: "Body 2",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const ep1 = f.daemon.queueRepo.currentHumanRequiredEpisode(dig1.qitemId)!.key;
+    const ep2 = f.daemon.queueRepo.currentHumanRequiredEpisode(dig2.qitemId)!.key;
+    const digestDecisionId = "dec-pull-digest-retry-1";
+
+    const preparedDigest = prepareRelayDecision(
+      {
+        kind: "outbound_decision",
+        decisionId: digestDecisionId,
+        op: OUTBOUND_OP,
+        entityBindingRef: "founder@external",
+        payload: {
+          deliveryDigestPost: true,
+          digestId: "dig-pull-1",
+          qitemId: dig1.qitemId,
+          notificationKey: "digest:founder@external:pull-1",
+          destinationSession: "founder@external",
+          summary: "Digest summary",
+          body: "Digest body",
+          humanIntent: "update",
+          ownerNotificationKind: "human-required",
+          ownerNotificationLevel: "INFO",
+          memberReceipts: [
+            { qitemId: dig1.qitemId, notificationKey: ep1, level: "ALERT", kind: "human-required", summary: "Pull digest item 1", body: "Body 1" },
+            { qitemId: dig2.qitemId, notificationKey: ep2, level: "ALERT", kind: "human-required", summary: "Pull digest item 2", body: "Body 2" },
+          ],
+        },
+        enqueuedAt: new Date().toISOString(),
+      },
+      {
+        loadHumanRegistry: () => loadHumanRegistry(f.home),
+        queueRepo: f.daemon.queueRepo,
+        resolveOutcome: () => "digest",
+      },
+    );
+    new DispatchBuffer(f.home).enqueue(preparedDigest);
+    new SeenStore(relayStatePaths(f.home).attemptedPath).mark(
+      digestDecisionId,
+      "attempted:relay-main:digest",
+    );
+
+    // 1. Fail on second receipt write during ackOutbox -> returns 503 receipt_write_failed, retains in DispatchBuffer
+    let failSecondReceipt = true;
+    let receiptCalls = 0;
+    const partialFailRepo = new Proxy(f.daemon.queueRepo, {
+      get(target, prop, receiver) {
+        if (prop === "recordRelayOwnerNotificationAccepted") {
+          return (input: Parameters<QueueRepository["recordRelayOwnerNotificationAccepted"]>[0]) => {
+            receiptCalls += 1;
+            if (failSecondReceipt && receiptCalls === 2) {
+              throw new Error("SQLITE_BUSY: simulated partial receipt failure on second digest member");
+            }
+            return target.recordRelayOwnerNotificationAccepted(input);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const partialHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: partialFailRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+
+    const firstAck = await partialHandler.ackOutbox({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({ deliveryId: digestDecisionId }),
+    });
+    expect(firstAck.status).toBe(503);
+    expect(firstAck.body.error).toBe("receipt_write_failed");
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(dig1.qitemId, ep1)).toBe(true);
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(dig2.qitemId, ep2)).toBe(false);
+    expect(new DispatchBuffer(f.home).pending().map((d) => d.decisionId)).toEqual([digestDecisionId]);
+
+    // Outbox listing still shows the pending envelope so the connector can retry ack
+    const midList = await partialHandler.listOutbox({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+    });
+    expect(midList.status).toBe(200);
+    expect((midList.body.deliveries as Array<{ deliveryId: string }>).map((d) => d.deliveryId)).toEqual([
+      digestDecisionId,
+    ]);
+
+    // 2. Retry ackOutbox once DB recovers -> finishes remaining receipt + marks delivered + drains buffer
+    failSecondReceipt = false;
+    const retryAck = await partialHandler.ackOutbox({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({ deliveryId: digestDecisionId }),
+    });
+    expect(retryAck.status).toBe(200);
+    expect(retryAck.body).toEqual({
+      ok: true,
+      deliveryId: digestDecisionId,
+      connectorRef: "relay-main",
+      alreadyAccepted: false,
+    });
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(dig1.qitemId, ep1)).toBe(true);
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(dig2.qitemId, ep2)).toBe(true);
+    expect(new DispatchBuffer(f.home).pending()).toHaveLength(0);
+
+    // 3. Unreadable storage never appears as an empty outbox (returns 503)
+    const bufferPath = join(f.home, "gateway", "dispatch-buffer.json");
+    writeFileSync(bufferPath, "{corrupt-buffer-json\n", "utf8");
+
+    const corruptBufferList = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(corruptBufferList.status).toBe(503);
+    expect(await corruptBufferList.json()).toMatchObject({ error: "dispatch_buffer_unavailable" });
+
+    const corruptBufferAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: digestDecisionId }),
+    });
+    expect(corruptBufferAck.status).toBe(503);
+    expect(await corruptBufferAck.json()).toMatchObject({ error: "dispatch_buffer_unavailable" });
+
+    // Restore valid buffer and make delivered SeenStore unreadable (directory) -> 503 seen_store_unavailable
+    writeFileSync(bufferPath, JSON.stringify({ pending: [] }), "utf8");
+    const deliveredPath = join(f.home, "state", "relay-delivered-decisions.jsonl");
+    rmSync(deliveredPath, { recursive: true, force: true });
+    mkdirSync(deliveredPath, { recursive: true });
+
+    const corruptSeenList = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(corruptSeenList.status).toBe(503);
+    expect(await corruptSeenList.json()).toMatchObject({ error: "seen_store_unavailable" });
+  });
+
+  it("pins 503 registry_unavailable wording across surfaces, gates listOutbox and ackOutbox on attempted decisions across hold/release/replay, and scopes digest replay completion to the digest deliveryId", async () => {
+    const f = await createRelayFixture({
+      mainVars: {
+        OPENRIG_RELAY_MODE: "pull",
+        OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001",
+      },
+    });
+
+    // 1. Registry-unavailable 503 messages capitalize surfaceLabel without duplicating "Relay relay ..."
+    const unavailableHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: f.daemon.queueRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+      loadEntities: () => ({ ok: false, error: "simulated unreadable registry" }),
+    });
+
+    const unavailInbound = await unavailableHandler.handle({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: "{}",
+    });
+    expect(unavailInbound.status).toBe(503);
+    expect(unavailInbound.body).toEqual({
+      error: "human_registry_unavailable",
+      message: "Relay inbound authentication is unavailable because human registry cannot be read",
+    });
+
+    const unavailList = await unavailableHandler.listOutbox!({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+    });
+    expect(unavailList.status).toBe(503);
+    expect(unavailList.body).toEqual({
+      error: "human_registry_unavailable",
+      message: "Relay outbox authentication is unavailable because human registry cannot be read",
+    });
+
+    const unavailAck = await unavailableHandler.ackOutbox!({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({ deliveryId: "dec-any" }),
+    });
+    expect(unavailAck.status).toBe(503);
+    expect(unavailAck.body).toEqual({
+      error: "human_registry_unavailable",
+      message: "Relay outbox ack authentication is unavailable because human registry cannot be read",
+    });
+
+    // 2. Unattempted decisions in DispatchBuffer (held/refused/threw before relayTransport.deliver)
+    //    are NOT listed in /outbox and NOT ackable in /outbox/ack; once attempted/released, they are listed and ackable.
+    const unattemptedAsk = await createAskWithAcceptedRelayRef(f, {
+      destinationSession: "founder@external",
+      connectorRef: "relay-main",
+      summary: "Held ask not yet attempted by transport",
+      body: "Held for quiet hours / threw before transport",
+      humanIntent: "decision",
+      recordViaPendingBufferOnly: true,
+      markAttempted: false,
+    });
+
+    const listWhileHeld = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listWhileHeld.status).toBe(200);
+    expect(await listWhileHeld.json()).toEqual({
+      ok: true,
+      connectorRef: "relay-main",
+      deliveries: [],
+    });
+
+    const ackWhileHeld = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: unattemptedAsk.payload.decisionId }),
+    });
+    expect(ackWhileHeld.status).toBe(404);
+    expect(await ackWhileHeld.json()).toMatchObject({ error: "unknown_delivery" });
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(
+        unattemptedAsk.qitemId,
+        unattemptedAsk.payload.episodeKey,
+      ),
+    ).toBe(false);
+    expect(new DispatchBuffer(f.home).pending().map((d) => d.decisionId)).toEqual([
+      unattemptedAsk.payload.decisionId,
+    ]);
+
+    // Now release/replay through the gateway subsystem so relayTransport.deliver marks it attempted
+    f.daemon.gatewaySubsystem.startServices();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const listAfterRelease = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listAfterRelease.status).toBe(200);
+    const listAfterReleaseBody = (await listAfterRelease.json()) as {
+      deliveries: Array<{ deliveryId: string }>;
+    };
+    expect(listAfterReleaseBody.deliveries.map((d) => d.deliveryId)).toEqual([
+      unattemptedAsk.payload.decisionId,
+    ]);
+
+    const ackAfterRelease = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: unattemptedAsk.payload.decisionId }),
+    });
+    expect(ackAfterRelease.status).toBe(200);
+    expect(await ackAfterRelease.json()).toEqual({
+      ok: true,
+      deliveryId: unattemptedAsk.payload.decisionId,
+      connectorRef: "relay-main",
+      alreadyAccepted: false,
+    });
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(
+        unattemptedAsk.qitemId,
+        unattemptedAsk.payload.episodeKey,
+      ),
+    ).toBe(true);
+    expect(new DispatchBuffer(f.home).pending()).toHaveLength(0);
+
+    // 3. Shared digest member receipt from ANOTHER deliveryId does not cause a staged digest to complete/drain on replay
+    const sharedMember = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Shared digest member A",
+      body: "Shared member A body",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const otherMember = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Digest member B",
+      body: "Member B body",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const epShared = f.daemon.queueRepo.currentHumanRequiredEpisode(sharedMember.qitemId)!.key;
+    const epOther = f.daemon.queueRepo.currentHumanRequiredEpisode(otherMember.qitemId)!.key;
+    const sharedDigestId = "dec-shared-digest-replay-1";
+
+    const dispatchRes = f.daemon.gatewaySubsystem.dispatch(
+      OUTBOUND_OP,
+      "founder@external",
+      {
+        deliveryDigestPost: true,
+        digestId: "dig-shared-1",
+        qitemId: sharedMember.qitemId,
+        notificationKey: "digest:founder@external:shared-1",
+        destinationSession: "founder@external",
+        summary: "Digest with shared member",
+        body: "Shared digest body",
+        humanIntent: "update",
+        ownerNotificationKind: "human-required",
+        ownerNotificationLevel: "INFO",
+        memberReceipts: [
+          {
+            qitemId: sharedMember.qitemId,
+            notificationKey: epShared,
+            level: "ALERT",
+            kind: "human-required",
+            summary: "Shared digest member A",
+            body: "Shared member A body",
+          },
+          {
+            qitemId: otherMember.qitemId,
+            notificationKey: epOther,
+            level: "ALERT",
+            kind: "human-required",
+            summary: "Digest member B",
+            body: "Member B body",
+          },
+        ],
+      },
+      { decisionId: sharedDigestId },
+    );
+    expect(dispatchRes.ok).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Record an accepted receipt for sharedMember under a DIFFERENT deliveryId (e.g. a retained single decision)
+    f.daemon.queueRepo.recordRelayOwnerNotificationAccepted({
+      qitemId: sharedMember.qitemId,
+      actorSession: "relay-connector",
+      notificationKey: epShared,
+      connectorRef: "relay-main",
+      deliveryId: "dec-retained-single-shared-A",
+      replyRef: null,
+      replyRefHash: null,
+      revision: f.daemon.queueRepo.decisionRevision(sharedMember),
+      episodeKey: epShared,
+      level: "ALERT",
+      kind: "human-required",
+    });
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(sharedMember.qitemId, epShared),
+    ).toBe(true);
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(
+        sharedMember.qitemId,
+        epShared,
+        sharedDigestId,
+      ),
+    ).toBe(false);
+
+    // Replay the subsystem: sharedDigestId must NOT write otherMember's receipt or drain without ack
+    f.daemon.gatewaySubsystem.restart();
+    f.daemon.gatewaySubsystem.startServices();
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(
+      f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(otherMember.qitemId, epOther),
+    ).toBe(false);
+    expect(new DispatchBuffer(f.home).pending().map((d) => d.decisionId)).toEqual([
+      sharedDigestId,
+    ]);
+
+    const listSharedDigest = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listSharedDigest.status).toBe(200);
+    expect(
+      ((await listSharedDigest.json()) as { deliveries: Array<{ deliveryId: string }> }).deliveries.map(
+        (d) => d.deliveryId,
+      ),
+    ).toEqual([sharedDigestId]);
+  });
+
+  it("pull notices: never staged or staging failed surfaces at 120s; staged and unpulled stays quiet, then surfaces after 24h; acknowledged reads accepted", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    // Never staged: dispatch failed before the DispatchBuffer.
+    const neverStaged = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Never staged ask",
+      body: "Dispatch failed before the buffer",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    // Staging failed: in the DispatchBuffer, but the transport never marked it attempted, so the outbox doesn't list it.
+    const stagingFailed = await createAskWithAcceptedRelayRef(f, {
+      summary: "Staging failed",
+      recordViaPendingBufferOnly: true,
+      markAttempted: false,
+    });
+    // Staged and unpulled: listed by the outbox, never acknowledged.
+    const staged = await createAskWithAcceptedRelayRef(f, { summary: "Staged, waiting for a pull", recordViaPendingBufferOnly: true });
+    const backdate = (qitemId: string, modifier: string) =>
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', ?) WHERE qitem_id = ?").run(modifier, qitemId);
+    for (const id of [neverStaged.qitemId, stagingFailed.qitemId, staged.qitemId]) backdate(id, "-10 minutes");
+
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(neverStaged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(stagingFailed.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(0);
+
+    // A listing works out the outbox's listable set once, not per item.
+    const bufferSpy = vi.spyOn(DispatchBuffer.prototype, "pendingStrict");
+    try {
+      const outcomes = new Map(f.daemon.queueRepo.list({ limit: 100 }).map((it) => [it.qitemId, it.deliveryOutcome]));
+      expect(outcomes.get(neverStaged.qitemId)).toBe("never-posted");
+      expect(outcomes.get(stagingFailed.qitemId)).toBe("never-posted");
+      expect(outcomes.get(staged.qitemId)).toBeNull();
+      expect(bufferSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      bufferSpy.mockRestore();
+    }
+
+    backdate(staged.qitemId, "-23 hours");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+    backdate(staged.qitemId, "-25 hours");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(1);
+
+    const ackRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryId: staged.payload.decisionId }),
+    });
+    expect(ackRes.status).toBe(200);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("accepted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(0);
+  });
+
+  it("a staged pull notice surfaces at 120s when the outbox can't list it because the delivered store is unreadable", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const staged = await createAskWithAcceptedRelayRef(f, { summary: "Staged, delivered store unreadable", recordViaPendingBufferOnly: true });
+    f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(staged.qitemId);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+
+    const deliveredPath = relayStatePaths(f.home).deliveredPath;
+    rmSync(deliveredPath, { recursive: true, force: true });
+    mkdirSync(deliveredPath, { recursive: true });
+    const listRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listRes.status).toBe(503);
+    expect(await listRes.json()).toMatchObject({ error: "seen_store_unavailable" });
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(1);
+  });
+
+  it("asks the pull outbox only once a notice is past the post window without a receipt", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const recent = await createAskWithAcceptedRelayRef(f, { summary: "Recent pull ask", recordViaPendingBufferOnly: true });
+    const receipted = await createAskWithAcceptedRelayRef(f, { summary: "Accepted pull ask" });
+    const aged = await createAskWithAcceptedRelayRef(f, { summary: "Aged pull ask", recordViaPendingBufferOnly: true });
+    for (const id of [receipted.qitemId, aged.qitemId]) {
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(id);
+    }
+    const secretSpy = vi.spyOn(nodeSecretFs, "readFileSync");
+    const bufferSpy = vi.spyOn(DispatchBuffer.prototype, "pendingStrict");
+    try {
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(recent.qitemId)).toBeNull();
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(receipted.qitemId)?.outcome).toBe("accepted");
+      expect(secretSpy).not.toHaveBeenCalled();
+      expect(bufferSpy).not.toHaveBeenCalled();
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(aged.qitemId)).toBeNull();
+      expect(secretSpy).toHaveBeenCalledTimes(1);
+      expect(bufferSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      secretSpy.mockRestore();
+      bufferSpy.mockRestore();
+    }
+  });
+
+  it("loads relay profiles once per listing, not once per pull-routed item", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const asks = [];
+    for (const n of [1, 2, 3]) {
+      asks.push(await createAskWithAcceptedRelayRef(f, { summary: `Pull ask ${n}`, recordViaPendingBufferOnly: true }));
+    }
+    // Past the post window, so each one's outcome depends on the relay profile.
+    for (const ask of asks) {
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(ask.qitemId);
+    }
+    const secretSpy = vi.spyOn(nodeSecretFs, "readFileSync");
+    try {
+      const listed = f.daemon.queueRepo.list({ limit: 100 }).map((it) => it.qitemId);
+      for (const ask of asks) expect(listed).toContain(ask.qitemId);
+      expect(secretSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      secretSpy.mockRestore();
+    }
+  });
+
+  it("acknowledges a listed deliveryId over 512 characters: a quiet-release of an ask with a long supplied queue id round-trips", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const loadRegistry = () => loadHumanRegistry(f.home);
+    expect(setHumanField("founder", "delivery-class", "B", f.home).ok).toBe(true);
+    const quiet = new HumanQuietStore(f.db);
+    const now = new Date();
+    quiet.setUntil("founder", { until: new Date(now.getTime() + 3_600_000), timezone: "UTC", setBy: "test", now });
+
+    const ask = await f.daemon.queueRepo.create({
+      qitemId: `qitem-long-${"a".repeat(560)}`,
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Long queue id ask",
+      body: "Held for quiet hours, then released",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const ports = makeQueuePorts(f.daemon.queueRepo, { loadHumanRegistry: loadRegistry } as never);
+    const alert = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((a) => a.qitemId === ask.qitemId)!;
+    expect(f.daemon.gatewaySubsystem.dispatch(OUTBOUND_OP, alert.destinationSession!, alert).ok).toBe(true);
+    f.daemon.gatewaySubsystem.startServices();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(
+      f.daemon.queueRepo.listTransitions(ask.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold ")),
+    ).toBe(true);
+
+    // Quiet ends: the release job produces the delivery id quiet-release:<notification key>.
+    quiet.end("founder", { endedBy: "test", now: new Date() });
+    const jobsRepo = new WatchdogJobsRepository(f.db);
+    const job = jobsRepo.listActive().find((j) => j.policy === QUIET_RELEASE_POLICY)!;
+    const rel = await runQuietRelease({
+      queueRepo: f.daemon.queueRepo,
+      jobsRepo,
+      home: f.home,
+      jobId: job.jobId,
+      now: new Date(),
+      registry: { loadHumanRegistry: loadRegistry, resolveSlackHandle },
+      dispatch: (op, ref, payload, opts) => f.daemon.gatewaySubsystem.dispatch(op, ref, payload, opts),
+    });
+    expect(rel).toMatchObject({ released: 1 });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const listRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listed = ((await listRes.json()) as { deliveries: Array<{ deliveryId: string }> }).deliveries.map((d) => d.deliveryId);
+    expect(listed).toEqual([`quiet-release:${alert.notificationKey}`]);
+    expect(listed[0]!.length).toBeGreaterThan(512);
+
+    const ackRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryId: listed[0] }),
+    });
+    expect(ackRes.status).toBe(200);
+    expect(await ackRes.json()).toEqual({ ok: true, deliveryId: listed[0], connectorRef: "relay-main", alreadyAccepted: false });
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(ask.qitemId, alert.notificationKey!)).toBe(true);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(ask.qitemId)?.outcome).toBe("accepted");
+
+    const relistRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(((await relistRes.json()) as { deliveries: unknown[] }).deliveries).toEqual([]);
   });
 });

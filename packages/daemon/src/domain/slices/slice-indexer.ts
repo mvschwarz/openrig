@@ -18,9 +18,84 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
-import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
+
+const QUEUE_COUNT_STATES = [
+  "pending",
+  "in-progress",
+  "done",
+  "blocked",
+  "failed",
+  "denied",
+  "canceled",
+  "handed-off",
+] as const;
+
+export type ObservedQueueState = (typeof QUEUE_COUNT_STATES)[number];
+/** State totals for GET /api/slices. A row contributes only when its tags
+ * resolve to one physical slice with a known project and mission.
+ */
+export type SliceQueueCounts = Record<ObservedQueueState, number>;
+
+const KNOWN_QUEUE_STATES = new Set<string>(QUEUE_COUNT_STATES);
+
+function zeroQueueCounts(): SliceQueueCounts {
+  return {
+    pending: 0,
+    "in-progress": 0,
+    done: 0,
+    blocked: 0,
+    failed: 0,
+    denied: 0,
+    canceled: 0,
+    "handed-off": 0,
+  };
+}
+
+function canonicalPhysicalPath(absPath: string): string | null {
+  try {
+    return fs.realpathSync(absPath);
+  } catch {
+    return null;
+  }
+}
+
+function parseTypedQueueScope(rawTags: string | null | undefined): {
+  projects: Set<string>;
+  missions: Set<string>;
+  slices: Set<string>;
+} | null {
+  if (rawTags == null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawTags);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const projects = new Set<string>();
+  const missions = new Set<string>();
+  const slices = new Set<string>();
+  for (const element of parsed) {
+    if (typeof element !== "string") continue;
+    for (const rawToken of element.split(",")) {
+      const token = rawToken.trim();
+      if (token.startsWith("project:")) {
+        const value = token.slice("project:".length);
+        if (value) projects.add(value);
+      } else if (token.startsWith("mission:")) {
+        const value = token.slice("mission:".length);
+        if (value) missions.add(value);
+      } else if (token.startsWith("slice:")) {
+        const value = token.slice("slice:".length);
+        if (value) slices.add(value);
+      }
+    }
+  }
+  return { projects, missions, slices };
+}
 
 export interface SliceQitemRef {
   qitemId: string;
@@ -101,7 +176,10 @@ export interface SliceListEntry {
    *  the storytelling adapter as the ConceptCard.oneLiner for
    *  `rawStatus === "candidate"` slices. null when absent. */
   description: string | null;
+  /** Existing legacy display-membership count; separate from state totals. */
   qitemCount: number;
+  /** Added by GET /api/slices as fresh state totals; null when scope or physical-candidate discovery is unresolved. */
+  queueCounts?: SliceQueueCounts | null;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
   /** PL-007 — absolute filesystem path of the slice folder. UI resolves
@@ -142,6 +220,10 @@ interface SliceIdAliases {
   nameById: Map<string, string>;
   idByName: Map<string, string>;
   expiresAt: number;
+}
+
+interface MissionIdAliases extends SliceIdAliases {
+  idByPath: Map<string, string>;
 }
 
 interface SliceLocation {
@@ -266,6 +348,18 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
   "parked-with-evidence": "blocked",
 };
 
+/** The bucket a slice's frontmatter `status:` word falls in, as `GET /api/slices` reports it (sdlc-conventions.md A2). */
+export function sliceStatusBucket(raw: string | undefined): SliceStatus {
+  if (!raw) return "draft";
+  const normalized = raw.toLowerCase().trim();
+  if (STATUS_TO_BUCKET[normalized]) return STATUS_TO_BUCKET[normalized];
+  // Heuristic fallbacks.
+  if (normalized.includes("done") || normalized.includes("ship") || normalized.includes("close")) return "done";
+  if (normalized.includes("block") || normalized.includes("park")) return "blocked";
+  if (normalized.includes("draft") || normalized.includes("pending")) return "draft";
+  return "active";
+}
+
 export class SliceIndexer {
   readonly projectId?: string;
   readonly missionId?: string;
@@ -285,6 +379,7 @@ export class SliceIndexer {
   private membershipIndex: MembershipIndex | null = null;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
+  private missionAliases: MissionIdAliases | null = null;
   // Depth of open withMembershipBatch scopes.
   private batchDepth = 0;
   private compositionBasis: string | null = null;
@@ -345,6 +440,7 @@ export class SliceIndexer {
     this.missionStatusCache = null;
     this.membershipIndex = null;
     this.idAliases = null;
+    this.missionAliases = null;
   }
 
   /** VM-005 B1 (the narrow C-vii exception; arch ruling b8d91aee…) — the
@@ -490,18 +586,247 @@ export class SliceIndexer {
     return id ? [name, id] : [name];
   }
 
+  /** The `mission:` tag values for this location: its directory name and its own
+   *  authored ID, unless a differently named mission in any configured root claims that ID. */
+  missionTagKeys(missionId: string, slicePath?: string): string[] {
+    const aliases = this.missionIdAliases();
+    const missionPath = slicePath ? this.missionPathOfSlice(missionId, slicePath) : null;
+    const id = missionPath
+      ? aliases.idByPath.get(missionPath)
+      : aliases.idByName.get(missionId);
+    return id ? [missionId, id] : [missionId];
+  }
+
+  /**
+   * Observed per-state queue counts (#2729) for `GET /api/slices`.
+   * Matches exact typed tags against physical slice candidates across the
+   * configured roots and the request's catalog project missions roots, then
+   * updates only a listed candidate. Missing project or mission tags count
+   * only when the remaining tags identify one resolved project/mission slice;
+   * list first-wins/filter behavior does not resolve ambiguity. Incomplete
+   * catalog or candidate-root discovery yields null totals rather than
+   * treating unseen candidates as absent.
+   * Queue rows are read in one uncapped shared scan, independent of the 60s
+   * listing cache.
+   */
+  observedQueueCounts(
+    entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
+    resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean } = {},
+  ): Map<string, SliceQueueCounts | null> {
+    const result = new Map<string, SliceQueueCounts | null>();
+    interface TargetScope {
+      projectId: string | null;
+      missionId: string | null;
+      missionKeys: Set<string>;
+      sliceKeys: Set<string>;
+      counts: SliceQueueCounts | null;
+    }
+    const targetsBySliceToken = new Map<string, TargetScope[]>();
+    const visibleCountsByPath = new Map<string, SliceQueueCounts | null>();
+    const projectIdsByPath = new Map<string, string | null>();
+    const canonicalPathsByInput = new Map<string, string | null>();
+    let physicalIdentityComplete = true;
+    const canonicalizeCountPath = (slicePath: string): string | null => {
+      const inputPath = path.resolve(slicePath);
+      if (!canonicalPathsByInput.has(inputPath)) {
+        canonicalPathsByInput.set(inputPath, canonicalPhysicalPath(slicePath));
+      }
+      return canonicalPathsByInput.get(inputPath) ?? null;
+    };
+    const projectForPath = (slicePath: string): string | null => {
+      const physicalPath = canonicalizeCountPath(slicePath);
+      if (!physicalPath) {
+        physicalIdentityComplete = false;
+        return null;
+      }
+      if (!projectIdsByPath.has(physicalPath)) {
+        projectIdsByPath.set(physicalPath, resolveProjectId(physicalPath));
+      }
+      return projectIdsByPath.get(physicalPath) ?? null;
+    };
+
+    for (const entry of entries) {
+      const physicalPath = canonicalizeCountPath(entry.slicePath);
+      if (!physicalPath) {
+        physicalIdentityComplete = false;
+        result.set(entry.slicePath, null);
+        continue;
+      }
+      const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
+      const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
+      if (!visibleCountsByPath.has(physicalPath)) {
+        visibleCountsByPath.set(physicalPath, counts);
+      } else if (visibleCountsByPath.get(physicalPath) === null || counts === null) {
+        visibleCountsByPath.set(physicalPath, null);
+      }
+      result.set(entry.slicePath, visibleCountsByPath.get(physicalPath) ?? null);
+    }
+    if (!physicalIdentityComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+    if (candidateOptions.complete === false) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+    if (![...visibleCountsByPath.values()].some((counts) => counts !== null)) return result;
+
+    let candidateScanComplete = true;
+    const candidateLocations = this.walkSliceLocations(
+      true,
+      candidateOptions.additionalSliceRoots ?? [],
+      () => { candidateScanComplete = false; },
+    );
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+
+    // Keep one target per resolved physical path even when overlapping roots
+    // discover it more than once. Authored IDs belong to that path, not to the
+    // first visible location that happens to share its directory name.
+    const locationsByPath = new Map<string, SliceLocation>();
+    for (const location of candidateLocations) {
+      const physicalPath = canonicalizeCountPath(location.slicePath);
+      if (!physicalPath) {
+        candidateScanComplete = false;
+        continue;
+      }
+      if (!locationsByPath.has(physicalPath)) locationsByPath.set(physicalPath, location);
+    }
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+    const missionIdsByPhysicalPath = this.missionIdAliasesForCounting(
+      candidateOptions.additionalSliceRoots ?? [],
+      () => { candidateScanComplete = false; },
+    );
+    if (!candidateScanComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+    const candidateNames = new Set([...locationsByPath.values()].map((location) => location.name));
+    const sliceIdsByPath = new Map<string, string | null>();
+    const pathsBySliceId = new Map<string, Set<string>>();
+    for (const [physicalPath, location] of locationsByPath) {
+      const id = this.readSliceIdForCounting(
+        location.slicePath,
+        () => { candidateScanComplete = false; },
+      );
+      sliceIdsByPath.set(physicalPath, id);
+      if (!id || candidateNames.has(id)) continue;
+      const claimants = pathsBySliceId.get(id) ?? new Set<string>();
+      claimants.add(physicalPath);
+      pathsBySliceId.set(id, claimants);
+    }
+
+    for (const [physicalPath, location] of locationsByPath) {
+      const missionKeys = new Set<string>();
+      if (location.missionId) {
+        const missionPath = this.missionPathOfSlice(location.missionId, location.slicePath);
+        const canonicalMissionPath = missionPath ? canonicalizeCountPath(missionPath) : null;
+        if (!canonicalMissionPath) {
+          candidateScanComplete = false;
+          continue;
+        }
+        missionKeys.add(location.missionId);
+        const missionId = missionIdsByPhysicalPath.get(canonicalMissionPath);
+        if (missionId) missionKeys.add(missionId);
+      }
+      const sliceKeys = new Set<string>([location.name]);
+      const sliceId = sliceIdsByPath.get(physicalPath);
+      if (sliceId && !candidateNames.has(sliceId) && pathsBySliceId.get(sliceId)?.size === 1) {
+        sliceKeys.add(sliceId);
+      }
+      const target: TargetScope = {
+        projectId: projectForPath(location.slicePath),
+        missionId: location.missionId,
+        missionKeys,
+        sliceKeys,
+        counts: visibleCountsByPath.get(physicalPath) ?? null,
+      };
+      for (const token of sliceKeys) {
+        const list = targetsBySliceToken.get(token);
+        if (list) list.push(target);
+        else targetsBySliceToken.set(token, [target]);
+      }
+    }
+    if (!candidateScanComplete || !physicalIdentityComplete) {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
+    }
+
+    if (targetsBySliceToken.size === 0) return result;
+
+    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+    if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
+      return result;
+    }
+
+    const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
+    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+      const scope = parseTypedQueueScope(row.tags);
+      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+      const rowProject = scope.projects.values().next().value;
+      const firstSlice = scope.slices.values().next().value!;
+      const candidates = targetsBySliceToken.get(firstSlice);
+      if (!candidates) continue;
+
+      let uniqueMatch: TargetScope | null = null;
+      for (const target of candidates) {
+        if (rowProject !== undefined && target.projectId !== rowProject) continue;
+        let allSlicesMatch = true;
+        for (const slice of scope.slices) {
+          if (!target.sliceKeys.has(slice)) {
+            allSlicesMatch = false;
+            break;
+          }
+        }
+        if (!allSlicesMatch) continue;
+        let allMissionsMatch = true;
+        for (const mission of scope.missions) {
+          if (!target.missionKeys.has(mission)) {
+            allMissionsMatch = false;
+            break;
+          }
+        }
+        if (!allMissionsMatch) continue;
+        if (uniqueMatch) {
+          uniqueMatch = null;
+          break;
+        }
+        uniqueMatch = target;
+      }
+
+      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+      uniqueMatch.counts[row.state as ObservedQueueState]++;
+    }
+
+    return result;
+  }
+
   // --- internals ---
 
   private readSliceLocations(): SliceLocation[] {
-    return this.walkSliceLocations().filter((location) => !this.missionId || location.missionId === this.missionId);
+    return this.walkSliceLocations(false, [], undefined, this.missionId || undefined);
   }
 
-  /** Every slice location under the roots, whatever mission this indexer is scoped to.
-   *  Directory names are deduplicated (first wins) unless `physical` asks for every folder. */
-  private walkSliceLocations(physical = false): SliceLocation[] {
+  /** Every slice location under the roots. A requested mission is filtered before
+   *  directory-name deduplication; otherwise the first matching name wins unless
+   *  `physical` asks for every folder. */
+  private walkSliceLocations(
+    physical = false,
+    additionalRoots: readonly string[] = [],
+    onReadError?: () => void,
+    missionId?: string,
+  ): SliceLocation[] {
     const locations: SliceLocation[] = [];
     const seen = new Set<string>();
     const addLocation = (location: SliceLocation) => {
+      if (missionId !== undefined && location.missionId !== missionId) return;
       if (!physical) {
         if (seen.has(location.name)) return;
         seen.add(location.name);
@@ -509,23 +834,25 @@ export class SliceIndexer {
       locations.push(location);
     };
 
-    for (const root of this.sliceRoots()) {
+    for (const root of this.sliceRoots(additionalRoots)) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
         continue;
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
         const entryPath = path.join(root, entry.name);
         const nestedSlicesRoot = path.join(entryPath, "slices");
-        if (this.isDirectory(nestedSlicesRoot)) {
+        if (this.isDirectory(nestedSlicesRoot, onReadError)) {
           let nestedEntries: fs.Dirent[];
           try {
             nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
           } catch {
             nestedEntries = [];
+            onReadError?.();
           }
           for (const nested of nestedEntries) {
             if (!nested.isDirectory() || nested.name.startsWith(".")) continue;
@@ -578,6 +905,115 @@ export class SliceIndexer {
     return this.idAliases;
   }
 
+  private missionPathOfSlice(missionId: string, slicePath: string): string | null {
+    const slicesDir = path.dirname(slicePath);
+    if (path.basename(slicesDir) !== "slices") return null;
+    const missionDir = path.dirname(slicesDir);
+    return path.basename(missionDir) === missionId ? path.resolve(missionDir) : null;
+  }
+
+  private missionIdAliasesForCounting(
+    additionalRoots: readonly string[],
+    onReadError: () => void,
+  ): Map<string, string> {
+    const missionNames = new Set<string>();
+    const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
+    const claims = new Map<string, Set<string>>();
+    const seenRoots = new Set<string>();
+    for (const configuredRoot of this.sliceRoots(additionalRoots)) {
+      let root: string;
+      try {
+        root = fs.realpathSync(configuredRoot);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
+        continue;
+      }
+      if (seenRoots.has(root)) continue;
+      seenRoots.add(root);
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(root, entry.name);
+        if (!this.isDirectory(path.join(entryPath, "slices"), onReadError)) continue;
+        const missionPath = canonicalPhysicalPath(entryPath);
+        if (!missionPath) {
+          onReadError();
+          continue;
+        }
+        missionNames.add(entry.name);
+        const id = this.readSliceIdForCounting(entryPath, onReadError);
+        missions.push({ name: entry.name, missionPath, id });
+        if (id) {
+          const claimants = claims.get(id) ?? new Set<string>();
+          claimants.add(entry.name);
+          claims.set(id, claimants);
+        }
+      }
+    }
+    const idByPath = new Map<string, string>();
+    for (const { name, missionPath, id } of missions) {
+      const validId = id && !missionNames.has(id) && claims.get(id)?.size === 1 ? id : null;
+      if (validId) idByPath.set(missionPath, validId);
+    }
+    return idByPath;
+  }
+
+  private missionIdAliases(): MissionIdAliases {
+    const now = Date.now();
+    if (this.missionAliases && this.missionAliases.expiresAt > now) return this.missionAliases;
+    const missionNames = new Set<string>();
+    const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
+    const claims = new Map<string, Set<string>>();
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(root, entry.name);
+        if (!this.isDirectory(path.join(entryPath, "slices"))) continue;
+        missionNames.add(entry.name);
+        const id = this.readSliceId(entryPath);
+        missions.push({ name: entry.name, missionPath: path.resolve(entryPath), id });
+        if (id) {
+          const claimants = claims.get(id) ?? new Set<string>();
+          claimants.add(entry.name);
+          claims.set(id, claimants);
+        }
+      }
+    }
+    const idByPath = new Map<string, string>();
+    const idsByName = new Map<string, Set<string | null>>();
+    const nameById = new Map<string, string>();
+    for (const { name, missionPath, id } of missions) {
+      const validId = id && !missionNames.has(id) && claims.get(id)?.size === 1 ? id : null;
+      if (validId) {
+        idByPath.set(missionPath, validId);
+        nameById.set(validId, name);
+      }
+      const ids = idsByName.get(name) ?? new Set<string | null>();
+      ids.add(validId);
+      idsByName.set(name, ids);
+    }
+    const idByName = new Map<string, string>();
+    for (const [name, ids] of idsByName) {
+      if (ids.size !== 1) continue;
+      const only = ids.values().next().value;
+      if (only) idByName.set(name, only);
+    }
+    this.missionAliases = { nameById, idByName, idByPath, expiresAt: now + this.cacheTtlMs };
+    return this.missionAliases;
+  }
+
   /** The `id:` the slice's node file declares, read the way the execution view reads it. */
   private readSliceId(slicePath: string): string | null {
     const nodeFile = resolveNodeFile(slicePath);
@@ -590,20 +1026,51 @@ export class SliceIndexer {
     }
   }
 
+  /**
+   * Counting needs to retain uncertainty about authored IDs: an unreadable
+   * hidden candidate must not disappear from the ambiguity set. Keep optional
+   * absence and readable nodes without IDs compatible with the lenient reader.
+   */
+  private readSliceIdForCounting(slicePath: string, onReadError: () => void): string | null {
+    let nodeFile: string | null = null;
+    for (const name of NODE_FILE_PRECEDENCE) {
+      const candidate = path.join(slicePath, name);
+      try {
+        fs.statSync(candidate);
+        nodeFile = candidate;
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          onReadError();
+          return null;
+        }
+      }
+    }
+    if (!nodeFile) return null;
+    try {
+      const id = parseFrontmatter(fs.readFileSync(nodeFile, "utf8"))["id"];
+      return typeof id === "string" && id.length > 0 ? id : null;
+    } catch {
+      onReadError();
+      return null;
+    }
+  }
+
   private findSliceLocation(name: string): SliceLocation | null {
     return this.readSliceLocations().find((location) => location.name === name) ?? null;
   }
 
-  private isDirectory(absPath: string): boolean {
+  private isDirectory(absPath: string, onReadError?: () => void): boolean {
     try {
       return fs.statSync(absPath).isDirectory();
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
       return false;
     }
   }
 
-  private sliceRoots(): string[] {
-    const roots = [this.slicesRoot, ...this.additionalSliceRoots].filter((root) => root.length > 0);
+  private sliceRoots(additionalRoots: readonly string[] = []): string[] {
+    const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {
@@ -621,7 +1088,7 @@ export class SliceIndexer {
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
-    const proofPacket = this.findProofPacket(name);
+    const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
 
     return {
@@ -651,7 +1118,7 @@ export class SliceIndexer {
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
-    const proofPacket = this.findProofPacket(name);
+    const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
     const files = this.listSliceFiles(slicePath);
@@ -765,14 +1232,7 @@ export class SliceIndexer {
   }
 
   private mapStatus(raw: string | undefined): SliceStatus {
-    if (!raw) return "draft";
-    const normalized = raw.toLowerCase().trim();
-    if (STATUS_TO_BUCKET[normalized]) return STATUS_TO_BUCKET[normalized];
-    // Heuristic fallbacks.
-    if (normalized.includes("done") || normalized.includes("ship") || normalized.includes("close")) return "done";
-    if (normalized.includes("block") || normalized.includes("park")) return "blocked";
-    if (normalized.includes("draft") || normalized.includes("pending")) return "draft";
-    return "active";
+    return sliceStatusBucket(raw);
   }
 
   private matchQitems(sliceName: string, served: Set<string> | null): string[] {
@@ -1045,7 +1505,34 @@ export class SliceIndexer {
     return this.membershipIndex;
   }
 
-  private findProofPacket(sliceName: string): SliceProofPacket | null {
+  private discoverMissionIds(): Set<string> {
+    const missionIds = new Set<string>();
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+      catch { continue; }
+      for (const entry of entries) {
+        if ((!entry.isDirectory() && !entry.isSymbolicLink()) || entry.name.startsWith(".")) continue;
+        // Project readers treat every non-dot directory or symlink entry as a mission;
+        // ownership needs only its name and never follows a sibling link.
+        missionIds.add(entry.name);
+      }
+    }
+    return missionIds;
+  }
+
+  private proofDirectoryMissionOwner(dirName: string, missionIds: ReadonlySet<string>): string | null {
+    let owner: string | null = null;
+    for (const candidate of missionIds) {
+      if (!dirName.startsWith(candidate)) continue;
+      const separator = dirName[candidate.length];
+      if (separator !== "-" && separator !== "." && separator !== "_") continue;
+      if (!owner || candidate.length > owner.length) owner = candidate;
+    }
+    return owner;
+  }
+
+  private findProofPacket(sliceName: string, missionId: string | null): SliceProofPacket | null {
     if (!this.dogfoodEvidenceRoot) return null;
     let entries: fs.Dirent[];
     try {
@@ -1054,19 +1541,26 @@ export class SliceIndexer {
       return null;
     }
 
-    // Match strategy: token-based. Tokenize slice name on `-`, drop
-    // trailing `vN` version tokens (real proof dirs typically don't
-    // include the version suffix), then a dir matches if every remaining
-    // token appears as a hyphen-bounded substring of the dir name. This
-    // handles real-world dir-naming where phase indicators land at the
-    // front (e.g. `pl005-phase-a-mission-control-queue-observability-...`)
-    // even though the slice folder uses suffix form
-    // (`mission-control-queue-observability-phase-a`). Latest mtime wins.
+    // Qualified proof directories use the observed `<mission>-<slice>` form:
+    // the literal mission ID must lead the name at a separator boundary. If
+    // known mission IDs overlap, the longest prefix owns the directory. This
+    // is a fixture-supported rule, not a historically documented contract.
+    // Unqualified reads retain their legacy slice-only token match. Once a
+    // qualified directory is attributed, slice tokens match against the
+    // remainder after that mission prefix and separator (`vN` handling unchanged);
+    // latest mtime remains the tie-break among same-mission matches.
+    let knownMissionIds: Set<string> | null = null;
+    if (missionId) {
+      knownMissionIds = this.discoverMissionIds();
+      knownMissionIds.add(missionId);
+    }
     const sliceTokens = sliceName.split("-").filter((t) => t.length > 0 && !/^v\d+$/.test(t));
     const matches: { dirent: fs.Dirent; mtime: number }[] = [];
     for (const dirent of entries) {
       if (!dirent.isDirectory()) continue;
-      const dirTokenSet = new Set(dirent.name.split(/[-._]/).filter((t) => t.length > 0));
+      if (knownMissionIds && this.proofDirectoryMissionOwner(dirent.name, knownMissionIds) !== missionId) continue;
+      const tokenSource = knownMissionIds && missionId ? dirent.name.slice(missionId.length + 1) : dirent.name;
+      const dirTokenSet = new Set(tokenSource.split(/[-._]/).filter((t) => t.length > 0));
       const allTokensPresent = sliceTokens.every((t) => dirTokenSet.has(t));
       if (!allTokensPresent) continue;
       try {

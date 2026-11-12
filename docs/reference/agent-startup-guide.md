@@ -75,20 +75,20 @@ in the rig's `attentionCount` and the TUI's attention totals.
 After a full restore of a Claude or Codex seat, answering the prompt is enough. When
 the seat's activity next turns to running or idle, or when the whole restore completes
 after the seat already reads running or idle, the daemon checks the live seat: its tmux
-session is alive, and the pane runs the agent resuming the conversation the seat
-records. When the check passes, the restore outcome becomes `operator_recovered`, so
-the restore no longer makes the seat need attention. When it fails, the restore outcome
-stays and the seat still needs attention, which is true when the pane runs another
-conversation. A check that started before a newer restore of the seat doesn't settle
-the newer outcome.
+session is alive, and the agent in its pane was started to resume the conversation the
+seat records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When the check fails, the restore
+outcome stays and the seat still needs attention. The check uses launch evidence; it
+does not prove which conversation is open now.
 
 `rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
-command says which check failed, and `--reason` doesn't bypass it. If
-the seat records the wrong conversation and you know the right one, set it with
-`rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
-`clear-attention` again. After a restore of only some seats, or a community
-harness's assisted startup, `--reason "<what you saw>"` can acknowledge the
-outcome instead.
+command says which check failed, and `--reason` doesn't bypass it. If the seat records
+the wrong conversation and the agent in its pane was started with the right one, set it
+with `rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
+`clear-attention` again; a token the running agent wasn't started with fails the same
+check. After a restore of only some seats, or a community harness's assisted startup,
+`--reason "<what you saw>"` can acknowledge the outcome instead, once any startup text
+left in the input box is submitted (not sent again) and the seat has responded.
 
 ## Two Categories of Startup
 
@@ -204,7 +204,7 @@ Startup content is merged additively through layers. Each layer adds to what the
 4. Rig layer       — from the RigSpec's top-level startup block
 5. Pod layer       — from the pod's startup block
 6. Member layer    — from the member's startup block in the RigSpec
-7. Operator layer  — added by OpenRig: openrig-start.md and, on a fresh start, the onboarding pack
+7. Operator layer  — added by OpenRig: openrig-start.md, openrig-context-entry.md and, on a fresh start, the onboarding pack
 ```
 
 A member with a `starter_ref` gets that agent starter's files in front of the agent layer. Terminal seats
@@ -220,7 +220,7 @@ A member with a `starter_ref` gets that agent starter's files in front of the ag
 | Rig | Rig spec author | Rig-wide context for all agents | Project documentation |
 | Pod | Rig spec author | Pod-specific coordination context | Pod SOP, intra-pod workflow |
 | Member | Rig spec author | Individual member overrides | Member-specific instructions, cwd-specific context |
-| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); on a fresh start, `openrig-onboarding-01.md` and `-02.md` unless `onboarding.default_pack.enabled` is false |
+| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); `openrig-context-entry.md`, a pointer to the skills router, help and declared context, for every seat; on a fresh start, `openrig-onboarding-01.md` and `-02.md` unless `onboarding.default_pack.enabled` is false |
 
 After the files, OpenRig sends a session-identity message (rig, pod, member, logical ID) once the seat is ready.
 
@@ -278,7 +278,10 @@ with an old Claude header or input frame above it and Claude already running. A 
 input frame also keeps the check pending. If the current screen or process cannot be read, or the process identity is unconfirmed, the handover keeps
 waiting within the readiness window and fails if that window expires. Old screen text or the `claude` process label
 alone cannot complete this check. A healthy agent can therefore remain unconfirmed while those observations are
-unavailable; inspect its pane before deciding how to recover.
+unavailable; inspect its pane before deciding how to recover. When the launch was already sent, the failure's
+guidance names that pane and the result carries `replacementStarted` and `successorPane`: the previous agent was
+already ended, the new one may be working there without being registered as the seat's occupant, and another
+handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
@@ -402,6 +405,11 @@ Each startup file and action specifies when it applies:
 - a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
 - an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
 
+**A file keeps one copy of each block.**
+- **Touched markers:** a marker an editor or formatter rewrapped, with spaces or line breaks inside the comment, still reads as its block, and the next write puts it back in OpenRig's form.
+- **Collected copies:** they're reduced to the first. Beside a copy you edited, OpenRig's own unedited copies and exact repeats are removed, and every different edited copy stays (`guidance_block_copies_removed`).
+- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
+
 An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 
 Use this to avoid re-sending context that a fresh conversation doesn't need twice. For example, a one-time project briefing might only apply on `fresh_start`, while identity grounding should apply on both, so a seat that comes back fresh gets it again.
@@ -423,7 +431,29 @@ running seat only through the action in the last column.
 | Working directory | `rig seat set-cwd`, shown by `rig seat status` as **Working directory for future launches** | The directory it started in | `rig seat launch --fresh --stop` (a blank conversation) or `rig handover --source rebuild` (durable context); [details](#change-an-existing-seats-working-directory) |
 | Launch wrapper (`launch_wrapper`) | Member `launch_wrapper` in `rig.yaml` (`pi`, `codex` and `claude-code` only; `launch_wrapper: []` clears, omitting retains on existing-seat apply; surfaced as `launchWrapper` in `rig ps --nodes --json` when set; no live `rig seat` edit verb) | The literal wrapper argv that prefixes the resolved Codex entry or Claude executable (preserving TTY stdio) or the resolved Pi child executable inside OpenRig's host runner (preserving RPC pipes and runner lifecycle) when that session launched; a configured prefix is not proof of isolation, tooling, memory or governance | Supported spec create/recreate/apply flow, then the seat's next managed launch, resume, restore or handover (fails closed when wrapper support is unavailable; never falls back to bare child launch; [details](rig-spec.md#launch-wrapper-runtime-pi-and-codex)) |
 | Startup files and skills | The spec's startup files, skills and actions | What its conversation read when it started; editing a file afterwards doesn't reach it | A fresh launch or a handover delivers them again; for the running seat, send or walk the change (`rig walk <seat> --through <files>`) |
+| Guidance blocks (`CLAUDE.md`, `AGENTS.md`) | The seat's startup selection, which OpenRig merges into its guidance file as managed blocks at each start and restore | `rig seat status` **Guidance**: when OpenRig wrote each of its blocks, before or after the session's recorded startup finish (for a claimed session, when OpenRig recorded it). That's chronology, not what the agent has: the harness reads the file earlier in startup, Claude Code reloads it after `/compact` or `/clear`, Codex reads it at session start, and the agent can read it, or be sent it, at any time. OpenRig doesn't record what an agent read | Claude: its next compaction, `/clear` or restart. Codex: its next start. Without either, [tell it](#new-guidance-for-a-running-seat) |
 | Tools (MCP servers, plugins) | Selected fragments, merged into the harness's own config (`.mcp.json` for Claude, `config.toml` for Codex) | Unknown to OpenRig: registered isn't active, Claude asks before it uses a new server, and no OpenRig command reports which tools a running harness loaded | Check in the harness itself (Claude Code's `/mcp`); a running session may need a restart to pick up newly written config ([runtime config disclosure](#runtime-config-disclosure)) |
+
+### New guidance for a running seat
+
+There are three ways for a seat to pick up new guidance:
+
+1. **Tell it.** `rig send <seat> "Read <file>: <why>"`, or `rig walk <seat> --through <files>` for several. The seat's
+   interruption settings can hold a message; `rig send` may report `retained, not delivered`.
+2. **The refocus hook**, where the seat runs OpenRig's `openrig-core` hooks (**Refocus** in `rig seat status` shows whether
+   the hook has recorded it). The hook's content comes from `OPENRIG_REFOCUS_CONTENT_REF` (a `rig context get` address),
+   else `OPENRIG_REFOCUS_CONTENT_FILE`, else `refocus/REFOCUS.md` under `OPENRIG_HOME`, else the shipped default. After
+   compaction the hook waits for an eligible prompt. For managed Claude compaction it skips the acknowledgement boundary,
+   and other prompts can arrive first and be skipped while restore is pending. Claude can also refocus after the
+   conversation grows past the hook's size threshold.
+3. **Its guidance file, loaded again:** for Claude at its next compaction, `/clear` or start, for Codex at its next start.
+   **Guidance** in `rig seat status` shows which of OpenRig's blocks were written after the session's recorded startup finish.
+
+A file pointer leaves the read to the seat, under its own permission settings. `rig walk` reads the named files in the
+calling process and sends their contents. A seat whose harness asks before reading a file outside its project (its own
+`LEARNED.md` under the topology root, a plugin's skill) waits at that prompt until someone answers it, even though a hook
+could deliver an excerpt of the same file. Finding a file, a hook picking it up, and the agent reading and using it are
+separate facts.
 
 Per harness: Claude Code's and Codex's permission choices are in the setup reference
 ([Claude Code](getting-started.md#claude-code-a-different-launch-flag),

@@ -76,6 +76,25 @@ go to:
 `rig gateway default` shows the current default; `rig gateway default --clear` clears the choice. Choosing a default
 never changes `workspace.operator_seat_name`, which keeps its own meaning.
 
+## The default receiving agent
+
+The default person is who OpenRig asks. The default receiving agent is the agent that reads what a person answers when
+nothing else reads it: a request with no owner of its own, such as a host pairing request or a mode's scheduled end, and
+a Slack message no thread or channel route claims. It is:
+1. the agent chosen in `agents.operator_session` (`rig config set agents.operator_session <seat>@<rig>`; a person's
+   address there is ignored);
+2. otherwise the kernel operator, `operator-agent@kernel`, when this host has that seat, running or stopped;
+3. otherwise none, and the request says no agent reads answers on this host.
+
+A stopped receiving agent stays the receiver: answers wait for it, and the person is told it isn't running. OpenRig
+never picks whichever seat happens to be running. The TUI shows the effective agent, where it came from and its state
+under Settings > Agents & runtime ("Default receiving agent"). It never replaces the default person.
+
+For Slack, `rig slack setup --inbound-destination default-receiver` (the default for a new setup) sends unrouted
+messages to the default receiving agent, read when the connector starts. With no receiving agent on the host, they go to
+`operator-agent@kernel` for compatibility, as before. A destination already saved in the connector
+config, `operator-agent@kernel` included, is kept as chosen; pass `default-receiver` to switch it.
+
 ## In the TUI: whose queue, and who acts
 
 The person at the terminal is the **primary user**. The TUI records their acts as unnamed (`human@host`),

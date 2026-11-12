@@ -7,6 +7,7 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
 import { earlierTileAttachment } from "./tile-attach.js";
+import { shellQuote } from "../../adapters/shell-quote.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -176,13 +177,17 @@ export class HerdrViewer {
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
-      // An upgrade can change only the tile script (argv[2]); the seat it attaches is the same, so the kept
-      // viewer moves to the current script.
+      let reopen = false;
+      let earlier = false;
+      // Updating provenance alone cannot replace a live client. Keep old observers unchanged; a writable
+      // legacy viewer is reopened explicitly, preserving the source agent and avoiding unowned client changes.
       if (entry && entry.command !== target.paneCommand && entry.readOnly === target.readOnly && Array.isArray(entry.argv)
+        && entry.command === entry.argv.map(shellQuote).join(" ")
         && earlierTileAttachment(entry.argv, target.attachArgv, target.readOnly)) {
-        entry.command = target.paneCommand; entry.argv = target.attachArgv; if (provision) save();
+        earlier = true;
+        reopen = !entry.readOnly;
       }
-      if (entry && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
+      if (entry && !earlier && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
         return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
       }
       if (!entry) {
@@ -235,6 +240,7 @@ export class HerdrViewer {
         delete journal.entries[id]; save();
         return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
       }
+      if (reopen) return unconfirmed(`Close only the owned Herdr viewer pane ${current.pane_id}, then reopen this view with rig terminal open. The agent's tmux session is preserved; its old client cannot be migrated by changing saved argv alone.`);
       if (entry.phase === "created") {
         if (!provision) return unconfirmed("The created viewer process is not yet confirmed.");
         if (!await stillCurrent()) return unconfirmed("Task membership changed before the viewer process started.");

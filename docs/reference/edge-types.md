@@ -44,13 +44,15 @@ All other edge kinds (`can_observe`, `collaborates_with`, `escalates_to`) do NOT
 
 `delegates_to` also names a seat's orchestrator for the queue: the source of the `delegates_to` edge into a seat. The
 wake ladder escalates an unacknowledged row to that orchestrator, and stuck-row findings and recovery go to it. A seat
-with no incoming `delegates_to` edge has no default orchestrator. `spawned_by` plays no part here.
+with no incoming `delegates_to` edge has no default orchestrator. A seat with several incoming `delegates_to` edges has
+no single orchestrator either: its recovery goes to its declared `escalates_to` destination, or keeps the existing
+fallback, and the recovery says the parents were ambiguous. `spawned_by` plays no part here.
 
 ### Fallback escalation across rigs
 
-A seat with **no declared `delegates_to` parent** may declare one `escalates_to` destination. The wake ladder and
-stuck sweep use it for new recovery rows; they do not move the original obligation or reassign an already-open recovery. A stopped or unbound declared
-parent still takes precedence, preserving the existing parent route and its fallback.
+A seat with **no declared `delegates_to` parent, or several**, may declare one `escalates_to` destination. The wake ladder and
+stuck sweep use it for new recovery rows; they do not move the original obligation or reassign an already-open recovery. A
+single stopped or unbound declared parent still takes precedence, preserving the existing parent route and its fallback.
 
 ```yaml
 edges:

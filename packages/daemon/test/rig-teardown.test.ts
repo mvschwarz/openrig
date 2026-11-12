@@ -27,6 +27,8 @@ import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -980,6 +982,20 @@ describe("RigTeardownOrchestrator", () => {
     expect(result).toMatchObject({ sessionsKilled: 1, errors: [], deleted: del, leftRunning: ["desktop@test-rig"] });
   });
 
+  it("stops a seat whose stored kind is neither tmux nor external CLI, as it does today: only an external CLI seat is left running", async () => {
+    const { rigId, nodeId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    db.prepare("UPDATE bindings SET attachment_type = 'herdr' WHERE node_id = ?").run(nodeId);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async (name: string) => ({ state: name === "r01-dev" ? "present" : "absent" }));
+
+    const result = await buildTeardown(tmux).teardown(rigId, { delete: false });
+
+    expect(tmux.killSession).toHaveBeenCalledWith("r01-dev");
+    expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+    expect(result.leftRunning).toBeUndefined();
+  });
+
   it("names the community-harness seats whose pane it stopped, since the harness's own processes may outlive it", async () => {
     const { rigId } = seedRigWithNode({ runtime: "claude-code", cwd: "/tmp" });
     const hermes = rigRepo.addNode(rigId, "hermes", { runtime: "synth-harness" });
@@ -1327,5 +1343,146 @@ describe("RigTeardownOrchestrator", () => {
     expect(result.errors.some((e) => e.includes("event persist failed") || e.includes("deletion"))).toBe(true);
 
     eventBus.persistWithinTransaction = origPersist;
+  });
+});
+
+// rig down stops only the seat's own terminal. On the production path (the guard installed, the server chosen by execution
+// args, every write as argv), a session is stopped only when it carries the seat's OpenRig marker, and each effect runs
+// only on the server and session id it was read from. Each case runs on its own private tmux server.
+describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can't show to be the seat's", () => {
+  const NAME = "dev-impl@owned";
+  const exec = promisify(execFile);
+
+  async function harness(hook?: (argv: string[], tmux: (...a: string[]) => Promise<string>) => Promise<void>) {
+    // Short socket path for macOS sockaddr_un, no inherited server, no config.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "rd-"));
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, TMUX_TMPDIR: home, SHELL: "/bin/sh" };
+    const tmux = async (...args: string[]) => (await exec("tmux", ["-L", "own", "-f", "/dev/null", ...args], { env, timeout: 5000 })).stdout.trim();
+    const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell execution"); }, undefined, async (argv) => {
+      const out = (await exec(argv[0]!, argv.slice(1), { env, timeout: 5000 })).stdout;
+      await hook?.(argv, tmux);
+      return out;
+    }, ["-L", "own", "-f", "/dev/null"]);
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), eventBus = new EventBus(db);
+    const guard = new SeatDeliveryGuard(db, (target) => resolveGuardTarget(db, target));
+    guard.recoverActivation();
+    adapter.deliveryGuard = guard;
+    const rig = rigRepo.createRig("owned");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: home });
+    const bind = async () => {
+      const pane = (await tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{pane_id}")).split("\n")[0]!;
+      const session = sessionRegistry.registerSession(node.id, NAME);
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: NAME, tmuxPane: pane });
+      return session;
+    };
+    const teardown = () => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter,
+      snapshotCapture: mockSnapshotCapture(db) }).teardown(rig.id, { snapshot: false });
+    const alive = (name: string) => tmux("has-session", "-t", `=${name}`).then(() => true, () => false);
+    const close = async () => { await tmux("kill-server").catch(() => {}); db.close(); fs.rmSync(home, { recursive: true, force: true }); };
+    return { tmux, node, bind, teardown, alive, close, sessionRegistry, db };
+  }
+
+  // What's left after a refusal: the session row still running and its binding intact, so nothing reads as stopped.
+  function expectLeftRunning(h: Awaited<ReturnType<typeof harness>>, sessionId: string, result: { sessionsKilled: number; errors: string[] }, reason: RegExp) {
+    expect(result.sessionsKilled).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatch(new RegExp(`^Kill failed for session '${NAME}': '${NAME}' was left running: its tmux session \\$\\d+ ${reason.source}`));
+    expect(h.sessionRegistry.getBindingForNode(h.node.id)?.tmuxSession).toBe(NAME);
+    expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId)).toEqual({ status: "running" });
+  }
+
+  it("the seat's own session, marked with its node, is stopped as before", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      await h.bind();
+      expect(await h.teardown()).toMatchObject({ sessionsKilled: 1, errors: [] });
+      expect(await h.alive(NAME)).toBe(false);
+      expect(await h.alive("keepalive")).toBe(true);
+      expect(h.sessionRegistry.getBindingForNode(h.node.id)).toBeNull();
+    } finally { await h.close(); }
+  });
+
+  it("after the tmux server is replaced, another terminal with the seat's name and its old ids survives", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      const session = await h.bind();
+      expect(h.sessionRegistry.getBindingForNode(h.node.id)?.tmuxPane).toBe("%0");
+      await h.tmux("kill-server");
+      await h.tmux("new-session", "-d", "-s", NAME, "sleep 301");
+      expect(await h.tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{session_id} #{pane_id}")).toBe("$0 %0");
+      expectLeftRunning(h, session.id, await h.teardown(), /doesn't carry this seat's OpenRig marker \(OPENRIG_NODE_ID\)/);
+      expect(await h.alive(NAME)).toBe(true);
+    } finally { await h.close(); }
+  });
+
+  it("a session with the seat's name but no marker (adopted, bound or older) is left running, not stopped", async () => {
+    const h = await harness();
+    // The daemon is on its own server here, so the manual path must name it: a plain `tmux` reaches another server.
+    setDaemonTmuxServer(["-L", "own"]);
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+      const session = await h.bind();
+      const result = await h.teardown();
+      expectLeftRunning(h, session.id, result, /doesn't carry this seat's OpenRig marker \(OPENRIG_NODE_ID\)/);
+      expect(result.errors[0]).toContain(`If it is this seat's, look first with \`tmux -L own attach -t '=${NAME}'\`, `
+        + `then stop it with \`tmux -L own kill-session -t '=${NAME}'\` and run the command again.`);
+      expect(await h.alive(NAME)).toBe(true);
+    } finally { setDaemonTmuxServer([]); await h.close(); }
+  });
+
+  it("a session marked with another seat's node is left running", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", "OPENRIG_NODE_ID=another-node", "sleep 300");
+      const session = await h.bind();
+      expectLeftRunning(h, session.id, await h.teardown(), /carries another seat's OpenRig marker \(OPENRIG_NODE_ID=another-node\)/);
+      expect(await h.alive(NAME)).toBe(true);
+    } finally { await h.close(); }
+  });
+
+  it("on the same server, a replacement with the seat's name (a different pane) survives", async () => {
+    const h = await harness();
+    try {
+      // The keepalive comes first, so the server stays the same one throughout.
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      const session = await h.bind();
+      await h.tmux("kill-session", "-t", `=${NAME}`);
+      await h.tmux("new-session", "-d", "-s", NAME, "sleep 301");
+      const result = await h.teardown();
+      expect(result).toMatchObject({ sessionsKilled: 0 });
+      expect(result.errors[0]).toMatch(/Managed pane identity unavailable or changed; no input written/);
+      expect(await h.alive(NAME)).toBe(true);
+      expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "running" });
+    } finally { await h.close(); }
+  });
+
+  it("a server replaced between reading the seat's marker and stopping it leaves the new terminal alone", async () => {
+    let replaced = false;
+    const h = await harness(async (argv, tmux) => {
+      // Just after the marker is read on the seat's server, that server is replaced, and another terminal takes the name and
+      // the old ids.
+      if (replaced || !argv.includes("show-environment")) return;
+      replaced = true;
+      await tmux("kill-server");
+      await tmux("new-session", "-d", "-s", NAME, "sleep 301");
+    });
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      const session = await h.bind();
+      const result = await h.teardown();
+      expect(replaced).toBe(true);
+      expect(result.sessionsKilled).toBe(0);
+      expect(result.errors).toEqual([`Kill failed for session '${NAME}': $0 is no longer that session on the tmux server it was read from `
+        + "(the server may have been replaced); nothing was detached or killed."]);
+      expect(await h.tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{session_id} #{pane_id}")).toBe("$0 %0");
+      expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "running" });
+    } finally { await h.close(); }
   });
 });

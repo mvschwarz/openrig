@@ -26,7 +26,18 @@ import { eligibleQueueBindings, ineligibleBindingDetail, loadLearnedHostBindings
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type CurrentWorkRow, type MissionsRootResolver, type RoleOrientation } from "../domain/current-work.js";
+import {
+  deriveCurrentWork,
+  deriveCurrentWorkChoice,
+  deriveRole,
+  deriveWorkCandidates,
+  evaluateCreateScope,
+  skippedCreateScopeAdvisory,
+  toCreateScopeAdvisory,
+  type CurrentWorkRow,
+  type MissionsRootResolver,
+  type RoleOrientation,
+} from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
@@ -81,6 +92,39 @@ export function isAttentionItem(q: { tier: string | null; destinationSession: st
 }
 
 
+/** A row a handoff of this one made: the rows naming it as `handedOffFrom`, and a local row its closure target names. */
+export interface HandoffSuccessor { qitemId: string; destinationSession: string; state: QueueState; via: "handedOffFrom" | "closureTarget" }
+
+/** #2794: a handed-off row records its new owner as the closure target, not the row the handoff made. This names that row
+ *  from what's already stored: the successor's own `handedOffFrom`, or a local row id in the closure target. A cross-host
+ *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
+ *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
+export const HANDOFF_SUCCESSOR_LIMIT = 20;
+export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+  try {
+    // Newest first, one past the bound so a cut list is known.
+    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
+    const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
+      .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
+      .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
+    const target = item.closureTarget;
+    if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
+      const named = repo.getById(target);
+      if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
+    }
+    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
+    return {
+      successors,
+      successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
+        ? `It was handed to another host; its successor there is ${target}. This daemon has no copy.`
+        : "No row on this daemon was made by this handoff.",
+    };
+  } catch {
+    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+  }
+}
+
 export function queueRoutes(): Hono {
   const app = new Hono();
 
@@ -114,6 +158,32 @@ export function queueRoutes(): Hono {
     // must neither fail that write nor misreport membership as unmatched.
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
+  }
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+    try {
+      const check = evaluateCreateScope(tags, () => {
+        const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
+        const projectTags = flat.filter((tag) => tag.startsWith("project:"));
+        if (projectTags.some((tag) => !tag.slice("project:".length).trim())) return null;
+        const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()))];
+        if (projectIds.length > 1) return null;
+        if (projectIds.length === 1) {
+          const projectId = projectIds[0]!;
+          const { catalog } = projectCatalogPaths(c as never);
+          const entries = readProjectCatalog(catalog);
+          if (!entries) return null;
+          const project = listProjects(c as never).projects.find((entry) => entry.id === projectId);
+          if (!project || project.error || !project.missionsRoot) return null;
+          return project.missionsRoot;
+        }
+        const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+        const value = store?.resolveOne("workspace.slices_root").value;
+        return typeof value === "string" && value.trim() ? value : null;
+      });
+      return check ? toCreateScopeAdvisory(check) : null;
+    } catch {
+      return null;
+    }
   }
   /** An ask (anything but an update) to a shared channel is accepted, with a word to the agent: the channel's replies
    *  come back as correspondence, never as an answer, so nothing there will settle it. Context, not a refusal. */
@@ -623,7 +693,14 @@ export function queueRoutes(): Hono {
         tags: crossHostProvenanceTags(body.tags),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
-      return fwd.ok ? c.json(fwd.payload as Record<string, unknown>, fwd.status as 200) : fwd.response;
+      if (!fwd.ok) return fwd.response;
+      const skippedScope = skippedCreateScopeAdvisory(body.tags);
+      const payload = fwd.payload;
+      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+        return c.json(payload, fwd.status as 200);
+      const objectPayload = payload as Record<string, unknown>;
+      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
     }
 
     try {
@@ -650,7 +727,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
+      const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
@@ -1281,7 +1359,8 @@ export function queueRoutes(): Hono {
         : undefined;
 
     if (!attention) {
-      const items = getRepo(c).list({
+      const repo = getRepo(c);
+      const items = repo.list({
         destinationSession,
         sourceSession,
         state,
@@ -1295,6 +1374,19 @@ export function queueRoutes(): Hono {
         updatedSince,
         sortByUpdated: c.req.query("sort") === "updated",
       });
+      // A seat that lists its own active inbox is checking in; the stuck sweep reads that for hosted members that pick up
+      // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows, a read of
+      // only what the seat sent (`as` and `sourceSession` both the seat, no destination) and the attention view aren't.
+      // A follow-through read (`handedOffFrom`, no destination) returns the seat's inbox only when the row was handed to
+      // it; one the seat handed on returns only what it sent, so it counts only when it returned a pending row addressed
+      // to the seat. A check-in proves the seat was reading, never that it saw or took any row.
+      const sender = transportSenderSession(c);
+      const named = [destinationSession, asSession].filter((s): s is string => !!s);
+      const sentOnly = !destinationSession && !!sender && ((!!sourceSession && repo.isSameSession(sender, sourceSession))
+        || (!!handedOffFrom && !items.some((item) => item.state === "pending" && repo.isSameSession(sender, item.destinationSession))));
+      if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
+        repo.recordInboxCheckIn(sender);
+      }
       return c.json(items);
     }
 
@@ -1348,6 +1440,11 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);
   });
+
+  // Each connected assistant on this host and whether it's checking its queue, with this daemon's own host id: the check-ins
+  // are this host's, so a reader matches members to it without needing a terminal seat to learn it. A status only:
+  // work addressed to an assistant that isn't checking in still queues and is rung as before. Precedes /:qitemId.
+  app.get("/hosted-members", (c) => c.json({ hostId: getSelfHostId(), members: getRepo(c).hostedMemberCheckIns() }));
 
   // GET /undelivered — surfaces pending create-path nudge failures plus active
   // human-notification episodes whose gateway delivery ledger failed or never posted.
@@ -1464,6 +1561,8 @@ export function queueRoutes(): Hono {
         actorSession: closing.actorSession,
         transitionNote: closing.transitionNote,
       } } : {}),
+      // #2794: a handed-off row names the row its handoff made (read only; nothing stored changes).
+      ...(item.state === "handed-off" || item.closureReason === "handed_off_to" ? handoffSuccessors(repo, item) : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });

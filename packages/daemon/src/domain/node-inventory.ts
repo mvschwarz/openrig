@@ -1,4 +1,4 @@
-import { sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -796,7 +796,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
@@ -1508,7 +1508,7 @@ export function hookOrPaneActivity(
   // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
   // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
   // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-  if (structural && structural.state !== "unknown") {
+  if (structural && (structural.state !== "unknown" || structural.reason === "unrecognized_client_version")) {
     return {
       source: "pane",
       activity: {
@@ -1617,8 +1617,9 @@ export async function attachAgentActivity(
      *
      *     needs_input > running > MOTION > idle / unknown
      *
-     * A current, target-bound complete idle frame is the narrow exception to motion below.
-     * A generic footer or old idle capture is not that evidence; D2 remains unchanged.
+     * A current, target-bound complete idle frame is the narrow idle exception to motion below.
+     * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
+     * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
      * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
      * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
      * safety argument, and it is what each half of the defect needs:
@@ -1644,7 +1645,7 @@ export async function attachAgentActivity(
      * signal improving. Silence therefore leaves the prior verdict exactly as it was.
      */
     const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
-      if (!motionRunning || (currentIdleFrame && activity.state === "idle")) return activity;
+      if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
       if (activity.state !== "idle" && activity.state !== "unknown") return activity;
       return {
         state: "running",
@@ -1682,7 +1683,8 @@ export async function attachAgentActivity(
 
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
     // that frame's provenance instead.
-    const resolved = hookOrPaneActivity(hookActivity, structural, motionRunning && currentIdleFrame, entry.runtime);
+    const resolved = hookOrPaneActivity(hookActivity, structural,
+      motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), entry.runtime);
     if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
     if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
     if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };

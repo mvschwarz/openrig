@@ -346,12 +346,15 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
   const startPipePaneCalls: string[] = [];
   const resizeWindowCalls: Array<{ cols: number; rows: number }> = [];
   let capturedOutputPath: string | null = null;
+  let fixedGeometry = false;
 
   beforeAll(async () => {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("tmuxAdapter" as never, {
         hasSession: async () => true,
+        readWindow: async (name: string) => ({ id: name, userOption: "" }),
+        getWindowLocalOption: async () => null,
         setWindowOption: async () => ({ ok: true }),
         resizeWindow: async (_n: string, cols: number, rows: number) => {
           resizeWindowCalls.push({ cols, rows });
@@ -371,7 +374,7 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
       await next();
     });
     const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-    registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: BROKER_TOKEN });
+    registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: BROKER_TOKEN, fixedGeometry: () => fixedGeometry });
     brokerServer = serve({ fetch: app.fetch, port: BROKER_PORT, hostname: "127.0.0.1" });
     injectWebSocket(brokerServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
@@ -415,21 +418,21 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
     b.close();
   }, 10000);
 
-  it("a client resize message never resizes the pane (FR-7): only the one canonical geometry call", async () => {
+  it("default browser traffic never pins the PTY; a newly opted-in broker uses fixed geometry", async () => {
     resizeWindowCalls.length = 0;
     const ws = await openWs("resize-session");
-    // One canonical-geometry resize happens at broker open.
-    await vi.waitFor(() => {
-      expect(resizeWindowCalls).toHaveLength(1);
-    }, { timeout: 1000 });
-    expect(resizeWindowCalls[0]).toEqual({ cols: 90, rows: 27 });
-
     ws.send(JSON.stringify({ type: "resize", cols: 200, rows: 9 }));
-    // Give the message time to (not) be processed.
     await new Promise<void>((r) => setTimeout(r, 120));
-    expect(resizeWindowCalls).toHaveLength(1); // unchanged - the resize was ignored
-
+    expect(resizeWindowCalls).toEqual([]);
     ws.close();
+
+    fixedGeometry = true;
+    const opted = await openWs("fixed-session");
+    await vi.waitFor(() => expect(resizeWindowCalls).toEqual([{ cols: 90, rows: 27 }]));
+    opted.send(JSON.stringify({ type: "resize", cols: 200, rows: 9 }));
+    await new Promise<void>((r) => setTimeout(r, 120));
+    expect(resizeWindowCalls).toEqual([{ cols: 90, rows: 27 }]);
+    opted.close();
   }, 10000);
 });
 

@@ -144,6 +144,22 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(out).toContain("Sent: 08-06 17:42Z · gen a1b2c3d4");
   });
 
+  // ── #2895 (a): a sender that `rig send` can't reach gets no `rig send` reply line ──
+  // MIRROR of packages/daemon/test/pane-envelope.test.ts against wrapPaneEnvelope (byte-identity contract).
+  it("#2895 (a): senderReachable false replaces the rig send line with a plain note; absent or true keeps it", () => {
+    const meta = { stampISO: "2026-08-06T17:42:09Z" };
+    expect(wrapSendBody("planner@global", "b@r", "hi", { ...meta, senderReachable: false }))
+      .toBe("From: planner@global\nTo: b@r\nSent: 08-06 17:42Z\n---\nhi\n---\n↩ No reply by rig send: planner@global has no session.");
+    expect(wrapSendBody("a@r", "b@r", "hi", { ...meta, senderReachable: true })).toBe(wrapSendBody("a@r", "b@r", "hi", meta));
+    expect(wrapSendBody("a@r", "b@r", "hi", meta).split("\n").at(-1)).toBe('↩ Reply: rig send a@r "..."');
+  });
+
+  it("#2895 (a): senderReachable false leaves the external reply line alone", () => {
+    for (const sender of ["alex@external"]) {
+      expect(wrapSendBody(sender, "b@r", "hi", { senderReachable: false })).toBe(wrapSendBody(sender, "b@r", "hi"));
+    }
+  });
+
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {
     const out = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toBe('From: a@r\nTo: b@r\nSent: 08-06 17:42Z · gen a1b2c3d4\n---\nhi\n---\n↩ Reply: rig send a@r "..."');

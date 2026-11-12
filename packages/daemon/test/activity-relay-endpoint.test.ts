@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
+import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") as {
@@ -92,5 +93,26 @@ describe("activity-relay occupant generation carry (W2a producer)", () => {
       () => new Date("2026-08-09T00:00:00.000Z"),
     );
     expect(payload).toHaveProperty("generation", null);
+  });
+});
+
+describe("activity-relay prompt fingerprint at UserPromptSubmit", () => {
+  const identity = { OPENRIG_SESSION_NAME: "dev-impl@r", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1" };
+  const at = () => new Date("2026-11-11T03:00:00.000Z");
+
+  it("carries the prompt's fingerprint, byte length and Claude's prompt id, never the prompt", () => {
+    const payload = relay.buildOpenRigPayload({ hook_event_name: "UserPromptSubmit", prompt: "héllo, world", prompt_id: "p-1", session_id: "s-1" }, identity, at)!;
+    expect(payload).toMatchObject({
+      hookEvent: "UserPromptSubmit", generation: "gen-1", nativePromptId: "p-1", promptBytes: Buffer.byteLength("héllo, world"),
+      promptSha256: createHash("sha256").update("héllo, world").digest("hex"),
+    });
+    expect(JSON.stringify(payload)).not.toContain("world");
+  });
+
+  it("adds nothing for another event, a prompt that isn't a string, or a malformed prompt id", () => {
+    expect(relay.buildOpenRigPayload({ hook_event_name: "Stop", prompt: "x" }, identity, at)).not.toHaveProperty("promptSha256");
+    expect(relay.buildOpenRigPayload({ hook_event_name: "UserPromptSubmit", prompt: 7 }, identity, at)).not.toHaveProperty("promptSha256");
+    expect(relay.buildOpenRigPayload({ hook_event_name: "UserPromptSubmit", prompt: "x", prompt_id: "not ok/../" }, identity, at))
+      .not.toHaveProperty("nativePromptId");
   });
 });

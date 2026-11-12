@@ -428,3 +428,38 @@ it("#613 additional: disabled real checkpoint source never opens malformed files
   expect(new HealthProjectionService(source, () => t.policy.read()).list().records).toEqual([]);
   expect(read).not.toHaveBeenCalled();
 });
+
+it("#2762: the daemon's own actors, including the bare claim-generation `system`, are not coordination", async () => {
+  const t = await setup(15);
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  const daemonActors = ["system", "watchdog@system", "queue@system", "stuck-sweep@system", "wake-ladder@system"];
+  for (const [i, actor] of [...daemonActors, ...daemonActors].entries()) insert.run("root", `2026-09-05T12:00:${String(16 + i).padStart(2, "0")}.000Z`, "in-progress", actor);
+  t.time("2026-09-05T12:00:30.000Z");
+  expect(t.projection.list().records).toHaveLength(0);
+  for (let i = 0; i < 5; i++) insert.run("root", `2026-09-05T12:00:${30 + i}.000Z`, "in-progress", "builder@rig");
+  t.time("2026-09-05T12:00:40.000Z");
+  const [observation] = t.source.read();
+  expect(observation?.coordinationTransitions).toBe(20);
+  const counted = t.db.prepare(`SELECT transition_id AS id FROM queue_transitions WHERE qitem_id = 'root' AND actor_session NOT IN (${daemonActors.map(() => "?").join(",")}) ORDER BY transition_id`).all(...daemonActors) as Array<{ id: number }>;
+  expect(observation?.ceremony?.transitionIds).toEqual(counted.map((r) => r.id));
+});
+
+it("#2762: a disposition recorded before the filter that cut at a daemon transition still closes its segment at its own end", async () => {
+  const t = await setup(); const id = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  const first = t.projection.list().records[0]!;
+  t.dispose(id, t.assessment("false-positive"));
+  // Rewrite the cleared disposition as an older daemon recorded it: its cut is a watchdog transition the filter now drops.
+  const watchdog = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,transition_note) VALUES(?,?,?,?,?)")
+    .run("root", "2026-09-05T12:00:31.000Z", "blocked", "watchdog@system", "park wake fired: watchdog job-1; delivery=delivered; awaiting owner consumption").lastInsertRowid as number;
+  const row = t.db.prepare("SELECT transition_id AS tid, transition_note AS note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC").all(id) as Array<{ tid: number; note: string }>;
+  const disposition = row.find((r) => r.note?.includes('"action":"disposition"'))!;
+  const receipt = JSON.parse(disposition.note) as { finding: { ceremony: { transitionIds: number[] }; window: { endedAt: string } } };
+  receipt.finding.ceremony.transitionIds.push(watchdog);
+  t.db.prepare("UPDATE queue_transitions SET transition_note = ? WHERE transition_id = ?").run(JSON.stringify(receipt), disposition.tid);
+  for (let i = 0; i < 20; i++) t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)").run("root", `2026-09-05T12:02:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-05T12:02:30.000Z");
+  const closed = t.source.read().find((o) => o.episodeKey === "root")!;
+  expect(closed.ceremony?.transitionIds).toEqual(first.ceremony?.transitionIds);
+  expect(closed.source.query.endedAt).toBe(receipt.finding.window.endedAt);
+  expect(t.projection.get(first.id)?.status).toBe("cleared");
+});

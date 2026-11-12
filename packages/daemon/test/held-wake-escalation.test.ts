@@ -4,15 +4,18 @@
 // Harness adapted from review50-r2's PR #1001 review (real hook route, SQLite store, activity service, transport,
 // parked-owner policy, queue and ladder; only terminal I/O and the final orchestrator delivery are inert).
 import { it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { activityRoutes } from "../src/routes/activity.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
@@ -22,7 +25,8 @@ import { startWakeLadderScheduler } from "../src/index.js";
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>, pane = "unrecognized provider content") {
+function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>, pane = "unrecognized provider content",
+  withStructural = false) {
   const db = createFullTestDb(); databases.push(db);
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
   const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime });
@@ -36,13 +40,16 @@ function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName:
     isRegisteredOccupantGeneration: (id, g) => Boolean(db.prepare("SELECT 1 FROM occupant_tenures WHERE node_id=? AND generation_uuid=?").get(id, g)),
   });
   const paste = vi.fn(async () => ({ ok: true as const })), enter = vi.fn(async () => ({ ok: true as const }));
+  const screen = { value: pane };
   const tmux = { hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
     getPaneCommand: async () => runtime === "codex" ? "codex" : "claude", getPanePid: async () => null,
-    listPanes: async () => [], hasSessionEnv: async () => false, capturePaneContent: async () => pane,
+    listPanes: async () => [], hasSessionEnv: async () => false, capturePaneContent: async () => screen.value,
     sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120,
   };
+  // The structural capture over the same pane, when a cell needs the oracle to read it (#2515).
+  const structural = withStructural ? new SeatStructuralActivityService(tmux as never, now) : undefined;
   const newOracle = () => new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now,
-    permissionPromptReader,
+    permissionPromptReader, structuralActivity: structural,
     permissionPromptChanged: permissionPromptReader ? (sessionName, confirmed, permissionRuntime) => {
       const latest = store.getLatestForNode({ sessionName });
       store.recordHookEvent({ sessionName, runtime: permissionRuntime, generation: latest?.generation,
@@ -70,7 +77,7 @@ function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName:
     getSeatState: (nodeId) => oracle.getSeatState(nodeId),
     getLatestHook: (sessionName) => store.getLatestForNode({ sessionName }) });
   return { db, bus, node, name, store, hook, transport, paste, enter, clock, readPromptState,
-    oracle: () => oracle, reconstruct: () => { oracle = newOracle(); },
+    oracle: () => oracle, reconstruct: () => { oracle = newOracle(); }, structural, show: (next: string) => { screen.value = next; },
     changeGeneration: (g: string | null) => { currentGeneration = g; } };
 }
 
@@ -301,4 +308,76 @@ it("the production scheduler keeps a current Claude prompt alert when an older S
     await scheduler.stop();
     vi.useRealTimers();
   }
+});
+
+// #2515: a native Codex choice that the person answers on screen, with no hook after it. The structural frame observes the
+// choice and then the empty composer, so the refused wake isn't escalated, and the next wake is sent once.
+const codexScreen = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+it("a Codex wake refused at a native choice the person then answers: no escalation, and the next wake is sent once", async () => {
+  const f = fixture("codex", undefined, codexScreen("./fixtures/codex-trust-0.156.1.txt"), true);
+  // The occupant as OpenRig records it: the binding's pane, and the pane process the identity reconciler verified.
+  new SessionRegistry(f.db).updateBinding(f.node.id, { tmuxPane: "%5" });
+  new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "verified", evidenceSource: null, reason: null,
+    evidence: { registeredPane: "%5", observedPanePid: 4100, observedPid: 4101, observedCommand: "codex", matchedLayer: 1 },
+    sessionName: f.name, observedAt: f.clock.value.toISOString() });
+  // The sweep's batched capture: the screen with the pane and process tmux reported for it.
+  const screen = { value: codexScreen("./fixtures/codex-trust-0.156.1.txt") };
+  const observe = async () => {
+    await f.structural!.pollSeat(f.name, new Map([[f.name, { text: screen.value, capturedAt: f.clock.value, pane: { id: "%5", pid: 4100 } }]]),
+      "codex", null, f.clock.value);
+    await f.oracle().pollAllRunningTmuxSeats(f.db);
+  };
+  await observe();
+  expect(f.oracle().getSeatState(f.node.id)?.needsInput).toMatchObject({ count: 1, reason: "selection_prompt" });
+  const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  const row = await repo.create({ sourceSession: "planner@r1001", destinationSession: f.name,
+    body: "finish synthetic assigned work", summary: "synthetic obligation", nudge: false });
+  repo.claim({ qitemId: row.qitemId, destinationSession: f.name });
+  const history: Array<Record<string, unknown>> = [];
+  const policy = makeParkedOwnerConsumerPolicy({
+    diagnoseRig: () => ({ seats: [{ sessionName: f.name, parked: true,
+      activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null } },
+      obligations: { items: [{ qitemId: row.qitemId, state: "in-progress", summary: row.summary }], held: [] } }] }),
+    history: { listForJob: () => history as never, countForJob: () => history.length },
+    rows: { listTransitions: (id) => repo.listTransitions(id),
+      appendNote: (id, note) => { repo.update({ qitemId: id, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
+      recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result), listOpenIds: () => [row.qitemId],
+      recoveryOwnsWake: (id) => queueRecoveryOwnsWake(f.db, repo.getById(id)),
+    },
+  });
+  const job = { jobId: "fixture-job", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("r1001") }, context: {} };
+  const wake = await policy.evaluate(job as never);
+  expect(wake.action).toBe("send");
+  const sent = await f.transport.send(f.name, "synthetic assigned-work wake");
+  expect(sent).toMatchObject({ ok: false, reason: "target_needs_input" });
+  history.push({ historyId: "history", jobId: job.jobId, evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
+    deliveryTargetSession: f.name, deliveryStatus: "failed", deliveryMessage: "synthetic wake",
+    evaluationNotes: { ...(wake as { notes?: Record<string, unknown> }).notes, deliveryReason: sent.error } });
+  await policy.evaluate(job as never);
+  const refused = repo.listTransitions(row.qitemId).find((t) => t.transitionNote?.startsWith(REFUSED_PREFIX));
+  expect(refused?.transitionNote).toContain("(selection_prompt)");
+  expect(f.readPromptState(f.name, refused!.ts)).toBe("blocked"); // still open: nothing is typed into it
+  // The person answers the choice; no hook follows.
+  f.show(codexScreen("./fixtures/input-box/codex-0.160.0/idle.txt"));
+  screen.value = codexScreen("./fixtures/input-box/codex-0.160.0/idle.txt");
+  f.clock.value = new Date(Date.now() + 2_000);
+  await observe();
+  expect(f.readPromptState(f.name, refused!.ts)).toBe("clear");
+  const targets: string[] = [];
+  const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 })
+    .filter((r) => r.tags?.includes("wake-prompt-refusal"));
+  for (const ageMs of [2_000, 3_600_000]) {
+    f.clock.value = new Date(Date.now() + ageMs);
+    await observe();
+    await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value,
+      resolveOrchestrator: () => "lead@r1001", readPromptState: f.readPromptState, retryIntervalSeconds: 1,
+      attemptWake: async (_id, target) => { targets.push(target); return "verified"; }, log: () => {} });
+  }
+  expect(targets).not.toContain("lead@r1001");
+  expect(alerts()).toHaveLength(0);
+  expect(f.paste).not.toHaveBeenCalled();
+  // The next wake goes through normal delivery, once.
+  expect((await policy.evaluate(job as never)).action).toBe("send");
+  expect((await f.transport.send(f.name, "synthetic assigned-work wake")).ok).toBe(true);
+  expect(f.paste).toHaveBeenCalledTimes(1);
 });

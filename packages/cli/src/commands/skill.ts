@@ -56,6 +56,9 @@ interface SeatInspection {
   bootstrapLine?: { state: "unasked" | "unknown" } | { state: "yes" | "no"; by: "saved" | "environment" } | null;
   /** OPR.0.7.0.9: what the seat's launch passes of its own additions; absent from an older daemon. */
   launchAdditions?: SeatLaunchAdditionsView | null;
+  /** #2895 (b): set for a seat on a runtime without seat skills; absent from an older daemon. */
+  unsupported?: true;
+  note?: string;
 }
 
 interface SeatApplyResponse {
@@ -183,6 +186,10 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
     if (res.status >= 400 && !("disk" in data)) {
       if (!opts.json) console.error(failure ?? `seat loadout failed (HTTP ${res.status})`);
       process.exitCode = 1;
+      return;
+    }
+    if (!opts.apply && data.unsupported) {
+      if (!opts.json) console.log(data.note);
       return;
     }
     const inspection = opts.apply ? data.inspection : data;

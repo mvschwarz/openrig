@@ -27,8 +27,9 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { mergeManagedBlock, MANAGED_BLOCK_START, MANAGED_BLOCK_END } from "../src/domain/managed-blocks.js";
-import { appendIsCleanupSafe } from "../src/domain/restore-guidance.js";
+import { appendIsCleanupSafe, seatGuidance } from "../src/domain/restore-guidance.js";
 import type { ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import type { NodeStartupSnapshot } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
@@ -75,6 +76,8 @@ interface SeatOptions {
   seatSkillsLine?: boolean;
   /** #875: a Pi launch that chose its own agent folder's AGENTS.md, recorded with the startup context. */
   piAgentFile?: boolean;
+  /** A launch from before the context-entry floor: the saved selection has the built-in openrig-start.md and no floor. */
+  legacyStart?: boolean;
 }
 
 /** The resume type each runtime records for its native session. */
@@ -82,6 +85,8 @@ const resumeTypeOf = (runtime: NonNullable<SeatOptions["runtime"]>): string =>
   runtime === "codex" ? "codex_id" : runtime === "pi" ? "pi_session_file" : "claude_id";
 
 const SEAT_SKILLS_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+const START_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-start.md");
+const CONTEXT_ENTRY_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-context-entry.md");
 
 describe("a seat's guidance across rig down then rig up --existing (exact resume)", () => {
   let db: Database.Database;
@@ -164,6 +169,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       files.push({ path: "openrig-seat-skills.md", absolutePath: SEAT_SKILLS_ASSET, ownerRoot: path.dirname(SEAT_SKILLS_ASSET),
         deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] });
     }
+    if (opts.legacyStart) {
+      files.push({ path: "openrig-start.md", absolutePath: START_ASSET, ownerRoot: path.dirname(path.dirname(START_ASSET)),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] });
+    }
     if (opts.autoSkillFile) {
       fs.writeFileSync(path.join(spec, "helper.md"), "# SKILL\nA skill, never merged into guidance.");
       files.push({ path: "helper.md", absolutePath: path.join(spec, "helper.md"), ownerRoot: spec,
@@ -183,6 +192,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     mergeManagedBlock(nodeFs, guidanceFile, "SOP.md", "How work flows here.");
     if (opts.freshOnlyFile) mergeManagedBlock(nodeFs, guidanceFile, "onboarding.md", "Onboarding: how this world works.");
     if (opts.autoGuidanceFile) mergeManagedBlock(nodeFs, guidanceFile, "NOTES.md", "Team notes, an older auto startup file.");
+    if (opts.legacyStart) mergeManagedBlock(nodeFs, guidanceFile, "openrig-start.md", fs.readFileSync(START_ASSET, "utf-8"));
     return { rigId: rig.id, guidanceFile };
   }
 
@@ -282,6 +292,35 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     for (const other of ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"].filter((f) => f !== file)) {
       expect(fs.existsSync(path.join(cwd, other)), `${other} must not be written`).toBe(false);
     }
+  });
+
+  // A seat launched before the context-entry floor existed: its exact resume puts back openrig-start.md and adds the floor
+  // beside it, in the seat's own guidance file on either runtime. The person's text stays, and the floor is no guidance gap.
+  // (This harness doesn't simulate Codex's native resume proof, so a Codex seat here reads attention_required with or
+  // without the floor; the rig result is checked for Claude.)
+  it.each([
+    { runtime: "claude-code" as const, file: "CLAUDE.md" },
+    { runtime: "codex" as const, file: "AGENTS.md" },
+  ])("an exact resume of a seat saved before the context-entry floor gets the floor in its $file", async ({ runtime, file }) => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime, legacyStart: true, userText: "Person notes\n" });
+    expect(path.basename(guidanceFile)).toBe(file);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).not.toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime });
+    expect(fileAtHarnessStart).toContain("Person notes");
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("openrig-start.md"));
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
+    expect(fileAtHarnessStart).toContain(fs.readFileSync(CONTEXT_ENTRY_ASSET, "utf-8").trim());
+    expect(fileAtHarnessStart!.indexOf(MANAGED_BLOCK_START("openrig-context-entry.md")))
+      .toBeGreaterThan(fileAtHarnessStart!.indexOf(MANAGED_BLOCK_START("openrig-start.md")));
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+    if (runtime === "claude-code") expect(result.rigResult).toBe("fully_restored");
+  });
+
+  it("a seat whose saved selection has no built-in openrig-start.md gets no floor (a custom start file isn't the anchor)", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true });
+    const { fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true });
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(fileAtHarnessStart).not.toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
   });
 
   // #875: a Pi seat's blocks live in AGENTS.md. Down takes them out like a Codex seat's, and the exact resume puts them back.
@@ -574,5 +613,30 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       "a truncated legacy BEGIN": "# P\n<!-- BEGIN RIGGED MANAGED BLOCK: \nnotes\n",
     };
     for (const [name, content] of Object.entries(safe)) expect(appendIsCleanupSafe(content, add), name).toBe(true);
+  });
+});
+
+// A selection saved by an older version can hold an openrig-start.md entry with no ownerRoot. Its identity is unknown, so
+// it doesn't anchor the context-entry block, and the rest of the seat's guidance selection is still put back.
+describe("an older saved selection whose openrig-start.md has no ownerRoot", () => {
+  const assets = "/old/node_modules/@openrig/cli/daemon/assets";
+  const snapshot = (ownerKnown: boolean) => ({
+    runtime: "claude-code", projectionEntries: [], startupActions: [],
+    resolvedStartupFiles: [
+      { path: "SOP.md", absolutePath: "/team/SOP.md", ownerRoot: "/team", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "openrig-start.md", absolutePath: `${assets}/guidance/openrig-start.md`, ...(ownerKnown ? { ownerRoot: assets } : {}),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] },
+    ],
+  }) as unknown as NodeStartupSnapshot;
+
+  it("keeps the whole selection, required SOP included, and adds no block for the unknown entry", () => {
+    const guidance = seatGuidance(snapshot(false), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md"]);
+    expect(guidance?.items.find((item) => item.blockId === "SOP.md")?.required).toBe(true);
+  });
+
+  it("with its ownerRoot, the same entry anchors the block (control)", () => {
+    const guidance = seatGuidance(snapshot(true), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md", "openrig-context-entry.md"]);
   });
 });

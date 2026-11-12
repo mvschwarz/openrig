@@ -16,14 +16,18 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper", "protocol"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+export type CommunityHarnessProtocol = "pi-rpc";
 
 export interface CommunityHarnessPreset {
   name: string;
   command: string;
   maintainer: string;
   limits: string[];
+  /** How the harness runs: omitted for the preset's own launcher; "pi-rpc" runs through OpenRig's Pi RPC runner. */
+  protocol?: CommunityHarnessProtocol;
   /** The launcher writes one launch-result record per launch (the harness's own conversation id). */
   launchResult: boolean;
   /** The harness takes a conversation name from OpenRig (OPENRIG_CONVERSATION) and creates or reopens that conversation. */
@@ -84,6 +88,26 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.launch_wrapper !== undefined && typeof raw.launch_wrapper !== "boolean") return bad("launch_wrapper must be true or false");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false");
   if (raw.runner !== undefined && typeof raw.runner !== "boolean") return bad("runner must be true or false");
+  if (raw.protocol !== undefined) {
+    if (typeof raw.protocol !== "string" || raw.protocol !== "pi-rpc") {
+      return bad("protocol must be 'pi-rpc' when specified");
+    }
+  }
+  const protocol: CommunityHarnessProtocol | undefined = raw.protocol === "pi-rpc" ? "pi-rpc" : undefined;
+  if (protocol === "pi-rpc") {
+    if (raw.runner === true) {
+      return bad("protocol: pi-rpc and runner: true can't both be set: pi-rpc harnesses use OpenRig's Pi runner");
+    }
+    if (raw.launch_result === true || raw.names_conversation === true) {
+      return bad("protocol: pi-rpc manages session identity through the Pi runner; launch_result and names_conversation are not supported");
+    }
+    if (raw.startup_assisted === true) {
+      return bad("protocol: pi-rpc and startup_assisted can't both be set");
+    }
+    if (raw.first_input === true) {
+      return bad("protocol: pi-rpc and first_input can't both be set");
+    }
+  }
   if (raw.launch_wrapper === true && raw.runner !== true) return bad("launch_wrapper needs runner: true: only a runner consumes OPENRIG_LAUNCH_WRAPPER");
   if (raw.runner === true && raw.launch_result !== true) {
     return bad("runner needs launch_result: true: a runner reports the conversation it opened in its launch record");
@@ -91,10 +115,11 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.launch_result === true && raw.names_conversation === true) {
     return bad("launch_result and names_conversation can't both be true: either the launcher reports the conversation, or OpenRig names it");
   }
-  if (raw.resume === true && raw.launch_result !== true && raw.names_conversation !== true) {
+  if (raw.resume === true && protocol !== "pi-rpc" && raw.launch_result !== true && raw.names_conversation !== true) {
     return bad("resume needs launch_result: true or names_conversation: true, so the conversation to reopen is one OpenRig knows");
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
+    ...(protocol ? { protocol } : {}),
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
     startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true,
     launchWrapper: raw.launch_wrapper === true, path } };
@@ -210,14 +235,15 @@ export function communityHarnessLabel(runtime: string, dir: string = communityHa
   const reported = own && session?.resumeProvenance === "launcher" ? own : undefined;
   const named = own && session?.resumeProvenance === "passed" ? own : undefined;
   const found = loadCommunityHarnessPreset(runtime, dir);
+  const isPiRpc = found.ok && found.preset.protocol === "pi-rpc";
   return {
     harness: runtime, community: true, testedByOpenRig: false,
     maintainer: found.ok ? found.preset.maintainer : null,
     limits: found.ok ? found.preset.limits : [],
-    identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : "not confirmed",
-    ...(reported ? { reportedConversation: reported } : {}),
+    identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : isPiRpc && own ? "reported by its launcher, not observed" : "not confirmed",
+    ...(reported || (isPiRpc && own) ? { reportedConversation: reported ?? own } : {}),
     ...(named ? { namedConversation: named } : {}),
-    needsInput: session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
+    needsInput: isPiRpc || session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

@@ -205,7 +205,55 @@ function tagValues(tags: string[], prefix: string): string[] {
  * Directories directly under `root` addressed by `wanted` — either because the directory
  * is named that, or because its SPEC.md frontmatter `id` is that. A directory can only
  * match once, so a name hit short-circuits its own frontmatter read.
+ *
+ * `inspectWorkNodeDirs` requires actual subdirectories (`statSync(...).isDirectory()`),
+ * preserves whether `root` could be read as a directory (`ok: true` even when 0 children
+ * match, vs `ok: false` with the OS error code when `readdirSync` fails), and records
+ * whether any child directory check or `SPEC.md` read failed for a reason other than
+ * ordinary absence/non-directory (`incomplete: true` when `statSync` or `readFileSync`
+ * throws anything other than `ENOENT`/`ENOTDIR`). `resolveWorkNodeDirs` keeps the
+ * historical permissive contract for existing `current-work` consumers.
  */
+export function inspectWorkNodeDirs(
+  root: string,
+  wanted: string,
+): { ok: true; matches: Match[]; incomplete: boolean } | { ok: false; code?: string } {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(root);
+  } catch (err) {
+    return { ok: false, code: (err as NodeJS.ErrnoException)?.code };
+  }
+  const out: Match[] = [];
+  let incomplete = false;
+  for (const dir of entries.sort()) {
+    const childPath = path.join(root, dir);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(childPath).isDirectory();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") incomplete = true;
+      continue;
+    }
+    if (!isDir) continue;
+    if (dir === wanted) {
+      out.push({ dir, form: "directory name" });
+      continue;
+    }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(childPath, "SPEC.md"), "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") incomplete = true;
+      continue;
+    }
+    if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
+  }
+  return { ok: true, matches: out, incomplete };
+}
+
 export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
   let entries: string[];
   try {
@@ -228,6 +276,195 @@ export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
     if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
   }
   return out;
+}
+
+export type CreateScopeCheck =
+  | { status: "unresolved"; tag: string; count: 0 }
+  | { status: "ambiguous"; tag: string; count: number }
+  | { status: "empty"; tag: "mission:" | "slice:" }
+  | { status: "conflict"; tags: string[] }
+  | { status: "unavailable"; tags: string[]; reason?: "missing-mission" }
+  | { status: "skipped"; tags: string[] };
+
+export type CreateScopeAdvisoryCode =
+  | "unresolved_scope"
+  | "ambiguous_scope"
+  | "empty_scope"
+  | "conflicting_scope"
+  | "scope_check_unavailable"
+  | "scope_check_skipped";
+
+export interface CreateScopeAdvisory {
+  code: CreateScopeAdvisoryCode;
+  message: string;
+}
+
+function displayScopeTag(raw: string): string | null {
+  const cleaned = raw.replace(/[\x00-\x1f\x7f]+/g, "").trim();
+  return cleaned.startsWith(MISSION_TAG) || cleaned.startsWith(SLICE_TAG) ? cleaned : null;
+}
+
+function displayScopeTags(tags: string[]): string[] {
+  const displayed: string[] = [];
+  for (const raw of tags) {
+    const safe = displayScopeTag(raw);
+    if (safe && !displayed.includes(safe)) displayed.push(safe);
+  }
+  return displayed;
+}
+
+function parseCreateScopeTags(tags: string[] | null | undefined): {
+  missions: string[];
+  slices: string[];
+  emptyPrefixes: Array<"mission:" | "slice:">;
+  scopeTags: string[];
+} {
+  const flat = (tags ?? []).flatMap((t) => t.split(",").map((s) => s.trim())).filter(Boolean);
+  const missions: string[] = [];
+  const slices: string[] = [];
+  const emptyPrefixes: Array<"mission:" | "slice:"> = [];
+  for (const t of flat) {
+    if (t.startsWith(MISSION_TAG)) {
+      const v = t.slice(MISSION_TAG.length).trim();
+      if (!v) {
+        if (!emptyPrefixes.includes(MISSION_TAG)) emptyPrefixes.push(MISSION_TAG);
+      } else if (!missions.includes(v)) {
+        missions.push(v);
+      }
+    } else if (t.startsWith(SLICE_TAG)) {
+      const v = t.slice(SLICE_TAG.length).trim();
+      if (!v) {
+        if (!emptyPrefixes.includes(SLICE_TAG)) emptyPrefixes.push(SLICE_TAG);
+      } else if (!slices.includes(v)) {
+        slices.push(v);
+      }
+    }
+  }
+  const scopeTags: string[] = [];
+  for (const raw of [
+    ...missions.map((m) => `mission:${m}`),
+    ...slices.map((s) => `slice:${s}`),
+    ...emptyPrefixes,
+  ]) {
+    const safe = displayScopeTag(raw);
+    if (safe && !scopeTags.includes(safe)) scopeTags.push(safe);
+  }
+  return { missions, slices, emptyPrefixes, scopeTags };
+}
+
+export function skippedCreateScopeAdvisory(tags: string[] | null | undefined): CreateScopeCheck | null {
+  const { scopeTags } = parseCreateScopeTags(tags);
+  return scopeTags.length > 0 ? { status: "skipped", tags: scopeTags } : null;
+}
+
+export function toCreateScopeAdvisory(check: CreateScopeCheck): CreateScopeAdvisory {
+  switch (check.status) {
+    case "unresolved":
+      return { code: "unresolved_scope",
+        message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is unresolved (resolves to 0 directories); row was created.` };
+    case "ambiguous":
+      return { code: "ambiguous_scope",
+        message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is ambiguous (resolves to ${check.count} directories, cannot uniquely resolve); row was created.` };
+    case "empty":
+      return { code: "empty_scope",
+        message: `queue create scope check: ${check.tag} has an empty value; row was created.` };
+    case "conflict":
+      return { code: "conflicting_scope",
+        message: `queue create scope check: conflicting scope tags (${displayScopeTags(check.tags).join(", ")}); row was created.` };
+    case "unavailable": {
+      const tags = displayScopeTags(check.tags).join(", ");
+      const message = check.reason === "missing-mission"
+        ? `queue create scope check unavailable (${tags}) without mission context: mission tag is missing; row was created.`
+        : `queue create scope check unavailable (${tags}): could not run scope check on this host; row was created.`;
+      return { code: "scope_check_unavailable", message };
+    }
+    case "skipped":
+      return { code: "scope_check_skipped",
+        message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+  }
+}
+
+/**
+ * Nonblocking post-create scope check (#2725). Distinguishes a completed check whose
+ * mission/slice tag resolved to 0 or >1 directories from empty/conflicting scope tags
+ * or a check that could not run because the catalogue, missions root, mission context,
+ * or candidate SPEC metadata was unavailable.
+ */
+export function evaluateCreateScope(
+  tags: string[] | null | undefined,
+  resolveRoot: () => string | null,
+): CreateScopeCheck | null {
+  const { missions, slices, emptyPrefixes, scopeTags } = parseCreateScopeTags(tags);
+  if (scopeTags.length === 0) return null;
+  const unavailable = (reason?: "missing-mission", customTags = scopeTags): CreateScopeCheck => ({
+    status: "unavailable",
+    ...(reason ? { reason } : {}),
+    tags: displayScopeTags(customTags),
+  });
+
+  let missionsRoot: string | null = null;
+  try {
+    missionsRoot = resolveRoot();
+  } catch {
+    missionsRoot = null;
+  }
+  if (!missionsRoot) return unavailable();
+
+  try {
+    fs.readdirSync(missionsRoot);
+  } catch {
+    return unavailable();
+  }
+
+  if (emptyPrefixes.length > 0) {
+    return { status: "empty", tag: emptyPrefixes[0]! };
+  }
+  if (missions.length > 1) {
+    return {
+      status: "conflict",
+      tags: displayScopeTags(missions.map((m) => `mission:${m}`)),
+    };
+  }
+  if (slices.length > 1) {
+    return {
+      status: "conflict",
+      tags: displayScopeTags(slices.map((s) => `slice:${s}`)),
+    };
+  }
+
+  let resolvedMissionDir: string | null = null;
+  if (missions.length === 1) {
+    const missionTarget = missions[0]!;
+    const missionTag = displayScopeTag(`mission:${missionTarget}`) ?? scopeTags[0]!;
+    const missionCheck = inspectWorkNodeDirs(missionsRoot, missionTarget);
+    if (!missionCheck.ok || missionCheck.incomplete) return unavailable();
+    if (missionCheck.matches.length === 0) return { status: "unresolved", tag: missionTag, count: 0 };
+    if (missionCheck.matches.length > 1) {
+      return { status: "ambiguous", tag: missionTag, count: missionCheck.matches.length };
+    }
+    resolvedMissionDir = missionCheck.matches[0]!.dir;
+  }
+
+  if (slices.length === 1) {
+    const sliceTarget = slices[0]!;
+    const sliceTag = displayScopeTag(`slice:${sliceTarget}`) ?? scopeTags[0]!;
+    if (!resolvedMissionDir) return unavailable("missing-mission", [sliceTag]);
+    const slicesRoot = path.join(missionsRoot, resolvedMissionDir, "slices");
+    const sliceCheck = inspectWorkNodeDirs(slicesRoot, sliceTarget);
+    if (!sliceCheck.ok) {
+      if (sliceCheck.code === "ENOENT" || sliceCheck.code === "ENOTDIR") {
+        return { status: "unresolved", tag: sliceTag, count: 0 };
+      }
+      return unavailable();
+    }
+    if (sliceCheck.incomplete) return unavailable();
+    if (sliceCheck.matches.length === 0) return { status: "unresolved", tag: sliceTag, count: 0 };
+    if (sliceCheck.matches.length > 1) {
+      return { status: "ambiguous", tag: sliceTag, count: sliceCheck.matches.length };
+    }
+  }
+
+  return null;
 }
 
 interface Candidate {

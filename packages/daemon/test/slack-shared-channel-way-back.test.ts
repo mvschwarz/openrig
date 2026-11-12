@@ -131,6 +131,16 @@ describe("a shared channel's conversation, there and back", () => {
       const ask = await create({ humanIntent: "decision", evidenceRef: "/fixture/refund" });
       expect(ask.status).toBe(201);
       expect((await ask.json()).advisories).toEqual([expect.objectContaining({ code: "shared_channel_correspondence", destinationSession: CHANNEL })]);
+      const scoped = await create({ humanIntent: "decision", tags: ["mission:MISSING.MISSION"] });
+      expect(scoped.status).toBe(201);
+      const scopedBody = await scoped.json();
+      expect(repo.getById(scopedBody.qitemId)).toMatchObject({ destinationSession: CHANNEL,
+        tags: ["mission:MISSING.MISSION"], body: "Shall we refund?" });
+      expect.soft(scopedBody.advisories).toEqual([
+        expect.objectContaining({ code: "shared_channel_correspondence", destinationSession: CHANNEL }),
+        expect.objectContaining({ code: "scope_check_unavailable", message: expect.stringMatching(/unavailable|could not.*check/i) }),
+      ]);
+      expect.soft(scoped.headers.has("X-OpenRig-Scope-Advisory")).toBe(false);
       const update = await create({ humanIntent: "update" });
       expect(update.status).toBe(201);
       expect(await update.json()).not.toHaveProperty("advisories");

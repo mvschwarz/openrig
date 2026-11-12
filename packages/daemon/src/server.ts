@@ -84,6 +84,7 @@ import { skillsRoutes } from "./routes/skills.js";
 import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
+import { networkRoutes } from "./routes/network.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
@@ -242,6 +243,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** The outbound network connector (`rig network`); started after the listener binds. */
+  networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
   modelDivergenceMonitor?: import("./domain/model-divergence/model-divergence-monitor.js").ModelDivergenceMonitor;
   /** S10 — the in-daemon gateway subsystem (amended M1 §3: in-process, no second deployable).
@@ -634,6 +637,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
+    c.set("networkConnector" as never, deps.networkConnector);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
@@ -827,7 +831,8 @@ export function createApp(deps: AppDeps): Hono {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
-    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null,
+      fixedGeometry: () => deps.settingsStore?.resolveOne("terminal.fixed_geometry").value === true });
   } else if (deps.enableNodeWebSocket) {
     registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }
@@ -871,6 +876,9 @@ export function createApp(deps: AppDeps): Hono {
     "/api/hosts",
     hostsRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
+  // A selected local seat's connections to a remote hub (`rig network`): bindings, status and disconnect. Its writes carry
+  // a participant's token, so they take the same operator-bearer posture as the hosts routes.
+  app.route("/api/network", networkRoutes({ bearerToken: deps.missionControlBearerToken ?? null }));
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
   // Living Notes Packet 2 (OPR.0.4.4.20) — composed-review read contract.

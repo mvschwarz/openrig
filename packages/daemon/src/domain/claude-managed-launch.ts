@@ -20,6 +20,7 @@ import { isolatedClaudeAccountProblem, OUTRANKING_TOKEN_ENV, projectRootForLocal
 export interface ClaudeLaunchTarget {
   /** A running seat's verified executable, carried through its in-place continuation. */
   executable?: string;
+  continuationConfigDir?: string | null;
   nodeId: string;
   cwd?: string;
   session?: string;
@@ -275,14 +276,14 @@ export class ClaudeManagedLaunch {
     return (accountHome === null ? selected !== undefined : !!selected) ? this.configPaths(cwd, nodeId, accountHome).statePath : undefined;
   }
 
-  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string) {
+  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string, continuationConfigDir?: string | null) {
     const { PATH, HOME } = this.sessionEnv;
-    const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
+    const CLAUDE_CONFIG_DIR = continuationConfigDir !== undefined ? continuationConfigDir ?? undefined : accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
-    const { configDir } = this.configPaths(cwd, nodeId, accountHome);
+    const configDir = continuationConfigDir !== undefined ? path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME!, ".claude")) : this.configPaths(cwd, nodeId, accountHome).configDir;
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
@@ -330,7 +331,7 @@ export class ClaudeManagedLaunch {
     const accountHome = target.accountHome !== undefined ? target.accountHome : seatAccountHome(this.db, target.nodeId, "claude-code");
     if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
     const credentialKeys: readonly string[] = accountHome ? ACCOUNT_HOME_PROVIDER_ENV : [];
-    const context = this.context(cwd, target.nodeId, accountHome, target.executable);
+    const context = this.context(cwd, target.nodeId, accountHome, target.executable, target.continuationConfigDir);
     // Resolved as the classic launch and preflight do (daemon PATH and daemon cwd). A missing or invalid wrapper refuses the launch; there is no unwrapped fallback.
     let wrapper: string[] = [];
     if (target.launchWrapper?.length) {
@@ -345,7 +346,7 @@ export class ClaudeManagedLaunch {
     const assertCurrent = () => {
       if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
       if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable)) !== JSON.stringify(context)
+        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable, target.continuationConfigDir)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
           && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key) && !credentialKeys.includes(key))) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");

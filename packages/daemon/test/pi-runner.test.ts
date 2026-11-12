@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
+import readline from "node:readline";
 import {
   createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar, startHeartbeatTimer,
@@ -198,7 +199,7 @@ describe("idle heartbeat", () => {
     expect(c.f.activity.filter(a => a.hookEvent !== "Stop")).toSatisfy((rest: Record<string, unknown>[]) => rest.every(a => !("livenessSeconds" in a)));
   });
 
-  it("is a Pi-only behaviour", () => {
+  it("is not an OMP behaviour", () => {
     const c = clocked("omp");
     ready(c.core);
     c.core.heartbeat();
@@ -209,7 +210,7 @@ describe("idle heartbeat", () => {
 // ── Streaming heartbeat: the runner contract's working beat (section 4), `active` / `liveness` ──
 
 describe("streaming heartbeat", () => {
-  function clocked(runtime?: "pi" | "omp") {
+  function clocked(runtime?: string) {
     const f = fakeIo();
     let t = Date.parse("2026-07-06T10:00:00Z");
     f.io.now = () => new Date(t).toISOString();
@@ -232,6 +233,18 @@ describe("streaming heartbeat", () => {
       turnId: "1", livenessSeconds: 30 })]);
     c.advance(10_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(2);
+  });
+
+  // A protocol: pi-rpc fork speaks Pi's protocol, so a silent turn keeps reading working, as an accepted turn.
+  it("gives a pi-rpc fork the same accepted turn and working beat as Pi", () => {
+    const c = clocked("omo");
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    expect(c.f.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ hookEvent: "UserPromptSubmit", subtype: "accepted", turnId: "1", runtime: "omo" })]));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ hookEvent: "active", subtype: "liveness", runtime: "omo",
+      turnId: "1", livenessSeconds: 30 })]);
   });
 
   // CodeRabbit 2336 — some turn paths omit agent_start; turn_start alone opens the turn.
@@ -278,7 +291,7 @@ describe("streaming heartbeat", () => {
     expect(c.beats()).toEqual([]);
   });
 
-  it("is a Pi-only behaviour", () => {
+  it("is not an OMP behaviour", () => {
     const c = clocked("omp");
     ready(c.core);
     c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
@@ -473,6 +486,56 @@ describe("runner input", () => {
       t.input.write("removeX\u007f\r");
       t.input.write("clear this\u0015kept\r");
       expect(t.blocks).toEqual(["prefix paste\n café  suffix", "abc", "remove", "kept"]);
+    } finally { t.editor.close(); }
+  });
+
+  it.each([
+    ["ac\u001b[Dbé🦊\r", "abé🦊c"],
+    ["world\u001b[Hhello \r", "hello world"],
+    ["do delete" + "\u001b[D".repeat(6) + "not \r", "do not delete"],
+    ["abcd\u001b[D\u007fXY\r", "abXYd"],
+    ["hello world\u001bbX\r", "hello Xworld"],
+  ])("keeps coalesced edit keys and text ordered: %j", (input, expected) => {
+    const t = terminal();
+    try {
+      t.input.write(input);
+      expect(t.blocks).toEqual([expected]);
+    } finally { t.editor.close(); }
+  });
+
+  it("keeps split escape sequences and UTF-8 ordered across every byte boundary", () => {
+    const bytes = Buffer.from("ac\u001b[Dbé🦊\r");
+    for (let i = 1; i < bytes.length; i++) {
+      const t = terminal();
+      try {
+        t.input.write(bytes.subarray(0, i));
+        t.input.write(bytes.subarray(i));
+        expect(t.blocks).toEqual(["abé🦊c"]);
+      } finally { t.editor.close(); }
+    }
+  });
+
+  it("leaves unknown escape sequences to readline without holding the next input", () => {
+    const t = terminal();
+    try {
+      t.input.write("ac\u001b[999~b\rnext\r");
+      expect(t.blocks).toEqual(["acb", "next"]);
+    } finally { t.editor.close(); }
+  });
+
+  it("preserves undo grouping on Node releases with correct native cursor insertion", ({ skip }) => {
+    const input = new PassThrough(), output = new PassThrough(), control: string[] = [];
+    output.resume();
+    const native = readline.createInterface({ input, output, terminal: true });
+    if (Object.prototype.hasOwnProperty.call(native, "_ttyWrite")) delete (native as any)._ttyWrite;
+    native.on("line", line => control.push(line));
+    input.write("ac\u001b[Db\r");
+    native.close();
+    if (control[0] !== "abc") { skip(); return; } // Affected Node uses grouped text in the workaround.
+    const t = terminal();
+    try {
+      t.input.write("abc\u001f\r");
+      expect(t.blocks).toEqual(["ab"]);
     } finally { t.editor.close(); }
   });
 
@@ -1135,6 +1198,42 @@ describe("--thinking in the runner command and the pi child argv", () => {
     const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking: "medium" });
     const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
     expect(buildPiChildArgs({ ...childBase, thinking: parsed.thinking })).toEqual(expect.arrayContaining(["--thinking", "medium"]));
+  });
+
+  it("parseRunnerArgs round-trips the command's --command and custom runtime", () => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "omo", command: "omo", thinking: "high" });
+    const argv = cmd.match(/(?:'[^']*'|[^\s]+)/g)!.slice(2).map((arg) => arg.replace(/^'|'$/g, ""));
+    const parsed = parseRunnerArgs(argv);
+    expect(parsed.command).toBe("omo");
+    expect(parsed.runtime).toBe("omo");
+    expect(parsed.thinking).toBe("high");
+    expect(parsed.trust).toBe("approve");
+  });
+
+  it("custom protocol: pi-rpc harness reporting no sessionFile raises attention (runtime_error)", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(
+      f.io,
+      { sessionName: "omo-worker@rig", nodeId: "omo-node", launchId: "launch-1" },
+      { runtime: "omo" },
+    );
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response",
+      id: "pi-runner-get-state",
+      data: { sessionId: "omo-session-1", sessionFile: null },
+    }));
+
+    expect(f.lines.join("\n")).toMatch(/\[omo-runner\] ERROR rpc get_state returned no session file/);
+    expect(f.lines.join("\n")).not.toContain("READY");
+    expect(f.sidecars).toEqual([]);
+    expect(f.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        hookEvent: "Notification",
+        subtype: "runtime_error",
+        runtime: "omo",
+      }),
+    ]));
   });
 });
 

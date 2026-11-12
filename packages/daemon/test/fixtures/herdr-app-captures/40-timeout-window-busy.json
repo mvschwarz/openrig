@@ -1,0 +1,20 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "timeout-window-busy",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"status\":true}\n"
+  },
+  "reply": {
+    "line": "{\"error\":\"the window did not answer\"}\n",
+    "json": {
+      "error": "the window did not answer"
+    }
+  },
+  "elapsed_ms": 5000,
+  "notes": "Sent while the window's main thread is held. The socket thread waits 5 s, then answers for the window: {\"error\":\"the window did not answer\"}."
+}

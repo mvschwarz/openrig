@@ -1,0 +1,117 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "pane-split-last-viewer",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"pane.split\",\"args\":{\"direction\":\"right\",\"pane\":\"pd82fe4e7183946941400159fd6f11245\",\"argv\":[\"sleep\",\"3600\"]}}\n"
+  },
+  "reply": {
+    "line": "{\"pane\":\"pfe11cbc31f2b9ff066663560dcb973b4\",\"terminal\":\"t6\"}\n",
+    "json": {
+      "pane": "pfe11cbc31f2b9ff066663560dcb973b4",
+      "terminal": "t6"
+    }
+  },
+  "elapsed_ms": 19,
+  "notes": "One viewer beside the status pane, so the next close is the tab's last non-status terminal.",
+  "effect": {
+    "status": {
+      "zoom": 1.0,
+      "font_size": 14.0,
+      "ui_font_size": 13.0,
+      "space": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+      "tab": "tb-capture-view",
+      "focused_pane": "pfe11cbc31f2b9ff066663560dcb973b4",
+      "layout": "main",
+      "agent": null,
+      "floats": {},
+      "overlays": [
+        "frame-welcome"
+      ],
+      "errors": []
+    },
+    "ls": {
+      "spaces": [
+        {
+          "id": "sp524ffbf49bcbe210ae2be30d9d1a8a76",
+          "name": "person-space",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": true,
+          "tabs": [
+            {
+              "id": "tb70e7f8353f6c88eabaec3285f582089c",
+              "name": "1",
+              "active": false,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t1",
+                  "pane": "pcf2a84c7b611d641d2d1e1c3964cd536",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            },
+            {
+              "id": "tb-capture-view",
+              "name": "2",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t3",
+                  "pane": "pd82fe4e7183946941400159fd6f11245",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                },
+                {
+                  "terminal": "t6",
+                  "pane": "pfe11cbc31f2b9ff066663560dcb973b4",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "sp-capture-rig",
+          "name": "work",
+          "folder": "<sandbox>/work",
+          "machine": null,
+          "active": false,
+          "tabs": [
+            {
+              "id": "tb-capture-status",
+              "name": "1",
+              "active": true,
+              "settled": false,
+              "terminals": [
+                {
+                  "terminal": "t2",
+                  "pane": "p15ba792b677c4588803c57f6b64d1bf8",
+                  "status": null,
+                  "app": null,
+                  "name": null,
+                  "sub_agents": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "recent": []
+    }
+  }
+}

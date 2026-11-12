@@ -18,7 +18,8 @@ describe("Slice-11 config — first-class + honest unconfigured (item 5)", () =>
     expect(configFileExists(home)).toBe(false);
     const cfg = loadConfig(home);
     expect(cfg.enabled).toBe(false);
-    expect(cfg.inboundDestination).toBe("operator-agent@kernel");
+    // Unchosen: the host's default receiving agent, resolved when the connector starts.
+    expect(cfg.inboundDestination).toBe("default-receiver");
     expect(cfg).not.toHaveProperty("alertTag");
   });
 

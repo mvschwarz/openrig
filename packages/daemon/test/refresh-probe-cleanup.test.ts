@@ -50,9 +50,20 @@ class FakeTmux {
       if (!found) throw new Error(`can't find session: ${target}`);
       return `${found[1].pane}|0|/tmp|80|24|1\n`;
     }
+    // The stop's identity read asks for the session id with its server's pid and start time.
+    if (command.startsWith("tmux display-message") && command.includes("#{pid}")) return byTarget() ? `${byTarget()![1].id}|4242|1700000000\n` : "\n";
     if (command.startsWith("tmux display-message") && command.includes("session_id")) return `${byTarget()?.[1].id ?? ""}\n`;
     if (command.startsWith("tmux display-message") && command.includes("pane_current_command")) return byTarget() ? "zsh\n" : "";
     if (command.startsWith("tmux capture-pane")) return byTarget() ? "user@host ~ % \n" : "";
+    if (command.startsWith("tmux if-shell -F") && command.includes("#{==:#{session_id},")) {
+      // A stop held to the session id and server it read: one branch runs, in the same command.
+      const found = byTarget();
+      const wantId = /#\{==:#\{session_id\},(\$\d+)\}/.exec(command)?.[1];
+      const same = found && found[1].id === wantId && command.includes("#{==:#{pid},4242}") && command.includes("#{==:#{start_time},1700000000}");
+      if (!same) return "openrig-stop-target-changed\n";
+      if (command.includes("kill-session")) this.sessions.delete(found[0]);
+      return "";
+    }
     if (command.startsWith("tmux if-shell -F")) {
       // Real tmux expands the format against the target session, then runs one branch in the same command.
       const found = byTarget();

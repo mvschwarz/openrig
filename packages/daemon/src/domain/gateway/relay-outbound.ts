@@ -719,7 +719,13 @@ export interface RelayAcceptedReceiptInfo {
 }
 
 export type ResolvedRelayOutboundProfile =
-  | { ok: true; connectorRef: string; url: string; outboundToken: string }
+  | {
+      ok: true;
+      connectorRef: string;
+      mode?: "push" | "pull";
+      url?: string | null;
+      outboundToken?: string | null;
+    }
   | { ok: false; reason: string };
 
 export interface RelayOutboundTransportOpts {
@@ -728,7 +734,7 @@ export interface RelayOutboundTransportOpts {
   outboundSeen: SeenStore;
   resolveProfile: (connectorRef: string) => ResolvedRelayOutboundProfile;
   onAccepted: (info: RelayAcceptedReceiptInfo) => void;
-  hasAcceptedReceipt?: (info: { qitemId: string; notificationKey: string }) => boolean;
+  hasAcceptedReceipt?: (info: { qitemId: string; notificationKey: string; deliveryId?: string }) => boolean;
   onTransportFailed?: (payload: OutboundPostPayload, failureClass: string, detail: string) => void;
   release?: (notificationKey: string) => void;
   fetchImpl?: FetchImpl;
@@ -742,7 +748,12 @@ export interface RelayOutboundTransport {
   wasAttempted: (decision: OutboundDecision) => boolean;
 }
 
-function buildExpectedReceipts(decision: OutboundDecision, p: RelayPayloadCarry, connectorRef: string, envelope: RelayOutboundEnvelope): RelayAcceptedReceiptInfo[] {
+export function buildRelayExpectedReceipts(
+  decision: OutboundDecision,
+  p: RelayPayloadCarry,
+  connectorRef: string,
+  envelope: RelayOutboundEnvelope,
+): RelayAcceptedReceiptInfo[] {
   if (p.deliveryDigestPost && Array.isArray(p.memberReceipts) && p.memberReceipts.length > 0) {
     return p.memberReceipts.map((m) => {
       const itemEntry = envelope.items?.find((it) => it.qitemId === m.qitemId && it.notificationKey === m.notificationKey);
@@ -847,14 +858,36 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       return { ok: false, class: "relay-envelope-missing", detail };
     }
 
-    const expectedReceipts = buildExpectedReceipts(decision, p, connectorRef, envelope);
+    const expectedReceipts = buildRelayExpectedReceipts(decision, p, connectorRef, envelope);
     const alreadyReceipted =
       expectedReceipts.length > 0 &&
       opts.hasAcceptedReceipt !== undefined &&
       expectedReceipts.every((r) => opts.hasAcceptedReceipt!({ qitemId: r.qitemId, notificationKey: r.notificationKey }));
+    const anyReceipted =
+      expectedReceipts.length > 0 &&
+      opts.hasAcceptedReceipt !== undefined &&
+      expectedReceipts.some((r) =>
+        opts.hasAcceptedReceipt!({
+          qitemId: r.qitemId,
+          notificationKey: r.notificationKey,
+          deliveryId: r.deliveryId,
+        }),
+      );
 
-    if (deliveredMap.has(decision.decisionId) || alreadyReceipted) {
+    if (deliveredMap.has(decision.decisionId) || alreadyReceipted || anyReceipted) {
       log(`relay delivery: decision ${decision.decisionId} already accepted — reconciling local guards without repost`);
+      try {
+        for (const receipt of expectedReceipts) {
+          if (opts.hasAcceptedReceipt?.({ qitemId: receipt.qitemId, notificationKey: receipt.notificationKey })) {
+            continue;
+          }
+          opts.onAccepted(receipt);
+        }
+      } catch (error) {
+        const detail = (error as Error).message || "relay acceptance receipt write failed";
+        log(`relay acceptance receipt write FAILED for ${p.qitemId ?? decision.decisionId}: ${detail} — retained for replay`);
+        return { ok: false, class: "receipt-failed", detail };
+      }
       return completeLocalGuards(decision, p, outboundSeenMap, deliveredMap);
     }
 
@@ -873,7 +906,8 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       return { ok: false, class: "stopped", detail: "relay transport stopped" };
     }
 
-    if (!attemptedMap.has(decision.decisionId)) {
+    const firstAttempt = !attemptedMap.has(decision.decisionId);
+    if (firstAttempt) {
       try {
         opts.attempted.mark(decision.decisionId, `attempted:${connectorRef}:${envelope.outcome}`);
       } catch (error) {
@@ -883,9 +917,20 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       }
     }
 
+    if (profile.mode === "pull") {
+      if (firstAttempt) {
+        log(`relay pull decision ${decision.decisionId} staged in dispatch buffer for connector "${connectorRef}"`);
+      }
+      return {
+        ok: false,
+        class: "relay-pull-awaiting-ack",
+        ...(firstAttempt ? { detail: "retained in dispatch buffer for pull outbox ack" } : {}),
+      };
+    }
+
     const res = await postRelayEnvelope({
-      url: profile.url,
-      outboundToken: profile.outboundToken,
+      url: profile.url ?? "",
+      outboundToken: profile.outboundToken ?? "",
       envelope,
       fetchImpl: opts.fetchImpl,
       timeoutMs: opts.timeoutMs,

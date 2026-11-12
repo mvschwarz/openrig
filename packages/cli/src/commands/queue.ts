@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
-import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
+import { sessionRigOf, isHumanSeatSessionRef, parseSessionName } from "../session-name.js";
 import { realDeps } from "./daemon.js";
 import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
@@ -544,7 +544,11 @@ function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSou
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   let remote = remoteHostOf(hostId);
-  if (remote && await daemonSelfHostId(client) === remote) remote = undefined;
+  const requestedRemote = remote;
+  const selfHostId = requestedRemote ? await daemonSelfHostId(client) : undefined;
+  if (remote && selfHostId === remote) remote = undefined;
+  const remoteConfirmed = requestedRemote !== undefined && typeof selfHostId === "string"
+    && selfHostId.trim().length > 0 && selfHostId !== requestedRemote;
   let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (remote) {
@@ -559,7 +563,7 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
-  return { reader, options };
+  return { reader, options, remote, remoteConfirmed };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -623,7 +627,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 
 /** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
  *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remoteConfirmed?: boolean }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   const target = await queueReadTarget(deps, client, hostId);
@@ -638,7 +642,8 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
+        remoteConfirmed: target.remoteConfirmed };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
@@ -888,6 +893,54 @@ function requireSeatSession(ignoredFlag: string): string | undefined {
     "actor is the seat's own identity.");
   process.exitCode = 1;
   return undefined;
+}
+
+/** The flags `rig queue update` takes that write more than a note. `--source` records a note only (#2866). */
+const UPDATE_STATE_WRITE_FLAGS = [
+  ["state", "--state"], ["reopen", "--reopen"], ["closureReason", "--closure-reason"], ["closureTarget", "--closure-target"],
+  ["closureRequiredAt", "--closure-required-at"], ["resolution", "--resolution"], ["blockedOn", "--blocked-on"],
+  ["wakeWatchdog", "--wake-watchdog"], ["wakeAfter", "--wake-after"], ["summary", "--summary"], ["evidenceRef", "--evidence-ref"],
+] as const;
+
+/**
+ * #2866: who appends a `rig queue update` note. Inside a managed seat it is the seat (the X-OpenRig-Session header the
+ * DaemonClient stamps), whatever --source says. Outside one, a routine can name itself with --source <name>@external:
+ * it rides the body as the declared actor, which the daemon records as claimed:v1 because no header names a seat, so
+ * the note is attributed to an external actor and never to a seat, and OPENRIG_SESSION_NAME is never forged. The
+ * external path records a note only, on the local daemon (the caller refuses a --host that resolves to another host).
+ * Returns the body actor to send (undefined = the header decides), or false after printing why nothing was sent.
+ */
+function resolveUpdateActor(source: string | undefined, opts: Record<string, unknown>): { actorSession?: string } | false {
+  const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
+  // Trimmed like the DaemonClient's header (senderIdentityHeaders): a blank env is no seat, so the two never disagree.
+  const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+  if (source !== undefined) {
+    const trimmed = source.trim();
+    if (parseSessionName(trimmed).kind !== "external") {
+      return refuse(`--source must be <name>@external (got '${source}'): it names a routine outside any seat, never a seat. Nothing was sent.`);
+    }
+    const writes = UPDATE_STATE_WRITE_FLAGS.filter(([key]) => opts[key] !== undefined).map(([, flag]) => flag);
+    if (opts.note === undefined || writes.length > 0) {
+      return refuse(`--source records a note only: pass --note and nothing else that writes${writes.length > 0 ? ` (got ${writes.join(", ")})` : ""}. ` +
+        "Changing a row needs a seat. Nothing was sent.");
+    }
+    if (seat) {
+      process.stderr.write(`warning: --source ${trimmed} is ignored: this runs in the seat ${seat}, which is the note's actor.\n`);
+      return {};
+    }
+    return { actorSession: trimmed };
+  }
+  if (seat) return {};
+  const noteOnly = opts.note !== undefined && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
+  return refuse(noteOnly
+    ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set, so " +
+      "there's no seat to act as: run this from a managed seat, or add --source <name>@external to record the note as " +
+      "that external routine (claimed, never a seat). --actor is ignored: the actor is the seat's own identity."
+    : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set " +
+      "OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --actor is ignored: the actor is " +
+      "the seat's own identity. Changing a row needs a seat, and notes need a seat; an external routine can pass " +
+      "--source <name>@external for a note only. A person answering an ask addressed to them (a host pairing approval, " +
+      "say) does it in the TUI (rig tui, then attention) or in Steering, not with this command.");
 }
 
 function extractRigName(sessionName: string): string | undefined {
@@ -1182,8 +1235,51 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           remoteHost: remoteHostOf(hostResolved.hostId) };
+        const emitScopeAdvisories = (created: Record<string, unknown>) => {
+          const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
+          for (const value of advisories) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            const advisory = value as { code?: unknown; message?: unknown };
+            if (typeof advisory.message !== "string") continue;
+            switch (advisory.code) {
+              case "scope_check_skipped":
+                console.error(`Note: ${advisory.message}`);
+                break;
+              case "unresolved_scope":
+              case "ambiguous_scope":
+              case "empty_scope":
+              case "conflicting_scope":
+              case "scope_check_unavailable":
+                console.error(`Warning: ${advisory.message}`);
+                break;
+            }
+          }
+        };
+        const emitRecoveredScopeAdvisory = (recoveredRemote: boolean) => {
+          const recoveredTags: string[] = [];
+          for (const raw of tags ?? []) {
+            if (recoveredTags.length >= 8) break;
+            if (!raw.startsWith("mission:") && !raw.startsWith("slice:")) continue;
+            const prefix = raw.startsWith("mission:") ? "mission:" : "slice:";
+            const body = raw.slice(prefix.length).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 120);
+            const sanitized = body ? `${prefix}${body}` : prefix;
+            if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
+          }
+          if (recoveredTags.length === 0) return;
+          // Only a confirmed different host ID justifies "forwarded";
+          // all other recovered outcomes remain neutral.
+          if (recoveredRemote) {
+            console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
+          } else {
+            console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
+          }
+        };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number) => {
+        const finish = async (created: Record<string, unknown>, status: number, recovered?: "neutral" | "remote") => {
+          if (status < 400) {
+            if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
+            else emitScopeAdvisories(created);
+          }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
@@ -1213,7 +1309,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200);
+              await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
               return;
             }
           }
@@ -1230,7 +1326,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200);
+            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
@@ -1299,11 +1395,20 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+After reading an existing remote successor, record its exact closure target, including the host:
+  rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
+The note can accompany the closing update or be appended later; a separate note is not required.
+A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
+For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
+`)
+    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
+      source?: string;
       state?: string;
       reopen?: boolean;
       closureReason?: string;
@@ -1338,11 +1443,21 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
-      if (!requireSeatSession("actor")) return;
+      // #2866: outside a seat, --source <name>@external names the routine appending a note (the declared body actor).
+      const actor = resolveUpdateActor(opts.source, opts);
+      if (!actor) return;
       const deps = getDeps();
       await withClient(deps, async (local) => {
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        if (actor.actorSession !== undefined && target.remote) {
+          // #2866: the other host would record the routine bare, indistinguishable from a routine of its own (a
+          // forwarded create stamps the origin; this path doesn't). A --host that resolves locally is fine.
+          console.error(`--source with --host ${target.remote} is not supported: that host would record ${actor.actorSession} ` +
+            "without the host it ran on. Run the routine on the host that holds the row. Nothing was sent.");
+          process.exitCode = 1;
+          return;
+        }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,
@@ -1356,6 +1471,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
+          ...actor,
         }, target.options);
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));

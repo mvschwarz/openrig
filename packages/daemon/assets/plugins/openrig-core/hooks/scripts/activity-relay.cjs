@@ -64,6 +64,20 @@ function conversationFields(providerPayload, env) {
   };
 }
 
+// The prompt the harness received at UserPromptSubmit, as a fingerprint and byte length, with Claude's own prompt id
+// when it sends one: enough for the daemon to match it to a message OpenRig wrote, without the prompt leaving this
+// process. Any other event, or a prompt that isn't a string, adds nothing.
+function promptBoundaryFields(hookEvent, providerPayload) {
+  if (hookEvent !== "UserPromptSubmit" || typeof providerPayload.prompt !== "string") return {};
+  const bytes = Buffer.from(providerPayload.prompt, "utf8");
+  const nativePromptId = firstString(providerPayload.prompt_id);
+  return {
+    promptSha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    promptBytes: bytes.length,
+    ...(nativePromptId && /^[A-Za-z0-9_-]{1,128}$/.test(nativePromptId) ? { nativePromptId } : {}),
+  };
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
@@ -127,9 +141,134 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
       && (providerPayload.agent_id == null || firstString(providerPayload.agent_id))
       ? { hookAgentId: firstString(providerPayload.agent_id) } : {}),
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
+    ...promptBoundaryFields(hookEvent, providerPayload),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
+    ...limitResetField(runtime, hookEvent, subtype, providerPayload, now),
     ...conversationFields(providerPayload, env),
+  };
+}
+
+// #99: a Claude usage limit says when it resets only in its rendered text ("You've hit your weekly limit ·
+// resets Nov 10, 4pm (America/Sao_Paulo)"). The typed error still decides THAT the seat is limited; the text
+// is read here, on the seat's machine and in its time zone, only for WHEN, and only the instant leaves the
+// relay: never the text itself.
+function limitResetField(runtime, hookEvent, subtype, providerPayload, now) {
+  if (runtime !== "claude-code" || hookEvent !== "StopFailure" || subtype !== "rate_limit") return {};
+  for (const value of [providerPayload.last_assistant_message, providerPayload.error_details]) {
+    if (typeof value !== "string") continue;
+    const resetsAt = claudeLimitResetAt(value.slice(0, 2000), now());
+    if (resetsAt) return { resetsAt };
+  }
+  return {};
+}
+
+const RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const RESET_EPOCH_RE = /usage limit reached\|(\d{10})\b/i;
+// Each unit must be a whole word ("2 months" is not "2 m"), and a "resets in" fragment is read only this way.
+const RESET_IN_LEAD_RE = /\bresets?\s+in\b/i;
+const RESET_IN_RE = /\bresets?\s+in\s+(?:(\d+)\s*(?:d|days?)\b\s*)?(?:(\d+)\s*(?:h|hrs?|hours?)\b\s*)?(?:(\d+)\s*(?:m|mins?|minutes?)\b)?/i;
+// A zone, when the text opens one, must be closed: "4pm (Not/AZone" is truncated, not local time.
+const RESET_AT_RE = /\bresets?\s+(?:at\s+|on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*(\()([^)\n]{0,64})(\))?)?/i;
+
+/** The reset instant a Claude usage-limit message states, as an ISO string, or null when it states none
+ *  this can read. A wall-clock time without a zone is the seat's local time, which is what Claude renders. */
+function claudeLimitResetAt(text, nowDate) {
+  const nowMs = nowDate.getTime();
+  if (!Number.isFinite(nowMs) || typeof text !== "string") return null;
+  let resetMs = null;
+  const epoch = RESET_EPOCH_RE.exec(text);
+  if (epoch) {
+    resetMs = Number(epoch[1]) * 1000;
+  } else if (RESET_IN_LEAD_RE.test(text)) {
+    const relative = RESET_IN_RE.exec(text);
+    // The whole fragment must be read: nothing numeric may follow what was, across a separator either
+    // ("in 2h 30x", "in 2h, 30x" and "in 2h and 30x" are not two hours).
+    if (!relative || !(relative[1] || relative[2] || relative[3])
+      || /^(?:\s|[,;&+]|and\b)*\d/i.test(text.slice(relative.index + relative[0].length))) return null;
+    resetMs = nowMs + ((Number(relative[1] || 0) * 24 + Number(relative[2] || 0)) * 60 + Number(relative[3] || 0)) * 60_000;
+  } else {
+    const wall = RESET_AT_RE.exec(text);
+    if (wall) resetMs = wallClockReset(wall, nowMs);
+  }
+  if (resetMs === null || !Number.isFinite(resetMs) || resetMs <= nowMs || resetMs > nowMs + RESET_MAX_MS) return null;
+  return new Date(resetMs).toISOString();
+}
+
+function wallClockReset(match, nowMs) {
+  const [, monthName, day, hourText, minuteText, meridiem, zoneOpen, zoneText, zoneClose] = match;
+  if (zoneOpen && (!zoneClose || !zoneText.trim())) return null; // a truncated or empty zone: no reset
+  const hour12 = Number(hourText);
+  const minute = Number(minuteText || 0);
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = (hour12 % 12) + (meridiem.toLowerCase() === "pm" ? 12 : 0);
+  const zone = zoneText ? zoneText.trim() : null;
+  let toUtc;
+  try {
+    toUtc = zone ? zonedClock(zone) : localClock();
+  } catch {
+    return null; // a zone this runtime doesn't know: no reset rather than a guessed one
+  }
+  const today = toUtc.partsAt(nowMs);
+  if (monthName) {
+    const month = MONTHS.indexOf(monthName.toLowerCase());
+    if (month < 0) return null;
+    for (const year of [today.year, today.year + 1]) {
+      if (!isCalendarDay(year, month, Number(day))) continue; // "Feb 30" names no day; never roll it into March
+      const at = toUtc.instant(year, month, Number(day), hour, minute);
+      if (Number.isNaN(at)) return null;
+      if (at > nowMs) return at;
+    }
+    return null;
+  }
+  const at = toUtc.instant(today.year, today.month, today.day, hour, minute);
+  if (Number.isNaN(at)) return null; // ambiguous today: never advance a day on a guess
+  return at > nowMs ? at : toUtc.instant(today.year, today.month, today.day + 1, hour, minute);
+}
+
+function isCalendarDay(year, month, day) {
+  return Number.isInteger(day) && day >= 1 && day <= new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+function localClock() {
+  return wallClock(
+    (ms) => { const d = new Date(ms); return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate(), hour: d.getHours(), minute: d.getMinutes() }; },
+    (ms) => -new Date(ms).getTimezoneOffset() * 60_000,
+  );
+}
+
+function zonedClock(timeZone) {
+  const format = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "numeric",
+    day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+  const partsAt = (ms) => {
+    const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((part) => [part.type, Number(part.value)]));
+    return { year: parts.year, month: parts.month - 1, day: parts.day, hour: parts.hour, minute: parts.minute, second: parts.second };
+  };
+  const offsetAt = (ms) => {
+    const p = partsAt(ms);
+    return Date.UTC(p.year, p.month, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000;
+  };
+  return wallClock(partsAt, offsetAt);
+}
+
+/** A clock whose instant() is the one moment a wall time names, or NaN when it names none (skipped by a DST jump) or
+ *  two (repeated by a DST fall-back): the message doesn't say which, so no reset rather than a guess a day off. */
+function wallClock(partsAt, offsetAt) {
+  return {
+    partsAt,
+    instant: (year, month, day, hour, minute) => {
+      const asUtc = Date.UTC(year, month, day, hour, minute);
+      const want = new Date(asUtc); // normalizes a day past the month's end (tomorrow)
+      const matches = new Set();
+      for (const probe of [asUtc - 14 * 3600_000, asUtc, asUtc + 14 * 3600_000]) {
+        const candidate = asUtc - offsetAt(probe);
+        const p = partsAt(candidate);
+        if (p.year === want.getUTCFullYear() && p.month === want.getUTCMonth() && p.day === want.getUTCDate()
+          && p.hour === want.getUTCHours() && p.minute === want.getUTCMinutes()) matches.add(candidate);
+      }
+      return matches.size === 1 ? [...matches][0] : NaN;
+    },
   };
 }
 
@@ -375,6 +514,7 @@ if (require.main === module) {
 
 module.exports = {
   buildOpenRigPayload,
+  claudeLimitResetAt,
   claimFirstLaunchHook,
   buildSessionIdentityPayload,
   parseJson,

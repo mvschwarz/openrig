@@ -84,6 +84,8 @@ export function attentionRoutes(): Hono {
           ...(!toPerson && q.state === "blocked" && q.blockedOn && isHumanSeatSessionRef(q.blockedOn) ? { answer: { verb: "resolve" as const, actorSession: actorFor(q.blockedOn) } } : {}),
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
+          // A pairing request is also decided directly on this host's settings page, opened on this request (its row).
+          ...(q.evidenceRef?.startsWith("pair-request:") ? { settingsLink: { category: "instance", focus: q.qitemId, label: "Open pairing settings (Approve or Deny directly)" } } : {}),
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
         const unbound = noConnector(toPerson ? q.destinationSession : q.blockedOn);
         const notSent = unbound || quiet.has(q.qitemId);

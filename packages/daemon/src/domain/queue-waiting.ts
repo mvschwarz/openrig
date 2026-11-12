@@ -1,4 +1,5 @@
 import { resolveEscalationOwner, hasConsumedEscalationHop } from "./escalation-owner.js";
+import { isTypedGateBlocker } from "./queue-blocker.js";
 import type Database from "better-sqlite3";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -142,7 +143,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const row = held && held.qitem_id === id ? held : statements.statement(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at, tags
     FROM queue_items WHERE qitem_id = ?`).get(id) as WaitingRow | undefined;
   if (!row) return null;
-  const blocker = row.blocked_on?.startsWith("qitem-") ? statements.statement(
+  const blocker = row.blocked_on && !isTypedGateBlocker(row.blocked_on) ? statements.statement(
     "SELECT destination_session, state FROM queue_items WHERE qitem_id = ?",
   ).get(row.blocked_on) as { destination_session: string; state: string } | undefined : undefined;
   let recoveryOwner: string | null = null;
@@ -151,7 +152,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const subject = row.blocked_on ? blocker?.destination_session ?? row.blocked_on : row.destination_session;
   let observed: ReturnType<WaitingActivityReader> = null;
   try { observed = readActivity?.(subject) ?? null; } catch { /* unavailable remains unknown */ }
-  const meaningful = meaningfulFor(db, row.blocked_on?.startsWith("qitem-") ? row.blocked_on : id, reads);
+  const meaningful = meaningfulFor(db, blocker ? row.blocked_on! : id, reads);
   const sweepInterval = sweepSeconds();
   const view: WaitingView = {
     obligation: id, owner: row.destination_session, state: row.state, actionableSince: row.state === "pending" ? pendingSince(db, id, statements) : null,
@@ -178,10 +179,11 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
       intervalSeconds: timer.interval_seconds, scanIntervalSeconds: timer.scan_interval_seconds, lastEvaluationAt: timer.last_evaluation_at }) : null;
+    const liveBlocker = blocker && ["pending", "in-progress", "blocked"].includes(blocker.state);
     view.nextBackstop = timer ? {
       owner: row.destination_session, mechanism: `watchdog:${timer.job_id}`, intervalSeconds: timer.interval_seconds,
       dueAt: new Date(timerDue ?? Date.now()).toISOString(),
-    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
+    } :{ owner: liveBlocker ? blocker.destination_session : row.destination_session, mechanism: liveBlocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: liveBlocker ? sweepInterval : null };
     if (timer) {
       let notice: { at: string; deliveryStatus: string } | undefined;
       try {

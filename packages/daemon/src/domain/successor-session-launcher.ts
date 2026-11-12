@@ -116,6 +116,11 @@ export type SuccessorLaunchResult =
       message: string;
       /** True once the predecessor process has been replaced in its pane. */
       replacementStarted: boolean;
+      /** The pane the successor was being started in, once it is resolved (start_agent failures). */
+      tmuxPane?: string;
+      /** True when the harness launch was sent into the pane and only readiness failed (#2985): the successor may
+       * still come up there, and it is not adopted. */
+      successorLaunched?: boolean;
     };
 
 export class SuccessorSessionLauncher {
@@ -293,11 +298,14 @@ export class SuccessorSessionLauncher {
     // 3. Route the successor through REAL runtime startup (launchHarness send-keys + readiness) so it
     //    becomes a LIVE, READY agent in the reused pane BEFORE it can be committed. UNWIND INVARIANT:
     //    on ANY launch/readiness failure we do NOT killSession the preserved seat — that would destroy
-    //    the retiree's recoverable state. We return the structured failure and leave the re-wakeable
-    //    shell in the pane; commit never runs, so the binding is not repointed.
+    //    the retiree's recoverable state. We return the structured failure; commit never runs, so the binding is
+    //    not repointed. When the harness launch was already sent and only readiness failed, the pane is NOT left as
+    //    a bare shell: the successor may still come up there, unadopted (#2985). The failure says so, so the caller
+    //    can tell the operator that a retry would end it.
     const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration);
     if (!started.ok) {
-      return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true };
+      return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
+        tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true } : {}) };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
@@ -386,7 +394,7 @@ export class SuccessorSessionLauncher {
     forkSource?: ForkSource,
     launchGeneration?: string | null,
     staged?: StagedLaunch,
-  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string }> {
+  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -472,9 +480,9 @@ export class SuccessorSessionLauncher {
     // createSession already succeeded (adapter/socket/permission errors rethrow).
     // A thrown exception must NOT reject createSuccessor before its kill/unwind
     // runs (that would LEAK the unmanaged successor + surface an unstructured 500).
-    // Catch it here and return a STRUCTURED ok:false so the caller kills the
-    // just-created session (killBestEffort) and fails loudly at step=start_agent —
-    // exactly like a returned readiness failure.
+    // Catch it here and return a STRUCTURED ok:false so the caller fails loudly at
+    // step=start_agent, exactly like a returned readiness failure. Nothing kills the
+    // pane (unwind invariant above): the launched successor may still be running there.
     let readiness: ReadinessResult;
     try {
       readiness = await this.waitForReady(adapter, binding);
@@ -483,6 +491,7 @@ export class SuccessorSessionLauncher {
         ok: false,
         code: "successor_readiness_failed",
         message: `Successor readiness probe threw: ${err instanceof Error ? err.message : String(err)}`,
+        launched: true,
       };
     }
     if (!readiness.ready) {
@@ -490,6 +499,7 @@ export class SuccessorSessionLauncher {
         ok: false,
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
         message: `Successor did not become a ready agent: ${readiness.reason ?? "readiness timeout"}`,
+        launched: true,
       };
     }
 

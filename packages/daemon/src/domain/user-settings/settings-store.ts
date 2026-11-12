@@ -134,6 +134,8 @@ export const SETTINGS_VALID_KEYS = [
   // dispatch ACK §4: allowlist-only edit; no migrations / new
   // endpoints / event types.
   "agents.advisor_session",
+  // The default receiving agent: reads what a person answers when nothing else reads it (resolveDefaultReceiver), and the
+  // agent a dead seat's recovery reaches. Unset means the kernel operator, when this host has that seat.
   "agents.operator_session",
   // Explicit operator override; unset means discover the registered human.
   "workspace.operator_seat_name",
@@ -193,6 +195,7 @@ export const SETTINGS_VALID_KEYS = [
   "terminal.tmux_server",
   // The managed ~/.tmux.conf block's history-limit; written by `rig setup` (CLI), twin of the CLI key.
   "terminal.history_limit",
+  "terminal.fixed_geometry",
   "terminal.inherit_tmux_environment",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
@@ -340,6 +343,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.fixed_geometry": { primary: "OPENRIG_TERMINAL_FIXED_GEOMETRY" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
@@ -448,6 +452,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.tmux_server": ["terminal", "tmuxServer"],
   "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.fixed_geometry": ["terminal", "fixedGeometry"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
@@ -766,6 +771,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "terminal.status_bar": return false;
     case "terminal.tmux_server": return "inherit";
     case "terminal.history_limit": return 10000;
+    case "terminal.fixed_geometry": return false;
     case "terminal.inherit_tmux_environment": return false;
     case "output.compact": return false;
     case "output.whoami_peers": return 8;

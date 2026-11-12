@@ -132,10 +132,12 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     const served = await listen();
     const a = await connect(served.url, A);
     const b = await connect(served.url, B);
-    const team = await a("rig_team", { rigId: RIG });
+    const team = await a("rig_team");
     expect(team.isError).toBe(false);
     expect(team.text).toContain(B.seat);
     expect(team.text).toContain(LEAD);
+    expect(team.structured.rig.name).toBe(RIG);
+    expect((await b("rig_team")).structured.rig.name).toBe(RIG);
 
     const sent = await a("rig_queue_create", { destination: B.seat, body: "Critique this plan.", tags: ["review"] });
     expect(sent.isError).toBe(false);

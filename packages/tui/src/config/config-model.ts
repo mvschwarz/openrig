@@ -1,5 +1,6 @@
 import { fieldLine, sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { FleetSnapshot, ViewState } from "../types.js";
+import { pairingLines } from "./pairing.js";
 
 export interface ConfigEntry {
   key: string;
@@ -51,6 +52,7 @@ const LABELS: Record<string, string> = {
   "workspace.projects_root": "Project folders", "workspace.specs_root": "Spec folders",
   "workspace.steering_path": "Steering file", "workspace.catalog_path": "Workspace catalog",
   "workspace.operator_seat_name": "Operator seat", "db.path": "Database",
+  "agents.default_receiver": "Default receiving agent", "agents.operator_session": "Receiving agent (chosen)",
   "topology.root": "Topology root", "context.root": "Context root", "skills.root": "Skills root",
   "ui.timezone": "Timezone", "workflow.exception_routing": "Exception routing",
   "queue.wake_retry_interval_seconds": "Retry interval", "queue.wake_retry_cap": "Retry limit",
@@ -231,6 +233,8 @@ function configContentLines(state: ViewState, snap: FleetSnapshot, width: number
     { text: `Next: ${snap.connections?.nextAction ?? "rig gateway status"}` },
     { text: "Guidance only; verification contacts Slack explicitly." },
   ], width));
+  // A pairing request is decided directly here (the Feed's pairing item opens this page on it).
+  if (category === "instance") lines.push(...pairingLines(snap.pairRequests, state.configFocus, width), { text: "" });
   if (category === "display") lines.push(...wrapDetailLines([{ text: `Client timezone: ${state.timeZone} (selected at TUI start)` }], width));
   lines.push({ text: `${entries.length} settings${state.filter ? ` matching “${state.filter}”` : ""} · Enter opens full value/source` }, { text: "" });
   lines.push({ text: "  SETTING / VALUE / SOURCE · env > file > default" });

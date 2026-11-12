@@ -1,0 +1,34 @@
+{
+  "capturedAt": {
+    "queue": "2026-11-10T10:22:58Z",
+    "benchmarkReadAt": "2026-11-10T10:22:58Z",
+    "benchmarkMeasuredAt": "2026-11-09T01:10:59Z"
+  },
+  "source": "a live daemon's queue (read-only) and the stuck_sweep.pass spans of a 45-agent benchmark",
+  "reroute": {
+    "actor": "system:queue-fallback",
+    "from": "qualidade-revisor@fabrica",
+    "to": "qualidade-revisor-2@fabrica",
+    "reason": "manual",
+    "note": "fallback-routed: qualidade-revisor@fabrica → qualidade-revisor-2@fabrica (manual)"
+  },
+  "reroutedSuccessorChainTail": "fallback-from:qualidade-revisor@fabrica",
+  "custody": {
+    "example": {
+      "source": {
+        "state": "done",
+        "closureReason": "handed_off_to",
+        "closureTarget": "coordenacao-orquestrador-tech@fabrica"
+      },
+      "successor": {
+        "destination": "coordenacao-orquestrador-tech@fabrica"
+      }
+    }
+  },
+  "benchmark": {
+    "source": "long-r3-F/sweep-ticks.json",
+    "passes": 28,
+    "wallMsPerRow": 7.628,
+    "wallMsPerRowMeans": "median of durationMs / rowsScanned over the passes: wall time, the pass's yields included"
+  }
+}

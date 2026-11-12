@@ -21,12 +21,17 @@
 //     per founder authorization 2026-05-10 (LICENSE only); 404 is the
 //     expected normal-state response until a separate publish authorization.
 
+import fs from "node:fs";
 import nodePath from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 export interface PluginVendorFs {
   readFile(path: string): string;
   writeFile(path: string, content: string): void;
+  /** A file's raw bytes. With `writeBytes`, a plugin's files are copied and compared byte for byte, so a binary file
+   *  (an icon) arrives intact. Optional: without them files are read and written as text. */
+  readBytes?(path: string): Uint8Array;
+  writeBytes?(path: string, content: Uint8Array): void;
   /** Copy raw bytes, failing if the recovery path already exists. */
   copyFileExclusive(source: string, target: string): void;
   exists(path: string): boolean;
@@ -160,7 +165,7 @@ export class PluginVendorService {
           const destPath = nodePath.join(targetDir, relPath);
           if (
             this.fs.exists(destPath) &&
-            hashContent(this.fs.readFile(destPath)) === hashContent(this.fs.readFile(srcPath))
+            hashContent(this.read(destPath)) === hashContent(this.read(srcPath))
           ) {
             this.preserveMode(srcPath, destPath);
           }
@@ -170,7 +175,7 @@ export class PluginVendorService {
       }
     }
 
-    const updates: Array<[string, string]> = this.fs.listFiles(sourceDir).map(rel => [rel, this.fs.readFile(nodePath.join(sourceDir, rel))]);
+    const updates: Array<[string, FileContent]> = this.fs.listFiles(sourceDir).map(rel => [rel, this.read(nodePath.join(sourceDir, rel))]);
     if (!this.preserveBeforeRefresh(targetDir, updates)) return;
     this.fs.mkdirp(targetDir);
 
@@ -179,23 +184,34 @@ export class PluginVendorService {
       const destPath = nodePath.join(targetDir, relPath);
       // Hash-skip: only write if content differs (idempotent re-runs). Reconcile mode even on
       // skip — a byte-identical copy staged earlier may still carry the wrong (default) mode.
-      if (this.fs.exists(destPath) && hashContent(this.fs.readFile(destPath)) === hashContent(content)) {
+      if (this.fs.exists(destPath) && hashContent(this.read(destPath)) === hashContent(content)) {
         this.preserveMode(srcPath, destPath);
         continue;
       }
       this.fs.mkdirp(nodePath.dirname(destPath));
-      this.fs.writeFile(destPath, content);
+      this.write(destPath, content);
       this.preserveMode(srcPath, destPath);
     }
   }
 
+  /** A plugin file as the fs reads it exactly: bytes when it can, else text. */
+  private read(path: string): FileContent {
+    return this.fs.readBytes ? this.fs.readBytes(path) : this.fs.readFile(path);
+  }
+
+  private write(path: string, content: FileContent): void {
+    if (typeof content === "string") this.fs.writeFile(path, content);
+    else if (this.fs.writeBytes) this.fs.writeBytes(path, content);
+    else this.fs.writeFile(path, Buffer.from(content).toString("utf-8"));
+  }
+
   /** Preserve every replaced file before touching a target, including its version authority. */
-  private preserveBeforeRefresh(targetDir: string, updates: Array<[string, string]>): boolean {
+  private preserveBeforeRefresh(targetDir: string, updates: Array<[string, FileContent]>): boolean {
     const backupDir = nodePath.join(nodePath.dirname(this.userPluginsDir), "backups", "managed-refresh", randomUUID());
     try {
       for (const [rel, content] of new Map(updates)) {
         const dest = nodePath.join(targetDir, rel);
-        if (!this.fs.exists(dest) || hashContent(this.fs.readFile(dest)) === hashContent(content)) continue;
+        if (!this.fs.exists(dest) || hashContent(this.read(dest)) === hashContent(content)) continue;
         const backup = nodePath.join(backupDir, rel);
         this.fs.mkdirp(nodePath.dirname(backup));
         this.fs.copyFileExclusive(dest, backup);
@@ -276,7 +292,7 @@ export class PluginVendorService {
           continue;
         }
       }
-      const updates: Array<[string, string]> = files.map(rel => [rel, this.fs.readFile(nodePath.join(sourceDir, rel))]);
+      const updates: Array<[string, FileContent]> = files.map(rel => [rel, this.read(nodePath.join(sourceDir, rel))]);
       if (!this.preserveBeforeRefresh(targetDir, [...updates, [GLOBAL_VENDOR_VERSION, `${sourceVersion}\n`]])) continue;
       this.fs.mkdirp(targetDir);
       for (const [relPath, content] of updates) {
@@ -284,13 +300,13 @@ export class PluginVendorService {
         const destPath = nodePath.join(targetDir, relPath);
         if (
           this.fs.exists(destPath) &&
-          hashContent(this.fs.readFile(destPath)) === hashContent(content)
+          hashContent(this.read(destPath)) === hashContent(content)
         ) {
           this.preserveMode(srcPath, destPath);
           continue;
         }
         this.fs.mkdirp(nodePath.dirname(destPath));
-        this.fs.writeFile(destPath, content);
+        this.write(destPath, content);
         this.preserveMode(srcPath, destPath);
       }
       this.fs.writeFile(versionMarker, `${sourceVersion}\n`);
@@ -339,6 +355,37 @@ export class PluginVendorService {
   }
 }
 
-function hashContent(content: string): string {
+/** A plugin file's content: its bytes, or its text from an fs that only reads text. */
+type FileContent = string | Uint8Array;
+
+/** The same digest for a text and for its UTF-8 bytes, so a text compare and a byte compare agree. */
+function hashContent(content: FileContent): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+/** The daemon's own filesystem for vendoring: files are copied and compared as bytes. */
+export function nodePluginVendorFs(): PluginVendorFs {
+  return {
+    readFile: (p) => fs.readFileSync(p, "utf-8"),
+    writeFile: (p, c) => fs.writeFileSync(p, c, "utf-8"),
+    readBytes: (p) => fs.readFileSync(p),
+    writeBytes: (p, c) => fs.writeFileSync(p, c),
+    copyFileExclusive: (src, dest) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
+    exists: (p) => fs.existsSync(p),
+    mkdirp: (p) => { fs.mkdirSync(p, { recursive: true }); },
+    listFiles: (dir) => {
+      const r: string[] = [];
+      /** Collect relative file paths recursively. */
+      const w = (d: string, pre: string) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name));
+          else r.push(pre ? nodePath.join(pre, e.name) : e.name);
+        }
+      };
+      w(dir, "");
+      return r;
+    },
+    statMode: (p) => fs.statSync(p).mode,
+    chmod: (p, m) => fs.chmodSync(p, m),
+  };
 }

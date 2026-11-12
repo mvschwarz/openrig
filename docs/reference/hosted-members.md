@@ -78,16 +78,25 @@ entry. The entry holds secret names, never values:
   - It's a pointer, not the row's body: the member reads the row under its grant.
   - A receiver should tolerate a repeated `qitem_id`. A ring accepted just before the daemon stops, before it's recorded,
     is rung again on recovery, the same at-least-once window a terminal wake has.
-  - It waits up to 10 seconds and doesn't follow redirects.
+  - It waits up to 10 seconds and doesn't follow redirects. A ring with no answer by then may still have reached the
+    trigger, so it reads unknown, not failed, and durable recovery doesn't repeat that recorded wake (other recovery paths
+    can still ring it again). The member sees the work when it next checks its rows.
 - **What the trigger should do:** start a run that lists the member's rows (`rig_queue_list` with `owned`) and claims its work.
 
 ## What the record says, and doesn't
 
 These facts stay separate on the row:
 - **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
-  ring, or `failed:webhook …`. Accepted means the tool's trigger answered, not that the member read the row.
-  - With no trigger, the result is `unroutable`, and OpenRig tells the person: the operator seat when it's a person, else whoever
-    created the row.
+  ring, `indeterminate:webhook …` when it didn't answer in time, or `failed:webhook …`. Accepted means the tool's trigger
+  answered, not that the member read the row.
+  - With no trigger, the result is `unroutable`. The member finds work by reading its own inbox and picks a row up by claiming
+    it, so a row gets no finding of its own. Work it leaves unclaimed past the stuck sweep's unclaimed age
+    (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default) is listed in one standing notice per member. The notice goes to
+    the operator seat when it's a person, else the rows' creator when they all share one, else the operator agent, else the
+    member itself. A notice to a creator lists only that creator's rows: when another creator's row joins, the notice moves to
+    the next recipient. It says whether the member has read its own pending inbox recently: a check-in, never a receipt or a
+    claim. A member with a declared route (a delegation parent or `escalates_to`) gets one finding per unclaimed row at that
+    route instead.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
@@ -95,13 +104,40 @@ These facts stay separate on the row:
 - **Result:** the closing transition and its resolution, or the handoff.
 - **Notification:** where a person asked, Slack's posted receipt. A posted notice isn't the person's acknowledgment.
 
-**On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`.
+**On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`. With an external grant offering `team/list`, call it without `rigId` to discover the connected team. It selects the grant's sole rig, or returns only its granted names when a choice is needed.
 OpenRig doesn't observe a hosted member between its calls, so it never reads idle. `rig roster find` shows it the same way.
 - **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
   - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
     `<OPENRIG_HOME>/mcp-http-presence.json`, beside the token file;
   - `lastWake`: its latest ring and the result, among its 50 most recent rows.
 - `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
+
+### Check-in status
+
+A connected assistant (a roster member marked `hosted: true`) checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
+when it lists the member's own work). Other calls it makes don't count yet. Its status compares its last check-in with
+what its roster entry states: a cadence (`check_in_minutes`), or that it checks in when a person asks it
+(`check_in_on_request: true`):
+
+| Status | Meaning |
+|---|---|
+| `checking-in` | its last check-in is no older than twice its stated cadence |
+| `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
+| `no-check-in-yet` | no check-in recorded for it on this daemon, whatever its entry states |
+| `on-request` | its entry says it checks in when a person asks it |
+| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so a revoked assistant reads overdue (or unknown, with no cadence) |
+| `unknown` | its entry states neither, its statement can't be used, or its check-ins couldn't be read; the reason says which, and its last check-in is shown. OpenRig assumes no cadence, so this never reads idle or overdue |
+
+Each place it's shown gives the evidence with it, for example `overdue: last check-in 2026-11-12T13:05:00Z, expected
+every 60 min; its schedule may be off or waiting for an approval`.
+
+A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
+anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
+isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
+gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
+reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats.
+When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
+line; when that notice is filed doesn't change.
 
 ## Revoke
 
@@ -141,8 +177,8 @@ and nothing else is offered:
   - **Queued:** the item exists and is `pending` with no claim.
   - **Picked up:** the receiver's claim (`in-progress`).
   - **Answered:** closed `done`, with the answer in `resolution`.
-  - Reading or listing an item records nothing, and nothing wakes an assistant, so an item stays queued until its receiver
-    claims it.
+  - Reading or listing an item records nothing on the item, and nothing wakes an assistant, so an item stays queued until its
+    receiver claims it. A member listing its own pending inbox records only a check-in time, which the notice above reads.
 
 ### A person answering the team's questions through their assistant
 
@@ -184,5 +220,6 @@ unusable `person` withholds only these two tools while the grant's other tools k
 ## Limits today
 
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
-  isn't rung, and its person is told instead.
+  isn't rung; work it leaves unclaimed past the unclaimed age is listed in one notice instead, which goes to its person, else
+  its rows' shared creator, the operator agent or the member itself.
 - **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).

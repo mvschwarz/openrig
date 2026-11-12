@@ -15,7 +15,7 @@ import { CLAUDE_ACTIVITY_RUNG_INVENTORY, type ActivityEvidence } from "../src/do
 const seat = "worker@fixture";
 const epoch = Date.parse("2026-01-01T00:00:00.000Z");
 const at = (seconds: number) => new Date(epoch + seconds * 1000);
-const retiredNote = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
+const retiredNote = "prompt escalation retired: the seat's prompt read clear; not a delivery receipt";
 const kinds = ["claimed-normal", "claimed-failed", "pending-failed", "pending-retained"] as const;
 type Kind = typeof kinds[number];
 const modes = ["no-alert", "newer-clear", "unknown", "manual-close-then-clear"] as const;

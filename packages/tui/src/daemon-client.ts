@@ -13,7 +13,14 @@ export interface DaemonClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string> | (() => Record<string, string>);
+  /** Headers for operator-gated writes (answering an ask), which the daemon checks against its operator bearer. Absent:
+   *  the same headers as every other call. */
+  actionHeaders?: Record<string, string> | (() => Record<string, string>);
 }
+
+/** What a person reads when the daemon refuses an answer for want of its operator bearer. Never carries a token. */
+export const ACTION_UNAUTHORIZED = "This daemon refused the answer without its operator bearer token, so nothing was recorded. "
+  + "Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, then answer again.";
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
@@ -69,16 +76,18 @@ export class DaemonClient {
   private readonly fetchImpl: typeof fetch;
   private optionalFetchImpl: typeof fetch;
   private readonly headerSource: Record<string, string> | (() => Record<string, string>);
+  private readonly actionHeaderSource: Record<string, string> | (() => Record<string, string>) | undefined;
 
   constructor(options: DaemonClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? process.env["OPENRIG_URL"] ?? "http://127.0.0.1:7433").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.optionalFetchImpl = this.fetchImpl;
     this.headerSource = options.headers ?? {};
+    this.actionHeaderSource = options.actionHeaders;
   }
 
   forPage(page: PageRead, signal: AbortSignal): DaemonClient {
-    const client = new DaemonClient({ baseUrl: this.baseUrl, headers: this.headerSource,
+    const client = new DaemonClient({ baseUrl: this.baseUrl, headers: this.headerSource, actionHeaders: this.actionHeaderSource,
       fetchImpl: page.fetch(this.fetchImpl, signal) });
     client.optionalFetchImpl = page.fetch(this.fetchImpl, signal, true);
     return client;
@@ -86,6 +95,11 @@ export class DaemonClient {
 
   private get headers(): Record<string, string> {
     return typeof this.headerSource === "function" ? this.headerSource() : this.headerSource;
+  }
+
+  private get actionHeaders(): Record<string, string> {
+    const source = this.actionHeaderSource;
+    return source === undefined ? this.headers : typeof source === "function" ? source() : source;
   }
 
   /** S19 AM-R18 — open the oracle's SSE event stream (FR-8: HTTP stays in THIS module).
@@ -124,13 +138,14 @@ export class DaemonClient {
     return res.json();
   }
 
-  private async post(route: string, body: unknown): Promise<unknown> {
+  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string } = {}): Promise<unknown> {
     const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
       method: "POST",
-      headers: { ...this.headers, "Content-Type": "application/json" },
+      headers: { ...(options.headers ?? this.headers), "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const parsed = await res.json().catch(() => null);
+    if (res.status === 401 && options.unauthorized) throw new Error(options.unauthorized);
     if (!res.ok) {
       const detail = parsed && typeof parsed === "object"
         ? "error" in parsed ? ` — ${(parsed as { error: unknown }).error}`
@@ -413,9 +428,18 @@ export class DaemonClient {
   reviewFleet() {
     return this.get(`/api/review/fleet`);
   }
+  /** This host's open pairing requests (read-only; nothing in it is a credential). */
+  pairRequests() { return this.get("/api/hosts/pair-requests") as Promise<{ requests: import("./config/pairing.js").PairRequest[] }>; }
+  /** Decide a pairing request directly, as `rig host approve|deny` does (POST /api/hosts/pair-decision), with the operator's
+   *  action headers. Returns the HTTP outcome; a timeout or a lost connection throws, and then the outcome is unknown. */
+  async pairDecision(request: string, decision: "approve" | "deny"): Promise<{ status: number; body: Record<string, unknown> | null }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/hosts/pair-decision`, { method: "POST",
+      headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
+    return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
+  }
   /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
   missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
-    return this.post("/api/mission-control/action", input) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
+    return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
       answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
   }
   attentionAggregate() {
@@ -444,12 +468,16 @@ export class DaemonClient {
    *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), or, from inside cmux, through
    *  `rig terminal open --provider cmux`. Preview with the provider it will use: its planId is the open's expected plan.
    *  A provider-less preview may pick cmux, whose plan the window opener never matches. */
-  async previewTerminal(view: string, provider: "herdr" | "rex" | "cmux" = "herdr"): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
-    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow. The cmux open sends
-    // no width, and a wide one changes the kernel view's layout and so its plan, so a cmux preview sends none either.
-    const columns = provider !== "cmux" && process.stdout.isTTY ? process.stdout.columns : undefined;
+  async previewTerminal(view: string, target: import("./terminals/open-window.js").WindowTarget | "herdr" | "rex" | "cmux" = { provider: "herdr" }): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
+    const t = typeof target === "string" ? { provider: target } : target;
+    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow. The cmux and
+    // herdr-app opens send no width (the view opens in that app's window, not at this TUI's width), and a wide one
+    // changes the kernel view's layout and so its plan, so their previews send none either.
+    const columns = t.provider !== "cmux" && t.provider !== "herdr-app" && process.stdout.isTTY ? process.stdout.columns : undefined;
     const viewport = Number.isSafeInteger(columns) && columns! > 0 ? `&viewportColumns=${columns}` : "";
-    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${provider}${viewport}`) as import("./terminals/terminal-model.js").TerminalPreview;
+    // herdr-app's plan belongs to one client: the preview names the same app home the open will.
+    const client = t.provider === "herdr-app" ? `&appHome=${encodeURIComponent(t.appHome)}` : "";
+    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${t.provider}${viewport}${client}`) as import("./terminals/terminal-model.js").TerminalPreview;
   }
   async openTerminal(view: string, expectedPlan?: string): Promise<TerminalOpenResult> {
     const result = (await this.post(`/api/terminal/open`, { view, ...(expectedPlan !== undefined ? { expectedPlan } : {}) })) as TerminalOpenResult;

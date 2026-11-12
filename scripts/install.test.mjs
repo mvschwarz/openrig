@@ -16,11 +16,11 @@ const nodeAdvice = [
   "https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md",
 ];
 
-function fixture(t, overrides = {}) {
+function fixture(t, overrides = {}, prefixName = "npm prefix with spaces") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-install-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, "tools");
-  const prefix = path.join(dir, "npm prefix with spaces");
+  const prefix = path.join(dir, prefixName);
   const modules = path.join(dir, "global modules with spaces");
   const checker = path.join(modules, "@openrig", "cli", "scripts", "check-abi.mjs");
   fs.mkdirSync(bin);
@@ -33,7 +33,14 @@ console.error("ABI native detail");
 process.exitCode = Number(process.env.ABI_EXIT || 0);
 `);
   const write = (file, body) => fs.writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  write(path.join(bin, "node"), 'printf "node:%s\\n" "$*" >>"$TEST_LOG"; if [ "$1" = --version ]; then printf "v22.22.1\\n"; else exec "$TEST_NODE" "$@"; fi');
+  write(path.join(bin, "node"), `
+if [ "$1" = -e ]; then
+  printf 'node:canonical-paths\\n' >>"$TEST_LOG"
+  if [ -n "$REALPATH_EXIT" ]; then exit "$REALPATH_EXIT"; fi
+else
+  printf 'node:%s\\n' "$*" >>"$TEST_LOG"
+fi
+if [ "$1" = --version ]; then printf 'v22.22.1\\n'; else exec "$TEST_NODE" "$@"; fi`);
   write(path.join(bin, "npm"), `
 printf 'npm:%s\n' "$*" >>"$TEST_LOG"
 case "$*" in
@@ -114,7 +121,7 @@ test("installed rig wins over stale PATH and a prefix containing spaces works", 
   const f = fixture(t);
   const r = f.run();
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup"]);
+  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup", "node:canonical-paths"]);
   assert.match(r.stdout, /choose providers, then rig up/);
   assert.match(r.stderr, /setup native error/);
 });
@@ -210,4 +217,77 @@ test("a setup that finishes ready keeps today's closing line and no summary", t 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Follow the next steps printed by rig setup/);
   assert.ok(!r.stderr.includes("SETUP NOT COMPLETE"), r.stderr);
+});
+
+for (const shell of ["/bin/zsh", "/bin/bash", ""]) test(`missing incoming rig gives a usable PATH line (${shell || "unknown shell"}) without editing profiles`, { skip: !!shell && !fs.existsSync(shell) }, t => {
+  const f = fixture(t, { SHELL: shell }, "prefix's $literal `name`");
+  fs.unlinkSync(path.join(f.bin, "rig"));
+  const profile = path.join(f.dir, ".zshrc");
+  fs.writeFileSync(profile, "# keep my settings\n");
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /rig was not found on the PATH inherited by this installer/);
+  assert.match(r.stdout, /No shell profile was edited/);
+  if (!shell) assert.match(r.stdout, /Shell not identified/);
+  const line = r.stdout.split("\n").find(s => s.startsWith("  export PATH="));
+  assert.ok(line, r.stdout);
+  // Run the exact printed line in the person's shell. Spaces, quotes and metacharacters stay literal.
+  const fixed = spawnSync(shell || "/bin/sh", ["-c", `${line}\ncommand -v rig`], { env: f.env, encoding: "utf8" });
+  assert.equal(fixed.status, 0, fixed.stderr);
+  assert.equal(fixed.stdout.trim(), path.join(f.prefix, "bin", "rig"));
+  assert.equal(fs.readFileSync(profile, "utf8"), "# keep my settings\n");
+});
+
+test("a prefix already first on the incoming PATH needs no fix", t => {
+  const f = fixture(t);
+  f.env.PATH = `${f.prefix}/bin:${f.env.PATH}`;
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /PATH check: installed rig is available/);
+  assert.ok(!r.stdout.includes("PATH needs attention"));
+});
+
+test("a stale rig is named, and fish gets its own PATH syntax", t => {
+  const f = fixture(t, { SHELL: "/usr/local/bin/fish" });
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(`The incoming PATH finds a different rig: ${f.bin}/rig`));
+  assert.match(r.stdout, /fish_add_path --prepend --move \(npm prefix -g\)\/bin/);
+  assert.ok(!r.stdout.includes("  export PATH="));
+});
+
+test("an incomplete setup still gives the PATH fix and preserves its exit", t => {
+  const f = fixture(t, { SETUP_EXIT: "43", SHELL: "/bin/zsh" });
+  fs.unlinkSync(path.join(f.bin, "rig"));
+  const r = f.run();
+  assert.equal(r.status, 43, r.stderr);
+  assert.match(r.stderr, /INSTALLED, SETUP NOT COMPLETE/);
+  assert.match(r.stdout, /PATH needs attention/);
+  assert.ok(!r.stdout.includes("Follow the next steps"));
+});
+
+for (const kind of ["directory", "executable"]) test(`a symlinked ${kind} on PATH resolves to the installed rig without a warning`, t => {
+  const f = fixture(t);
+  const alias = path.join(f.dir, "current link");
+  if (kind === "directory") fs.symlinkSync(path.join(f.prefix, "bin"), alias, "dir");
+  else {
+    fs.mkdirSync(alias);
+    fs.symlinkSync(path.join(f.prefix, "bin", "rig"), path.join(alias, "rig"));
+  }
+  f.env.PATH = `${alias}:${f.env.PATH}`;
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /PATH check: installed rig is available/);
+  assert.ok(!r.stdout.includes("PATH needs attention"), r.stdout);
+});
+
+for (const samePath of [true, false]) test(`failed canonical lookup keeps the string comparison (same path: ${samePath})`, t => {
+  const f = fixture(t, { REALPATH_EXIT: "47" });
+  if (samePath) f.env.PATH = `${f.prefix}/bin:${f.env.PATH}`;
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.includes("PATH needs attention"), !samePath);
+  assert.equal(r.stdout.includes("PATH check: installed rig is available"), samePath);
+  assert.equal(f.calls().includes("node:canonical-paths"), !samePath);
+  assert.ok(!r.stderr.includes("canonical"));
 });

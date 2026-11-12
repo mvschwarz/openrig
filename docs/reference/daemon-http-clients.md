@@ -44,14 +44,14 @@ in the case named:
 | `routeTimings` | With `eventLoop`. |
 | `slowOperations` | When the slow-operation recorder runs. |
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
-| `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. |
+| `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
 
 ## Bearer tokens
 
 The daemon reads two tokens from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
-  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`), and the `/api/rig-mode`
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), and the `/api/rig-mode`
   binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
   needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
 - **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
@@ -61,7 +61,9 @@ The daemon reads two tokens from its environment at start:
 
 A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
-or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it.
+or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
+approve|deny` and the TUI's answers to asks send `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also
+takes `--bearer`), and otherwise the terminal token; refused for want of it, they say what to set.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
@@ -208,3 +210,17 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   `?project`. When two missions have a slice folder of the same name, the daemon keeps the first one it finds:
   that one is listed and served, and the other doesn't appear in `GET /api/slices` at all. Keep slice names unique
   across missions, as [Project workspace](project-workspace.md) says.
+- **Queue state counts on `GET /api/slices`:** every list row has `queueCounts`, a current, uncapped count by
+  `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
+  the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
+  separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
+  `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
+  and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
+  tags identify exactly one physical slice with a resolved project and mission. Ambiguous matches count nowhere,
+  even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
+  mission never counts. Several `slice:` or `mission:` tags on one row count only when they all name the same
+  physical slice or mission (a slice's folder name and its frontmatter `id:`, say); a row that names two distinct
+  slices, missions or projects counts nowhere, while `qitemCount` can include it under several tagged slices,
+  subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
+  request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
+  resolution does not change the returned slice list or filters.

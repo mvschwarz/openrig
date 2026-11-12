@@ -187,6 +187,7 @@ export function composeView(
         paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         recoveryCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
         readOnly: m.readOnly,
+        host: m.host,
       });
       continue;
     }

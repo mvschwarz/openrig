@@ -23,16 +23,20 @@ import type { CommunityHarnessPreset } from "../domain/community-harness-presets
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
+import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
+import { PiCommunityRuntimeAdapter } from "./pi-community-runtime-adapter.js";
 
-interface CommunityHarnessAdapterDeps {
+export interface CommunityHarnessAdapterDeps {
   environmentStartup?: EnvironmentStartup;
-  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
+  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "capturePaneContent" | "listPanes">>;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command" | "resolveLaunchWrapper">;
   presetsDir?: () => string;
   /** Where launch-result records go (tests); defaults to $OPENRIG_HOME/state/launch-results. */
   launchResultRoot?: () => string;
   /** How long to wait for a launcher's record (tests). */
   launchResultWait?: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** The Pi adapter a `protocol: pi-rpc` preset runs through (its deps, with this preset's command). */
+  piAdapter?: PiRuntimeAdapter;
 }
 
 /**
@@ -284,17 +288,35 @@ function conversationName(session: string): string {
   return `openrig-${seat}-${randomBytes(4).toString("hex")}`;
 }
 
+/** Create the runtime adapter for an installed community harness preset. */
+export function createCommunityHarnessAdapter(
+  runtime: string,
+  deps: CommunityHarnessAdapterDeps,
+  piAdapter?: PiRuntimeAdapter,
+): RuntimeAdapter {
+  const found = loadCommunityHarnessPreset(runtime, deps.presetsDir?.() ?? communityHarnessesDir());
+  if (found.ok && found.preset.protocol === "pi-rpc") {
+    const pi = deps.piAdapter ?? piAdapter;
+    if (pi && typeof pi.getCommunityDeps === "function") {
+      return PiCommunityRuntimeAdapter.fromPiAdapter(pi, runtime, found.preset);
+    }
+    throw new Error(`Cannot initialize PiCommunityRuntimeAdapter for "${runtime}": Pi adapter is required`);
+  }
+  return new CommunityHarnessRuntimeAdapter(runtime, deps);
+}
+
 /**
  * The runtime adapter map, extended with community harnesses: a runtime name that isn't built in resolves to an
- * CommunityHarnessRuntimeAdapter while its preset is installed. The built-in entries are returned as they are, and the map's
- * own keys stay the built-ins.
+ * CommunityHarnessRuntimeAdapter (or PiCommunityRuntimeAdapter for pi-rpc harnesses) while its preset is installed.
+ * The built-in entries are returned as they are, and the map's own keys stay the built-ins.
  */
 export function withCommunityHarnesses<T extends Record<string, RuntimeAdapter>>(builtIns: T, deps: CommunityHarnessAdapterDeps): T {
+  const piAdapter = (deps.piAdapter ?? (builtIns["pi"] instanceof PiRuntimeAdapter ? builtIns["pi"] : undefined)) as PiRuntimeAdapter | undefined;
   const installed = (key: string | symbol): key is string =>
     typeof key === "string" && !Object.hasOwn(builtIns, key) && isCommunityHarnessRuntime(key)
       && loadCommunityHarnessPreset(key, deps.presetsDir?.() ?? communityHarnessesDir()).ok;
   return new Proxy(builtIns, {
-    get: (target, key, receiver) => installed(key) ? new CommunityHarnessRuntimeAdapter(key, deps) : Reflect.get(target, key, receiver),
+    get: (target, key, receiver) => installed(key) ? createCommunityHarnessAdapter(key, deps, piAdapter) : Reflect.get(target, key, receiver),
     has: (target, key) => Reflect.has(target, key) || installed(key),
   });
 }
@@ -308,10 +330,11 @@ const COMMUNITY_HARNESS_RESOLVER = Symbol("community-harness-resolver");
  * runtime merely matches an installed preset's name (a free-text self-attach) gets no adapter, as before.
  */
 export function withCommunityHarnessResolver<T extends Record<string, RuntimeAdapter>>(builtIns: T, deps: CommunityHarnessAdapterDeps): T {
+  const piAdapter = (deps.piAdapter ?? (builtIns["pi"] instanceof PiRuntimeAdapter ? builtIns["pi"] : undefined)) as PiRuntimeAdapter | undefined;
   Object.defineProperty(builtIns, COMMUNITY_HARNESS_RESOLVER, {
     enumerable: false,
     value: (runtime: string) => isCommunityHarnessRuntime(runtime) && loadCommunityHarnessPreset(runtime, deps.presetsDir?.() ?? communityHarnessesDir()).ok
-      ? new CommunityHarnessRuntimeAdapter(runtime, deps) : undefined,
+      ? createCommunityHarnessAdapter(runtime, deps, piAdapter) : undefined,
   });
   return builtIns;
 }

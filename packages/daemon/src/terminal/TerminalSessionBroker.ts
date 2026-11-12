@@ -15,8 +15,8 @@ import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_O
 // for the same session (the per-connection bug): a second viewer of one seat
 // fought the first for output. The broker fixes that: ONE tmux pipe per
 // session, MANY subscribers, output fanned out to all, each subscriber seeded
-// with a cursor-safe snapshot of the current screen on attach, fixed geometry
-// (no client-driven resize), honest session-death reporting to ALL subscribers,
+// with a cursor-safe snapshot of the current screen on attach, optional fixed geometry,
+// honest session-death reporting to ALL subscribers,
 // and full cleanup when the last subscriber leaves.
 
 const PIPE_PANE_POLL_MS = 50;
@@ -33,15 +33,9 @@ const DEFAULT_LIVENESS_MS = 2000;
 const MAX_HISTORY_BYTES = 64 * 1024;
 
 /**
- * Canonical fixed terminal geometry (FR-7). 90 cols (OPR.0.4.0.39, founder-directed):
- * Claude Code (Ink) + Codex CLI are RESPONSIVE TUIs that reflow to whatever width they
- * are given - they have no required width; 80 is the legacy fallback that users find
- * too narrow, so 90 sits comfortably above the 80 floor while being narrower than 120 so
- * the scaled static/live mirror reads bigger (more legible) in the topology grid cells.
- * 27 rows gives the classic-terminal 1.72:1 landscape shape (90x27 = ~650x378px, matching the canonical 80x24 aspect) (founder: classic terminal rectangle) while staying a workable agent-TUI height; subscribers fit/scroll/pan their
- * viewport but never resize the pane - so multiple viewers cannot shrink the session to
- * the smallest one. MUST stay in sync with the client mirror LIVE_TERMINAL_COLS
- * (packages/ui/.../terminal/terminal-geometry.ts) - the xterm grid must match the pane.
+ * Browser rendering grid and explicit fixed-geometry opt-in size. The default broker does not resize the
+ * agent PTY; native clients control it. Keep these browser grid values in sync with LIVE_TERMINAL_COLS/ROWS
+ * in packages/ui/src/terminal/terminal-geometry.ts. This does not make the browser a native sizing client.
  */
 export const CANONICAL_COLS = 90;
 export const CANONICAL_ROWS = 27;
@@ -79,6 +73,8 @@ export interface BrokerTmux {
 }
 
 export interface BrokerOptions {
+  /** Explicit web fixed-geometry opt-in. Default false; native clients otherwise own the PTY size. */
+  fixedGeometry?: boolean | (() => boolean);
   /** File-tail poll interval (ms). Default 50. */
   pollMs?: number;
   /** Session-liveness probe interval (ms). Default 2000. */
@@ -199,6 +195,7 @@ export class TerminalSessionBroker {
   // The window this broker pinned, by its immutable id, and listed itself as a holder of. When the last live holder lets
   // go, the window gets back its own `window-size`, so native clients (Herdr, attach) size it again. Null: nothing held.
   private pinnedWindow: string | null = null;
+  private readonly fixedGeometry: boolean;
   private readonly holder = newPinHolder();
 
   constructor(sessionName: string, tmux: BrokerTmux, opts: BrokerOptions = {}) {
@@ -208,6 +205,7 @@ export class TerminalSessionBroker {
     this.livenessMs = opts.livenessMs ?? DEFAULT_LIVENESS_MS;
     this.cols = opts.cols ?? CANONICAL_COLS;
     this.rows = opts.rows ?? CANONICAL_ROWS;
+    this.fixedGeometry = typeof opts.fixedGeometry === "function" ? opts.fixedGeometry() : opts.fixedGeometry === true;
     this.maxHistoryBytes = opts.maxHistoryBytes ?? MAX_HISTORY_BYTES;
     this.onEmpty = opts.onEmpty;
   }
@@ -420,19 +418,14 @@ export class TerminalSessionBroker {
     const alive = await this.tmux.hasSession(this.sessionName);
     if (!alive) return { ok: false, code: 1008, reason: `session not found: ${this.sessionName}` };
 
-    // FR-7 fixed geometry: window-size manual so tmux will NOT auto-shrink the
-    // window to the smallest attached client; then the canonical width/height
-    // ONCE. Deliberately NOT aggressive-resize, which does the opposite. The
-    // window's own value is read first and recorded on the window with this
-    // broker as a holder, and given back when the last holder lets go. The window
-    // is named by its id, so the pin and the give-back reach the same window even
-    // after a client switches windows, and the read, record and pin run in its
-    // queue (window-pin.ts), so a readable capture in this daemon takes its turn.
-    // Without a window id or a readable value, the session's window is pinned as
-    // before with nothing to give back.
-    const window = (await this.tmux.readWindow?.(this.sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.id ?? null;
-    const pinned = await (window ? withWindowPin(window, () => this.pinWindow(window)) : this.pinWindow(null));
-    if (!pinned || this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // dispose gives it back
+    // Fixed web geometry is explicit opt-in. Record each holder on the immutable window id;
+    // the last release unsets the temporary override so native clients size it again.
+    // Unknown sizing is observed without making an untracked manual pin.
+    if (this.fixedGeometry) {
+      const window = (await this.tmux.readWindow?.(this.sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.id ?? null;
+      const pinned = await (window ? withWindowPin(window, () => this.pinWindow(window)) : this.pinWindow(null));
+      if (!pinned || this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" };
+    }
 
     const outputPath = path.join(
       os.tmpdir(),
@@ -461,11 +454,12 @@ export class TerminalSessionBroker {
   private async pinWindow(window: string | null): Promise<boolean> {
     const sizing = window ? await readPinSizing(this.tmux, window) : null;
     if (this.torndown) return false; // disposed: pin nothing
-    if (sizing) {
-      this.pinnedWindow = sizing.window;
-      await recordPin(this.tmux, sizing, this.holder);
-    }
-    const target = sizing?.window ?? this.sessionName;
+    if (!sizing) return true; // Unknown geometry: observe normally rather than leave an untracked manual pin.
+    // A person's fixed window is not an OpenRig pin to take over or unset.
+    if (sizing.live === "manual" && !(await this.tmux.readWindow?.(sizing.window, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.userOption.trim()) return true;
+    this.pinnedWindow = sizing.window;
+    if (!(await recordPin(this.tmux, sizing, this.holder))) { this.pinnedWindow = null; return true; }
+    const target = sizing.window;
     await this.tmux.setWindowOption(target, "window-size", "manual").catch(() => {});
     await this.tmux.resizeWindow(target, this.cols, this.rows).catch(() => {});
     return true;

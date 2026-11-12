@@ -91,6 +91,7 @@ import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-pla
 import { compactCommand, type CompactDeps } from "./commands/compact.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
+import { networkCommand, type NetworkDeps } from "./commands/network.js";
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
@@ -168,6 +169,7 @@ export interface ProgramDeps {
   compactDeps?: CompactDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
+  networkDeps?: NetworkDeps;
   rigModeDeps?: RigModeDeps;
   startupProofDeps?: StartupProofDeps;
   healthDeps?: HealthDeps;
@@ -269,6 +271,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
   program.addCommand(handoverCommand(depsOverride?.seatDeps));
+  program.addCommand(networkCommand(depsOverride?.networkDeps));
   program.addCommand(startupProofCommand(depsOverride?.startupProofDeps));
   // release-0.3.2 slice 12 — rig scope CLI primitive.
   program.addCommand(scopeCommand());

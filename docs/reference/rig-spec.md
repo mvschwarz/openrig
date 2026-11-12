@@ -695,7 +695,7 @@ first turn. Check `/status` after a real tool turn to confirm the authentication
 
 For Codex, a saved native API-key login is selected with the existing `--to-account <name>`
 path, exactly like a saved subscription login. Prepare it using native `codex login --with-api-key`
-with the key on stdin, then `rig auth save --codex-home <home> <name>`; never put a key in argv.
+with the key on stdin, then `CODEX_HOME=<home> rig auth save <name>`; never put a key in argv.
 Use the seat's existing home. Preparing a login replaces that home's active credentials, so do it
 before running seats there, or prepare/import a native auth profile separately. Switches preserve
 an outgoing credential copy and report peers sharing the home. A native keyring or administrator
@@ -1061,7 +1061,7 @@ This is human-authored (you choose the pod/member IDs) and system-validated (the
 | `spawned_by` | Source was spawned by target; the target launches first. Constrains launch order. | Child → parent in hierarchical topologies |
 | `can_observe` | Source can observe target's output. Does NOT constrain launch order. | Reviewer → implementer, monitor → worker |
 | `collaborates_with` | Peer collaboration relationship. Does NOT constrain launch order. | Co-equal peers working together |
-| `escalates_to` | Fallback queue escalation for a seat without a declared delegation parent. Does NOT constrain launch order. | Local member or same-daemon `pod-member@rig` address |
+| `escalates_to` | Fallback queue escalation for a seat without a single declared delegation parent (none, or several). Does NOT constrain launch order. | Local member or same-daemon `pod-member@rig` address |
 
 A named `escalates_to` target may be in another rig on the same daemon and need not exist at import time.
 See [fallback escalation across rigs](edge-types.md#fallback-escalation-across-rigs) for precedence, single-hop delivery,
@@ -1127,6 +1127,20 @@ Removal also supports `--plan` and `--json`. Removing an edge that is already go
 and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports not found, not success.
 Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
+
+Managed Claude compaction also uses the delegation parent for two diagnostic notices: repeated
+unsent preparation attempts and repeated restore-delivery failures. If the seat has no recorded
+parent session (including when it is outside the recorded topology), these notices go to the
+configured registered human operator, or the default registered person when no operator is set.
+If no registered person can be selected, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
+preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+to the seat; declare one when an agent should receive these notices. With multiple parents, the
+parent session with the latest creation time is selected; `escalates_to` is not used for these
+notices. The restore-delivery notice to a person omits local paths and
+points to `rig compact <seat> --state` on the host; the preparation notice includes its state-file
+evidence reference and attempt details. Treat these notices and any chat relay accordingly. Existing
+notices retain their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's

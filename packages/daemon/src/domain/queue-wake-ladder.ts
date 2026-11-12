@@ -1,6 +1,5 @@
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
-import { shellQuote } from "../adapters/shell-quote.js";
 import type { HookReviewObservation } from "./kernel-hook-review.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
@@ -13,6 +12,7 @@ import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
+import { readWakeOutcome } from "./connection-contract.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
 // silently park: today one failed nudge is recorded and nothing follows (the measured
 // dominant 0.5.3 failure class — a perfect surviving packet, a recipient never woken).
@@ -384,28 +384,44 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
 type WakeMode = "failed" | "unconfirmed" | "held";
 
 function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
-  if (!lastNudgeResult) return null;
-  if (lastNudgeResult.startsWith("failed:")) return "failed";
-  // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
-  // unclaimed baton keeps a retry path instead of stranding behind a terminal
-  // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
-  // claimed parked-owner arm's retry readback still selects `failed:%` only, so
-  // admitting retained there would make recovery OWN a row that nothing retries.
-  // Retry behaviour, as it actually runs: the first retry re-probes the guard and
-  // records a fresh attempt; later retries reuse the same delivery id, whose
-  // retained readback returns `retained` again even after the guard has cleared —
-  // so the row re-probes once and then escalates rather than looping probes.
-  // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
-  // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
-  if (lastNudgeResult === "retained:typing_guard") return "held";
-  if (lastNudgeResult.startsWith("retained:")) return "failed";
-  if (
-    lastNudgeResult === "delivered-ack-pending" ||
-    lastNudgeResult.startsWith("indeterminate:") ||
-    lastNudgeResult.startsWith("gateway-owned:")
-  )
-    return "unconfirmed";
-  return null; // verified (or unknown vocabulary) — never enters the ladder
+  // A claimed row's unconfirmed result is presented as `claimed` (presentedNudgeResult): the claim is pickup, which
+  // outranks any wake outcome.
+  if (lastNudgeResult === "claimed") return null;
+  const outcome = readWakeOutcome(lastNudgeResult);
+  if (!outcome) return null;
+  switch (outcome.fact) {
+    // Nothing reached the seat, so a retry can't double-deliver. An address no route can carry (`none`) has nothing
+    // to retry; its own notice covers it.
+    case "not-delivered":
+      return outcome.route === "none" ? null : "failed";
+    // A webhook failure after the POST: its effect is unknown, but it keeps the failed path and retry policy it has
+    // always had.
+    case "failed-effect-unknown":
+      return "failed";
+    // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
+    // unclaimed baton keeps a retry path instead of stranding behind a terminal
+    // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
+    // claimed parked-owner arm's retry readback still selects `failed:%` only, so
+    // admitting retained there would make recovery OWN a row that nothing retries.
+    // Retry behaviour, as it actually runs: the first retry re-probes the guard and
+    // records a fresh attempt; later retries reuse the same delivery id, whose
+    // retained readback returns `retained` again even after the guard has cleared —
+    // so the row re-probes once and then escalates rather than looping probes.
+    // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
+    // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
+    case "held":
+      return outcome.heldBy === "typing-guard" ? "held" : "failed";
+    // A rendered terminal wake, or a hosted trigger that took the ring (the stuck sweep owns a hosted member's
+    // unclaimed work), never enters. An unverified terminal send rides the confirmation path.
+    case "accepted":
+      return outcome.renderVerified || outcome.route === "hosted-trigger" ? null : "unconfirmed";
+    // Unknown, including a recorded result no reader recognises: it never retries (input may have arrived), and it
+    // escalates past the window when nothing picked the work up, instead of reading as delivered.
+    case "queued-not-started":
+    case "turn-started":
+    case "unknown":
+      return "unconfirmed";
+  }
 }
 
 /** A retained (typing-guard) result is retryable ONLY for an unclaimed baton. The
@@ -417,7 +433,7 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
 function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "lastNudgeResult">): WakeMode | null {
   const mode = classifyWakeResult(row.lastNudgeResult);
   if (mode === null) return null;
-  const retained = row.lastNudgeResult?.startsWith("retained:") ?? false;
+  const retained = readWakeOutcome(row.lastNudgeResult)?.fact === "held";
   if (retained && !(row.state === "pending" && !row.claimedAt && row.handedOffFrom)) return null;
   return mode;
 }
@@ -431,8 +447,8 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
   const endedPrompt = Boolean(db.prepare(`SELECT 1 FROM queue_items q WHERE q.qitem_id = ?
         AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
         AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
-          AND t.actor_session = q.source_session AND t.transition_note = ?)`)
-        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE));
+          AND t.actor_session = q.source_session AND t.transition_note IN (?, ?))`)
+        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE, LEGACY_PROMPT_RETIRED_NOTE));
   return endedPrompt ? null : recovery;
 }
 
@@ -864,7 +880,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
           : mode === "held"
             ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried`
-            : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
+            : readWakeOutcome(row.lastNudgeResult)?.route === null
+              ? `wake outcome unknown (unrecognised result "${row.lastNudgeResult!.slice(0, 80)}") with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`
+              : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
       if (hasConsumedEscalationHop(deps.db, row.qitemId)) {
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
@@ -1034,9 +1052,10 @@ export function makePromptStateReader(deps: {
 /** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
 export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
-const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
-/** The ladder's own transition on a prompt alert it retires because its seat's prompt read clear, and the only thing that
- *  ends a watchdog refusal run. A transition, not the resolution: a fallback route may already hold that field's text. */
+const LEGACY_PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
+const PROMPT_RETIRED_NOTE = "prompt escalation retired: the seat's prompt read clear; not a delivery receipt";
+/** The ladder's positive-clear boundary, independent of whether the alert's owner still holds its custody.
+ * A transition, not the resolution: a fallback route may already hold that field's text. */
 const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
 /** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash
  * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
@@ -1180,17 +1199,28 @@ async function advancePromptRefusals(
       AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
       AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
     .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
-  // Every tag value of every closed (terminal) prompt alert, read once per tick when the first episode needs it,
+  // Every tag value of every final prompt disposition, read once per tick when the first episode needs it,
   // rather than one scan of all terminal rows per open episode. The row predicates are the per-episode lookup's;
   // membership is the same exact json_each value equality; and nothing below writes before the last episode is
   // checked, so every episode sees the snapshot its own lookup would have read.
   let closedAlertTags: Set<unknown> | undefined;
   const closedEpisode = (episodeTag: string): boolean => {
-    closedAlertTags ??= new Set((deps.db.prepare(`WITH closed AS MATERIALIZED (
-        SELECT tags FROM queue_items WHERE ${PROMPT_ALERT_ROWS} AND state NOT IN ('pending','in-progress','blocked')
-          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
+    closedAlertTags ??= new Set((deps.db.prepare(`WITH alerts AS MATERIALIZED (
+        SELECT qitem_id, tags, state, source_session, handed_off_from FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
+          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)),
+      closed AS MATERIALIZED (
+        SELECT tags FROM alerts q WHERE state NOT IN ('pending','in-progress','blocked')
+          AND (state != 'handed-off' OR NOT EXISTS (
+            SELECT 1 FROM alerts successor WHERE successor.handed_off_from = q.qitem_id))
+          -- A tagged local successor carries custody; replaced tags or no local successor leave a final disposition.
+          -- Older automatic retirements without a clear
+          -- marker likewise cannot silence a prompt that is still positively blocked. Manual closes stay final.
+          AND NOT EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
+            AND t.actor_session = q.source_session AND t.transition_note = ?
+            AND NOT EXISTS (SELECT 1 FROM queue_transitions c WHERE c.qitem_id = q.qitem_id
+              AND c.actor_session = ? AND c.transition_note = ?)))
       SELECT j.value FROM closed, json_each(closed.tags) j`)
-      .all(PROMPT_ALERT_TAG) as Array<{ value: unknown }>).map(row => row.value));
+      .all(PROMPT_ALERT_TAG, LEGACY_PROMPT_RETIRED_NOTE, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as Array<{ value: unknown }>).map(row => row.value));
     return closedAlertTags.has(episodeTag);
   };
   for (const { qitem_id, destination_session } of candidates) {
@@ -1229,12 +1259,12 @@ async function advancePromptRefusals(
   }
 
   // A watchdog reminder refused at a prompt joins its seat's episode; the row carries the job ids. The
-  // seat's latest alert the ladder marked as retired on a cleared prompt bounds the run; an ended episode doesn't.
+  // seat's latest positive-clear marker bounds the run, even while its owner holds the alert; an ended episode doesn't.
   const clearedAlerts = new Map<string, { qitemId: string; at: string } | null>();
   const clearedAlert = (dest: string) => {
     if (!clearedAlerts.has(dest)) clearedAlerts.set(dest, (deps.db.prepare(`SELECT q.qitem_id AS qitemId, MAX(t.ts) AS at
         FROM queue_items q JOIN queue_transitions t ON t.qitem_id = q.qitem_id
-       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND json_valid(q.tags)
+       WHERE ${PROMPT_ALERT_ROWS} AND json_valid(q.tags)
          AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
          AND t.actor_session = ? AND t.transition_note = ?
        GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
@@ -1302,10 +1332,10 @@ async function advancePromptRefusals(
     }
   }
 
-  const promptState = (dest: string): "blocked" | "clear" | "unknown" => {
+  const promptState = (dest: string, since?: string): "blocked" | "clear" | "unknown" => {
     const group = groups.get(dest);
     if (group?.hookReview) return hookObservations.get(dest)?.state ?? "unknown";
-    const state = readAt(dest, group?.refusedAt ?? now.toISOString());
+    const state = readAt(dest, group?.refusedAt ?? since ?? now.toISOString());
     // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
     // that prompt. While the latest refusal is at a choice prompt, one held one retry interval with nothing newer clearing
     // it reads blocked; one answered within seconds never escalates, and a current non-choice refusal keeps its own rule.
@@ -1331,9 +1361,27 @@ async function advancePromptRefusals(
     if (tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|hook-review:`))
       && (!hookObservations.has(dest) || hookObservations.get(dest)?.state === "unknown")) continue;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
-    const cleared = promptState(dest) === "clear";
-    if (!sameEpisode || cleared) {
-      if (cleared) appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
+    const state = promptState(dest, aggregate.tsCreated);
+    const cleared = state === "clear";
+    // Keep the prompt boundary without closing the owner's hold. A later refusal is a new episode even if
+    // no reminder was delivered between them; repeated clear ticks do not move that boundary forward.
+    if (cleared && !deps.queueRepo.listTransitions(qitem_id).some(t => t.actorSession === LADDER_ACTOR
+      && t.transitionNote === PROMPT_CLEARED_NOTE && Date.parse(t.ts) >= Date.parse(group?.refusedAt ?? aggregate.tsCreated))) {
+      appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
+    }
+    // Missing work/episode membership says nothing about the seat's prompt. Keep an explicit owner's hold
+    // (including its wake) even on a positive clear; only its owner can dispose of that custody.
+    const retained = cleared && aggregate.state === "blocked"
+      ? "the seat's prompt read clear; owner hold and wake retained"
+      : !sameEpisode && !cleared ? `original episode ended; prompt ${state}; not evidence of clearing`
+        : state === "unknown" ? "prompt state unknown; not evidence of clearing" : null;
+    if (retained) {
+      const note = `prompt escalation retained: ${retained}`;
+      if (!deps.queueRepo.listTransitions(qitem_id).some(t => t.actorSession === LADDER_ACTOR && t.transitionNote === note)) {
+        appendMarker(deps.queueRepo, aggregate, note);
+      }
+    }
+    if (cleared && aggregate.state !== "blocked") {
       await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
         closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE });
     }
@@ -1417,7 +1465,7 @@ async function advancePromptRefusals(
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
     const reason = (group.hookReview
-      ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Reach that pane on this host with ${tmuxAttachCommand(shellQuote(dest))}. Review the hooks there through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
+      ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Reach that pane on this host with ${tmuxAttachCommand(dest)}. Review the hooks there through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
       : "interactive prompt blocks outstanding work; no input was sent")
       + (route && route.outcome !== "none" && route.outcome !== "parent" ? `; ${route.reason}` : "");
     // Every refusal at a choice prompt: the alert follows queue.wake_human_rung and holds for other choice alerts. Any other
@@ -1429,7 +1477,7 @@ async function advancePromptRefusals(
       toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
-    if (!row) continue;
+    if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = keys.filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));

@@ -139,22 +139,26 @@ A `rebuild` primes the successor from the seat's durable artifacts, highest trus
 first:
 1. the authored `RECAP.md`;
 2. `LEARNED.md`;
-3. the latest restore packet, when one is marked;
-4. the superseded recaps.
+3. the latest restore packet, when one is marked.
+
+The superseded recaps follow, newest first, as optional history: the successor reads
+them only when it needs the seat's history.
 
 A missing `RECAP.md` is recorded as a gap. The successor is directed to the remaining
 available artifacts in that order. So before a handover, a compaction or a long pause,
 the sitting occupant writes its recap alongside `LEARNED.md`:
 
 ```sh
-rig context recap-write --rig <rig> --seat <seat> --file <draft.md>
+rig context recap-write --file <draft.md>
 ```
 
-- `<seat>` is the seat's folder under `rigs/<rig>/seats/`, the part of its session
-  name before `@`.
+- Without `--rig` and `--seat` it writes the calling seat's recap (from `OPENRIG_SESSION_NAME`).
+  For another seat, `--seat` is its folder under `rigs/<rig>/seats/`, the part of its session
+  name before `@`. A seat's recorded logical id or member id maps to its folder when the daemon
+  can check it against the rig's seats.
 - The command reads `topology.root` and doesn't need the daemon.
 - Each write moves the previous recap into the seat's `recap-superseded/` chain,
-  which later rebuilds also read. Write through this command, not a file tool, so
+  which later rebuilds list as history. Write through this command, not a file tool, so
   the chain is kept.
 
 **The store refuses the write, and writes nothing,** when a section can't be
