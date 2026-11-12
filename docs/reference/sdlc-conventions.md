@@ -207,7 +207,8 @@ current revision. Opt-in `rig scope slice close <slice> --in-place --reason deli
 exits) updates status in place under `<mission>/slices/<slice>` (and reconciles
 any existing top-level scalar `status:` in `PROGRESS.md` frontmatter, refusing
 before modifying any file if `PROGRESS.md` frontmatter carries an ambiguous
-nested `status:` entry that line-based slice readers would treat as slice status)
+duplicate or nested `status:` entry that line-based slice readers would treat as
+slice status)
 without moving the folder, so recorded judgments stay applicable while the item
 text, policy and cited evidence bytes are unchanged (judgments citing files
 updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,
