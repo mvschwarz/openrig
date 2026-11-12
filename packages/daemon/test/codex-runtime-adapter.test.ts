@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { codexNonLoginShellArg } from "../src/domain/native-resume-probe.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -256,6 +257,38 @@ describe("Codex runtime adapter", () => {
       { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
     ] });
     expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "returned_to_shell" });
+  });
+
+  it("checkReady called for several seats in one observation pass reads the process table once per step, not once per seat (#161)", async () => {
+    const paneContent = fs.readFileSync(new URL("./fixtures/codex-api-key-login-no-daemon.txt", import.meta.url), "utf8");
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    // Seats 1 and 3 sit in an idle shell; seat 2 has a command in the foreground between the idle-shell samples.
+    const run = async (shared: boolean) => {
+      let listings = 0;
+      const listProcesses = vi.fn(() => {
+        listings++;
+        return [
+          { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt },
+          { pid: 910, ppid: 1, command: "/bin/bash", pgid: 910, tpgid: listings % 2 === 0 ? 911 : 910, executableName: "bash", startedAt },
+          { pid: 920, ppid: 1, command: "/bin/bash", pgid: 920, tpgid: 920, executableName: "bash", startedAt },
+        ];
+      });
+      const pass = new ObservationPass();
+      const results = [];
+      for (const pid of [900, 910, 920]) {
+        const tmux = mockTmux({ getPaneCommand: vi.fn(async () => "bash"), getPanePid: vi.fn(async () => pid),
+          capturePaneContent: vi.fn(async () => paneContent) });
+        const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+        results.push(await adapter.checkReady(makeBinding(), shared ? { observationPass: pass } : undefined));
+      }
+      return { results, listings };
+    };
+    const alone = await run(false);
+    const together = await run(true);
+    expect(together.results).toEqual(alone.results);
+    expect(together.results.map((r) => ("code" in r ? r.code : "ready"))).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
+    expect(alone.listings).toBe(9);
+    expect(together.listings).toBe(3);
   });
 
   it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {

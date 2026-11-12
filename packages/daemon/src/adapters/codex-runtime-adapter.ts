@@ -16,7 +16,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
-  InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
+  InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult, ReadinessOptions,
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 import type { GuidanceChoice } from "../domain/runtime-adapter.js";
@@ -1252,7 +1252,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return await this.tmux.capturePaneContent(target, 40) ?? "";
   }
 
-  async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
+  async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {
     if (!binding.tmuxSession) {
       return { ready: false, reason: "No tmux session bound" };
     }
@@ -1261,6 +1261,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ready: false, reason: "tmux session not responsive" };
     }
 
+    // In a poll's pass, this agent's listings come from the pass: shared with the other agents checked in it, and
+    // still two distinct observations for each proof.
+    const listProcesses = options?.observationPass ? options.observationPass.lister(this.listProcesses) : this.listProcesses;
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = await this.captureProbeScreen(binding.tmuxSession);
     let probe = assessNativeResumeProbe({
@@ -1271,7 +1274,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime") {
       const process = await verifyCodexPaneProcess({ target: binding.tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
-        listProcesses: this.listProcesses as never });
+        listProcesses: listProcesses as never });
       if (process) {
         const currentPaneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
         const currentPaneContent = await this.captureProbeScreen(binding.tmuxSession);
@@ -1284,7 +1287,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const isIdleShell = await verifyPaneIdleShell({
         target: binding.tmuxSession,
         tmux: this.tmux,
-        listProcesses: this.listProcesses,
+        listProcesses,
       });
       if (!isIdleShell) {
         return {
