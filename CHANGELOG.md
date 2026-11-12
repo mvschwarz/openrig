@@ -78,9 +78,10 @@ Known limits.
 
 - Queue content can be erased for closed-work retention and account deletion,
   and a retried create can't bring erased work back. ([#2837](https://github.com/mvschwarz/openrig/pull/2837), [#2843](https://github.com/mvschwarz/openrig/pull/2843))
-- Each send records what's known about its delivery in one
+- A send records what's known about its delivery in one
   `transport.delivery_evidence` event: what was admitted, what reached the
-  input, what the screen check showed, and for which occupant. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
+  input, what the screen check showed, and for which occupant. The record is
+  best effort, so a missing one doesn't show there was no send. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
 - `rig queue create` advises on an unresolved scope, slice lists show observed
   queue counts, a proof policy can require every listed judge, the execution
   ladder shows each slice's recorded status, `rig queue show` names a handed-off
@@ -168,7 +169,7 @@ Known limits.
   It doesn't keep a stored host or boot identity, doesn't guard against another
   program running as you, and a daemon restart between losing the tmux server
   and the stop wasn't exercised. For an adopted session, such as a seat joined
-  with `rig attach --self`, `rig seat stop` still suggests `rig down`, which
+  with `rig attach --self` from a tmux pane, `rig seat stop` still suggests `rig down`, which
   leaves that terminal running too. Release it with `rig unclaim <session>`
   (that leaves its process running), then end that process. If it runs in tmux,
   also end the underlying tmux session, including any remaining shell; closing
