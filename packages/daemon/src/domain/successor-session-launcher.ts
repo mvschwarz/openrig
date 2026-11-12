@@ -121,6 +121,11 @@ export type SuccessorLaunchResult =
       /** True when the harness launch was sent into the pane and only readiness failed (#2985): the successor may
        * still come up there, and it is not adopted. */
       successorLaunched?: boolean;
+      /** #2985: with successorLaunched, the resume token the launch generated (never logged), so a recovery can prove the
+       *  pane's process is exactly this launch, and how the retiree ended before it. */
+      resumeToken?: string;
+      resumeType?: string;
+      retireeExit?: "graceful" | "forced";
     };
 
 export class SuccessorSessionLauncher {
@@ -305,7 +310,8 @@ export class SuccessorSessionLauncher {
     const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
-        tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true } : {}) };
+        tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path,
+          ...(started.resumeToken ? { resumeToken: started.resumeToken, resumeType: started.resumeType } : {}) } : {}) };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
@@ -394,7 +400,8 @@ export class SuccessorSessionLauncher {
     forkSource?: ForkSource,
     launchGeneration?: string | null,
     staged?: StagedLaunch,
-  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
+  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
+    | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -492,6 +499,7 @@ export class SuccessorSessionLauncher {
         code: "successor_readiness_failed",
         message: `Successor readiness probe threw: ${err instanceof Error ? err.message : String(err)}`,
         launched: true,
+        ...(resumeToken ? { resumeToken, resumeType } : {}),
       };
     }
     if (!readiness.ready) {
@@ -500,6 +508,7 @@ export class SuccessorSessionLauncher {
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
         message: `Successor did not become a ready agent: ${readiness.reason ?? "readiness timeout"}`,
         launched: true,
+        ...(resumeToken ? { resumeToken, resumeType } : {}),
       };
     }
 

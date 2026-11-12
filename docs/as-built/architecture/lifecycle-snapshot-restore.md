@@ -306,6 +306,20 @@ cited here by number with the code that carries them):
   `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
+- **Seat handover recovery** (#2985, #2861) — a handover that fails after
+  the in-place respawn with its Claude successor launched records the attempt
+  in `seat_handover_attempts` (migration 163; `seat-handover-attempts.ts`):
+  the generation it reserved, the pane and the session id it generated for
+  the launch. `rig seat handover <seat> --recover --reason <reason>` calls
+  `POST /api/seat/handover/:seatRef/recover`, which runs
+  `SeatHandoverService.recover`: under the seat's lifecycle lease it checks
+  the attempt still replaces the current occupant, proves the session's only
+  pane holds exactly one foreground Claude naming that session id (two
+  samples, unchanged PID), then commits through the same `commit()` with the
+  reserved generation (rolled back if it doesn't register). The result and
+  `seat.handover_completed` carry `recoveredFrom`. Codes: 404
+  `no_handover_to_recover`, 409 `handover_attempt_superseded` and
+  `successor_identity_unproven`, 501 `recover_runtime_unsupported`.
 
 ## 5. Daemon-side restore-check and CLI restore-packet
 

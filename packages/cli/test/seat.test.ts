@@ -806,6 +806,38 @@ describe("rig seat status", () => {
       }
     });
 
+  it("handover --recover posts to the recovery route with the reason and prints the adoption (#2985)", async () => {
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    const recovered = { ...HANDOVER_RESULT, source: { mode: "rebuild", ref: null, raw: "rebuild", defaulted: false },
+      recoveredFrom: { attemptId: "a1", failedStep: "start_agent", failureCode: "successor_not_ready", failedAt: "2026-11-10T16:21:34.000Z" },
+      sideEffects: { ...HANDOVER_RESULT.sideEffects, departingProcess: "ended-graceful", startupContextDelivered: false } };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(makeDeps({ status: 200, data: recovered }, paths, bodies)).parseAsync([
+        "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--recover", "--reason", "adopt the running successor"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/handover/dev-impl%40seat-rig/recover"]);
+    expect(bodies).toEqual([{ reason: "adopt the running successor", operator: undefined }]);
+    const output = logs.join("\n");
+    expect(output).toContain('Adopted the running successor of the handover that failed at "start_agent" (successor_not_ready, 2026-11-10T16:21:34.000Z); its conversation was kept and nothing was typed into its pane.');
+    expect(output).toContain("The context packet that handover didn't deliver was not delivered now either");
+    expect(output).not.toContain("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
+  });
+
+  it("handover --recover takes no --source or --dry-run and does not contact the daemon", async () => {
+    for (const extra of [["--source", "rebuild"], ["--dry-run"]]) {
+      const paths: string[] = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCommand(makeDeps({ status: 200, data: HANDOVER_RESULT }, paths)).parseAsync([
+          "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--recover", "--reason", "adopt", ...extra, "--json"]);
+      });
+      expect(exitCode).toBe(2);
+      expect(paths).toEqual([]);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ ok: false, code: "invalid_options" });
+    }
+  });
+
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
 

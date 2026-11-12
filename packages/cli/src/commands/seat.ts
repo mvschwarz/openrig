@@ -180,6 +180,8 @@ interface SeatHandoverMutationResult {
   restorePacket?: { status: "unconfirmed"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
+  /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
+  recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
   sideEffects: {
     departingSessionKilled: false;
     /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
@@ -408,6 +410,15 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Rebuild chain was EMPTY: ${outcome.emptyChainReason}`);
     }
   }
+  if (result.recoveredFrom) {
+    // #2985: the successor was adopted as it runs; the recovery typed nothing into its pane.
+    const r = result.recoveredFrom;
+    console.log(`Adopted the running successor of the handover that failed at "${r.failedStep}" (${r.failureCode}, ${r.failedAt}); its conversation was kept and nothing was typed into its pane.`);
+    if (!result.sideEffects.startupContextDelivered && result.restorePacket?.status !== "unconfirmed" && result.source.mode !== "fork") {
+      console.log("The context packet that handover didn't deliver was not delivered now either: the successor started without it.");
+      return;
+    }
+  }
   if (result.sideEffects.startupContextDelivered) {
     if (result.source.mode === "rebuild") {
       console.log("The rebuild priming packet was delivered to the successor.");
@@ -624,6 +635,7 @@ Examples:
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
+    .option("--recover", "Adopt the running successor of a handover that failed after launching it, keeping its conversation (needs --reason; not with --source or --dry-run)")
     .option("--json", "JSON output for agents")
     .description("Hand a seat to a successor (two-phase). Pass --dry-run to plan without changing topology.")
     .addHelpText("after", `
@@ -631,7 +643,8 @@ Examples:
   rig seat handover spec-writer@openrig-pm --reason context-wall --dry-run
   rig seat handover spec-writer@openrig-pm --source rebuild --reason context-wall --dry-run --json
   rig seat handover spec-writer@openrig-pm --source fork:0b0165d7 --reason successor-test --operator orch-lead@openrig-pm --dry-run
-  rig seat handover spec-writer@openrig-pm --source discovered:01H... --reason mvp-proof --json`)
+  rig seat handover spec-writer@openrig-pm --source discovered:01H... --reason mvp-proof --json
+  rig seat handover spec-writer@openrig-pm --recover --reason "adopt the successor the failed handover left running"`)
     .action((seat: string, opts: HandoverActionOpts) => runSeatHandover(seat, opts, getDeps()));
 
   // OPR.0.4.3.26 — seat-recovery VIEW retarget. Points an already-attached tmux
@@ -1601,6 +1614,8 @@ interface HandoverActionOpts {
   reason?: string;
   operator?: string;
   dryRun?: boolean;
+  /** #2985: adopt the running successor of a failed handover instead of starting a new one. */
+  recover?: boolean;
   json?: boolean;
 }
 
@@ -1623,10 +1638,24 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
     return;
   }
 
+  if (opts.recover === true && (opts.source !== undefined || opts.dryRun === true)) {
+    const message = "--recover adopts the successor the failed handover launched; it takes no --source and has no --dry-run.";
+    const error: SeatStatusError = { ok: false, code: "invalid_options", message,
+      guidance: `Run: rig seat handover ${seat} --recover --reason "<why>"` };
+    if (opts.json) console.log(JSON.stringify(error, null, 2));
+    else printSeatError(error, message);
+    process.exitCode = 2;
+    return;
+  }
+
   const daemon = await getDaemonStatus(deps.lifecycleDeps);
   if (!daemonStatusGuard(daemon)) return; // B8-1b: epistemic-matched
 
   const client = deps.clientFactory(getDaemonUrl(daemon));
+  if (opts.recover === true) {
+    await runSeatHandoverRecover(seat, opts, client);
+    return;
+  }
   const handoverRoute = `/api/seat/handover/${encodeURIComponent(seat)}`;
   const handoverBody = {
     source: opts.source,
@@ -1678,6 +1707,24 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
   }
 }
 
+/** #2985 / #2861: `--recover` adopts the running successor of a handover that failed after launching it. The daemon
+ *  proves the pane's process is that launch before committing, and types nothing into the pane. */
+async function runSeatHandoverRecover(seat: string, opts: HandoverActionOpts, client: ReturnType<SeatDeps["clientFactory"]>): Promise<void> {
+  const res = await client.post<SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}/recover`,
+    { reason: opts.reason, operator: opts.operator });
+  if (opts.json) {
+    console.log(JSON.stringify(res.data, null, 2));
+    if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+    return;
+  }
+  if (res.status >= 400) {
+    printSeatError(res.data as SeatStatusError, `Seat handover recovery failed (HTTP ${res.status})`);
+    process.exitCode = res.status >= 500 ? 2 : 1;
+    return;
+  }
+  printHumanHandoverResult(res.data as SeatHandoverMutationResult);
+}
+
 /**
  * OPR.0.4.3.04 — top-level `rig handover <seat>` verb: the operator-facing
  * surface for the full-cycle handover composer. Same route + behavior as
@@ -1694,6 +1741,7 @@ export function handoverCommand(depsOverride?: SeatDeps): Command {
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
+    .option("--recover", "Adopt the running successor of a handover that failed after launching it, keeping its conversation (needs --reason; not with --source or --dry-run)")
     .option("--json", "JSON output for agents")
     .description("Hand a seat to a successor: create -> deliver context -> verify continuity -> rebind")
     .addHelpText("after", `

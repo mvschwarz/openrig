@@ -283,6 +283,19 @@ guidance names that pane and the result carries `replacementStarted` and `succes
 already ended, the new one may be working there without being registered as the seat's occupant, and another
 handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
+**Adopting the successor of a failed handover.** When a handover fails after its successor was launched in the
+respawned pane (the readiness window closed, the context packet didn't land, or the final binding step refused), it
+records the attempt, and its guidance names `rig seat handover <seat> --recover --reason <why>`. That adopts the
+successor that is running there and keeps its conversation. It first proves, reading only, that the attempt still
+replaces the seat's current occupant and that the pane is the seat session's only pane, with exactly one foreground
+Claude that names the session id OpenRig generated for that launch, the same process in two samples. Then it commits
+the handover with the occupant generation the attempt reserved, so the successor's identity hooks are accepted from
+then on. It types nothing into the pane, and a packet the failed handover didn't deliver is not delivered: the result
+says so, and a rebuild whose priming never arrived is recorded as fresh. Anything it can't prove, such as another
+conversation, two Claudes or a changed pane, refuses with `successor_identity_unproven` and changes nothing; an
+attempt that another occupant has replaced since is closed as `handover_attempt_superseded`. It adopts Claude Code
+successors only (`recover_runtime_unsupported` otherwise).
+
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
 same prompt still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
