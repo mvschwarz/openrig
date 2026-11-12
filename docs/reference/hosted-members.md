@@ -141,7 +141,9 @@ reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, 
 without `--nodes`, and when it has no rigs or nodes to show) lists every connected assistant after its table, one line
 each. That's on this host, and in the node view of an HTTP host; an SSH host's `rig ps` prints its own. An HTTP host's
 rig view and the multi-host fan-out leave the section out. When the list can't be read, for example from an older
-daemon, it says check-in is unavailable instead. Its `--json` output is unchanged.
+daemon, it says check-in is unavailable instead. Its `--json` output is unchanged. The TUI's
+instance and rig tables list them the same way after their seats, with times in the viewer's zone; when the list can't be read,
+they say check-in is unavailable, as `rig ps` does.
 When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
 line; when that notice is filed doesn't change.
 
