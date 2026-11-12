@@ -33,11 +33,18 @@ import {
 import type { SliceDetail } from "../../hooks/useSlices.js";
 import type { SliceListEntry } from "../../hooks/useSlices.js";
 
+function isClosedSliceStatus(status: string | undefined): boolean {
+  const normalized = status?.toLowerCase() ?? "";
+  return normalized === "closed" || normalized.startsWith("closed-");
+}
+
 /** Resolution rule used by both the heat-map cells AND the legend so
  *  the legend swatch class is always EXACTLY the same string the cell
- *  would render. Pure function of tone; no side effects. */
-function doneCellClass(tone: ProjectMetaTone): string {
-  return statusDotClass[tone];
+ *  would render. Only closed/closed-* slices use the neutral closed
+ *  dot class; draft and other generic neutral states retain complete. */
+function doneCellClass(tone: ProjectMetaTone, closed = false): string {
+  if (closed) return statusDotClass.neutral;
+  return statusDotClass[tone === "neutral" ? "success" : tone];
 }
 
 interface HeatmapRow {
@@ -177,7 +184,7 @@ function Cells({ row }: { row: HeatmapRow }) {
   // for done, danger for blocked, etc.) so the heat-map reads both
   // per-cell + per-row at-a-glance. Not-done cells stay outline-only
   // so the eye finds incomplete work fast.
-  const doneClass = doneCellClass(tone);
+  const doneClass = doneCellClass(tone, isClosedSliceStatus(row.status));
   return (
     <div
       data-testid={`mission-progress-heatmap-cells-${row.name}`}
@@ -213,7 +220,7 @@ function HeatmapLegend() {
     >
       <LegendCell label="done (active)" tone="info" testId="legend-active" />
       <LegendCell label="done (complete)" tone="success" testId="legend-complete" />
-      <LegendCell label="done (closed)" tone="neutral" testId="legend-closed" />
+      <LegendCell label="done (closed)" tone="neutral" closed testId="legend-closed" />
       <LegendCell label="done (warning)" tone="warning" testId="legend-warning" />
       <LegendCell label="done (blocked)" tone="danger" testId="legend-blocked" />
       <LegendCell label="not done" notDone testId="legend-not-done" />
@@ -224,17 +231,19 @@ function HeatmapLegend() {
 function LegendCell({
   label,
   tone,
+  closed,
   notDone,
   testId,
 }: {
   label: string;
   tone?: ProjectMetaTone;
+  closed?: boolean;
   notDone?: boolean;
   testId: string;
 }): ReactNode {
   const swatchClass = notDone
     ? "border-outline-variant bg-surface-lowest/35"
-    : doneCellClass(tone!);
+    : doneCellClass(tone!, Boolean(closed));
   return (
     <span className="flex items-center gap-1.5">
       <span
