@@ -20,6 +20,12 @@ export interface PairRequest {
 export interface PairRequestsRead { requests: PairRequest[]; readAt: string }
 type PairDecisionAct = Extract<Action, { type: "act"; act: "pair-decision" }>;
 
+/** The requester's self-description, as the daemon shows it: quoted and escaped, the unauthenticated requesting
+ *  machine's own words, never text that reads as this page's own. */
+function quotedRequester(requester: string): string {
+  return JSON.stringify(requester);
+}
+
 function hhmm(iso: string): string {
   return /T(\d\d:\d\d)/.exec(iso)?.[1] ?? iso;
 }
@@ -38,7 +44,7 @@ export function pairingLines(read: PairRequestsRead | null | undefined, focus: s
   if (!read.requests.length) text.push({ text: "No open pairing requests on this host." });
   for (const r of read.requests) {
     const mark = r === focused ? "> " : "  ";
-    text.push({ text: `${mark}${r.code} · ${r.requester} · expires ${hhmm(r.expiresAt)} UTC · ${r.status}` });
+    text.push({ text: `${mark}${r.code} · ${quotedRequester(r.requester)} · expires ${hhmm(r.expiresAt)} UTC · ${r.status}` });
     text.push({ text: `    ${r.owner ? `${r.owner} reads ${r.person}'s answer and decides` : `No agent reads answers here: ${r.noReader ?? "reason unreported"}`}` });
     if (r.answer) {
       const a = r.answer;
@@ -49,7 +55,7 @@ export function pairingLines(read: PairRequestsRead | null | undefined, focus: s
     }
     if (r.status === "pending" && r.approvalQitemId) {
       const act = (decision: "approve" | "deny"): Action => ({ type: "act", act: "pair-decision", request: r.approvalQitemId!, decision, code: r.code, requester: r.requester });
-      text.push(listItem(`Approve ${r.code}: hand this host's bearer token to ${r.requester}`, act("approve"), 4),
+      text.push(listItem(`Approve ${r.code}: hand this host's bearer token to ${quotedRequester(r.requester)}`, act("approve"), 4),
         listItem(`Deny ${r.code}`, act("deny"), 4));
     } else if (r.status === "unknown") {
       text.push({ text: "    Its decision couldn't be read here: refresh before deciding." });
@@ -74,7 +80,7 @@ export async function decidePairRequest(client: PairDecisionClient, act: PairDec
 }
 
 async function decideOnce(client: PairDecisionClient, act: PairDecisionAct): Promise<string> {
-  const what = `Pairing request ${act.code} from ${act.requester}`;
+  const what = `Pairing request ${act.code} from ${quotedRequester(act.requester)}`;
   const find = async () => (await client.pairRequests()).requests.find((r) => r.approvalQitemId === act.request);
   let before: PairRequest | undefined;
   try { before = await find(); } catch (error) {
