@@ -287,8 +287,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
             : node.activityState?.display === "idle"
               ? "idle"
               : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
-                // A community harness gives no idle signal: a quiet screen is unknown, not idle.
-                : node.communityHarness ? "unknown" : "idle"))
+                // The daemon's activity word decides when it's served (as in `rig ps`): it said unknown, so a quiet
+                // screen stays unknown. A community harness gives no idle signal either. Only an older daemon that
+                // serves no activity word keeps the screen fallback.
+                : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
