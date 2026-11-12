@@ -138,7 +138,10 @@ anything up. It's a status only. Work addressed to a member that isn't checking 
 isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
 gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
 reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats, and `rig ps` (with or
-without `--nodes`) lists connected assistants after its table, one line each; its `--json` output is unchanged.
+without `--nodes`, and when it has no rigs or nodes to show) lists every connected assistant after its table, one line
+each. That's on this host, and in the node view of an HTTP host; an SSH host's `rig ps` prints its own. An HTTP host's
+rig view and the multi-host fan-out leave the section out. When the list can't be read, for example from an older
+daemon, it says check-in is unavailable instead. Its `--json` output is unchanged.
 When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
 line; when that notice is filed doesn't change.
 

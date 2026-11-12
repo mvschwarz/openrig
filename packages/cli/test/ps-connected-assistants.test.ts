@@ -31,6 +31,10 @@ describe("rig ps: connected assistants and their check-in status", () => {
   let server: http.Server;
   let port: number;
   let members: unknown = { hostId: "host-a", members: MEMBERS };
+  // How the hosted-members route answers: 200 with `members`, an older daemon's 404, a failure, or a dropped connection.
+  let membersStatus = 200;
+  let rigs: unknown[] = PS;
+  let nodes: unknown[] = [NODE];
   let savedSession: string | undefined;
 
   beforeAll(async () => {
@@ -39,9 +43,12 @@ describe("rig ps: connected assistants and their check-in status", () => {
     server = http.createServer((req, res) => {
       const url = req.url ?? "";
       const reply = (status: number, body: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
-      if (/^\/api\/rigs\/[^/]+\/nodes/.test(url)) return reply(200, [NODE]);
-      if (url.startsWith("/api/ps")) return reply(200, PS);
-      if (url === "/api/queue/hosted-members") return members === null ? reply(404, { error: "not found" }) : reply(200, members);
+      if (/^\/api\/rigs\/[^/]+\/nodes/.test(url)) return reply(200, nodes);
+      if (url.startsWith("/api/ps")) return reply(200, rigs);
+      if (url === "/api/queue/hosted-members") {
+        if (membersStatus === 0) return req.socket.destroy();
+        return reply(membersStatus, membersStatus === 200 ? members : { error: "unavailable" });
+      }
       return reply(404, { error: "not found" });
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -51,7 +58,13 @@ describe("rig ps: connected assistants and their check-in status", () => {
     server.close();
     if (savedSession !== undefined) process.env.OPENRIG_SESSION_NAME = savedSession;
   });
-  beforeEach(() => { members = { hostId: "host-a", members: MEMBERS }; });
+  beforeEach(() => {
+    members = { hostId: "host-a", members: MEMBERS };
+    membersStatus = 200;
+    rigs = PS;
+    nodes = [NODE];
+    process.exitCode = undefined;
+  });
 
   async function run(args: string[]): Promise<string[]> {
     const deps: StatusDeps = { lifecycleDeps: lifecycle(port), clientFactory: (url) => new DaemonClient(url) };
@@ -88,10 +101,60 @@ describe("rig ps: connected assistants and their check-in status", () => {
     expect(Array.isArray(JSON.parse(logs[0]!))).toBe(true);
   });
 
-  it("no section when there are none, or the daemon gives no answer (an older daemon)", async () => {
+  it("a host with no terminal rigs still lists its connected assistants", async () => {
+    rigs = [];
+    const out = (await run([])).join("\n");
+    expect(out).toContain("No rigs");
+    expect(out).toContain("Connected assistants (outside the terminal; each checks its own queue):");
+    expect(out).toContain("  chat@hub  overdue");
+    expect(out).toContain("  other@elsewhere  on request");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it("a rig with no terminal seats still lists its connected assistants", async () => {
+    rigs = [{ ...PS[0], nodeCount: 0, runningCount: 0 }];
+    nodes = [];
+    const out = (await run(["--nodes", "--rig", "hub"])).join("\n");
+    expect(out).toContain("No nodes");
+    expect(out).toContain("  chat@hub  overdue");
+    expect(out).toContain("  new@hub  no check-in yet");
+    expect(out).not.toContain("other@elsewhere");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it("a missing rig keeps its not-found answer, with no section", async () => {
+    const out = (await run(["--rig", "nowhere"])).join("\n");
+    expect(out).not.toContain("Connected assistants");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a known-empty list stays quiet, in a full view and an empty one", async () => {
     members = { hostId: "host-a", members: [] };
     expect((await run([])).join("\n")).not.toContain("Connected assistants");
-    members = null;
-    expect((await run(["--nodes"])).join("\n")).not.toContain("Connected assistants");
+    rigs = [];
+    expect((await run([])).join("\n")).not.toContain("Connected assistants");
+    members = { hostId: "host-a", members: MEMBERS };
+    rigs = PS;
+    // Members only on other rigs: this rig's list is known to be empty.
+    expect((await run(["--nodes", "--rig", "elsewhere-only"])).join("\n")).not.toContain("Connected assistants");
+  });
+
+  it.each([
+    ["an older daemon without the route", () => { membersStatus = 404; }, "this daemon doesn't serve it"],
+    ["a failed read", () => { membersStatus = 500; }, "the read failed: HTTP 500"],
+    ["an answer without a members list", () => { members = { hostId: "host-a" }; }, "the daemon's answer couldn't be read"],
+    ["a dropped connection", () => { membersStatus = 0; }, "the read failed: "],
+  ])("%s says check-in is unavailable, not that there are none", async (_case, arrange, reason) => {
+    arrange();
+    for (const args of [[], ["--nodes", "--rig", "hub"]]) {
+      const out = (await run(args)).join("\n");
+      expect(out).toContain(`Connected assistants: check-in unavailable (${reason}`);
+      expect(out).not.toContain("each checks its own queue");
+      // The main table and the exit status are as they were.
+      expect(out).toContain(args.length ? "lead@hub" : "hub");
+      expect(process.exitCode ?? 0).toBe(0);
+    }
+    rigs = [];
+    expect((await run([])).join("\n")).toContain("No rigs\n\nConnected assistants: check-in unavailable");
   });
 });
