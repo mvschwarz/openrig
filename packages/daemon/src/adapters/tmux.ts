@@ -2170,6 +2170,25 @@ export class TmuxAdapter {
     }
   }
 
+  /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
+   *  "" when it reported none). Empty when the session has no clients, or when the session or the server is gone;
+   *  null when tmux can't be read. */
+  async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
+    try {
+      const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+        `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+      return output.split("\n").flatMap((line) => {
+        const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+        const tty = line.slice(0, Math.max(separator, 0));
+        return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
+      });
+    } catch (err) {
+      return isServerMissingError(err) || isSessionAbsenceError(tmuxReportedError(err)) ? [] : null;
+    }
+  }
+
   /**
    * OPR.0.4.3.26 — retarget an already-attached client's VIEW to `target`
    * (`<session>` or `<session>:<window>`). This is the whole point of the
