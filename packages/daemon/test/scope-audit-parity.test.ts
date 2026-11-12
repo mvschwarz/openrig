@@ -415,3 +415,43 @@ describeDf("PM dogfood #1 — twin verdict parity: authored README vs pristine P
     expectDf(conventionKinds).toEqual([]); // RED pre-fix: both findings fire
   });
 });
+
+describeDf("#2727 in-place closure audit parity & dependency graph", () => {
+  const AUTHORED_SPEC = "# S\n## Intent\nauthored intent\n## Mini-requirements\n1. first requirement\n## Proof contract\n- [ ] promised deliverable\n";
+
+  itDf("both twins exempt non-delivery in-place closures from missing_proof while still flagging unproved done slices", async () => {
+    const mod = await import(path.join(REPO_ROOT, "packages/cli/src/lib/scope/scope-audit.ts"));
+    const cliClassify = mod.classifyScopeItem as typeof daemonClassifier;
+
+    for (const status of ["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"]) {
+      const input: ScopeAuditInput = {
+        id: "OPR.99.0.3.1",
+        path: "/fix/missions/m1/slices/01-non-delivery",
+        readmeFrontmatterRaw: `id: OPR.99.0.3.1\nstatus: ${status}`,
+        progressFileExists: true,
+        readmeOnlyMarker: false,
+        isActiveRelease: true,
+        level: "slice",
+        readmeContent: AUTHORED_SPEC,
+        proofArtifactCount: 0,
+      };
+      const cliRes = cliClassify(input);
+      const daemonRes = daemonClassifier(input);
+      expectDf(daemonRes).toEqual(cliRes);
+      expectDf(daemonRes.findings.map((f) => f.kind), status).not.toContain("missing_proof");
+    }
+
+    const doneUnproved: ScopeAuditInput = {
+      id: "OPR.99.0.3.2",
+      path: "/fix/missions/m1/slices/02-done",
+      readmeFrontmatterRaw: "id: OPR.99.0.3.2\nstatus: done",
+      progressFileExists: true,
+      readmeOnlyMarker: false,
+      isActiveRelease: true,
+      level: "slice",
+      readmeContent: AUTHORED_SPEC,
+      proofArtifactCount: 0,
+    };
+    expectDf(daemonClassifier(doneUnproved).findings.map((f) => f.kind)).toContain("missing_proof");
+  });
+});

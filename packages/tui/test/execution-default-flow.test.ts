@@ -68,4 +68,68 @@ describe("#2761 execution view on the default flow", () => {
     expect(body).toContain("WAVE w1 · 3 slices · 3 planned");
     expect(text(executionContentLines(execution, scopes, [], "evidence", 400))).not.toContain("records:");
   });
+
+  it("#2727 reads non-delivery in-place closures as deferred/superseded/closed rather than declared done or planned", () => {
+    const nonDeliveryWords = ["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"] as const;
+    const ids = nonDeliveryWords.map((_, i) => `ND.${i + 1}`);
+    const dir = (i: number) => `0${i + 1}-nd`;
+    const execution = {
+      view: "execution",
+      mission: "non-delivery-flow",
+      derived_at: "2026-11-11T00:00:00.000Z",
+      sources: { git: { basis: "no reachable repo context" }, build_info: { commit: null } },
+      q1_lanes: [],
+      q2_sequencing: ids.map((id, i) => ({
+        slice_id: id,
+        dir: dir(i),
+        depends_on: [],
+        blocked_on_rows: [],
+        next_up: "INDETERMINATE",
+        next_up_basis: "own completion rung INDETERMINATE",
+        next_up_rank: null,
+      })),
+      q3_care: ids.map((id) => ({ slice_id: id, build_wave: "w1" })),
+      q4_ladder: ids.map((id, i) => ({
+        slice_id: id,
+        dir: dir(i),
+        recorded_status: {
+          word: nonDeliveryWords[i],
+          bucket: "closed",
+          basis: "SPEC.md frontmatter status:",
+        },
+        locked: { value: false, basis: "no approved-spec-at" },
+        built: { candidate_sha: "INDETERMINATE", basis: UNRECORDED },
+        reviewed: { value: "INDETERMINATE", basis: "no candidate", legs: [] },
+        folded: { value: "INDETERMINATE", basis: "no candidate" },
+        adopted: { value: "INDETERMINATE", basis: "no candidate" },
+      })),
+      q5_park: [],
+    } as NonNullable<FleetSnapshot["execution"]>;
+    const template = demoSnapshot().scopes![0]!.slices[0]!;
+    const scopes = [{
+      mission: "non-delivery-flow",
+      slices: ids.map((id, i) => ({
+        ...template,
+        id,
+        dirName: dir(i),
+        displayName: `ND ${i + 1}`,
+        status: nonDeliveryWords[i],
+        readiness: { configured: true, state: "not-ready" as const, revision: "r1", items: [], issues: [] },
+        proof: { paired: 0, total: 1 },
+      })),
+    }];
+
+    const body = text(executionContentLines(execution, scopes, [], null, 180));
+    expect(body).not.toContain("declared done");
+    expect(body).not.toContain("planned");
+    expect(body).not.toContain("outcomes pending");
+    expect(body).toContain("1 deferred");
+    expect(body).toContain("1 superseded");
+    expect(body).toContain("2 closed");
+
+    for (let i = 0; i < nonDeliveryWords.length; i++) {
+      const strip = text(executionSliceStripLines(execution, ids[i]!, dir(i), 200, nonDeliveryWords[i]));
+      expect(strip).toContain(`next        none — declared ${nonDeliveryWords[i]}`);
+    }
+  });
 });

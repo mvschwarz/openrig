@@ -154,6 +154,7 @@ export function stateTone(state: string | undefined): ProjectMetaTone {
 export function sliceStatusTone(state: string | undefined): ProjectMetaTone {
   const normalized = state?.toLowerCase() ?? "";
   if (normalized === "active" || normalized === "in-flight") return "info";
+  if (normalized === "closed" || normalized.startsWith("closed-")) return "neutral";
   return stateTone(state);
 }
 

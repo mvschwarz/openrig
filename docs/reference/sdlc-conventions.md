@@ -146,13 +146,14 @@ older than 90 days as `provisional`.
 
 A slice's frontmatter may also carry `status:`. `GET /api/slices` reports the
 bucket each word falls in as the slice's `status`, and its
-`?filter=all|active|done|blocked` filters on that bucket:
+`?filter=all|active|done|closed|blocked` filters on that bucket:
 
 | `status:` word | Bucket |
 | --- | --- |
 | `active`, `in-flight`, `ratified` | `active` |
 | `draft`, `draft-pending-orch-ratification`, `placeholder` | `draft` |
 | `done`, `shipped`, `promoted`, `closed` | `done` |
+| `wontfix`, `deferred`, `superseded`, `stale`, `closed-wontfix`, `closed-deferred`, `closed-superseded`, `closed-stale` | `closed` |
 | `blocked`, `parked-with-evidence` | `blocked` |
 
 Words are matched ignoring case. Any other word is matched by what it contains:
@@ -198,9 +199,15 @@ judgment and publication are distinct. This optional component does not select
 Part B or add a mandatory review gate.
 
 A judgment binds the slice's path, the item's text and the policy. Moving or
-renaming a slice (`rig scope slice move`, or by hand) reopens its judged items:
+renaming a slice (`rig scope slice move`, default moving `rig scope slice close`,
+or by hand) reopens its judged items:
 `rig proof show` reports each as `unknown`, and each needs a new judgment on its
-current revision. `rig scope audit` checks structure only and never reads proof
+current revision. Opt-in `rig scope slice close <slice> --in-place --reason delivered`
+(or `--in-place --reason <wontfix|deferred|superseded|stale>` for non-delivery
+exits) updates status in place under `<mission>/slices/<slice>` without moving the
+folder, so recorded judgments stay applicable while the item text, policy and cited
+evidence bytes are unchanged, and parent mission status is never automatically
+marked delivered. `rig scope audit` checks structure only and never reads proof
 readiness, so a passing audit doesn't mean the proof still stands.
 
 The project readiness that `rig proof show --project` reports counts only
