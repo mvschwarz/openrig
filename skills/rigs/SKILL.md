@@ -72,7 +72,8 @@ person needs in their project or home folder and name that path.
 
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
-  Keep it.
+  Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on
+  the person's yes ("Who answers OpenRig's questions" below).
 - **If the person uses Codex:** now that OpenRig is running, make the one-time offer under "Codex: one offer, once,
   after OpenRig starts" at the end of this step.
 - **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
