@@ -272,9 +272,23 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
   });
 
   it("retries a failed start (a rolled-back launch's superseded row is not an intentional stop)", async () => {
-    const f = fixture({ status: "superseded", intentionallyStopped: true });
+    const f = fixture({ status: "superseded" });
     f.starter.notify("dev.impl@fleet");
     await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    f.db.close();
+  });
+
+  it("does not revive a failed launch stopped by rig down when a peer is launched later", async () => {
+    // Given a rolled-back launch subsequently marked stopped by rig teardown.
+    const f = fixture({ status: "superseded" });
+    f.db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = 's1'").run();
+    f.setLiveSessions(["dev-rev@fleet"]);
+    // When pending work wakes the stopped seat after a peer has come back.
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    // Then explicit stop intent wins over retryable launch history.
+    expect(f.launches).toHaveLength(0);
+    expect(classifyColdStartStop(f.db, "n1").kind).toBe("intentional");
     f.db.close();
   });
 

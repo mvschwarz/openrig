@@ -101,11 +101,11 @@ export function classifyColdStartStop(db: Database.Database, nodeId: string): Co
     .get(nodeId) as { sessionId: string; sessionName: string; status: string; intentionallyStopped: number } | undefined;
   // A seat that never ran has nothing to replace: the door legitimately fresh-primes it.
   if (!latest) return { kind: "dormant" };
-  // A rolled-back launch is occupant history, not a decision: the seat failed to start.
-  if (latest.status === "superseded") return { kind: "failed_start" };
   // No recorded stop intent: an observed exit (crash), a detached session, or a session the
   // daemon lost. None of those is a decision to keep the seat down.
-  if (latest.intentionallyStopped !== 1) return { kind: "dormant" };
+  if (latest.intentionallyStopped !== 1) {
+    return { kind: latest.status === "superseded" ? "failed_start" : "dormant" };
+  }
 
   const event = db.prepare(`SELECT payload FROM events
     WHERE node_id = ? AND type = 'session.stopped' ORDER BY seq DESC LIMIT 1`)
