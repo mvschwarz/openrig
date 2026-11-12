@@ -195,6 +195,96 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
   });
 
+  // Review of #3049: an unreadable list is never narrowed to the rows that qualify on a pass: it is rebuilt from every
+  // row still waiting unclaimed at the seat, and closes only once none of those is left.
+  it.each([["missing", "parent"], ["malformed", "parent"], ["missing", "own"], ["malformed", "own"]] as const)(
+    "a notice whose list is %s is rebuilt from every waiting row, never narrowed to the rows that qualify (%s notice)", async (how, kind) => {
+      if (kind === "parent") lane("dev1"); else seat("lane", "pool.dev1", "dev1@lane");
+      const to = kind === "parent" ? "owner@lane" : "dev1@lane";
+      const a = await work("dev1@lane", 180);
+      const b = await work("dev1@lane", 90);
+      await sweep(60);
+      const [notice] = findingsTo(to);
+      expect(notice!.body).toContain(a.qitemId);
+      expect(notice!.body).toContain(b.qitemId);
+      breakRowList(notice!.qitemId, how);
+      await sweep(120); // only A qualifies now; the list is rebuilt from every row still waiting, never just A
+      const rebuilt = queue.getById(notice!.qitemId)!;
+      expect(rebuilt.state).toBe("pending");
+      const footer = rebuilt.body.split("\n").find((l) => l.startsWith("Every row this notice stands for: "))!;
+      expect(JSON.parse(footer.slice("Every row this notice stands for: ".length)).sort()).toEqual([a.qitemId, b.qitemId].sort());
+      queue.claim({ qitemId: a.qitemId, destinationSession: "dev1@lane" });
+      await sweep(120);
+      expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+      expect(queue.getById(notice!.qitemId)!.body).toContain(b.qitemId);
+      expect(queue.getById(b.qitemId)).toMatchObject({ state: "pending", claimedAt: null });
+      // Once nothing it could stand for still waits, it closes: an unreadable list doesn't keep it open for ever.
+      queue.claim({ qitemId: b.qitemId, destinationSession: "dev1@lane" });
+      await sweep(120);
+      expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+    });
+
+  it.each(["parent", "own"] as const)("a %s notice whose list was unreadable holds nothing back once it closes: a row it never listed gets a notice later", async (kind) => {
+    if (kind === "parent") lane("dev1"); else seat("lane", "pool.dev1", "dev1@lane");
+    const to = kind === "parent" ? "owner@lane" : "dev1@lane";
+    const a = await work("dev1@lane", 90);
+    await sweep();
+    const [notice] = findingsTo(to);
+    // Q waits behind a typing guard (resolution evidence), so it never qualifies while the guard holds.
+    const q = await work("dev1@lane", 90);
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?")
+      .run(new Date().toISOString(), q.qitemId);
+    breakRowList(notice!.qitemId, "missing");
+    queue.claim({ qitemId: a.qitemId, destinationSession: "dev1@lane" });
+    await sweep();
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = NULL, last_nudge_result = NULL WHERE qitem_id = ?").run(q.qitemId);
+    await sweep();
+    await sweep();
+    expect(openFor(q).length).toBeGreaterThan(0);
+  });
+
+  // Review of #3049: the route is rechecked at the fold, not only the finding's state: a parent resolution that changes
+  // or becomes ambiguous while the notice is being written leaves the per-row finding open and unmarked.
+  it.each(["ambiguous", "gone"] as const)("a fold rechecks the route: a parent that becomes %s while the notice is written folds nothing", async (change) => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    const perRow = await perRowFinding(row);
+    const create = queue.create.bind(queue);
+    queue.create = (async (input: Parameters<typeof queue.create>[0]) => {
+      if ((input.tags ?? []).includes(parentBacklogTag("owner@lane", "dev1@lane"))) {
+        if (change === "ambiguous") {
+          const other = seat("lane", "coord.other", "other@lane");
+          rigs.addEdge(other.rig.id, other.node.id, kids[0]!.node.id, "delegates_to");
+        } else {
+          db.prepare("DELETE FROM edges WHERE source_id = ? AND target_id = ? AND kind = 'delegates_to'").run(parent.node.id, kids[0]!.node.id);
+        }
+      }
+      return create(input);
+    }) as typeof queue.create;
+    await sweep();
+    const after = queue.getById(perRow.qitemId)!;
+    expect(after.state).toBe("pending");
+    expect(after.tags).not.toContain("stuck-sweep-folded-into-backlog");
+    expect(findQueueRecovery(db, row.qitemId)).toMatchObject({ qitemId: perRow.qitemId });
+  });
+
+  it("a fold rechecks that the row still waits unclaimed: one claimed while the notice is written isn't folded", async () => {
+    lane("dev1");
+    const row = await work("dev1@lane");
+    const perRow = await perRowFinding(row);
+    const create = queue.create.bind(queue);
+    queue.create = (async (input: Parameters<typeof queue.create>[0]) => {
+      const made = await create(input);
+      if ((input.tags ?? []).includes(parentBacklogTag("owner@lane", "dev1@lane"))) queue.claim({ qitemId: row.qitemId, destinationSession: "dev1@lane" });
+      return made;
+    }) as typeof queue.create;
+    await sweep();
+    // Its finding resolves the way a claimed row's does (the sweep's own resolution), never by a fold.
+    const after = queue.getById(perRow.qitemId)!;
+    expect(after.tags).not.toContain("stuck-sweep-folded-into-backlog");
+  });
+
   it("a closed notice whose list is unreadable doesn't file again for the same rows", async () => {
     lane("dev1");
     await work("dev1@lane", 90);

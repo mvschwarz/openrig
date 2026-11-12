@@ -337,6 +337,42 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
   });
 
+  // Review of #3049: an unreadable list is rebuilt from every row still waiting at the member, never left alone or
+  // narrowed, so another creator's row still moves the notice on and never stays unseen.
+  it.each(["missing", "malformed"] as const)("a notice to a creator whose list is %s still moves on for another creator's row", async (how) => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(how === "malformed" ? `${body}\n${prefix}[` : body, toLead!.qitemId);
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep(noPerson);
+    const open = notices().filter((n) => n.state === "pending");
+    expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
+    for (const row of [first, other]) expect(open[0]!.body).toContain(row.qitemId);
+    expect(repo.getById(toLead!.qitemId)!.state).toBe("done");
+  });
+
+  it("a notice to a creator whose list is unreadable isn't moved on by another creator's row that doesn't qualify yet", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    await work(MEMBER, { from: "orch@hub", ageMinutes: 1 });
+    await sweep(noPerson);
+    expect(notices().filter((n) => n.state === "pending").map((n) => n.destinationSession)).toEqual(["lead@hub"]);
+  });
+
   it("a notice to a creator lists only that creator's rows: another creator's row moves every row to the next recipient", async () => {
     seedSeat("orch@hub");
     seedSeat("operator@hub");
