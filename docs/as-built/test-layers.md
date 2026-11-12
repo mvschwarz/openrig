@@ -315,7 +315,10 @@ The most useful next pieces of harness work, roughly in dependency order:
    `claude-executable-foreground.test.ts` holds that recorder open in private Bash, zsh, dash and ksh panes
    to check parent PID, process-group ownership, tmux's pane command and parent-shell
    restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
-   native readiness, history or answers.
+   native readiness, history or answers. The provider-shaped half now exists for the delivery suite: local
+   stand-in Messages and Responses servers in `packages/test-system/delivery/stand-ins/` that a real Claude Code or
+   Codex can talk to with no account, logging each request's exact bytes. Nothing drives a real program through them
+   yet.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 

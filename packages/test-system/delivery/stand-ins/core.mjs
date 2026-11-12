@@ -1,0 +1,200 @@
+// The shared half of the delivery suite's stand-in model servers: the per-turn script, the request log and the HTTP
+// scaffold. A stand-in answers a real Claude Code or Codex TUI the way a model service would, from a script, so a case
+// can drive the real program with no account, no login and no spend. Only the wire format differs per program
+// (messages.mjs, responses.mjs); everything a case decides lives in its script.
+//
+// What a stand-in proves is narrow: which requests the program sent, in what order, with what bytes. That request log is
+// the receiver-side record a case joins to OpenRig's own delivery record. It never proves a model's behaviour.
+
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import { appendFileSync, readFileSync } from "node:fs";
+
+/** A correlation marker a case puts in the text it delivers, such as `DLV-D01-3f2a`. */
+export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
+
+/**
+ * A script is the stand-in's whole behaviour:
+ *
+ *   { "marker"?: "<regex source>",            // what counts as a correlation marker; DEFAULT_MARKER otherwise
+ *     "rules": [ {
+ *       "on"?: "user" | "tool_result" | "any", // what the request's last turn must be (default "user")
+ *       "when"?: "<regex source>",            // matched against that turn's text; absent matches any
+ *       "times"?: <n>,                        // how many requests this rule answers; absent is unlimited
+ *       "gate"?: "<name>",                    // hold the answer until the case releases this gate
+ *       "delayMs"?: <n>,                      // wait before the first byte
+ *       // then exactly one action:
+ *       "say"?: "<text>",                     // a streamed text reply; {{marker}} is the turn's first marker
+ *       "chunks"?: <n>, "chunkDelayMs"?: <n>, //   split into n deltas with a pause between them (a long turn)
+ *       "tool"?: { "name": "<tool>", "input": { ... } },  // a tool call, in this program's own tool shape
+ *       "error"?: { "status": <n>, "headers"?: { ... }, "body"?: <json> },  // an HTTP error answer
+ *       "failInStream"?: { "type"?: "<type>", "code"?: "<code>", "message": "<text>" }  // fail after streaming starts
+ *     } ] }
+ *
+ * The first rule that fits answers. With none, a user turn gets "ok {{marker}}" and a tool result gets "done".
+ */
+export function loadScript(source) {
+  const script = typeof source === "string" ? JSON.parse(readFileSync(source, "utf8")) : (source ?? {});
+  const rules = Array.isArray(script.rules) ? script.rules : [];
+  rules.forEach((rule, index) => {
+    const actions = ["say", "tool", "error", "failInStream"].filter((key) => rule[key] !== undefined);
+    if (actions.length !== 1) throw new Error(`stand-in script rule ${index}: needs exactly one of say, tool, error, failInStream (has ${actions.join(", ") || "none"})`);
+    if (rule.on !== undefined && !["user", "tool_result", "any"].includes(rule.on)) throw new Error(`stand-in script rule ${index}: on must be user, tool_result or any`);
+  });
+  return { marker: new RegExp(script.marker ?? DEFAULT_MARKER), rules };
+}
+
+/** The rule that answers a turn, consuming one of its `times`; null when none fits. */
+export function selectRule(script, used, turn) {
+  for (const [index, rule] of script.rules.entries()) {
+    const on = rule.on ?? "user";
+    if (on !== "any" && on !== turn.kind) continue;
+    if (rule.when !== undefined && !new RegExp(rule.when).test(turn.text)) continue;
+    if (rule.times !== undefined && (used.get(index) ?? 0) >= rule.times) continue;
+    used.set(index, (used.get(index) ?? 0) + 1);
+    return { index, rule };
+  }
+  return null;
+}
+
+export function fallbackRule(turn) {
+  return { index: null, rule: turn.kind === "tool_result" ? { say: "done" } : { say: "ok {{marker}}" } };
+}
+
+export function fillMarker(text, marker) {
+  return text.replaceAll("{{marker}}", marker ?? "(no marker)");
+}
+
+/** Text split into `n` near-equal pieces, never empty ones. */
+export function splitChunks(text, n = 1) {
+  const count = Math.max(1, Math.min(n, text.length || 1));
+  const size = Math.ceil(text.length / count);
+  const pieces = [];
+  for (let at = 0; at < text.length; at += size) pieces.push(text.slice(at, at + size));
+  return pieces.length > 0 ? pieces : [""];
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const REDACTED_HEADERS = new Set(["authorization", "x-api-key", "cookie"]);
+
+/**
+ * Start a stand-in. `protocol` supplies the program's wire format:
+ *   turnOf(body) -> { kind: "user" | "tool_result" | "other", text, parts: string[] }
+ *     parts are the last turn's separate text pieces exactly as sent (a typed message is one; context the program adds,
+ *     or a second message merged into the same turn, is another)
+ *   userTurns(body) -> number   how many user turns the request's history holds, tool results aside
+ *   answer(ctx) -> Promise<void>   writes the response for the chosen rule
+ *   other(req, res, body) -> boolean   serves a path the protocol knows besides its main one (count_tokens, a probe)
+ *   path: the main POST path, e.g. "/v1/messages"
+ * Control routes for the harness, under /_stand-in/: GET requests (the log so far), POST release/<gate>.
+ */
+export async function startStandIn(protocol, { script, logPath, port = 0, host = "127.0.0.1" } = {}) {
+  const loaded = loadScript(script);
+  const used = new Map();
+  const requests = [];
+  const gates = new Map();
+  let seq = 0;
+
+  const log = (entry) => {
+    requests.push(entry);
+    if (logPath) appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
+  };
+  const waitGate = (name) => {
+    const gate = gates.get(name) ?? { released: false, waiters: [] };
+    gates.set(name, gate);
+    return gate.released ? Promise.resolve() : new Promise((resolve) => gate.waiters.push(resolve));
+  };
+  const release = (name) => {
+    const gate = gates.get(name) ?? { released: false, waiters: [] };
+    gate.released = true;
+    gate.waiters.splice(0).forEach((resolve) => resolve());
+    gates.set(name, gate);
+  };
+
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const url = new URL(req.url ?? "/", "http://stand-in");
+    const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, REDACTED_HEADERS.has(k) ? "(present)" : v]));
+    const entry = { seq: ++seq, at: new Date().toISOString(), method: req.method, path: url.pathname, query: url.search, headers };
+
+    if (url.pathname === "/_stand-in/requests" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(requests));
+      return;
+    }
+    if (url.pathname.startsWith("/_stand-in/release/") && req.method === "POST") {
+      release(decodeURIComponent(url.pathname.slice("/_stand-in/release/".length)));
+      res.writeHead(204).end();
+      return;
+    }
+
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
+    if (req.method !== "POST" || url.pathname !== protocol.path) {
+      const served = protocol.other?.(req, res, body, url) ?? false;
+      log({ ...entry, body: body ?? (raw || null), served: served ? "other" : "not-found" });
+      if (!served) res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "not_found", message: `stand-in serves ${protocol.path}` } }));
+      return;
+    }
+
+    const turn = protocol.turnOf(body);
+    const picked = selectRule(loaded, used, turn) ?? fallbackRule(turn);
+    const marker = turn.text.match(loaded.marker)?.[0] ?? null;
+    log({ ...entry, body, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
+      action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });
+    if (picked.rule.gate) await waitGate(picked.rule.gate);
+    if (picked.rule.delayMs) await sleep(picked.rule.delayMs);
+    if (picked.rule.error) {
+      res.writeHead(picked.rule.error.status, { "content-type": "application/json", ...(picked.rule.error.headers ?? {}) })
+        .end(JSON.stringify(picked.rule.error.body ?? {}));
+      return;
+    }
+    try {
+      await protocol.answer({ req, res, body, rule: picked.rule, marker, stream: body?.stream === true, sleep });
+    } catch (error) {
+      if (!res.headersSent) res.writeHead(500).end(String(error));
+      else res.end();
+    }
+  });
+
+  await new Promise((resolve) => server.listen(port, host, resolve));
+  const address = server.address();
+  const url = `http://${host}:${address.port}`;
+  return {
+    url,
+    port: address.port,
+    requests: () => [...requests],
+    release,
+    close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }),
+  };
+}
+
+/** A turn as the log keeps it: each part's exact text with its UTF-8 byte length and sha256, and the markers it holds, so
+ *  a case can tell one intact message from a merge of two or a message split across turns. */
+export function describeTurn(turn, marker) {
+  const global = new RegExp(marker.source, "g");
+  return { kind: turn.kind, text: turn.text, parts: (turn.parts ?? []).map((text) => ({ text, bytes: Buffer.byteLength(text, "utf8"),
+    sha256: createHash("sha256").update(text, "utf8").digest("hex"), markers: text.match(global) ?? [] })) };
+}
+
+/** Write one server-sent event. */
+export function sse(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/** The command-line form both stand-ins share: `--script <file> [--log <file>] [--port <n>] [--host <addr>]`. Prints
+ *  `READY <url>` once listening, so a harness can wait for that line. */
+export async function runCli(start, argv = process.argv.slice(2)) {
+  const opts = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = argv[i]?.replace(/^--/, "");
+    if (!["script", "log", "port", "host"].includes(key ?? "")) throw new Error(`unknown option ${argv[i]}`);
+    opts[key] = argv[i + 1];
+  }
+  const standIn = await start({ script: opts.script, logPath: opts.log, port: opts.port ? Number(opts.port) : 0, host: opts.host ?? "127.0.0.1" });
+  process.stdout.write(`READY ${standIn.url}\n`);
+  const stop = () => standIn.close().then(() => process.exit(0));
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}
