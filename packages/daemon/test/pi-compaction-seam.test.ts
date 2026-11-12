@@ -10,6 +10,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { PiCompactionService } from "../src/domain/pi-compaction-service.js";
+import { PiCompactionRequestStore } from "../src/domain/pi-compaction-request-store.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { piCompactionTerminal } from "./helpers/pi-compaction-terminal.js";
@@ -17,6 +18,54 @@ import { piCompactionTerminal } from "./helpers/pi-compaction-terminal.js";
 afterEach(() => vi.useRealTimers());
 
 describe("Pi runner -> requested compaction status", () => {
+  it.each(["draft", "without-enter"])("keeps B uncertain after daemon restart with %s input", async boundary => {
+    // Given A completed through the real runner editor.
+    const dir = mkdtempSync(join(tmpdir(), "pi-request-restart-"));
+    const sidecar = join(dir, "runner-state.json");
+    const readSidecar = () => parsePiRunnerState(readFileSync(sidecar, "utf8"));
+    const core = new RunnerCore({
+      sendRpc: () => {}, postActivity: () => {}, mirrorLine: () => {}, mirrorAppend: () => {},
+      writeSidecar: state => writePiRunnerSidecar(sidecar, state), now: () => new Date().toISOString(),
+    }, { sessionName: "builder@seam", nodeId: "builder", launchId: "launch" });
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: {} }));
+    const terminal = piCompactionTerminal(core);
+    const requestStore = new PiCompactionRequestStore(join(dir, "requests"));
+    let attempt = 0;
+    const service = new PiCompactionService({ readSidecar, requestStore,
+      newAttemptId: () => `attempt-${++attempt}`, send: async (session, text, opts) => {
+        expect(requestStore.get(session)?.attemptId).toBe(text.split(" ")[1]);
+        if (attempt === 1 || boundary === "draft") return terminal.send(session, text, opts);
+        opts.beforeWrite?.();
+        terminal.input.write(`\u001b[200~${text}\u001b[201~`);
+        return { ok: false, sent: true, inputPhase: "written" };
+      } });
+    const seat = { nodeId: "builder", sessionName: "builder@seam", runtime: "pi" };
+    try {
+      await service.trigger(seat);
+      core.handlePiLine(JSON.stringify({ type: "compaction_start", reason: "manual" }));
+      core.handlePiLine(JSON.stringify({ type: "compaction_end", reason: "manual" }));
+      expect(service.getState(seat.sessionName)).toMatchObject({ status: "completed", attemptId: "attempt-1" });
+      if (boundary === "draft") terminal.input.write("operator draft ");
+      // When B is written and the daemon is recreated, including its request store.
+      await service.trigger(seat);
+      core.heartbeat(); // Runner writes must not erase the daemon-owned request.
+      const restarted = new PiCompactionService({ readSidecar, send: terminal.send,
+        requestStore: new PiCompactionRequestStore(join(dir, "requests")) });
+      // Then the newest request is B, not A's completion.
+      expect(restarted.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-2" });
+      expect(restarted.getState(seat.sessionName, "different-agent").attemptId).not.toBe("attempt-2");
+      const replacement = new RunnerCore({
+        sendRpc: () => {}, postActivity: () => {}, mirrorLine: () => {}, mirrorAppend: () => {},
+        writeSidecar: state => writePiRunnerSidecar(sidecar, state), now: () => new Date().toISOString(),
+      }, { sessionName: seat.sessionName, nodeId: seat.nodeId, launchId: "replacement-launch" });
+      replacement.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: {} }));
+      expect(restarted.getState(seat.sessionName, seat.nodeId)).toMatchObject({ status: "not_requested" });
+    } finally {
+      terminal.editor.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([{ delivery: "delayed" }, { delivery: "lost" }] as const)(
     "keeps the requested attempt's completion with $delivery activity delivery", async ({ delivery }) => {
       // Given a real runner sidecar and running Pi seat in an isolated database.

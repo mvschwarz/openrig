@@ -357,7 +357,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
 
 export function createRunnerInput(
   input: NodeJS.ReadableStream & { readonly isTTY?: boolean; readonly isRaw?: boolean; setRawMode: (raw: boolean) => unknown },
-  output: NodeJS.WritableStream & { readonly isTTY?: boolean },
+  output: NodeJS.WritableStream & { readonly isTTY?: boolean; readonly columns?: number; readonly rows?: number },
   onSubmit: (block: string) => void,
   pane?: PaneCompositor,
 ): readline.Interface {
@@ -948,6 +948,10 @@ export class RunnerCore {
     const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
     if (this.runtime === "pi" && compact) {
       const attemptId = compact[1]!;
+      if (this.pendingCompactAttemptId || (this.compaction?.startedAt && !this.compaction.endedAt)) {
+        this.diag("[pi-runner] compact already in progress; request not sent");
+        return;
+      }
       this.pendingCompactAttemptId = attemptId;
       this.pendingCompaction = { attemptId, requestedAt: this.io.now() };
       // Persist the request before the RPC leaves: the id survives a daemon
@@ -1007,6 +1011,14 @@ export class RunnerCore {
       }
       return;
     }
+    if (this.runtime === "pi" && record.success === true && record.error == null
+      && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)) {
+      const attemptId = record.id.slice(COMPACT_ID.length);
+      if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+      if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+      this.writeSidecar({});
+      return;
+    }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
@@ -1018,13 +1030,15 @@ export class RunnerCore {
         this.io.mirrorLine(`[pi-runner] ERROR rpc compact${unsupported ? " unsupported" : " failed"}: ${message}`);
         // A failure with no start replaces any older record: this attempt is the answer.
         const prior = this.compaction?.attemptId === attemptId ? this.compaction : undefined;
-        this.pendingCompactAttemptId = null;
-        this.pendingCompaction = undefined;
-        this.compaction = { attemptId, reason: prior?.reason ?? "manual",
+        const wasPending = this.pendingCompactAttemptId === attemptId;
+        if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+        const failed = { attemptId, reason: prior?.reason ?? "manual",
           ...(prior?.requestId ? { requestId: prior.requestId } : {}),
           ...(prior?.startedAt ? { startedAt: prior.startedAt } : {}),
           endedAt: prior?.endedAt ?? this.io.now(), errorMessage: detail };
-        this.requestedCompaction = this.compaction;
+        if (wasPending || !this.compaction?.attemptId || this.compaction.attemptId === attemptId) this.compaction = failed;
+        if (wasPending || !this.requestedCompaction || this.requestedCompaction.attemptId === attemptId) this.requestedCompaction = failed;
         this.writeSidecar({});
         return;
       }

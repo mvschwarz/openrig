@@ -27,6 +27,46 @@ function fixture(runtime: "pi" | "omp" = "pi") {
 }
 
 describe("Pi compaction sidecar", () => {
+  it.each([true, false])("releases A on RPC success=%s without permanently refusing an uncertain retry", success => {
+    const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-A");
+    f.event({ type: "response", id: "pi-runner-compact:attempt-A", success,
+      ...(success ? {} : { error: "Nothing to compact" }) });
+    expect(f.sidecars.at(-1)?.pendingCompaction).toBeUndefined();
+    f.core.handleUserBlock("/openrig-compact attempt-B");
+    f.event({ type: "response", id: "pi-runner-compact:attempt-A", success: true });
+    expect(f.sidecars.at(-1)?.pendingCompaction?.attemptId).toBe("attempt-B");
+    expect(f.rpc.at(-1)).toEqual({ type: "compact", id: "pi-runner-compact:attempt-B" });
+  });
+  it("keeps A pending when B arrives before Pi answers and credits a delayed start to A", () => {
+    // Given A is sent but Pi has not responded.
+    const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-A");
+    // When B arrives before a delayed manual start.
+    f.core.handleUserBlock("/openrig-compact attempt-B");
+    expect(f.rpc.filter(command => command.type === "compact")).toHaveLength(1);
+    expect(f.sidecars.at(-1)?.pendingCompaction?.attemptId).toBe("attempt-A");
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-A" });
+    // Then the start belongs to A, not B.
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-A", requestId: "request-A" });
+  });
+
+  it("does not clear B or replace its run when A's RPC error arrives late", () => {
+    // Given A ended and B is awaiting Pi.
+    const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-A");
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-A" });
+    f.event({ type: "compaction_end", reason: "manual", requestId: "request-A" });
+    f.core.handleUserBlock("/openrig-compact attempt-B");
+    // When A's response arrives late.
+    f.event({ type: "response", id: "pi-runner-compact:attempt-A", success: false, error: "late error" });
+    // Then B remains pending and its delayed start belongs to B.
+    expect(f.sidecars.at(-1)?.pendingCompaction?.attemptId).toBe("attempt-B");
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-B" });
+    f.event({ type: "response", id: "pi-runner-compact:attempt-A", success: false, error: "late error" });
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-B", requestId: "request-B" });
+  });
+
   it("keeps the prior sidecar readable until the atomic replacement", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sidecar-"));
     const target = path.join(dir, "runner-state.json");

@@ -81,9 +81,9 @@ and its delivery guard. A person's draft is respected where the seat's draft
 protection reads the Pi editor; otherwise the control can join a draft, as any
 message to a Pi agent can, and that attempt reads uncertain. A hold, a prompt
 and the bound occupant follow the guard's usual rules, and the send uses the
-transport's bounded idle wait so a working agent is waited for. The runner
-turns it into Pi's native compact RPC (not
-back into the runner sidecar, so the requested run is reported separately from
+transport's bounded idle wait so a working agent is waited for. The runner turns
+the reserved input into Pi's native compact RPC, not prompt text. The request's
+attempt id is carried into the command and the runner sidecar, so the requested run is reported separately from
 an automatic one and an earlier completion never answers a new request.
 A successful trigger is reported as "submitted, unconfirmed"; when input may
 have been written it is reported as uncertain. --state reports the requested

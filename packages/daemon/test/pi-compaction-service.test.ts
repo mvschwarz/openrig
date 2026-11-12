@@ -119,6 +119,20 @@ describe("PiCompactionService", () => {
     expect(f.sent).toHaveLength(2);
   });
 
+  it("holds B while A awaits Pi's response, then permits retry once Pi answers", async () => {
+    // Given A reached the runner's compact RPC but has no response yet.
+    const f = fixture();
+    await f.service.trigger(seat);
+    f.update({ pendingCompaction: { attemptId: "attempt-1", requestedAt: "now" } });
+    // When B is requested before A's response.
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "already_in_progress" });
+    expect(f.sent).toHaveLength(1);
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-1" });
+    // Then Pi's answer releases the hold, even if no completion event was observed.
+    f.update({});
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: true, attemptId: "attempt-2" });
+  });
+
   it("sends after a daemon restart while the prior attempt reads uncertain", async () => {
     const f = fixture({ sidecar: { ready: true, launchId: "launch", updatedAt: "old",
       compaction: { attemptId: "attempt-old", reason: "manual" } } });

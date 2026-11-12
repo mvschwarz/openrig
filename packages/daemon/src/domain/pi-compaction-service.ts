@@ -3,6 +3,7 @@ import type { PiCompactionRecord, PiRunnerState } from "../adapters/pi-runner-pr
 import type { SendOpts, SendResult } from "./session-transport.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { TerminalPolicyRefusal, type TerminalActor } from "./terminal-policy.js";
+import type { PiCompactionRequest, PiCompactionRequestStore } from "./pi-compaction-request-store.js";
 
 type PiSeat = { readonly nodeId: string; readonly sessionName: string; readonly runtime: string | null };
 
@@ -43,9 +44,10 @@ type PiCompactionDeps = {
   readonly terminalPolicies?: { check(nodeId: string, action: "compaction", actor: TerminalActor): unknown };
   readonly now?: () => number;
   readonly newAttemptId?: () => string;
+  readonly requestStore?: Pick<PiCompactionRequestStore, "get" | "set" | "delete">;
 };
 
-type RequestedAttempt = { readonly attemptId: string; readonly launchId: string | null; readonly submittedAt: string };
+type RequestedAttempt = PiCompactionRequest;
 
 const UNSUPPORTED = /unknown command|unsupported|not supported/i;
 /** The transport's own send-readiness window, as the Claude compaction send uses for its idle wait. */
@@ -85,15 +87,16 @@ export class PiCompactionService {
     if (UNSUPPORTED.test(prior?.compaction?.errorMessage ?? "") || UNSUPPORTED.test(prior?.requestedCompaction?.errorMessage ?? "")) {
       return { triggered: false, reason: "unsupported" };
     }
-    // Only a run that actually started and has no end is in flight. An attempt that
-    // merely never got its own record reads uncertain but holds no later request.
+    // Runner-confirmed RPCs and open runs are in flight. A draft-only or otherwise
+    // unconfirmed attempt reads uncertain without holding later requests.
     if (prior?.compaction?.startedAt && !prior.compaction.endedAt) return { triggered: false, reason: "already_in_progress" };
+    if (prior?.pendingCompaction && !prior.exited) return { triggered: false, reason: "already_in_progress" };
 
     const attemptId = this.newAttemptId();
     const launchId = prior?.launchId ?? null;
     // Record the pending attempt BEFORE awaiting the send: a second caller sees it
     // in flight, and a refusal before any input clears it below.
-    this.remember(seat.sessionName, attemptId, launchId);
+    this.remember(seat, attemptId, launchId);
     // The guard re-checks node, session, occupant and pane at the write and at
     // Enter. This bound launch check runs at those same two moments, so a
     // request cannot reach a replacement occupant or a rebound runner.
@@ -134,16 +137,16 @@ export class PiCompactionService {
       const detail = result.error ?? result.warning;
       return { triggered: true, attemptId, stage: "uncertain", ...(detail ? { detail } : {}) };
     }
-    this.forget(seat.sessionName);
     if (result.outcome === "retained") {
+      this.forget(seat.sessionName);
       return { triggered: false, reason: "held", detail: "The seat's delivery guard held the request; no compaction input was written." };
     }
     if (result.inputPhase === "not_reached" || result.sent === false) {
+      this.forget(seat.sessionName);
       return { triggered: false, reason: result.reason ?? "send_failed", ...(result.error ? { detail: result.error } : {}) };
     }
     // No positive pre-input result: the write outcome is unknown, so the request
     // may have been submitted. Keep it as an uncertain attempt rather than deny it.
-    this.remember(seat.sessionName, attemptId, launchId);
     return { triggered: true, attemptId, stage: "uncertain" };
   }
 
@@ -152,16 +155,21 @@ export class PiCompactionService {
    * automatic run, or from an earlier request, never answers a newer one: with
    * no matching record the attempt reads `uncertain`, not completed.
    */
-  getState(session: string): PiCompactionState {
+  getState(session: string, nodeId?: string): PiCompactionState {
     const sidecar = this.deps.readSidecar(session);
-    return this.attemptState(this.requested.get(session) ?? null, sidecar);
+    const saved = this.deps.requestStore?.get(session) ?? null;
+    const requested = this.requested.get(session) ?? (saved?.launchId === sidecar?.launchId ? saved : null);
+    return this.attemptState(requested && (nodeId === undefined || requested.nodeId === nodeId) ? requested : null, sidecar);
   }
 
-  private remember(session: string, attemptId: string, launchId: string | null): void {
-    this.requested.set(session, { attemptId, launchId, submittedAt: new Date(this.now()).toISOString() });
+  private remember(seat: PiSeat, attemptId: string, launchId: string | null): void {
+    const request = { nodeId: seat.nodeId, attemptId, launchId, submittedAt: new Date(this.now()).toISOString() };
+    this.deps.requestStore?.set(seat.sessionName, request);
+    this.requested.set(seat.sessionName, request);
   }
 
   private forget(session: string): void {
+    this.deps.requestStore?.delete(session);
     this.requested.delete(session);
   }
 

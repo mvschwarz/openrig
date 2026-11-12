@@ -162,7 +162,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (resolved?.node.runtime === "pi") {
       const service = c.get("piCompactionService" as never) as PiCompactionService | undefined;
       if (!service) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
-      return c.json({ ok: true, session, runtime: "pi", state: service.getState(resolved.sessionName) });
+      return c.json({ ok: true, session, runtime: "pi", state: service.getState(resolved.sessionName, resolved.node.node_id) });
     }
     if (!enforcer) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
     if (seat) enforcer.recoverSeat({ sessionName: session, cwd: seat.cwd, runtime: seat.runtime });

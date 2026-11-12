@@ -375,9 +375,9 @@ dispatches `/api/compaction/trigger` and `/api/compaction/state` by runtime.
    for, an over-budget wait returns the transport's own not-idle reason, and an
    unknown reading still sends. No probe and no new refusal code are added.
    A request is recorded before its send is awaited, so two overlapping triggers
-   share one send. Only a run that actually started and has no end holds a later
-   request; an attempt that never got its own record reads `uncertain` but no
-   longer blocks `already_in_progress`.
+   share one send. A runner-confirmed compact RPC awaiting Pi's answer, or a run
+   that started and has no end, holds a later request. A draft-only or otherwise
+   unconfirmed attempt reads `uncertain` without a lasting `already_in_progress` refusal.
 
 ### The requested run, scoped to its launch
 
@@ -398,9 +398,11 @@ It stamps that attempt id onto the sidecar `compaction` record at
   separately as `automatic`.
 - A request that may have been submitted with no result, and a start with no end,
   both report `uncertain` (`submitted_no_result` and `started_no_end`), including
-  in the CLI, never "was not started". The runner records
-  `pendingCompaction.attemptId` before it sends the compact RPC, so a daemon
-  restart reads the newest request as `uncertain` instead of an older completion.
+  in the CLI, never "was not started". The service saves one current request,
+  scoped to the agent and runner launch, before guarded input can be submitted.
+  A daemon restart therefore reads the newest request as `uncertain` even if its
+  text joined a draft or was written without Enter. The runner separately records
+  `pendingCompaction.attemptId` while its compact RPC awaits Pi's answer.
   Runner restart drops the launch-scoped record and pending id.
 - The runner re-arms idle heartbeats at `compaction_end` even when the terminal
   post is lost or attention suppresses it. Activity is advisory; completion is
@@ -412,8 +414,7 @@ can have returned submission success before that RPC error arrives. `--skip-map`
 is accepted but ignored for Pi; `--cancel` rejects Pi with `runtime_filter` and
 supplies no native abort path.
 
-[`pi-compaction-seam.test.ts`](../../../packages/daemon/test/pi-compaction-seam.test.ts)
-service and the activity store, with synthetic runner events. Its cases cover
+`pi-compaction-seam.test.ts` drives the real RunnerCore input/RPC handling, atomic sidecar output, service and activity store with synthetic Pi events. Its cases cover
 optional request identity, delayed or lost terminal activity, ordered beats,
 durable completion scoped by attempt id, a requested completion kept beside a
 later automatic run, and idle re-arming. This is an executable producer/consumer

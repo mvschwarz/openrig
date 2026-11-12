@@ -1110,9 +1110,6 @@ For a Pi seat:
   run (reported separately as `automatic`), never answers a newer request. Activity
   delivery can lag or be lost without preventing sidecar completion; the sidecar is
   authoritative.
-  An earlier completion, and an automatic threshold/overflow run (reported
-  separately as `automatic`), never answers a newer request. Activity delivery can
-  lag or be lost without preventing sidecar completion; the sidecar is authoritative.
 - The caller's actor reaches the same terminal-policy check as the Claude path:
   `terminal_policy_refused` and `terminal_policy_unavailable` use the seat's
   existing self/peer/OpenRig rules, with unattributed callers unchanged. This is
