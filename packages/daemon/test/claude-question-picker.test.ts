@@ -160,8 +160,9 @@ describe("ordinary transport under current and historical questions", () => {
         const staleWaiting = hook.name === "send_stale_permission" || hook.name === "display_stale_permission";
         const currentQuestion = ["picker160", "picker100", "picker12", "picker13"].includes(shape)
           || shape === "footer_in_multiline_draft";
-        // A fresh running or idle hook reads the pane once for a current dialog: a picker opened after Stop fires no hook.
-        const freshDialogCheck = hook.name === "fresh_running" || hook.name === "fresh_idle";
+        // A fresh running, idle or unknown (SessionStart) hook reads the pane once for a current dialog: a picker
+        // opened after Stop or SessionStart fires no hook.
+        const freshDialogCheck = hook.name === "fresh_running" || hook.name === "fresh_idle" || hook.name === "fresh_unknown";
         const freshCurrentQuestion = freshDialogCheck && currentQuestion;
         const sent = hook.name === "fresh_permission" || freshCurrentQuestion ? false
           : hook.name.startsWith("fresh_") ? true : state !== "attention" && !(staleWaiting && state === "unknown");

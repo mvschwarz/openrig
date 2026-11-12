@@ -4201,7 +4201,8 @@ export class SessionTransport {
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
-        if ((hookActivity.state === "running" || hookActivity.state === "idle") && input.runtime === "claude-code") {
+        // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4218,9 +4219,10 @@ export class SessionTransport {
           if (paneVeto.state === "needs_input" && (hookActivity.state === "running"
             || paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
         }
-        // Codex's /model picker fires no hook either. After its fresh idle hook only a current selector recognized in
-        // full refuses (the dialogue-only read skips the numbered-row scan, so history and drafts still deliver).
-        if (hookActivity.state === "idle" && input.runtime === "codex") {
+        // Codex's /model picker fires no hook either, and Codex opens it during a running turn too. After any fresh
+        // hook short of a permission request, only a current selector recognized in full refuses (the dialogue-only
+        // read skips the numbered-row scan, so history, drafts and a busy pane with no picker still deliver).
+        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && input.runtime === "codex") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,

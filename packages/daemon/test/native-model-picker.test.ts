@@ -52,7 +52,8 @@ describe("the program's own model picker", () => {
   });
 });
 
-async function send(runtime: "claude-code" | "codex", pane: string, hook: "Stop" | null) {
+type Hook = "Stop" | "UserPromptSubmit" | "SessionStart";
+async function send(runtime: "claude-code" | "codex", pane: string, hook: Hook | null) {
   const db = createFullTestDb();
   try {
     const repo = new RigRepository(db), registry = new SessionRegistry(db), rig = repo.createRig("picker");
@@ -89,10 +90,17 @@ describe("an ordinary send never types into an open model picker", () => {
     ["Codex, no hooks", "codex", codexModel, null],
     ["Codex, a fresh Stop hook", "codex", codexModel, "Stop"],
     ["Codex, the reasoning-level step after a fresh Stop hook", "codex", codexReasoning, "Stop"],
+    // Codex opens /model during a running turn too, and a fresh SessionStart reads unknown on both programs.
+    ["Codex, a fresh UserPromptSubmit hook (a running turn)", "codex", codexModel, "UserPromptSubmit"],
+    ["Codex, a fresh SessionStart hook", "codex", codexModel, "SessionStart"],
+    ["Claude, a fresh SessionStart hook", "claude-code", claudeDefault, "SessionStart"],
+    ["Claude, a fresh UserPromptSubmit hook (a running turn)", "claude-code", claudeDefault, "UserPromptSubmit"],
   ] as const)("%s: refused before any input", async (_name, runtime, pane, hook) => {
     const sent = await send(runtime, pane, hook);
-    expect(sent.result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false });
-    expect(sent.written).toBe(0);
+    // One assertion, so a failure shows both what the send answered and what it wrote.
+    expect({ ok: sent.result.ok, reason: (sent.result as { reason?: string }).reason, written: sent.written })
+      .toEqual({ ok: false, reason: "target_needs_input", written: 0 });
+    expect(sent.result).toMatchObject({ sent: false });
   });
 
   it.each([
@@ -104,6 +112,22 @@ describe("an ordinary send never types into an open model picker", () => {
   ] as const)("%s after a fresh Stop hook still delivers to %s", async (_program, _name, runtime, pane) => {
     const sent = await send(runtime, pane, "Stop");
     expect(sent.result.ok).toBe(true);
+    expect(sent.written).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["Codex, a fresh SessionStart hook, an empty composer", "codex", codexComposer, "SessionStart"],
+    ["Claude, a fresh SessionStart hook, an empty composer", "claude-code", claudeComposer, "SessionStart"],
+  ] as const)("%s: still delivers", async (_name, runtime, pane, hook) => {
+    const sent = await send(runtime, pane, hook);
+    expect(sent.result.ok).toBe(true);
+    expect(sent.written).toBeGreaterThan(0);
+  });
+
+  it("Codex mid-turn with no picker still delivers, with the busy advisory, as before", async () => {
+    const sent = await send("codex", "• Working (4s • esc to interrupt)\n\n" + codexComposer, "UserPromptSubmit");
+    expect(sent.result).toMatchObject({ ok: true });
+    expect((sent.result as { warning?: string }).warning).toContain("mid-task");
     expect(sent.written).toBeGreaterThan(0);
   });
 });
