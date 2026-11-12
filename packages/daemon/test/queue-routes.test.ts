@@ -1797,6 +1797,83 @@ describe("queue routes", () => {
     expect(data).toHaveLength(1);
   });
 
+  it("issue2728 applies repeated exact tags before the limit and composes existing filters", async () => {
+    const seed = async (item: {
+      body: string;
+      tags: string[];
+      createdAt: string;
+      targetRepo?: string;
+      sourceSession?: string;
+      destinationSession?: string;
+      state?: string;
+    }) => {
+      const created = await queueRepo.create({
+        sourceSession: item.sourceSession ?? "lead@rig-a",
+        destinationSession: item.destinationSession ?? "worker@rig-a",
+        body: item.body,
+        tags: item.tags,
+        targetRepo: item.targetRepo ?? "repo-a",
+        nudge: false,
+      });
+      db.prepare("UPDATE queue_items SET ts_created = ?, state = ? WHERE qitem_id = ?")
+        .run(item.createdAt, item.state ?? "pending", created.qitemId);
+      return created.qitemId;
+    };
+
+    const olderMatch = await seed({
+      body: "older exact match",
+      tags: ["review", "publish"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const newerOneTag = await seed({
+      body: "newer review-only row",
+      tags: ["review"],
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    await seed({ body: "wrong repo", tags: ["review", "publish"], targetRepo: "repo-b", createdAt: "2026-01-03T00:00:00.000Z" });
+    await seed({ body: "wrong destination", tags: ["review", "publish"], destinationSession: "other@rig-a", createdAt: "2026-01-04T00:00:00.000Z" });
+    await seed({ body: "wrong state", tags: ["review", "publish"], state: "done", createdAt: "2026-01-05T00:00:00.000Z" });
+    await seed({ body: "wrong rig", tags: ["review", "publish"], sourceSession: "lead@other-rig", destinationSession: "worker@other-rig", createdAt: "2026-01-06T00:00:00.000Z" });
+    await seed({ body: "case variant is not exact", tags: ["Review", "publish"], createdAt: "2026-01-07T00:00:00.000Z" });
+    await seed({ body: "substring is not exact", tags: ["reviewer", "publish"], createdAt: "2026-01-08T00:00:00.000Z" });
+    await seed({ body: "comma-joined tag stays literal", tags: ["review,publish"], createdAt: "2026-01-09T00:00:00.000Z" });
+
+    const query = "targetRepo=repo-a&destinationSession=worker%40rig-a&state=pending&rig=rig-a";
+    const bounded = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=1`);
+    expect(bounded.status).toBe(200);
+    expect(((await bounded.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const exactOnly = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=10`);
+    expect(exactOnly.status).toBe(200);
+    expect(((await exactOnly.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const single = await app.request(`/api/queue/list?tag=review&${query}&limit=5`);
+    expect(((await single.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([newerOneTag, olderMatch]);
+
+    const active = await app.request("/api/queue/list?tag=review&tag=publish&targetRepo=repo-a&destinationSession=worker%40rig-a&rig=rig-a&activeOnly=1&limit=5");
+    expect(((await active.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const blank = await app.request("/api/queue/list?tag=%20");
+    expect(blank.status).toBe(400);
+    expect(await blank.json()).toMatchObject({ error: "tag_invalid" });
+  });
+
+  it("issue2728 keeps repeated tags composed with the attention list path", async () => {
+    const matching = await queueRepo.create({
+      sourceSession: "a@r", destinationSession: "human-founder@external", body: "older human ask",
+      tags: ["review"], nudge: false,
+    });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run("2026-01-01T00:00:00.000Z", matching.qitemId);
+    await queueRepo.create({
+      sourceSession: "a@r", destinationSession: "human-founder@external", body: "newer unrelated human ask",
+      tags: ["other"], nudge: false,
+    });
+
+    const response = await app.request("/api/queue/list?attention=1&tag=review&limit=1");
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([matching.qitemId]);
+  });
+
   it("GET /api/queue/list follows a handoff to its successor and filters by updatedSince", async () => {
     const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),

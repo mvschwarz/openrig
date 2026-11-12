@@ -185,6 +185,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.
       "output.whoami_peers",
+      "output.rebuild_recaps",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
       // The providers chosen at rig setup --providers, which kernel boot honours.
@@ -325,6 +326,19 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("output.whoami_peers")).toMatchObject({ value: 12, source: "file" });
     for (const raw of ["0", "-3", "2.5", "8junk", "many"]) {
       expect(() => store.set("output.whoami_peers", raw)).toThrow(/output\.whoami_peers/);
+    }
+  });
+
+  it("configures the optional rebuild recap preview without limiting retained history", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 3, source: "default" });
+    store.set("output.rebuild_recaps", "0");
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 0, source: "file" });
+    vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "2");
+    expect(store.resolveOne("output.rebuild_recaps")).toMatchObject({ value: 2, source: "env" });
+    vi.unstubAllEnvs();
+    for (const raw of ["-1", "2.5", "2recaps", "9007199254740992"]) {
+      expect(() => store.set("output.rebuild_recaps", raw)).toThrow(/output\.rebuild_recaps/);
     }
   });
 

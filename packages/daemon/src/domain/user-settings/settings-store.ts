@@ -200,6 +200,7 @@ export const SETTINGS_VALID_KEYS = [
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
   "output.whoami_peers",
+  "output.rebuild_recaps",
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view; daemon-read, twin of the CLI key.
   "provider.usage_windows",
   // The providers chosen at rig setup --providers; kernel boot counts only these. Twin of the CLI key.
@@ -347,6 +348,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
+  "output.rebuild_recaps": { primary: "OPENRIG_OUTPUT_REBUILD_RECAPS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   "provider.selected": { primary: "OPENRIG_PROVIDER_SELECTED" },
   "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
@@ -456,6 +458,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
+  "output.rebuild_recaps": ["output", "rebuildRecaps"],
   "provider.usage_windows": ["provider", "usageWindows"],
   "provider.selected": ["provider", "selected"],
   "bundle.services_enabled": ["bundle", "servicesEnabled"],
@@ -775,6 +778,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "terminal.inherit_tmux_environment": return false;
     case "output.compact": return false;
     case "output.whoami_peers": return 8;
+    case "output.rebuild_recaps": return 3;
     case "provider.usage_windows": return false;
     case "provider.selected": return "";
     case "bundle.services_enabled": return false;
@@ -1001,6 +1005,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, KeyConstraint>> = {
   // surface rejects exactly what the CLI rejects. `retention.enabled` is a
   // boolean (coerceValue enforces true/false) — no constraint entry needed.
   // Slice 15 P5 — the whoami peer bound; lockstep with the CLI twin.
+  "output.rebuild_recaps": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid value for output.rebuild_recaps: must be an integer >= 0, got "${raw}"`);
+    }
+  },
   "output.whoami_peers": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);

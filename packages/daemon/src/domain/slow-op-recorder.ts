@@ -3,7 +3,6 @@ import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import type { MiddlewareHandler } from "hono";
 
-export const SLOW_OPERATION_BARRIER_TIMEOUT_MS = 250;
 export const SLOW_OPERATION_THRESHOLD_MS = 250;
 export const SLOW_OPERATION_ROTATION_BYTES = 1024 * 1024;
 export const SLOW_OPERATION_ROTATION_COUNT = 3;
@@ -89,7 +88,6 @@ interface SlowOpRecorderOptions {
   maxBytes?: number;
   rotationCount?: number;
   slowThresholdMs?: number;
-  barrierTimeoutMs?: number;
 }
 
 interface Span {
@@ -141,13 +139,7 @@ const WORKER_SOURCE = String.raw`
       ok = false;
       error = caught instanceof Error ? caught.message : String(caught);
     }
-    if (message.signal) {
-      const state = new Int32Array(message.signal);
-      Atomics.store(state, 0, ok ? 1 : 2);
-      Atomics.notify(state, 0);
-    } else if (message.id) {
-      parentPort.postMessage({ id: message.id, ok, error });
-    }
+    if (message.id) parentPort.postMessage({ id: message.id, ok, error });
   });
 `;
 
@@ -157,7 +149,6 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
   private readonly maxBytes: number;
   private readonly rotationCount: number;
   private readonly slowThresholdMs: number;
-  private readonly barrierTimeoutMs: number;
   private readonly pending = new Map<string, { resolve: () => void; reject: (error: unknown) => void }>();
   private degraded: SlowOperationSnapshot = { healthy: true };
   private degradedHandler?: (snapshot: Required<Pick<SlowOperationSnapshot, "reason" | "site">>) => void;
@@ -181,7 +172,6 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     this.maxBytes = options.maxBytes ?? SLOW_OPERATION_ROTATION_BYTES;
     this.rotationCount = options.rotationCount ?? SLOW_OPERATION_ROTATION_COUNT;
     this.slowThresholdMs = options.slowThresholdMs ?? SLOW_OPERATION_THRESHOLD_MS;
-    this.barrierTimeoutMs = options.barrierTimeoutMs ?? SLOW_OPERATION_BARRIER_TIMEOUT_MS;
     this.worker = new Worker(WORKER_SOURCE, { eval: true, execArgv: [] });
     this.worker.unref();
     this.worker.on("message", (message: { id?: string; ok?: boolean }) => {
@@ -220,27 +210,10 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
 
   beginSyncSpan(site: string): Span {
     const span: Span = { spanId: randomUUID(), site, startedAt: performance.now() };
-    const signal = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-    const state = new Int32Array(signal);
-    try {
-      this.worker.postMessage({
-        type: "append",
-        signal,
-        logPath: this.logPath,
-        maxBytes: this.maxBytes,
-        rotationCount: this.rotationCount,
-        record: { v: 1, ts: new Date().toISOString(), spanId: span.spanId, phase: "begin", site },
-      });
-    } catch {
-      // Synchronous postMessage failure means the Worker is gone: degrade
-      // through the terminal transition but still return the span so the
-      // wrapped operation runs to completion (its value/error stays exact).
-      this.handleTerminalFailure("recorder_post_failed", site);
-      return span;
-    }
-    const wait = Atomics.wait(state, 0, 0, this.barrierTimeoutMs);
-    if (wait === "timed-out") this.markDegraded("begin_barrier_timeout", site);
-    else if (Atomics.load(state, 0) !== 1) this.markDegraded("begin_barrier_failed", site);
+    // Queue before the operation without waiting on worker startup or fsync. The
+    // worker can write even while the main thread is wedged; only flush/close
+    // acknowledge durability. A crash before the worker appends can lose begin.
+    this.appendAsync({ v: 1, ts: new Date().toISOString(), spanId: span.spanId, phase: "begin", site });
     return span;
   }
 

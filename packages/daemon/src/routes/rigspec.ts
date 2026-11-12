@@ -202,7 +202,9 @@ rigspecImportRoutes.post("/workspace", async (c) => {
 
 // POST /api/rigs/import/materialize -> create rig topology without launching
 rigspecImportRoutes.post("/materialize", async (c) => {
-  const { podInstantiator } = getDeps(c);
+  const header = c.req.header("X-OpenRig-Operation-Id");
+  if (!validOperationId(header)) return c.json({ error: "Invalid X-OpenRig-Operation-Id" }, 400);
+  const { podInstantiator, rigRepo } = getDeps(c);
   const body = await c.req.text();
 
   let raw: unknown;
@@ -223,7 +225,12 @@ rigspecImportRoutes.post("/materialize", async (c) => {
 
   const targetRigId = c.req.header("X-Target-Rig-Id") ?? undefined;
   const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
-  const outcome = await podInstantiator.materialize(body, rigRoot, { targetRigId, cwdOverride });
+  const operation = reserveOperation(rigRepo.db, header, "rig.materialize", targetRigId ? [targetRigId] : [],
+    body, [rigRoot, cwdOverride ?? null]);
+  if (operation.state === "conflict") return c.json({ code: "operation_id_conflict" }, 409);
+  if (operation.state === "replay") return c.json({ replayed: true, operation: operation.operation }, 200);
+  const outcome = await podInstantiator.materialize(body, rigRoot, { targetRigId, cwdOverride,
+    ...(operation.state === "fresh" ? { recordCreated: operation.recordCreated } : {}) });
   if (!outcome.ok) {
     const status = outcome.code === "validation_failed" ? 400
       : outcome.code === "preflight_failed" ? 409
@@ -234,9 +241,9 @@ rigspecImportRoutes.post("/materialize", async (c) => {
     const body = outcome.code === "rig_name_running"
       ? { ...outcome, error: outcome.message }
       : outcome;
-    return c.json(body, status);
+    return c.json(operation.state === "fresh" ? { ...body, operation: operation.read() } : body, status);
   }
-  return c.json(outcome.result, 201);
+  return c.json(operation.state === "fresh" ? { ...outcome.result, operation: operation.read() } : outcome.result, 201);
 });
 
 // POST /api/rigs/import/validate -> validate only (auto-detects format)
