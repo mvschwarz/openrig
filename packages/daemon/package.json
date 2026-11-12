@@ -99,6 +99,10 @@
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
+    },
+    "./herdr-live-workspace": {
+      "types": "./dist/herdr-live-workspace-surface.d.ts",
+      "import": "./dist/herdr-live-workspace-surface.js"
     }
   },
   "scripts": {

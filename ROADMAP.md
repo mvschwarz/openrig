@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.11
+## Released in 0.7.12
 
-[0.7.11 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.11): OpenRig 0.7.11 is a patch for people running their own agent teams. An ordinary send or work notice now goes into a person's typed draft by default instead of being refused (see Behaviour that changed). See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
+[0.7.12 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.12): OpenRig 0.7.12 is a patch for people running their own agent teams. When you answer your team, by typing, clicking or qualifying an answer, the answer now goes to an agent that reads it with the question and decides. When no receiving agent is available, your answer waits. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
 
 ## How to help
 

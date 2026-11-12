@@ -261,7 +261,10 @@ configurations, as below; do not take the pin from a cached page summary.
    later prompts.
    - **A permission choice already made** (in the handoff or to you: fewer
      prompts for this project, a mode, a rule, or keep prompts on): use it,
-     and don't ask again.
+     and don't ask again, when it covers the commands this goal will repeat
+     in this project. Keeping prompts on covers them all. A choice for other
+     commands or another scope, such as a user-wide rule for `rig` commands,
+     doesn't: make the one offer below for the commands it leaves out.
    - **Otherwise, one offer if they want fewer interruptions:** name the
      command families this goal will repeat in their folder (for example
      `git switch`, `git add`, `git commit` and the project's test command)
@@ -361,8 +364,10 @@ configurations, as below; do not take the pin from a cached page summary.
     so the choice is theirs.
     When you see one, tell them where it is and where they can answer: which
     seat, what its prompt asks (`rig capture <session>` with the seat's
-    `canonicalSessionName` shows it), and that seat's terminal in the team's
-    space from step 8, or through you. Only when no space is open, give the
+    `canonicalSessionName` shows it), and that seat's terminal, or through
+    you. A team seat's terminal is in the team's space from step 8. A kernel
+    seat's is in the kernel's view (`rig terminal open saved:kernel --window`;
+    the advisor has its own tab or window). Only when no space is open, give the
     seat's `tmuxAttachCommand` as a command for a new terminal, with one
     line on what it does (it shows that seat; closing the window leaves the
     seat running), or just its name if it has none. Never send them to a

@@ -1,3 +1,4 @@
+import { inputReadDiagnostic, type InputReadDiagnostic } from "./input-read-diagnostic.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -2176,6 +2177,7 @@ export interface SendResult {
   heldInputBox?: InputBoxAnnotation["status"];
   /** The existing preserve-input reading, without the draft or suggestion text. No extra capture. */
   heldInputBoxReading?: Pick<InputBoxAnnotation, "status" | "confidence" | "evidence" | "cursor">;
+  inputReadFailure?: InputReadDiagnostic;
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -2823,6 +2825,7 @@ export class SessionTransport {
         sent: written ? true : attempted ? undefined : false,
         inputPhase: written ? "written" : attempted ? "attempted" : "not_reached",
         reason: (error as { code?: string }).code ?? "expected_identity_unavailable", error: (error as Error).message,
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
         ...(receiptUnconfirmed ? { warning: "Conditional input receipt could not be finalized; inspect before retrying." } : {}) };
     }
   }
@@ -2944,17 +2947,20 @@ export class SessionTransport {
       if ((error as { inputWritten?: boolean }).inputWritten === true) {
         // Only a throw before the Enter key reached the adapter positively means Enter was never sent.
         const enter = (error as { enterAttempted?: boolean }).enterAttempted === true ? "the submission (Enter) outcome is unconfirmed" : "Enter was not sent";
-        return { ok: false, sessionName, sent: true, outcome: "failed", inputPhase: "written", reason: (error as { code?: string }).code ?? "submit_refused",
+        return { ok: false, sessionName, sent: true, outcome: "failed", inputPhase: "written",
+          ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}), reason: (error as { code?: string }).code ?? "submit_refused",
           error: `Text was written to '${sessionName}' but ${enter}: ${(error as Error).message}` };
       }
       // A throw after the text write was issued: whether it landed is unknown, so it is not "nothing sent" either.
       if ((error as { inputAttempted?: boolean }).inputAttempted === true) {
-        return { ok: false, sessionName, outcome: "failed", inputPhase: "attempted", reason: (error as { code?: string }).code ?? "delivery_indeterminate",
+        return { ok: false, sessionName, outcome: "failed", inputPhase: "attempted",
+          ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}), reason: (error as { code?: string }).code ?? "delivery_indeterminate",
           error: `A text write to '${sessionName}' was issued, but its result was lost: ${(error as Error).message}` };
       }
       const noInputCode = error instanceof OutboxHandlerError && error.code === "retained_quota_full" ? "retained_quota_full" as const
         : error instanceof DeliveryGuardError && error.code === "terminal_seat" ? "terminal_seat" as const : undefined;
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message,
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
         ...(noInputCode ? { noInputCode, inputPhase: "not_reached" as const } : {}) };
     }
   }
@@ -3350,7 +3356,7 @@ export class SessionTransport {
       }
       if (!submitResult.ok && !enterIssued && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
-        return { ok: false, sessionName, inputPhase: enterIssued ? "attempted" : "not_reached", ...(!enterIssued ? { sent: false } : {}), reason: submitResult.code?.startsWith("expected_identity_") ? submitResult.code : "submit_failed", outcome: "failed", error: enterIssued
+        return { ok: false, sessionName, ...(submitResult.inputReadFailure ? { inputReadFailure: submitResult.inputReadFailure } : {}), inputPhase: enterIssued ? "attempted" : "not_reached", ...(!enterIssued ? { sent: false } : {}), reason: submitResult.code?.startsWith("expected_identity_") ? submitResult.code : "submit_failed", outcome: "failed", error: enterIssued
           ? `submitOnly: Enter reported a failure for '${sessionName}'; submission is unconfirmed: ${submitResult.message}`
           : `submitOnly: Enter was not sent to '${sessionName}': ${submitResult.message}` };
       }
@@ -3700,7 +3706,7 @@ export class SessionTransport {
           heldInputBoxReading = { status, confidence, evidence, cursor };
         }
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
-          `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
+          `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`, inputReadDiagnostic("composer", box));
       }
       if (!clear) pastedOverInputBox = box?.status ?? "unknown";
     } : undefined;
@@ -3735,6 +3741,7 @@ export class SessionTransport {
         ok: false,
         sessionName,
         reason: policyRefusal ? textResult.code : "send_failed",
+        ...(textResult.inputReadFailure ? { inputReadFailure: textResult.inputReadFailure } : {}),
         outcome: "failed",
         // The adapter's draft checks run before the paste (only file/buffer preparation precedes them), and its
         // after-paste observation cannot fail the write, so a draft_* receipt proves the target input was never reached.
@@ -3803,6 +3810,7 @@ export class SessionTransport {
           ok: false,
           sessionName,
           reason: policyRefusal ? submitResult.code : "submit_failed",
+          ...(submitResult.inputReadFailure ? { inputReadFailure: submitResult.inputReadFailure } : {}),
           outcome: "failed",
           inputPhase: "written",
           error: policyRefusal

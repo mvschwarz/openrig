@@ -1179,7 +1179,7 @@ async function runFanOutSend(params: {
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
-  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}`);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}${heldSuffix(results)}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
@@ -1190,6 +1190,12 @@ async function runFanOutSend(params: {
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }
+}
+
+/** The summary's held count, when any target was held: held work is retained, not delivered and not failed. */
+export function heldSuffix(results: Array<{ outcome?: string }>): string {
+  const held = results.filter((r) => r.outcome === "retained").length;
+  return held > 0 ? `, ${held} held` : "";
 }
 
 function parseWaitForIdleMs(value: string | undefined): number | undefined | null {

@@ -338,7 +338,11 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect(team.structured.hostedMembers).toEqual([{ session: "grok@team", roster: "team", capabilities: ["web research"],
         useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown",
         // Its last call is recorded; no ring was rung (nudge: false), so its last wake is unknown, never idle.
-        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows" } }]);
+        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows",
+          // Its own inbox reads over this server were recorded as check-ins on the daemon. Its entry states no cadence,
+          // so it reads unknown with that check-in, never on request.
+          checkIn: { status: "unknown", lastCheckInAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), expectedMinutes: null, onRequest: false,
+            reason: "no check-in cadence declared" } } }]);
       expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
       expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
       expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");

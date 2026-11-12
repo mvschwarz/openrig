@@ -138,6 +138,7 @@ Keys:
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
                          --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
+  output.rebuild_recaps  superseded recap paths previewed in rebuild briefings (default 3; 0 lists all)
   bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
   provider.selected      the providers chosen at rig setup --providers (claude, codex or claude,codex); kernel boot uses only these (default empty: every signed-in provider)
