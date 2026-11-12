@@ -497,6 +497,18 @@ describe("credential-bound observation-only reports", () => {
     expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: "original-ref" });
   });
 
+  it.each(["model", "context"] as const)("checks both original and latest session references for %s currency", async component => {
+    for (const [original, latest, current] of [["core-A", "runner-B", false], ["core-A", "core-A", true], ["runner-B", "core-A", false]] as const) {
+      const f = runner();
+      f.db.prepare("UPDATE sessions SET resume_type='community:synth', resume_token='core-A' WHERE id=?").run(f.row.id);
+      expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: original }, model: { id: "model-A" }, context: { usedTokens: 10 } }))).status).toBe(200);
+      expect((await f.post(f.grant.token, f.report(2, { session: { nativeRef: latest } }))).status).toBe(200);
+      const read = f.store.getRunnerObservation(f.guest.id, component, { freshnessMs: 600_000 });
+      expect(read).toMatchObject(current ? { report: { sequence: 1 }, reason: null } : { report: null, reason: "session_mismatch" });
+      expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: "core-A" });
+    }
+  });
+
   it.each(["revoked", "replaced"])("refuses a body that arrives after its run was %s", async change => {
     const f = runner(); const held = f.heldPost(f.grant.token, f.report(1, { model: { id: "delayed" } }));
     await held.reading;

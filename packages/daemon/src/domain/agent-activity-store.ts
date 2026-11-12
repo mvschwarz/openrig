@@ -267,8 +267,8 @@ export class AgentActivityStore {
       if (now - sample >= policy.freshnessMs) return unknown("stale");
       const session = this.db.prepare("SELECT resume_token FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1")
         .get(nodeId) as { resume_token: string | null } | undefined;
-      const nativeRef = report.observations.session?.nativeRef ?? latest("session")?.observations.session?.nativeRef;
-      if (session?.resume_token && nativeRef && session.resume_token !== nativeRef) return unknown("session_mismatch");
+      const nativeRefs = [report.observations.session?.nativeRef, latest("session")?.observations.session?.nativeRef];
+      if (session?.resume_token && nativeRefs.some(ref => ref && session.resume_token !== ref)) return unknown("session_mismatch");
       return { report, reason: null };
     } catch { return unknown("binding_changed"); }
   }
