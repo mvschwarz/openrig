@@ -6,6 +6,7 @@ import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-sta
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { personRegistrationOffer } from "../person-registration-offer.js";
 import {
   startDaemon,
   stopDaemon,
@@ -309,6 +310,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             process.exitCode = 1;
           }
         }
+        if (process.exitCode !== 1) for (const line of await personRegistrationOffer()) console.log(line);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;

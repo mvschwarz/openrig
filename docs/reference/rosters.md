@@ -92,3 +92,8 @@ A member marked `"hosted": true` is a hosted member: a tool outside the terminal
 `show` and `find` say it's hosted rather than unmatched. See [Hosted members](hosted-members.md).
 Its entry can declare `wake.webhook`, the secret names for a trigger OpenRig rings when work lands for it
 (see [Ring it when work lands](hosted-members.md#ring-it-when-work-lands)).
+It can also declare `check_in_minutes`, how often it's expected to check its queue (a positive whole number of minutes;
+an hourly schedule is `60`), or `check_in_on_request: true` when it checks in only when a person asks it. That's what
+its person set up, not something OpenRig observes. With neither, its check-in status reads unknown: OpenRig doesn't
+assume a cadence. A value that can't be used doesn't stop the roster loading: that member's check-in
+status reads unknown, with the reason. See [Check-in status](hosted-members.md#check-in-status).

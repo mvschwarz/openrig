@@ -256,6 +256,13 @@ export class QueueWakeRepository {
       row.state === "blocked" && this.getStatus(row.qitemId)?.ref === jobId);
   }
 
+  /** An ordinary one-shot park has no later cycle to replace a failed wake.
+   * Repeating waits and provider-limit expiry keep their own existing lifecycle. */
+  hasOwedOneShotParkWake(jobId: string): boolean {
+    return this.findCurrentQitemsByGeneratedTimer(jobId).some(row => !this.isUsageLimitBlocker(row.qitemId))
+      && !this.isRepeatingTimer(jobId);
+  }
+
   /** Active park-generated timers that are still their blocked row's current wake and still target the
    *  row's owner. These wake the seat that owns the row, not a particular occupant, so a seat swap keeps
    *  them; any other job the retiring occupant registered still stops. */

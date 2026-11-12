@@ -573,35 +573,39 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
 export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean; frozenExecutable?: string } = {}): Promise<NativeProcessRow[]> {
-  try {
-    // Copies: the table is shared with concurrent readers, and executable paths are added below.
-    const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
-    // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
-    // foreground path-named Claude too. `frozenExecutable`: the caller is proving a launch that froze that file (the
-    // installer's symlink resolved to its versioned file), which needs the path only of a path-named Claude whose
-    // argv[0] isn't already the file; an exact launch is proved without it, and a helper timeout can't change its
-    // fingerprint. Every other listing skips that read (on macOS it starts a helper process).
-    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (mayBeClaudeAfterScript(row) && (options.claudeLaunchPaths === true
-      || (!!options.frozenExecutable && tokens(row.command)[0] !== options.frozenExecutable))));
-    if (candidates.length > 0) {
-      const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
-      for (const row of candidates) row.executablePath = paths.get(row.pid);
-    }
-    // Linux argv was captured with this same /proc table sample; never read real /proc
-    // again after a caller has selected a fixture or alternate process-table root.
-    // Only foreground rows can be selected below. Skip macOS helper reads for
-    // background Codex processes; every foreground seat still gets fresh argv.
-    const codexCandidates = process.platform === "darwin"
-      ? rows.filter(row => row.executableName === "codex" && row.pgid !== undefined && row.pgid > 0 && row.pgid === row.tpgid)
-      : [];
-    if (codexCandidates.length > 0) {
-      // A failed or timed-out helper read loses argv evidence, not the process table.
-      // The foreground Codex still participates in delivery's uniqueness check.
-      const argumentsByPid = await readNativeProcessArguments(codexCandidates.map(row => row.pid)).catch(() => new Map<number, string[]>());
-      for (const row of codexCandidates) row.argv = argumentsByPid.get(row.pid) ?? null;
-    }
-    return rows;
-  } catch { return []; }
+  try { return await listNativeProcessesOrThrow(options); } catch { return []; }
+}
+
+/** The same listing, but a failed enumeration rejects instead of reading as an empty table. A caller that shares or
+ *  reuses one listing needs this: an empty array is a legitimate success, so it cannot also mean "failed". */
+export async function listNativeProcessesOrThrow(options: { claudeLaunchPaths?: boolean; frozenExecutable?: string } = {}): Promise<NativeProcessRow[]> {
+  // Copies: the table is shared with concurrent readers, and executable paths are added below.
+  const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
+  // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
+  // foreground path-named Claude too. `frozenExecutable`: the caller is proving a launch that froze that file (the
+  // installer's symlink resolved to its versioned file), which needs the path only of a path-named Claude whose
+  // argv[0] isn't already the file; an exact launch is proved without it, and a helper timeout can't change its
+  // fingerprint. Every other listing skips that read (on macOS it starts a helper process).
+  const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (mayBeClaudeAfterScript(row) && (options.claudeLaunchPaths === true
+    || (!!options.frozenExecutable && tokens(row.command)[0] !== options.frozenExecutable))));
+  if (candidates.length > 0) {
+    const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
+    for (const row of candidates) row.executablePath = paths.get(row.pid);
+  }
+  // Linux argv was captured with this same /proc table sample; never read real /proc
+  // again after a caller has selected a fixture or alternate process-table root.
+  // Only foreground rows can be selected below. Skip macOS helper reads for
+  // background Codex processes; every foreground seat still gets fresh argv.
+  const codexCandidates = process.platform === "darwin"
+    ? rows.filter(row => row.executableName === "codex" && row.pgid !== undefined && row.pgid > 0 && row.pgid === row.tpgid)
+    : [];
+  if (codexCandidates.length > 0) {
+    // A failed or timed-out helper read loses argv evidence, not the process table.
+    // The foreground Codex still participates in delivery's uniqueness check.
+    const argumentsByPid = await readNativeProcessArguments(codexCandidates.map(row => row.pid)).catch(() => new Map<number, string[]>());
+    for (const row of codexCandidates) row.argv = argumentsByPid.get(row.pid) ?? null;
+  }
+  return rows;
 }
 
 export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;

@@ -18,11 +18,11 @@ const id = () => randomUUID();
 afterEach(() => { for (const value of opened.splice(0)) value.close(); });
 
 describe("operation correlation", () => {
-  it("returns a capability marker for the three supported kinds", async () => {
+  it("returns a capability marker for the supported kinds", async () => {
     const { app } = createTestApp(db());
     const response = await app.request("/api/operations/capabilities");
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ contract: "operation-correlation.v1", kinds: ["rig.create", "rig.import", "member.add"] });
+    expect(await response.json()).toEqual({ contract: "operation-correlation.v1", kinds: ["rig.create", "rig.import", "rig.materialize", "member.add"] });
   });
 
   it("reserves a legacy import before paused preflight so a concurrent replay has one executor", async () => {

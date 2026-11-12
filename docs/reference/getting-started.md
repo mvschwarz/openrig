@@ -180,19 +180,21 @@ user.
 
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
-`~/.claude/skills` and `~/.agents/skills` when the daemon starts. To add it manually, use the release tag matching
-your installed `rig --version`: replace `<release-tag>` below with that tag, including its `v` prefix.
-`rig --version` prints the version and a commit, for example `0.6.11 (379f0a0d)`; the tag is `v0.6.11`.
-The skill is in the repository from v0.6.6; on an older install, use the v0.6.6 tag or upgrade first.
-Choose the command for the agent doing the setup:
+`~/.claude/skills` and `~/.agents/skills` when the daemon starts. For a new install, add it with the command for the
+agent doing the setup. Both use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent codex
 ```
+
+If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
+after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
+`0.6.11 (379f0a0d)`; the tag is `v0.6.11`. The skill is in the repository from v0.6.6; on an older install, use the
+v0.6.6 tag or upgrade first.
 
 These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
@@ -201,11 +203,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.11/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.11/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -342,9 +344,21 @@ startup reconcile leaves when every kernel terminal is gone, for example after a
 reboot. It does not detect a reboot as such. It uses the same restore as
 `rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
 until the seats are ready. A kernel stopped with `rig down kernel`, including
-one whose seats were already detached, stays down on later starts. So do a kernel
-with only some seats stopped and seats you unclaimed. Start one again with
-`rig up kernel --existing`.
+one whose seats were already detached, stays down on later starts; start it again
+with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+While the kernel's other seats are running, `rig up kernel --existing` refuses
+(it restores only a kernel with no live session), so start one stopped seat with
+`rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
+kernel snapshot that restore ranks first: the newest usable automatic one (taken
+before `rig down`, on the periodic schedule, or at a runtime switch), even when a
+manual one is newer, and otherwise the newest usable one. `--plan` names the
+snapshot it picked and any newer usable one, and `--snapshot-id <id>` picks one
+yourself. Under the default restore policy, which the kernel's seats keep, it
+resumes the seat's saved conversation; a seat it can't resume is reported as
+waiting for a decision, not as started.
+`rig seat launch <seat> --fresh --reason "…"` instead starts a new conversation
+with no continuity source: use it only when you want a fresh occupant, since the
+seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
 empty server and probe again. It records the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux

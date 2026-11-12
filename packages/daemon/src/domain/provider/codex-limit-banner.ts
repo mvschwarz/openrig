@@ -19,7 +19,8 @@ export interface CodexLimitBanner {
   evidence: string;
 }
 
-const BANNER_LINE_RE = /^\s*■ You've hit your usage limit\b/;
+// Codex prints a typographic apostrophe (U+2019); older builds use the straight one.
+const BANNER_LINE_RE = /^\s*■ You['’]ve hit your usage limit\b/u;
 const RESET_RE = /try again at ([^.!\n]+)/i;
 
 // Fenced code blocks: banner-shaped text an agent printed is quoted content,

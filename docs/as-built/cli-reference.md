@@ -245,7 +245,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
+| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--operation-id <uuid>`<br>`--json`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
 
 ### ui
 
@@ -551,7 +551,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
 | `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
 | `rig queue transitions <qitemId>` | — | `--json`<br>`--full`<br>`--host <id>` |
-| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--tag <tag>` (repeatable, AND)<br>`--mission <id>`<br>`--slice <id>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
@@ -561,6 +561,8 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
 | `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
+
+`rig queue list` accepts repeated exact, case-sensitive `--tag <tag>` filters and requires every tag to match before the result limit. `--mission <id>` and `--slice <id>` add the exact `mission:<id>` and `slice:<id>` tags. Exact duplicates collapse; blank values are rejected; commas inside a tag are literal. The CLI and MCP report a visibly unfiltered nonempty response from an older daemon, but an empty response cannot establish whether the daemon applied the filter.
 
 ### slack
 
