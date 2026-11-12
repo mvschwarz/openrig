@@ -23,8 +23,6 @@ export interface PersistedRestorePostureReader {
   getFallbackRigRef: () => string | null;
   getRigProvenance: () => PersistedRigProvenance | null;
   readFile?: (target: string) => string;
-  /** Display-only guard: reject non-custom refs when re-deriving a custom-origin provenance row. */
-  requireCustomOrigin?: boolean;
 }
 
 export interface PersistedPolicyProvenanceSnapshot {
@@ -86,7 +84,7 @@ export function resolvePersistedRestorePosture(reader: PersistedRestorePostureRe
             const rederived = resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
               readFile: () => body,
             });
-            if (rederived.contentResolved && (!reader.requireCustomOrigin || rederived.origin === "custom")) {
+            if (rederived.contentResolved) {
               return rederived.launchPosture;
             }
           }
@@ -109,7 +107,7 @@ export function resolvePersistedRestorePosture(reader: PersistedRestorePostureRe
           const rederived = resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
             readFile: () => body,
           });
-          if (rederived.contentResolved && (!reader.requireCustomOrigin || rederived.origin === "custom")) {
+          if (rederived.contentResolved) {
             return rederived.launchPosture;
           }
         }
@@ -124,9 +122,11 @@ export function resolvePersistedRestorePosture(reader: PersistedRestorePostureRe
 
 /**
  * Display-only posture resolution for batched node inventory and detail guidance:
+ * follows `resolvePersistedRestorePosture` so displayed flags match unchanged `main` restore
+ * (including inconsistent custom-origin rows whose ref resolves to a builtin or `none`),
  * normalizes unrecognized or empty persisted posture strings to `"floor"` so ambient OPENRIG_YOLO
- * never leaks into displayed commands, rejects mismatched builtin/none refs under custom provenance,
- * and reads custom targets through `readRegularCustomPolicyFile` by default.
+ * never leaks into displayed commands, and reads custom targets through `readRegularCustomPolicyFile`
+ * by default.
  */
 export function resolveDisplayedRestorePosture(
   snapshot: PersistedPolicyProvenanceSnapshot,
@@ -155,7 +155,6 @@ export function resolveDisplayedRestorePosture(
           }
         : null,
     readFile: deps.readFile,
-    requireCustomOrigin: true,
   });
   return asKnownLaunchPosture(raw) ?? "floor";
 }

@@ -1401,7 +1401,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     }
   });
 
-  it("F01: rejects mismatched builtin and deliberate_none refs in display when saved custom provenance re-derives posture while keeping RestoreOrchestrator unchanged from main", async () => {
+  it("QA002 / F01: matches unchanged main RestoreOrchestrator posture in display when custom-origin provenance points at builtin:yolo or none", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-3043-f01-provenance-"));
     try {
@@ -1472,34 +1472,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const sGenuineSeat = registry.registerSession(genuineSeatNode.id, "dev-genuine-seat@f01-node-rig");
       registry.updateResumeToken(sGenuineSeat.id, "codex_id", "tok-f01-genuine-seat", "hook");
 
-      // Display rejects mismatched builtin/none refs under custom provenance, while RestoreOrchestrator preserves main's unhardened behavior.
-      const nodeEntries = new Map(getNodeInventory(db, nodeRig.id).map((e) => [e.logicalId, e]));
-      expect(nodeEntries.get("dev.stale-node-yolo")?.resumeCommand).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
-      );
-      expect(getNodeDetail(db, nodeRig.id, "dev.stale-node-yolo")?.recoveryGuidance?.commands[0]).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
-      );
-      expect(restoreOrchestrator.resolveRestorePosture(staleNodeYolo.id, nodeRig.id)).toBe("full_bypass");
-
-      expect(nodeEntries.get("dev.stale-inh-yolo")?.resumeCommand).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-inh-yolo'`,
-      );
-      expect(restoreOrchestrator.resolveRestorePosture(staleInheritedYolo.id, nodeRig.id)).toBe("full_bypass");
-
-      expect(nodeEntries.get("dev.stale-node-none")?.resumeCommand).toBe(
-        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-node-none'`,
-      );
-      expect(restoreOrchestrator.resolveRestorePosture(staleNodeNone.id, nodeRig.id)).toBe("floor");
-
-      // Genuine custom seat policy agrees between display and real RestoreOrchestrator.
-      expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
-        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-genuine-seat'`,
-      );
-      expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
-        await runRealRestoreResolvedResume(restoreOrchestrator, genuineSeatNode.id, nodeRig.id, "tok-f01-genuine-seat"),
-      );
-
       // 2. Rig custom provenance persisted as floor over stale builtin:yolo, persisted as full_bypass over stale 'none',
       //    and genuine custom rig policy re-deriving from full_bypass to floor.
       const staleRigYolo = rigRepo.createRig("f01-rig-yolo");
@@ -1510,11 +1482,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const sRigYolo = registry.registerSession(rigYoloSeat.id, "dev-rig-yolo@f01-rig-yolo");
       registry.updateResumeToken(sRigYolo.id, "codex_id", "tok-f01-rig-yolo", "hook");
 
-      expect(getNodeInventory(db, staleRigYolo.id)[0]?.resumeCommand).toBe(
-        `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-rig-yolo'`,
-      );
-      expect(restoreOrchestrator.resolveRestorePosture(rigYoloSeat.id, staleRigYolo.id)).toBe("full_bypass");
-
       const staleRigNone = rigRepo.createRig("f01-rig-none");
       db.prepare(
         "UPDATE rigs SET permission_policy = 'none', rig_policy_origin = 'custom', rig_policy_resolved_target = ?, rig_policy_declaring_dir = ?, rig_policy_launch_posture = 'full_bypass' WHERE id = ?",
@@ -1522,11 +1489,6 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const rigNoneSeat = rigRepo.addNode(staleRigNone.id, "dev.rig-none", { runtime: "codex", cwd: "/work/f01-f" });
       const sRigNone = registry.registerSession(rigNoneSeat.id, "dev-rig-none@f01-rig-none");
       registry.updateResumeToken(sRigNone.id, "codex_id", "tok-f01-rig-none", "hook");
-
-      expect(getNodeInventory(db, staleRigNone.id)[0]?.resumeCommand).toBe(
-        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-rig-none'`,
-      );
-      expect(restoreOrchestrator.resolveRestorePosture(rigNoneSeat.id, staleRigNone.id)).toBe("floor");
 
       const genuineRig = rigRepo.createRig("f01-genuine-rig");
       db.prepare(
@@ -1536,12 +1498,89 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       const sGenuineRig = registry.registerSession(genuineRigSeat.id, "dev-genuine-rig@f01-genuine-rig");
       registry.updateResumeToken(sGenuineRig.id, "codex_id", "tok-f01-genuine-rig", "hook");
 
+      // Unchanged main RestoreOrchestrator derives full_bypass for readable custom-origin builtin:yolo refs and floor for 'none'.
+      expect(restoreOrchestrator.resolveRestorePosture(staleNodeYolo.id, nodeRig.id)).toBe("full_bypass");
+      expect(restoreOrchestrator.resolveRestorePosture(staleInheritedYolo.id, nodeRig.id)).toBe("full_bypass");
+      expect(restoreOrchestrator.resolveRestorePosture(staleNodeNone.id, nodeRig.id)).toBe("floor");
+      expect(restoreOrchestrator.resolveRestorePosture(rigYoloSeat.id, staleRigYolo.id)).toBe("full_bypass");
+      expect(restoreOrchestrator.resolveRestorePosture(rigNoneSeat.id, staleRigNone.id)).toBe("floor");
+
+      const realNodeYoloCmd = await runRealRestoreResolvedResume(
+        restoreOrchestrator,
+        staleNodeYolo.id,
+        nodeRig.id,
+        "tok-f01-node-yolo",
+      );
+      const realInhYoloCmd = await runRealRestoreResolvedResume(
+        restoreOrchestrator,
+        staleInheritedYolo.id,
+        nodeRig.id,
+        "tok-f01-inh-yolo",
+      );
+      const realNodeNoneCmd = await runRealRestoreResolvedResume(
+        restoreOrchestrator,
+        staleNodeNone.id,
+        nodeRig.id,
+        "tok-f01-node-none",
+      );
+      const realRigYoloCmd = await runRealRestoreResolvedResume(
+        restoreOrchestrator,
+        rigYoloSeat.id,
+        staleRigYolo.id,
+        "tok-f01-rig-yolo",
+      );
+      const realRigNoneCmd = await runRealRestoreResolvedResume(
+        restoreOrchestrator,
+        rigNoneSeat.id,
+        staleRigNone.id,
+        "tok-f01-rig-none",
+      );
+
+      expect(realNodeYoloCmd).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-node-yolo'`);
+      expect(realInhYoloCmd).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-inh-yolo'`);
+      expect(realNodeNoneCmd).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-none'`);
+      expect(realRigYoloCmd).toBe(`codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-rig-yolo'`);
+      expect(realRigNoneCmd).toBe(`codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-rig-none'`);
+
+      // Genuine custom seat and rig policies agree between display and real RestoreOrchestrator.
+      const nodeEntries = new Map(getNodeInventory(db, nodeRig.id).map((e) => [e.logicalId, e]));
+      expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
+        `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-genuine-seat'`,
+      );
+      expect(nodeEntries.get("dev.genuine-seat")?.resumeCommand).toBe(
+        await runRealRestoreResolvedResume(restoreOrchestrator, genuineSeatNode.id, nodeRig.id, "tok-f01-genuine-seat"),
+      );
       expect(getNodeInventory(db, genuineRig.id)[0]?.resumeCommand).toBe(
         `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-genuine-rig'`,
       );
       expect(getNodeInventory(db, genuineRig.id)[0]?.resumeCommand).toBe(
         await runRealRestoreResolvedResume(restoreOrchestrator, genuineRigSeat.id, genuineRig.id, "tok-f01-genuine-rig"),
       );
+
+      // Display must match main's real restore command across both directions (builtin:yolo -> full_bypass and none -> floor).
+      expect({
+        staleNodeYoloInventory: nodeEntries.get("dev.stale-node-yolo")?.resumeCommand,
+        staleNodeYoloDetail: getNodeDetail(db, nodeRig.id, "dev.stale-node-yolo")?.recoveryGuidance?.commands[0],
+        staleInheritedYoloInventory: nodeEntries.get("dev.stale-inh-yolo")?.resumeCommand,
+        staleInheritedYoloDetail: getNodeDetail(db, nodeRig.id, "dev.stale-inh-yolo")?.recoveryGuidance?.commands[0],
+        staleNodeNoneInventory: nodeEntries.get("dev.stale-node-none")?.resumeCommand,
+        staleNodeNoneDetail: getNodeDetail(db, nodeRig.id, "dev.stale-node-none")?.recoveryGuidance?.commands[0],
+        staleRigYoloInventory: getNodeInventory(db, staleRigYolo.id)[0]?.resumeCommand,
+        staleRigYoloDetail: getNodeDetail(db, staleRigYolo.id, "dev.rig-yolo")?.recoveryGuidance?.commands[0],
+        staleRigNoneInventory: getNodeInventory(db, staleRigNone.id)[0]?.resumeCommand,
+        staleRigNoneDetail: getNodeDetail(db, staleRigNone.id, "dev.rig-none")?.recoveryGuidance?.commands[0],
+      }).toEqual({
+        staleNodeYoloInventory: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
+        staleNodeYoloDetail: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-node-yolo'`,
+        staleInheritedYoloInventory: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-inh-yolo'`,
+        staleInheritedYoloDetail: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-inh-yolo'`,
+        staleNodeNoneInventory: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-none'`,
+        staleNodeNoneDetail: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-node-none'`,
+        staleRigYoloInventory: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-rig-yolo'`,
+        staleRigYoloDetail: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-f01-rig-yolo'`,
+        staleRigNoneInventory: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-rig-none'`,
+        staleRigNoneDetail: `codex -s workspace-write ${UPDATE_OFF} resume 'tok-f01-rig-none'`,
+      });
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
