@@ -63,10 +63,11 @@ const OWN_INPUT_REREAD_MS = 300;
 /** Right before an automatic paste, the empty input is read once more after this wait: a draft typed (or redrawn by the
  *  agent's TUI) since the first read is seen before the paste, not after it, where nothing is removed (#2447, #3076). */
 const PASTE_SETTLE_MS = 300;
-/** A key from any tmux client of the seat this recently means a person is typing there: the paste waits for a later
- *  attempt. tmux reports client activity in whole seconds, so this is three of them (#3076). */
+/** Recent activity at a writable tmux client of the seat (keys, but also other client input; session-wide, not proof of
+ *  typing in this pane) holds the paste: a later attempt can deliver once it reads quiet and the input empty. tmux
+ *  reports client activity in whole seconds, so this is three of them (#3076). */
 const INPUT_QUIET_MS = 3000;
-/** tmux's client_activity is in whole seconds; the key may have come up to this much after the second it reports. */
+/** tmux's client_activity is in whole seconds; the activity may have come up to this much after the second it reports. */
 const CLIENT_ACTIVITY_PRECISION_MS = 999;
 /** A terminal member with nothing set holds OpenRig's own notices and takes deliberate sends. */
 const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
@@ -130,7 +131,8 @@ export class SeatDeliveryGuard {
   /** A paste this guard kept from being submitted because it couldn't read the input, per node (#2429). */
   private readonly leftovers = new Map<string, { target: GuardTarget; humanEpoch: number; text: string; collapsedPaste: string | null }>();
   private inspectInput?: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>;
-  /** When a tmux client of the seat last had a key (epoch ms), or null when unknown. */
+  /** When a writable tmux client of the seat last had activity (epoch ms, whole seconds); null when no writable client
+   *  has; a rejection when that can't be known. */
   private inputActivity?: (target: GuardTarget) => Promise<number | null>;
   private inputAbsent?: (target: GuardTarget) => Promise<boolean>;
   private readonly hasModeConfig: boolean;
@@ -511,26 +513,27 @@ export class SeatDeliveryGuard {
     }
   }
 
-  /** No key from a tmux client of the seat in the last seconds, before and after a short wait, and the input still
-   *  empty when read again after it. A key time tmux can't report holds the paste, as an unreadable input does. The
-   *  read it returns is the one the paste goes on. */
+  /** No recent writable-client activity before a short wait, the input still empty when read again after it, and still
+   *  no recent activity after that read. A time tmux can't report holds the paste, as an unreadable input does. The
+   *  read it returns is the one the paste goes on. Typing after this final check and before the paste can still leave
+   *  the notice beside the person's draft: the Enter is then refused, nothing is submitted or deleted (#3076). */
   private async quietBeforePaste(target: GuardTarget, read: () => Promise<ComposerInput | null>,
     unknown: (reading: ComposerInput | null) => DeliveryGuardError): Promise<ComposerInput> {
-    const typing = async () => {
+    const quiet = async () => {
       if (!this.inputActivity) return;
       const last = await this.inputActivity(target).then(at => ({ at }), () => null);
-      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read when the seat's terminal last had a key. Automatic delivery is held; nothing was pasted.");
-      // tmux reports whole seconds: a key at N.999 s reads as N, so the quiet window counts from the end of that second.
+      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.");
+      // tmux reports whole seconds: activity at N.999 s reads as N, so the quiet window counts from the end of that second.
       if (last.at !== null && Date.now() - (last.at + CLIENT_ACTIVITY_PRECISION_MS) < INPUT_QUIET_MS) {
-        throw new DeliveryGuardError("draft_input_busy", "A person is typing at this seat. Automatic delivery is held; nothing was pasted.");
+        throw new DeliveryGuardError("draft_input_busy", "A writable client of this seat had recent activity. Automatic delivery is held; nothing was pasted.");
       }
     };
-    await typing();
+    await quiet();
     await this.sleep(PASTE_SETTLE_MS);
-    await typing();
     const again = await read();
     if (!again || again.state === "unknown") throw unknown(again);
     if (again.state !== "empty") throw new DeliveryGuardError("draft_input_busy", "The input changed just before the paste. Automatic delivery is held; nothing was pasted.");
+    await quiet();
     return again;
   }
 

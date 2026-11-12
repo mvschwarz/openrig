@@ -32,7 +32,7 @@ function signal() {
   return { ready: new Promise<void>(resolve => { release = resolve; }), release: () => release() };
 }
 
-function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } = {}) {
+function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; appendPaste?: boolean } = {}) {
   const db = new Database(saved ?? ":memory:");
   if (!saved) {
     migrate(db, ALL_MIGRATIONS);
@@ -60,7 +60,8 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
     const node = command.includes("%2") ? "b" : "a";
     if (command.includes("paste-buffer")) {
       await hooks.paste?.();
-      writes.push(`paste:${node}:${staged}`); bodies[node] = staged;
+      // appendPaste: a paste lands after whatever the input already holds, as in a real composer (#3076 tests).
+      writes.push(`paste:${node}:${staged}`); bodies[node] = opts.appendPaste ? (bodies[node] ?? "") + staged : staged;
     }
     if (command.includes("send-keys")) {
       writes.push(`keys:${node}:${command}`);
@@ -1169,7 +1170,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   };
 
   it("is seen by the re-read after the settle wait: the notice is held and nothing is pasted into the person's input", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     const waits: number[] = [];
     // The person starts typing during the guard's wait right before the paste (the first read saw an empty input).
@@ -1182,8 +1183,8 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     expect(f.bodies.a).toBe(draft);
   });
 
-  it("holds while a tmux client had a key in the last seconds, also when the key comes during the wait, and delivers once quiet", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+  it("holds on recent writable-client activity, also activity during the wait, and a later attempt delivers once quiet", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     let last: number | null = Date.now() - 1000;
     setActivity(f, () => last);
@@ -1191,7 +1192,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     expect(busy).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
 
     last = Date.now() - 60_000;
-    f.hooks.settle = () => { last = Date.now(); };   // a key during the settle wait, nothing drawn yet
+    f.hooks.settle = () => { last = Date.now(); };   // activity during the settle wait, nothing drawn yet
     f.advance();
     const during = await f.send("wake-2", "Wake timer fired again.", { openrigNotice: true, verify: false });
     expect(during).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
@@ -1206,7 +1207,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   });
 
   it("counts the quiet window from the end of the whole second tmux reports: 3.5 s ago still holds, 4.5 s ago delivers", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     let last = Date.now() - 3500;   // a key at N.999 s reads as N: it may have been 2.5 s ago
     setActivity(f, () => last);
@@ -1218,8 +1219,8 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     expect(sent).toMatchObject({ ok: true });
   });
 
-  it("holds as unreadable when tmux can't say when the seat last had a key; with no client attached it delivers", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+  it("holds as unreadable when tmux can't report recent writable-client activity; with no writable client it delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
     const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
@@ -1232,7 +1233,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   });
 
   it("holds as unreadable when the input can't be read after the wait", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = null; };
     const result = await f.send("unreadable", notice, { openrigNotice: true, verify: false });
@@ -1241,7 +1242,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   });
 
   it("runs the send's own waiting checks before the guard's last read, so a draft typed while they wait is seen", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     // A conditional send's checks await (a conversation lookup); the person types meanwhile. The adapter returns the
     // guard's refusal as its result.
@@ -1253,12 +1254,25 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   });
 
   it("applies to every automatic input under draft-aware, a deliberate send included, as the empty check already did", async () => {
-    const f = fixture(undefined, { runtime: "claude-code" });
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
     f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = draft; };
     const result = await f.send("deliberate", "a message from another seat", { verify: false });
     expect(result).toMatchObject({ sent: false, reason: "draft_input_busy" });
     expect(pasted(f)).toEqual([]);
     expect(f.bodies.a).toBe(draft);
+  });
+
+  it("the remaining gap: typing after the final check and before the paste leaves the notice beside the draft, never submitted or deleted", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let typed = false;
+    // The person types between the guard's last check and tmux's paste: the paste lands after their text.
+    f.hooks.paste = () => { if (!typed) { typed = true; f.bodies.a = draft; } };
+    const result = await f.send("final-boundary", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ ok: false });          // pasted (sent) but never confirmed as delivered
+    expect(f.submissions).toEqual([]);                    // not submitted: the Enter was refused
+    expect(f.bodies.a!.startsWith(draft)).toBe(true);     // the person's text kept, in front
+    expect(f.bodies.a).toContain("Wake timer fired.");    // the notice beside it: the contamination this PR narrows
   });
 });

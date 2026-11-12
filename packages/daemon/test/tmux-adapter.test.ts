@@ -54,14 +54,18 @@ describe("TmuxAdapter.listSessionClientTerminals", () => {
 describe("TmuxAdapter.lastClientActivity (#3076)", () => {
   const activity = (stdout: string) => adapterFor(mockExec({ "list-clients": { stdout } })).lastClientActivity("op@kernel");
 
-  it("is the latest key of a writable client, in milliseconds", async () => {
-    expect(await activity("0|1790000000|1790000100\n0|1790000000|1790000105\n")).toBe(1790000105000);
+  it("is the latest activity of a writable client, in milliseconds", async () => {
+    expect(await activity("0|1790000100\n0|1790000105\n")).toBe(1790000105000);
   });
 
-  it("does not count a read-only client (a viewer tile) or a client that only attached", async () => {
-    expect(await activity("1|1790000000|1790000200\n0|1790000000|1790000100\n")).toBe(1790000100000);
-    expect(await activity("1|1790000000|1790000200\n")).toBeNull();
-    expect(await activity("0|1790000300|1790000300\n")).toBeNull();
+  it("does not count a read-only client (a viewer tile)", async () => {
+    expect(await activity("1|1790000200\n0|1790000100\n")).toBe(1790000100000);
+    expect(await activity("1|1790000200\n")).toBeNull();
+  });
+
+  it("counts an attach as recent activity: a key in the same second as the attach can't be told apart from it", async () => {
+    // tmux would report client_created == client_activity for both an attach alone and an attach plus a key that second.
+    expect(await activity("0|1790000300\n")).toBe(1790000300000);
   });
 
   it("is null with no client", async () => {
@@ -70,8 +74,9 @@ describe("TmuxAdapter.lastClientActivity (#3076)", () => {
   });
 
   it("throws on a row it can't read, alone or next to a readable one, so the guard holds", async () => {
-    for (const stdout of ["0|1790000000|abc\n", "0|x|1790000100\n", "0|1790000000|0\n", "0|1790000000\n", "2|1790000000|1790000100\n",
-      "0|1790000000|1790000100\n0|1790000000|abc\n"]) await expect(activity(stdout)).rejects.toThrow();
+    for (const stdout of ["0|abc\n", "0|0\n", "0\n", "2|1790000100\n", "0|1790000000|1790000100\n", "0|1790000100\n0|abc\n"]) {
+      await expect(activity(stdout)).rejects.toThrow();
+    }
   });
 
   it("throws when tmux can't say", async () => {
@@ -80,10 +85,10 @@ describe("TmuxAdapter.lastClientActivity (#3076)", () => {
     }
   });
 
-  it("asks tmux for the read-only flag, the attach time and the activity of each client of the session", async () => {
+  it("asks tmux for the read-only flag and the activity of each client of the session", async () => {
     const commands: string[] = [];
     await adapterFor(async command => { commands.push(command); return ""; }).lastClientActivity("op@kernel");
-    expect(commands.some(c => c.includes("list-clients") && c.includes("#{client_readonly}|#{client_created}|#{client_activity}"))).toBe(true);
+    expect(commands.some(c => c.includes("list-clients") && c.includes("#{client_readonly}|#{client_activity}"))).toBe(true);
   });
 });
 

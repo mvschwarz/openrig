@@ -497,24 +497,24 @@ export class TmuxAdapter {
     }, target => this.lastClientActivity(target.session));
   }
 
-  /** When a person last had a key at a tmux client attached to this session (epoch ms, whole seconds), or null when no
-   *  client has. A read-only client (a viewer tile) can't type into the seat, and a client whose activity is still its
-   *  attach time hasn't had a key, so neither counts. A tmux failure or an unreadable row throws: the guard then holds
-   *  the paste rather than take it for "nobody typing". Read-only; the guard uses it so an automatic paste waits while
-   *  a person is typing there (#3076). */
+  /** When a writable tmux client attached to this session last had activity (epoch ms, whole seconds), or null when no
+   *  writable client is attached. tmux's client_activity is session-wide and covers more than text keys, so this is
+   *  recent writable-client activity, not proof of typing in the pane. A read-only client (a viewer tile) can't type
+   *  into the seat and doesn't count. An attach counts: tmux can't tell a key in the attach's second from the attach,
+   *  so a delivery can be held briefly after one. A tmux failure or an unreadable row throws: the guard then holds
+   *  the paste rather than take it for "no activity" (#3076). */
   async lastClientActivity(session: string): Promise<number | null> {
     const exact = exactTarget(session, "session");
-    const format = `#{client_readonly}${TMUX_FIELD_SEPARATOR}#{client_created}${TMUX_FIELD_SEPARATOR}#{client_activity}`;
+    const format = `#{client_readonly}${TMUX_FIELD_SEPARATOR}#{client_activity}`;
     const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
       `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
     let latest: number | null = null;
     for (const line of output.split("\n").map(row => row.trim()).filter(row => row !== "")) {
-      const [readonly, created, activity, ...rest] = line.split(TMUX_FIELD_SEPARATOR);
-      if (rest.length || !/^[01]$/.test(readonly ?? "") || !/^[1-9]\d*$/.test(created ?? "") || !/^[1-9]\d*$/.test(activity ?? "")) {
+      const [readonly, activity, ...rest] = line.split(TMUX_FIELD_SEPARATOR);
+      if (rest.length || !/^[01]$/.test(readonly ?? "") || !/^[1-9]\d*$/.test(activity ?? "")) {
         throw new Error(`tmux list-clients: unreadable client row for ${session}`);
       }
-      if (readonly === "1" || Number(activity) <= Number(created)) continue;
-      latest = Math.max(latest ?? 0, Number(activity) * 1000);
+      if (readonly === "0") latest = Math.max(latest ?? 0, Number(activity) * 1000);
     }
     return latest;
   }
