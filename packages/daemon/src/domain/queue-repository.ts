@@ -85,7 +85,8 @@ import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, des
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
-import { hostedWakeFor, isHostedMemberAt, type RosterWake } from "./rosters.js";
+import { hostedMembersAt, hostedWakeFor, isHostedMemberAt, type RosterMember, type RosterWake } from "./rosters.js";
+import { memberCheckInStatus, type MemberCheckIn } from "./connection-contract.js";
 import { hostedRingMayHaveArrived, ringHostedWake } from "./hosted-wake.js";
 import { effectiveGateRoles } from "./gate-predicate.js";
 import {
@@ -651,6 +652,16 @@ function defaultIsHostedMember(destination: string): boolean {
   }
 }
 
+/** The hosted members the authored rosters list on this host. Empty when the rosters or this host's id can't be read. */
+function defaultHostedMembers(): RosterMember[] {
+  try {
+    const root = new SettingsStore().resolveOne("workspace.root").value;
+    return typeof root === "string" && root ? hostedMembersAt(join(root, "rosters"), getSelfHostId()) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** A session's latest read of its own pending inbox: when it was seen, never seen, or unknown (the record can't be read). */
 export type InboxCheckIn = { state: "seen"; at: string } | { state: "never" } | { state: "unknown" };
 
@@ -1098,6 +1109,7 @@ export class QueueRepository {
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
   /** Whether the rosters list an address as a hosted member, trigger or not. */
   private readonly hostedMemberFn: (destination: string) => boolean;
+  private readonly hostedMembersFn: () => RosterMember[];
   private readonly permissionDecider?: (ask: QueueItem, requester: string) => { session: string; describe?: string } | null;
   private readonly hostedWakeFetch: typeof fetch | undefined;
   /** When this process last wrote each session's inbox check-in, so a seat that polls often writes at most once a minute. */
@@ -1151,6 +1163,7 @@ export class QueueRepository {
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
       hostedWake?: (destination: string) => RosterWake | null;
       isHostedMember?: (destination: string) => boolean;
+      hostedMembers?: () => RosterMember[];
       hostedWakeFetch?: typeof fetch;
       /** Who decides a runner's permission ask after its person answers, while the runner waits (startup wires the
        *  receiving-agent order, `permissionDeciderFor`). Absent, or null for an ask: the ask closes with the answer, as
@@ -1174,6 +1187,7 @@ export class QueueRepository {
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
     this.hostedMemberFn = opts?.isHostedMember ?? defaultIsHostedMember;
+    this.hostedMembersFn = opts?.hostedMembers ?? defaultHostedMembers;
     this.permissionDecider = opts?.permissionDecider;
     this.hostedWakeFetch = opts?.hostedWakeFetch;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
@@ -5269,6 +5283,24 @@ export class QueueRepository {
       }
       this.inboxCheckInWriteFailed = true;
     }
+  }
+
+  /** Each hosted member on this host with its check-in status: its stated cadence against its own inbox reads. A status
+   *  only; nothing here changes how work reaches it. */
+  hostedMemberCheckIns(now: Date = new Date()): Array<{ seat: string; rung: boolean } & MemberCheckIn> {
+    return this.hostedMembersFn().map((m) => ({ seat: m.seat, rung: m.wake !== undefined,
+      ...memberCheckInStatus({ checkInMinutes: m.check_in_minutes, onRequest: m.check_in_on_request, cadenceProblem: m.check_in_problem,
+        checkIn: this.lastInboxCheckIn(m.seat), now }) }));
+  }
+
+  /** One member's check-in status, as `hostedMemberCheckIns` gives it. A seat the rosters don't list here (or can't be
+   *  read for) states no cadence, so it reads by its check-ins alone. */
+  hostedMemberCheckIn(seat: string, now: Date = new Date()): MemberCheckIn {
+    let member: RosterMember | undefined;
+    try { member = this.hostedMembersFn().find((m) => this.isSameSession(m.seat, seat)); } catch { member = undefined; }
+    // The roster's spelling of the seat, as the list read uses, so both read the same check-ins.
+    return memberCheckInStatus({ checkInMinutes: member?.check_in_minutes, onRequest: member?.check_in_on_request,
+      cadenceProblem: member?.check_in_problem, checkIn: this.lastInboxCheckIn(member?.seat ?? seat), now });
   }
 
   /** This session's latest recorded check-in under any of its names. */
