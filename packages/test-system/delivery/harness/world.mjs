@@ -145,6 +145,8 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
   const sockets = mkdtempSync("/tmp/dlv-");
   chmodSync(sockets, 0o700);
   if (Buffer.byteLength(join(sockets, `tmux-${process.getuid()}`, "default")) > 100) throw new Error(`the tmux socket path under ${sockets} is too long`);
+  // Who the cell's processes are, for a reap from outside if this process is stopped before it can close the cell.
+  writeFileSync(join(root, "identity.json"), JSON.stringify({ home, sockets }));
   // The program and the logging tmux come first on PATH; node is needed by the rig CLI and a node-based program.
   symlinkSync(join(HERE, "tmux"), join(bin, "tmux"));
   symlinkSync(program.bin, join(bin, program.kind));
@@ -287,20 +289,46 @@ async function waitReady(cell, kind, timeoutMs) {
   throw new Error(`the seat didn't become ready: ${JSON.stringify({ startupStatus: last?.startupStatus, latestError: last?.latestError })}\n${screen}`);
 }
 
-/** This user's processes started for the cell: the ones whose environment carries the cell's home. */
-export function cellProcesses(cell) {
-  const uid = process.getuid();
-  const marker = `HOME=${cell.home}\0`;
+/** Whether an environment (/proc/<pid>/environ: NUL-separated entries) belongs to the cell: an entry that is exactly
+ *  its HOME or its tmux socket directory. A suffix such as XHOME=<cell home> isn't one. */
+export function ownsEnviron(environ, { home, sockets }) {
+  const entries = environ.split("\0");
+  return entries.includes(`HOME=${home}`) || (!!sockets && entries.includes(`TMUX_TMPDIR=${sockets}`));
+}
+
+/** This user's processes started for the cell (see ownsEnviron), by its identity: { home, sockets }. */
+export function processesOf(identity) {
+  const uid = String(process.getuid());
   return readdirSync("/proc").filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid).flatMap((name) => {
     try {
-      if (readFileSync(`/proc/${name}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1] !== String(uid)) return [];
-      return `${readFileSync(`/proc/${name}/environ`, "latin1")}\0`.includes(marker) ? [procStat(Number(name))].filter(Boolean) : [];
+      if (readFileSync(`/proc/${name}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1] !== uid) return [];
+      return ownsEnviron(readFileSync(`/proc/${name}/environ`, "latin1"), identity) ? [procStat(Number(name))].filter(Boolean) : [];
     } catch { return []; }
-  });
+  }).filter((p) => p.state !== "Z");
+}
+
+export const cellProcesses = (cell) => processesOf({ home: cell.home, sockets: cell.sockets });
+
+/** SIGTERM whatever of the cell's is still running, then SIGKILL what's left; returns what was signalled. Usable from
+ *  inside the cell and, by the cell's identity file, from the parent after the cell's own process is gone. */
+export async function reapByIdentity(identity) {
+  const reaped = [];
+  let left = processesOf(identity);
+  if (left.length) {
+    reaped.push({ signal: "SIGTERM", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
+    for (const p of left) { try { process.kill(p.pid, "SIGTERM"); } catch { /* gone */ } }
+    for (let i = 0; i < 20 && left.length; i++) { await sleep(250); left = processesOf(identity); }
+    if (left.length) {
+      reaped.push({ signal: "SIGKILL", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
+      for (const p of left) { try { process.kill(p.pid, "SIGKILL"); } catch { /* gone */ } }
+    }
+  }
+  if (identity.sockets?.startsWith("/tmp/dlv-")) rmSync(identity.sockets, { recursive: true, force: true });
+  return reaped;
 }
 
 /** Stop the cell normally: the rig, then the daemon, then its private tmux server, then the stand-in. Whatever of the
- *  cell's is still running after that gets SIGTERM, then SIGKILL, and is recorded: a cell never outlives its run. */
+ *  cell's is still running after that is reaped and recorded: a cell never outlives its run. */
 export async function closeCell(cell) {
   if (cell.env.OPENRIG_URL) {
     await cell.rig(["down", RIG, "--json", "--yes"], { allowFail: true, timeout: 90_000 });
@@ -308,17 +336,7 @@ export async function closeCell(cell) {
   }
   try { await cell.tmux(["kill-server"]); } catch { /* already gone */ }
   await cell.standIn.close();
-  let left = cellProcesses(cell).filter((p) => p.state !== "Z");
-  if (left.length) {
-    cell.record({ step: "reap", signal: "SIGTERM", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
-    for (const p of left) { try { process.kill(p.pid, "SIGTERM"); } catch { /* gone */ } }
-    for (let i = 0; i < 20 && left.length; i++) { await sleep(250); left = cellProcesses(cell).filter((p) => p.state !== "Z"); }
-    if (left.length) {
-      cell.record({ step: "reap", signal: "SIGKILL", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
-      for (const p of left) { try { process.kill(p.pid, "SIGKILL"); } catch { /* gone */ } }
-    }
-  }
-  if (cell.sockets?.startsWith("/tmp/dlv-")) rmSync(cell.sockets, { recursive: true, force: true });
+  for (const step of await reapByIdentity({ home: cell.home, sockets: cell.sockets })) cell.record({ step: "reap", ...step });
   cell.record({ step: "closed" });
 }
 

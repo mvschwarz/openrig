@@ -150,8 +150,11 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
 
   const server = createServer((req, res) => {
     handle(req, res).catch((error) => {
-      errors.push({ at: new Date().toISOString(), method: req.method, path: req.url, message: String(error?.message ?? error) });
-      process.stderr.write(`stand-in: ${req.method} ${req.url}: ${error?.message ?? error}\n`);
+      // The path and the query's names only, as the request log keeps them: a query value can be a credential.
+      const url = new URL(req.url ?? "/", "http://stand-in");
+      const where = { path: url.pathname, query: loggedQuery(url.searchParams) };
+      errors.push({ at: new Date().toISOString(), method: req.method, ...where, message: String(error?.message ?? error) });
+      process.stderr.write(`stand-in: ${req.method} ${where.path}: ${error?.message ?? error}\n`);
       if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "stand_in_error", message: String(error?.message ?? error) } }));
       else res.end();
     });

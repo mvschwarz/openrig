@@ -434,8 +434,14 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
       expect(res.status).toBe(500);
       expect(JSON.parse(res.text)).toMatchObject({ error: { type: "stand_in_error" } });
       expect(standIn.errors()).toEqual([expect.objectContaining({ method: "POST", path: "/v1/responses", message: expect.stringMatching(/EISDIR/) })]);
+      // A credential in the failing request's query stays out of the error record too.
+      const sentinel = "sk-SENTINEL-error-path-0123456789";
+      await post(`${standIn.url}/v1/responses?api-key=${sentinel}`, codexTurn("DLV-logfail-2"));
+      expect(JSON.stringify(standIn.errors())).not.toContain(sentinel);
+      expect(standIn.errors()[1]).toMatchObject({ path: "/v1/responses", query: { "api-key": "(present)" } });
       const served = await (await fetch(`${standIn.url}/_stand-in/errors`)).json();
-      expect(served).toHaveLength(1);
+      expect(served).toHaveLength(2);
+      expect(JSON.stringify(served)).not.toContain(sentinel);
       // The server is still up for the next request.
       expect((await fetch(`${standIn.url}/_stand-in/requests`)).status).toBe(200);
     } finally { rmSync(dir, { recursive: true, force: true }); }

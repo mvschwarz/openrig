@@ -65,11 +65,13 @@ export function caseContext(cell, { caseId, kind }) {
     },
 
     /** Wait until the screen has stopped changing for `quietMs` (the probe oracle's readiness settle). */
+    /** Settled means a capture taken after this call succeeded and the screen hasn't changed for `quietMs`. */
     async settle({ quietMs = 1250, timeoutMs = 60_000 } = {}) {
+      const started = performance.now();
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const last = screen.last();
-        if (last && performance.now() - last.monotonicMs >= quietMs) return true;
+        if (last && screen.okAt() > started && performance.now() - last.monotonicMs >= quietMs) return true;
         await sleep(100);
       }
       return false;
@@ -77,10 +79,11 @@ export function caseContext(cell, { caseId, kind }) {
 
     /** Wait until the screen shows `text`; returns the frame or null. */
     async waitScreen(text, { timeoutMs = 30_000 } = {}) {
+      const started = performance.now();
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const last = screen.last();
-        if (last?.screen.includes(text)) return last;
+        if (last?.screen.includes(text) && screen.okAt() > started) return last;
         await sleep(100);
       }
       return null;
@@ -88,10 +91,11 @@ export function caseContext(cell, { caseId, kind }) {
 
     /** Wait until the screen matches any of `patterns` (regexes); returns { frame, pattern } or null. */
     async waitScreenAny(patterns, { timeoutMs = 30_000 } = {}) {
+      const started = performance.now();
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const last = screen.last();
-        const hit = last && patterns.find((p) => p.test(last.screen));
+        const hit = last && screen.okAt() > started && patterns.find((p) => p.test(last.screen));
         if (hit) return { frame: last, pattern: String(hit) };
         await sleep(100);
       }

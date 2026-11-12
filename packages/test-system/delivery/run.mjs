@@ -6,7 +6,7 @@
 //     package registry, and a cell has no network.
 //
 //   node run.mjs run --installs <dir> --openrig <version | path to rig's bin-wrapper.js> --out <dir>
-//                    [--claude 2.1.322,2.1.311] [--codex 0.167.2,0.167.1] [--cases D01,D02,...]
+//                    [--claude 2.1.322,2.1.311] [--codex 0.167.2,0.167.1] [--cases D01,D02,...] [--cell-timeout <seconds>]
 //     Every case on every listed program version, one cell at a time, each cell in its own loopback-only namespace
 //     with a fresh home, a stand-in model and a private daemon. Writes <out>/RESULT.json and RESULT.md, and a raw
 //     bank per cell. A cell that can't run is NOT RUN with its reason, never skipped silently.
@@ -14,8 +14,8 @@
 // Evidence level of every cell here: native-standin (the real program on a local stand-in model).
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containedArgv, probeContainment } from "./harness/contain.mjs";
@@ -58,12 +58,39 @@ function install(opts) {
   }
 }
 
-/** The exact program a cell runs: its version as it reports it, and the bytes of what runs. */
+/** Every regular file under `dir`, as one digest of its sorted "path NUL sha256" lines. */
+function treeDigest(dir) {
+  const lines = readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((d) => d.isFile()).map((d) => join(d.parentPath ?? d.path, d.name)).sort()
+    .map((path) => `${path.slice(dir.length + 1)}\0${sha256File(path)}\n`);
+  return { files: lines.length, sha256: createHash("sha256").update(lines.join("")).digest("hex") };
+}
+
+/** The exact program a cell runs, read when the run starts, before any cell:
+ *  - its version as it reports itself;
+ *  - entryPointSha256: the file on PATH (a launcher for Codex and OpenRig, so this alone doesn't pin what runs);
+ *  - payloads: every native executable in the install (Codex's vendored binary, Claude Code's native binary);
+ *  - packageTree: a digest of the whole installed package;
+ *  - lockfileIntegrity: npm's integrity for the package, written when it was installed. */
 function pin(kind, entry) {
   const real = realpathSync(entry);
   const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: "/nonexistent-delivery-suite", CODEX_HOME: "/nonexistent-delivery-suite/codex" };
   const version = spawnSync(kind === "openrig" ? process.execPath : real, kind === "openrig" ? [real, "--version"] : ["--version"], { encoding: "utf8", env, timeout: 30_000 });
-  return { entry, real, sha256: sha256File(real), version: (version.stdout || version.stderr || "").trim().split("\n").at(-1) };
+  const out = { entry, real, entryPointSha256: sha256File(real), version: (version.stdout || version.stderr || "").trim().split("\n").at(-1), readAt: new Date().toISOString() };
+  const prefix = real.includes("/node_modules/") ? real.split("/node_modules/")[0] : null;
+  if (prefix) {
+    const modules = join(prefix, "node_modules");
+    const pkgName = PACKAGES[kind];
+    const lock = existsSync(join(prefix, "package-lock.json")) ? JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8")).packages ?? {} : {};
+    out.lockfileIntegrity = Object.fromEntries(Object.entries(lock).filter(([k]) => k.startsWith(`node_modules/${pkgName}`)).map(([k, v]) => [k.slice("node_modules/".length), { version: v.version, integrity: v.integrity }]));
+    out.packageTree = treeDigest(join(modules, pkgName));
+    const scope = pkgName.split("/")[0];
+    out.payloads = existsSync(join(modules, scope)) ? readdirSync(join(modules, scope), { recursive: true, withFileTypes: true })
+      .filter((d) => d.isFile()).map((d) => join(d.parentPath ?? d.path, d.name))
+      .filter((path) => { try { return readFileSync(path).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])); } catch { return false; } })
+      .map((path) => ({ path: path.slice(modules.length + 1), sha256: sha256File(path) })) : [];
+  }
+  return out;
 }
 
 function hostPins() {
@@ -77,6 +104,8 @@ async function runSuite(opts) {
   const { CASES } = await import("./cases/index.mjs");
   if (!opts.out) throw new Error("run needs --out <dir>");
   const out = resolve(opts.out);
+  // One --out per run: a cell that dies before its verdict must never be credited with an earlier run's.
+  if (existsSync(join(out, "RESULT.json")) || existsSync(join(out, "cells"))) throw new Error(`${out} already holds a run; give each run a new --out`);
   mkdirSync(out, { recursive: true });
   const installs = opts.installs ? resolve(opts.installs) : null;
   const openrigEntry = existsSync(String(opts.openrig)) ? resolve(opts.openrig) : installs && installEntry(installs, "openrig", opts.openrig);
@@ -103,7 +132,8 @@ async function runSuite(opts) {
         if (!programPin) { cells.push({ ...base, result: "NOT RUN", reason: `${kind} ${version} isn't installed (run.mjs install)` }); continue; }
         if (!containment.ok) { cells.push({ ...base, result: "NOT RUN", reason: `no loopback-only namespace: ${containment.reason}` }); continue; }
         console.log(`cell ${cellId} ...`);
-        cells.push({ ...base, ...(await runCell({ cellId, out, caseId: c.id, kind, programEntry: entry, openrigEntry, realTmux: pins.host.tmuxPath })) });
+        cells.push({ ...base, ...(await runCell({ cellId, out, caseId: c.id, kind, version, programEntry: entry, openrigEntry, realTmux: pins.host.tmuxPath,
+          ...(opts["cell-timeout"] ? { timeoutMs: Number(opts["cell-timeout"]) * 1000 } : {}) })) });
         console.log(`cell ${cellId}: ${cells.at(-1).result}${cells.at(-1).reason ? ` (${cells.at(-1).reason})` : ""}`);
       }
     }
@@ -115,21 +145,39 @@ async function runSuite(opts) {
 }
 
 /** One cell in its own contained process, so a crash, a hang or a leak ends with it. */
-function runCell({ cellId, out, caseId, kind, programEntry, openrigEntry, realTmux }) {
+/** One cell in its own contained process, so a crash, a hang or a leak ends with it. Only a verdict written by this
+ *  spawn counts. After the process ends, for any reason, whatever it left running is reaped from here by the cell's
+ *  identity, and recorded. */
+function runCell({ cellId, out, caseId, kind, version, programEntry, openrigEntry, realTmux, timeoutMs = 15 * 60_000 }) {
   const dir = join(out, "cells", cellId);
   mkdirSync(dir, { recursive: true });
-  const spec = { dir, caseId, kind, programEntry, openrigEntry, realTmux, arm: cellId };
+  const spawnId = randomBytes(8).toString("hex");
+  const verdictPath = join(dir, "verdict.json");
+  rmSync(verdictPath, { force: true });
+  const spec = { dir, caseId, kind, version, programEntry, openrigEntry, realTmux, arm: cellId, spawnId };
   writeFileSync(join(dir, "cell-spec.json"), JSON.stringify(spec, null, 1));
   // node:sqlite reads the daemon's records; its experimental-feature notice isn't evidence.
   const argv = containedArgv([process.execPath, "--disable-warning=ExperimentalWarning", fileURLToPath(import.meta.url), "cell", join(dir, "cell-spec.json")]);
   return new Promise((done) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "inherit", "inherit"], env: { PATH: "/usr/bin:/bin", USER: process.env.USER ?? "delivery" } });
-    const timer = setTimeout(() => child.kill("SIGTERM"), 15 * 60_000);
-    child.on("exit", (code, signal) => {
+    let timedOut = false;
+    // On the timeout the cell gets SIGTERM and time to close itself normally; SIGKILL only if it doesn't.
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 120_000).unref(); }, timeoutMs);
+    child.on("exit", async (code, signal) => {
       clearTimeout(timer);
-      const verdictPath = join(dir, "verdict.json");
-      if (existsSync(verdictPath)) return done(JSON.parse(readFileSync(verdictPath, "utf8")));
-      done({ result: "NOT RUN", reason: `the cell process ended (${signal ?? `exit ${code}`}) before a verdict` });
+      let outcome = null;
+      if (existsSync(verdictPath)) {
+        const written = JSON.parse(readFileSync(verdictPath, "utf8"));
+        if (written.spawnId === spawnId) outcome = written;
+      }
+      outcome ??= { result: "NOT RUN", reason: `the cell process ended (${timedOut ? "timed out, " : ""}${signal ?? `exit ${code}`}) before a verdict` };
+      const identityPath = join(dir, "world", "identity.json");
+      if (existsSync(identityPath)) {
+        const { reapByIdentity } = await import("./harness/world.mjs");
+        const reaped = await reapByIdentity(JSON.parse(readFileSync(identityPath, "utf8")));
+        if (reaped.length) outcome.parentReaped = reaped;
+      }
+      done(outcome);
     });
   });
 }
@@ -143,9 +191,16 @@ async function cellMain(specPath) {
   const { bankCell } = await import("./harness/evidence.mjs");
   const c = CASES.find((x) => x.id === spec.caseId);
   const verdictPath = join(spec.dir, "verdict.json");
+  const write = (outcome) => writeFileSync(verdictPath, JSON.stringify({ ...outcome, spawnId: spec.spawnId }, null, 1));
   let cell = null;
   let ctx = null;
   let outcome;
+  // A timeout's SIGTERM: no verdict is credited, and the cell still stops what it started, within a bound.
+  process.once("SIGTERM", async () => {
+    write({ result: "NOT RUN", reason: "the cell timed out", partial: ctx?.verdict.toJSON() ?? null });
+    if (cell) await Promise.race([closeCell(cell).catch(() => {}), new Promise((r) => setTimeout(r, 90_000))]);
+    process.exit(0);
+  });
   try {
     cell = await openCell({ dir: join(spec.dir, "world"), arm: spec.arm, program: { kind: spec.kind, bin: spec.programEntry }, openrig: spec.openrigEntry,
       realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null });
@@ -160,26 +215,35 @@ async function cellMain(specPath) {
     } catch (error) {
       outcome = { ...(ctx?.verdict.toJSON() ?? {}), result: "FAIL", reason: `the case stopped on an error: ${String(error.message ?? error)}`, detail: String(error.stack ?? error).slice(0, 4000) };
     }
-    if (ctx) await ctx.screen.stop();
+    if (ctx) {
+      await ctx.screen.stop();
+      if (ctx.screen.failures()) outcome.screenCaptureFailures = ctx.screen.failures();
+    }
+    // No credit without evidence the verdict can stand on.
+    const notRun = (reason) => { outcome = { ...outcome, resultBeforeDowngrade: outcome.result, result: "NOT RUN", reason }; };
+    const { conversation } = await import("./harness/oracle.mjs");
+    const standInErrors = cell.standIn.errors();
+    if (standInErrors.length) notRun(`the stand-in failed: ${standInErrors[0].message}`);
+    else if (outcome.result !== "NOT RUN" && !conversation(cell.standIn.requests()).identified) notRun("the seat's conversation couldn't be identified in the stand-in's log");
     try {
       const manifest = bankCell(cell, join(spec.dir, "bank"), { "verdict.json": outcome });
       outcome.bank = { path: "bank", credentialScan: manifest.credentialScan, files: manifest.files.length };
-      if (!manifest.credentialScan.clean) outcome.bankWarning = "credential-shaped text found in the bank; read MANIFEST.json before sharing it";
-    } catch (error) { outcome.bankError = String(error.message ?? error); }
+      if (!manifest.credentialScan.clean) notRun("credential-shaped text found in the bank; read MANIFEST.json before sharing it");
+    } catch (error) { outcome.bankError = String(error.message ?? error); notRun("the cell's evidence wasn't banked"); }
     try { await closeCell(cell); } catch (error) { outcome.closeError = String(error.message ?? error); }
   }
-  writeFileSync(verdictPath, JSON.stringify(outcome, null, 1));
+  write(outcome);
 }
 
 function resultMarkdown({ generatedAt, pins, cells }) {
   const rows = cells.map((c) => `| ${c.case} | ${c.title} | ${c.program} ${c.version} | ${c.result} | ${c.level} | ${(c.reason ?? (c.failed?.length ? `failed: ${c.failed.join("; ")}` : "")).replaceAll("|", "\\|")} |`);
-  const programs = Object.entries(pins.programs).map(([k, p]) => `- ${k}: ${p.version ?? "not installed"}${p.sha256 ? ` (sha256 ${p.sha256.slice(0, 16)}…)` : ""}`);
+  const programs = Object.entries(pins.programs).map(([k, p]) => `- ${k}: ${p.version ?? "not installed"}${p.payloads?.length ? ` (native ${p.payloads.map((x) => x.sha256.slice(0, 16)).join(", ")}…)` : p.entryPointSha256 ? ` (entry point ${p.entryPointSha256.slice(0, 16)}…)` : ""}${p.packageTree ? `, package tree ${p.packageTree.sha256.slice(0, 16)}…` : ""}`);
   return [
     "# Delivery conformance: result",
     "",
     `Generated ${generatedAt}. Evidence level: ${LEVEL} (the real program on a local stand-in model).`,
     "",
-    `- OpenRig: ${pins.openrig.version} (bin-wrapper sha256 ${pins.openrig.sha256.slice(0, 16)}…)`,
+    `- OpenRig: ${pins.openrig.version} (package tree ${pins.openrig.packageTree?.sha256.slice(0, 16) ?? "not read"}…, entry point ${pins.openrig.entryPointSha256.slice(0, 16)}…)`,
     ...programs,
     `- tmux ${pins.host.tmux}, node ${pins.host.node}, ${pins.host.os} (${pins.host.kernel})`,
     `- Expected results: ${pins.expected.path}, sha256 ${pins.expected.sha256}`,

@@ -7,17 +7,24 @@ import { createHash } from "node:crypto";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-/** Record frames of `target` into `path` every `everyMs` until `stop()`. Returns { stop, frames, last }. */
+/** Record frames of `target` into `path` every `everyMs` until `stop()`. Returns { stop, frames, last, okAt, failures }.
+ *  `last()` is the screen as it is now: null while the newest capture failed, so a reader never takes an old screen for
+ *  the current one. `okAt()` is when a capture last succeeded (performance.now()), changed or not. */
 export function recordScreen(cell, path, { everyMs = 250, target = cell.session } = {}) {
   const frames = [];
   let running = true;
   let previous = null;
+  let lastOk = -Infinity;
+  let latestFailed = false;
+  let failures = 0;
   const loop = (async () => {
     while (running) {
       try {
         const screen = await cell.tmux(["capture-pane", "-p", "-t", target]);
         const state = (await cell.tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}\t#{window_width}x#{window_height}"])).trim().split("\t");
         const sha256 = createHash("sha256").update(screen).digest("hex");
+        lastOk = performance.now();
+        latestFailed = false;
         if (sha256 !== previous) {
           previous = sha256;
           const frame = { at: new Date().toISOString(), monotonicMs: performance.now(), inMode: state[0] === "1", size: state[1], sha256, screen };
@@ -25,7 +32,9 @@ export function recordScreen(cell, path, { everyMs = 250, target = cell.session 
           appendFileSync(path, `${JSON.stringify(frame)}\n`);
         }
       } catch (error) {
-        const frame = { at: new Date().toISOString(), error: String(error.message ?? error) };
+        latestFailed = true;
+        failures += 1;
+        const frame = { at: new Date().toISOString(), monotonicMs: performance.now(), error: String(error.message ?? error) };
         frames.push(frame);
         appendFileSync(path, `${JSON.stringify(frame)}\n`);
       }
@@ -34,7 +43,9 @@ export function recordScreen(cell, path, { everyMs = 250, target = cell.session 
   })();
   return {
     frames,
-    last: () => frames.findLast((f) => f.screen !== undefined) ?? null,
+    last: () => (latestFailed ? null : frames.findLast((f) => f.screen !== undefined) ?? null),
+    okAt: () => lastOk,
+    failures: () => failures,
     stop: async () => { running = false; await loop; },
   };
 }

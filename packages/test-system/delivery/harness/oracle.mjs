@@ -4,23 +4,30 @@
 // (Claude Code) or a user input item (Codex), read from the history of the latest request in the seat's thread. Each
 // item counts once, however many requests repeat it. Requests repeat history all the time: every turn resends it, a
 // retry resends the same request, and Codex re-requests a running turn with the newly typed message added after it.
-// Deliberately not deliveries:
-//   - a side request in another thread (Codex asks for a task title with the typed text quoted in its prompt);
+// The seat's conversation is found positively: the thread whose request carries OpenRig's identity prompt for this rig,
+// the first turn every seat gets. Only that thread's requests that offer tools and don't ask for a JSON-schema answer
+// are the conversation. Deliberately not deliveries:
+//   - a side request, in another thread or in the same one (Codex's task title; a no-tools request a program sends
+//     under its session id), even when it quotes the typed text;
 //   - a marker quoted inside some other item (only typed parts count, never a tool's output).
-// Two sends inside one item is a merge.
+// When no thread can be identified, there's no conversation to judge: callers treat that as NOT RUN, never as empty.
+// Two sends inside one item is a merge; order is the items' order in the conversation.
 
 import { createHash } from "node:crypto";
 
 export const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
-/** The seat's conversation: the thread most of its tool-offering requests name. */
+/** OpenRig's identity prompt for the cell's rig, as a seat's first turn carries it. */
+export const IDENTITY = /OpenRig session identity:\s*\n- rig: dlv\b/;
+
+/** A request the conversation is made of: it offers the seat's tools and isn't asking for a JSON-schema answer. */
+const isConversationRequest = (r) => r.body && typeof r.body === "object" && !r.served && r.request?.tools > 0 && !r.request?.structuredOutput;
+
+/** The seat's conversation thread: the one whose request carries OpenRig's identity prompt; null when none does. */
 export function seatThread(requests) {
-  const counts = new Map();
-  for (const r of requests) {
-    const thread = r.request?.thread;
-    if (thread && r.request.tools > 0) counts.set(thread, (counts.get(thread) ?? 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const anchor = requests.find((r) => isConversationRequest(r) && r.request.thread
+    && userItems(r.body).some((parts) => parts.some((p) => p.source === "text" && IDENTITY.test(p.text))));
+  return anchor?.request.thread ?? null;
 }
 
 const textOf = (blocks, types) => (Array.isArray(blocks) ? blocks : []).filter((b) => types.includes(b?.type) && typeof b.text === "string").map((b) => b.text);
@@ -46,9 +53,10 @@ const itemKey = (parts) => sha256(parts.map((p) => `${p.source}:${p.text}`).join
  *  arrived in and how many requests carried it. */
 export function conversation(requests) {
   const thread = seatThread(requests);
-  const inThread = requests.filter((r) => r.body && typeof r.body === "object" && !r.served && (r.request?.thread ?? null) === thread);
+  if (!thread) return { thread: null, identified: false, items: [] };
+  const inThread = requests.filter((r) => isConversationRequest(r) && r.request.thread === thread);
   const last = inThread.at(-1);
-  if (!last) return { thread, items: [] };
+  if (!last) return { thread, identified: true, items: [] };
   const firstSeen = new Map();
   const carried = new Map();
   for (const r of inThread) {
@@ -64,14 +72,27 @@ export function conversation(requests) {
     const parts = raw.map((p) => ({ ...p, bytes: Buffer.byteLength(p.text, "utf8"), sha256: sha256(p.text) }));
     return { index, seq: first.seq, at: first.at, kind: parts.some((p) => p.source === "tool_result") ? "tool_result" : "user", parts, carriedBy: carried.get(key) };
   });
-  return { thread, lastSeq: last.seq, items };
+  return { thread, identified: true, lastSeq: last.seq, items };
 }
 
 /** The user items that carry `marker` in a typed part (not a tool's output), in conversation order. `turns` is kept
  *  as the name cases use. */
 export function deliveriesOf(requests, marker) {
-  const { thread, items } = conversation(requests);
-  return { thread, turns: items.filter((item) => item.parts.some((p) => p.source === "text" && p.text.includes(marker))) };
+  const { thread, identified, items } = conversation(requests);
+  return { thread, identified, turns: items.filter((item) => item.parts.some((p) => p.source === "text" && p.text.includes(marker))) };
+}
+
+/** Several sends judged together: each one's items, which items hold more than one of the case's markers (a merge),
+ *  and whether the sends' first items come in send order. Identity and order are the items' positions in the
+ *  conversation, never the request they were first seen in: Codex can add two new messages to one request. */
+export function orderAndMerge(requests, markers, pattern) {
+  const each = markers.map((m) => deliveriesOf(requests, m).turns);
+  const first = each.map((items) => items[0] ?? null);
+  const merged = first.filter(Boolean).filter((item, i, all) => all.findIndex((o) => o.index === item.index) === i && markersIn(item, pattern).length > 1)
+    .map((item) => ({ index: item.index, markers: markersIn(item, pattern) }));
+  const positions = first.map((item) => item?.index ?? Infinity);
+  const inOrder = first.every(Boolean) && positions.every((p, i) => i === 0 || p > positions[i - 1]);
+  return { each, first, merged, positions, inOrder };
 }
 
 /** The typed part that holds `marker` in an item, and whether `body` arrived in it byte for byte. */

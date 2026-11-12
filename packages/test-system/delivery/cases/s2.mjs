@@ -6,7 +6,7 @@
 // through ctx (harness/case-context.mjs) and records checks on ctx.verdict. A check states what was seen, so a FAIL
 // reads as evidence, not a bare verdict.
 
-import { conversation, markersIn, partWith } from "../harness/oracle.mjs";
+import { conversation, markersIn, orderAndMerge, partWith } from "../harness/oracle.mjs";
 
 const ACK = "ack {{marker}}";
 const MARK = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
@@ -232,14 +232,12 @@ export const CASES = [
       for (const [i, body] of bodies.entries()) sendAccepted(ctx, await ctx.send(body), `message ${i + 1}`);
       for (const m of markers) await ctx.waitDelivered(m, { timeoutMs: 60_000 });
       await ctx.sleep(3000);
-      const seen = markers.map((m) => ctx.deliveries(m).turns);
-      markers.forEach((m, i) => verdict.check(`message ${i + 1}: delivered exactly once`, seen[i].length === 1, seen[i].map((t) => t.seq)));
-      const firstTurns = seen.map((turns) => turns[0] ?? null);
-      const merged = firstTurns.filter(Boolean).filter((t, i, all) => all.findIndex((o) => o.seq === t.seq) !== i);
-      verdict.check("each message is its own turn (a merge of two sends is a FAIL)", merged.length === 0 && firstTurns.every(Boolean),
-        firstTurns.map((t, i) => t && { message: i + 1, seq: t.seq, markers: markersIn(t, MARK) }));
-      const order = firstTurns.map((t) => t?.seq ?? Infinity);
-      verdict.check("the model got them in send order", order.every((s, i) => i === 0 || s > order[i - 1]), order);
+      const judged = orderAndMerge(ctx.requests(), markers, MARK);
+      markers.forEach((m, i) => verdict.check(`message ${i + 1}: delivered exactly once`, judged.each[i].length === 1, judged.each[i].map((t) => ({ index: t.index, firstSeq: t.seq }))));
+      verdict.check("each message is its own item (a merge of two sends is a FAIL)", judged.merged.length === 0 && judged.first.every(Boolean),
+        judged.first.map((t, i) => t && { message: i + 1, index: t.index, firstSeq: t.seq, markers: markersIn(t, MARK) }));
+      verdict.check("the model got them in send order", judged.inOrder, judged.positions);
+      const firstTurns = judged.first;
       bodies.forEach((body, i) => { if (firstTurns[i]) verdict.check(`message ${i + 1}: intact`, partWith(firstTurns[i], markers[i], body).intact, null); });
     },
   },

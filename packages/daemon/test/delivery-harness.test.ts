@@ -10,10 +10,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // packages/daemon/test -> packages/test-system/delivery/harness
-import { conversation, deliveriesOf, markersIn, partWith, seatThread, Verdict } from "../../test-system/delivery/harness/oracle.mjs";
+import { conversation, deliveriesOf, markersIn, orderAndMerge, partWith, seatThread, Verdict } from "../../test-system/delivery/harness/oracle.mjs";
 import { containedArgv } from "../../test-system/delivery/harness/contain.mjs";
 import { composerText } from "../../test-system/delivery/harness/screen.mjs";
-import { parseStat } from "../../test-system/delivery/harness/world.mjs";
+import { ownsEnviron, parseStat } from "../../test-system/delivery/harness/world.mjs";
+import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
 
 const HARNESS = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "test-system", "delivery", "harness");
@@ -21,6 +22,9 @@ const MARK = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
 
 // Request-log entries shaped as the stand-ins log them, with bodies shaped as the real programs sent them.
 const codexMsg = (text: string) => ({ type: "message", role: "user", content: [{ type: "input_text", text }] });
+// OpenRig's identity prompt, the first turn every seat gets: it anchors the seat's thread.
+const IDENTITY_TEXT = "OpenRig-generated identity context (not a project task):\np-seat@dlv\nOpenRig session identity:\n- rig: dlv\n- pod: p";
+const identity = () => codexMsg(IDENTITY_TEXT);
 const codexAnswer = (text: string) => ({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
 let seq = 0;
 const codexReq = (input: unknown[], thread: string | null = "t1", tools = 13) =>
@@ -30,7 +34,7 @@ const claudeReq = (messages: unknown[], thread = "s1") =>
 
 describe("delivery harness: the receiver-side oracle", () => {
   it("counts each message once when Codex re-requests a running turn with the next message added (recorded D09 shape)", () => {
-    const start = [codexMsg("<environment_context/>"), codexMsg("startup"), codexAnswer("ok")];
+    const start = [codexMsg("<environment_context/>"), identity(), codexAnswer("ok")];
     const [one, two, three] = ["DLV-D09-one-1", "DLV-D09-two-2", "DLV-D09-three-3"].map((m) => codexMsg(`Delivery check ${m}`));
     const requests = [
       codexReq([...start]),
@@ -47,25 +51,25 @@ describe("delivery harness: the receiver-side oracle", () => {
 
   it("doesn't count a side request in another thread that quotes the message (Codex's task title)", () => {
     const msg = codexMsg("Delivery check DLV-D01-x-1");
-    const requests = [codexReq([msg]), codexReq([codexMsg("Generate a title for: Delivery check DLV-D01-x-1")], null, 0)];
+    const requests = [codexReq([identity(), msg]), codexReq([codexMsg("Generate a title for: Delivery check DLV-D01-x-1")], null, 0)];
     expect(seatThread(requests)).toBe("t1");
     expect(deliveriesOf(requests, "DLV-D01-x-1").turns).toHaveLength(1);
   });
 
   it("counts a message twice when the program really submitted it twice", () => {
     const msg = codexMsg("Delivery check DLV-D01-dup-1");
-    const requests = [codexReq([msg]), codexReq([msg, codexAnswer("ack"), msg])];
+    const requests = [codexReq([identity(), msg]), codexReq([identity(), msg, codexAnswer("ack"), msg])];
     expect(deliveriesOf(requests, "DLV-D01-dup-1").turns).toHaveLength(2);
   });
 
   it("counts a retried request once", () => {
-    const body = [codexMsg("Delivery check DLV-D01-retry-1")];
+    const body = [identity(), codexMsg("Delivery check DLV-D01-retry-1")];
     const requests = [codexReq(body), codexReq(body)];
     expect(deliveriesOf(requests, "DLV-D01-retry-1").turns).toHaveLength(1);
   });
 
   it("finds a message typed during a tool run beside the tool's result (Claude), and never counts a tool's output", () => {
-    const first = { role: "user", content: [{ type: "text", text: "start DLV-D02-first-1" }] };
+    const first = { role: "user", content: [{ type: "text", text: IDENTITY_TEXT }, { type: "text", text: "start DLV-D02-first-1" }] };
     const tool = { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Bash", input: {} }] };
     const result = { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "echo DLV-D02-quoted-1" }, { type: "text", text: "now DLV-D02-second-1" }] };
     const requests = [claudeReq([first]), claudeReq([first, tool, result])];
@@ -77,11 +81,47 @@ describe("delivery harness: the receiver-side oracle", () => {
 
   it("reads two sends in one item as a merge, and checks the bytes of the part that holds the marker", () => {
     const merged = { role: "user", content: [{ type: "text", text: "a DLV-D09-a-1" }, { type: "text", text: "b DLV-D09-b-2" }] };
-    const [item] = deliveriesOf([claudeReq([merged])], "DLV-D09-a-1").turns;
+    const start = { role: "user", content: [{ type: "text", text: IDENTITY_TEXT }] };
+    const [item] = deliveriesOf([claudeReq([start, merged])], "DLV-D09-a-1").turns;
     expect(markersIn(item!, MARK)).toEqual(["DLV-D09-a-1", "DLV-D09-b-2"]);
     expect(partWith(item!, "DLV-D09-b-2", "b DLV-D09-b-2").intact).toBe(true);
     expect(partWith(item!, "DLV-D09-b-2", "b\tDLV-D09-b-2").intact).toBe(false);
-    expect(conversation([claudeReq([merged])]).items).toHaveLength(1);
+    expect(conversation([claudeReq([start, merged])]).items).toHaveLength(2);
+  });
+
+  it("finds no conversation, rather than an empty one, when no request carries OpenRig's identity prompt", () => {
+    const requests = [codexReq([codexMsg("Delivery check DLV-D01-q-1")])];
+    expect(seatThread(requests)).toBeNull();
+    expect(conversation(requests)).toMatchObject({ identified: false, items: [] });
+    expect(deliveriesOf(requests, "DLV-D01-q-1")).toMatchObject({ identified: false, turns: [] });
+  });
+
+  it("never reads a same-thread request without tools, or one asking for a JSON-schema answer, as the conversation", () => {
+    // A Claude Code side request can carry the seat's session id with no tools; its history isn't the seat's.
+    const start = { role: "user", content: [{ type: "text", text: IDENTITY_TEXT }] };
+    const msg = { role: "user", content: [{ type: "text", text: "Delivery check DLV-D01-side-1" }] };
+    const side = { ...claudeReq([{ role: "user", content: [{ type: "text", text: "Summarize: Delivery check DLV-D01-side-1 DLV-D01-side-1" }] }]),
+      request: { thread: "s1", tools: 0, structuredOutput: false } };
+    const schema = { ...claudeReq([start, msg, msg]), request: { thread: "s1", tools: 13, structuredOutput: true } };
+    const requests = [claudeReq([start]), claudeReq([start, msg]), side, schema];
+    const { turns } = deliveriesOf(requests, "DLV-D01-side-1");
+    expect(turns).toHaveLength(1);
+    expect(conversation(requests).lastSeq).toBe(requests[1]!.seq);
+  });
+
+  it("judges order and merge by the items' positions, so two messages first seen in one request are neither merged nor out of order", () => {
+    const start = [identity(), codexAnswer("ok")];
+    const [one, two, three] = ["DLV-D09-one-1", "DLV-D09-two-2", "DLV-D09-three-3"].map((m) => codexMsg(`Delivery check ${m}`));
+    const requests = [codexReq([...start]), codexReq([...start, one]), codexReq([...start, one, two, three])]; // two and three arrive together
+    const judged = orderAndMerge(requests, ["DLV-D09-one-1", "DLV-D09-two-2", "DLV-D09-three-3"], MARK);
+    expect(judged.merged).toEqual([]);
+    expect(judged.inOrder).toBe(true);
+    expect(judged.first.map((t) => t!.seq)).toEqual([requests[1]!.seq, requests[2]!.seq, requests[2]!.seq]);
+    // A real merge is two markers inside one item.
+    const both = codexMsg("Delivery check DLV-D09-one-1 and DLV-D09-two-2");
+    const mergedRun = orderAndMerge([codexReq([...start, both])], ["DLV-D09-one-1", "DLV-D09-two-2"], MARK);
+    expect(mergedRun.merged).toHaveLength(1);
+    expect(mergedRun.inOrder).toBe(false);
   });
 
   it("judges PASS only when every check holds, and keeps NOT RUN's reason", () => {
@@ -111,6 +151,29 @@ describe("delivery harness: the cell's surroundings", () => {
     const codex = ["› From: someone", "• ok DLV-x", "", "› half typed words", "", "  stand-in default · /w"].join("\n");
     expect(composerText("codex", codex)).toBe("half typed words");
     expect(composerText("claude", "no prompt here")).toBeNull();
+  });
+
+  it("owns a process only by an exact HOME or tmux-socket entry in its environment", () => {
+    const identity = { home: "/c/home", sockets: "/tmp/dlv-x" };
+    expect(ownsEnviron("PATH=/bin\0HOME=/c/home\0", identity)).toBe(true);
+    expect(ownsEnviron("TMUX_TMPDIR=/tmp/dlv-x\0HOME=/elsewhere", identity)).toBe(true);
+    expect(ownsEnviron("XHOME=/c/home\0HOME=/elsewhere", identity)).toBe(false);
+    expect(ownsEnviron("HOME=/c/home/sub", identity)).toBe(false);
+  });
+
+  it("never offers an old screen as the current one once a capture fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delivery-screen-"));
+    let fail = false;
+    const cell = { session: "s", tmux: async (args: string[]) => { if (fail) throw new Error("no server"); return args[0] === "capture-pane" ? "screen A" : "0\t80x24"; } };
+    const rec = recordScreen(cell, join(dir, "frames.jsonl"), { everyMs: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 80));
+      expect(rec.last()?.screen).toBe("screen A");
+      fail = true;
+      await new Promise((r) => setTimeout(r, 80));
+      expect(rec.last()).toBeNull();
+      expect(rec.failures()).toBeGreaterThan(0);
+    } finally { await rec.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("reads a process's name and parent from /proc stat even when the name holds parentheses and spaces", () => {
@@ -169,6 +232,16 @@ describe("delivery harness: the cell's surroundings", () => {
       rmSync(sockets, { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses to run into an --out that already holds a run, so no earlier verdict can be read as this run's", () => {
+    const dir = mkdtempSync(join(tmpdir(), "delivery-out-"));
+    try {
+      writeFileSync(join(dir, "RESULT.json"), "{}");
+      const r = spawnSync(process.execPath, [join(HARNESS, "..", "run.mjs"), "run", "--out", dir, "--openrig", "/nonexistent"], { encoding: "utf8" });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/already holds a run/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("banks the daemon's tables without credential-like columns, and flags credential-shaped text", () => {
