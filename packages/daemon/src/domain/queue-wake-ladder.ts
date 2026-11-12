@@ -1066,7 +1066,9 @@ const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\
 /** The rows a prompt refusal can still concern: open rows, and the rows an open prompt alert recovers (its exact
  * `recovery-for:<id>` tags), each kept when one of its own transitions carries a refusal note. Read from the open rows
  * (the state index) and then each candidate's own transitions (the qitem index), not by matching the note across the
- * whole transition log, which only grows. Ordered by each row's first refusal, the order the whole-log read returned. */
+ * whole transition log, which only grows. Ordered by each row's first refusal: the order the whole-log read returned
+ * under its observed plan (it had no ORDER BY), now explicit. A recovered id is cut after the 13-byte ASCII prefix as
+ * bytes, because text substr stops at a NUL, which a caller-supplied id can hold; the join then compares it exactly. */
 export const PROMPT_REFUSAL_CANDIDATES_SQL = `WITH scored AS MATERIALIZED (
     SELECT q.qitem_id, q.destination_session,
       (SELECT min(t.transition_id) FROM queue_transitions t
@@ -1074,7 +1076,7 @@ export const PROMPT_REFUSAL_CANDIDATES_SQL = `WITH scored AS MATERIALIZED (
     FROM (
       SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
       UNION
-      SELECT substr(j.value, 14) FROM queue_items a,
+      SELECT CAST(substr(CAST(j.value AS BLOB), 14) AS TEXT) FROM queue_items a,
         json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) j
       WHERE a.state IN ('pending','in-progress','blocked') AND json_valid(a.tags)
         AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) WHERE value = @alertTag)

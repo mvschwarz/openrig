@@ -7,7 +7,9 @@ import { PROMPT_ALERT_TAG, PROMPT_REFUSAL_CANDIDATES_SQL, readPromptRefusalCandi
 import { configureSyncSiteRecorder } from "../src/domain/sync-site-wrap.js";
 
 // The candidate read the wake ladder used before it read from the open rows: every transition's note matched against
-// the refusal prefix. Kept here as the oracle the new read must agree with, row for row and in the same order.
+// the refusal prefix. Kept here as the oracle the new read must agree with, row for row. It has no ORDER BY, so its
+// order is its plan's: on this schema, with no statistics, a scan of the transitions in id order, which is the order the
+// new read makes explicit (each row's first refusal). These fixtures pin that observed order, not a guarantee.
 const WHOLE_LOG_READ = `SELECT DISTINCT q.qitem_id, q.destination_session FROM queue_items q
     JOIN queue_transitions t ON t.qitem_id = q.qitem_id
     WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
@@ -66,6 +68,28 @@ describe("the wake ladder's prompt-refusal candidates", () => {
     expect(read.map((candidate) => candidate.qitem_id)).toEqual(
       ["q-c-recovered", "q-z-open", "q-a-open", "q-h-case-variant-note", "q-i-recovered-beside-other-values"]);
     expect(read[1]).toEqual({ qitem_id: "q-z-open", destination_session: "q-z-open-seat@rig" });
+  });
+
+  // The create route accepts any string id, and text substr stops at a NUL, so a recovered id is cut as bytes.
+  const withNul = "q-nul\u0000tail";
+
+  it("keeps a recovered id with an embedded NUL selected", () => {
+    row(withNul, "done");
+    alert("q-alert-nul", "pending", `recovery-for:${withNul}`);
+    refused(withNul);
+
+    // The premise: the tag's JSON keeps the NUL, so the whole-log read found the whole id.
+    expect(wholeLog()).toEqual([{ qitem_id: withNul, destination_session: `${withNul}-seat@rig` }]);
+    expect(readPromptRefusalCandidates(db)).toEqual(wholeLog());
+  });
+
+  it("never borrows the row whose id equals a NUL-bearing recovered id's prefix", () => {
+    row("q-nul", "done");
+    alert("q-alert-nul", "pending", `recovery-for:${withNul}`);
+    refused("q-nul");
+
+    expect(wholeLog()).toEqual([]);
+    expect(readPromptRefusalCandidates(db)).toEqual([]);
   });
 
   it("is empty when no row carries a refusal", () => {
