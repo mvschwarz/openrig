@@ -31,6 +31,10 @@
       "types": "./dist/rosters-surface.d.ts",
       "import": "./dist/rosters-surface.js"
     },
+    "./connection-contract": {
+      "types": "./dist/connection-contract-surface.d.ts",
+      "import": "./dist/connection-contract-surface.js"
+    },
     "./gateway-protocol": {
       "types": "./dist/gateway-protocol-surface.d.ts",
       "import": "./dist/gateway-protocol-surface.js"

@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { runSyncSite } from "./sync-site-wrap.js";
+import { runAsyncSite } from "./sync-site-wrap.js";
 
 export interface TmuxOptionDefaultsDeps {
   tmuxAdapter: TmuxAdapter;
@@ -17,11 +17,11 @@ export interface TmuxOptionDefaultsDeps {
    */
   platform?: NodeJS.Platform;
   /**
-   * OPR.0.4.6.02 S1 — cheap `command -v <bin>` probe for the linux
-   * copy-command fallback chain. Defaults to a real shell probe; injectable
+   * OPR.0.4.6.02 S1 — asynchronous `command -v <bin>` probe for the linux
+   * copy-command fallback chain. Defaults to a bounded asynchronous shell probe; injectable
    * for deterministic tests.
    */
-  hasCommand?: (bin: string) => boolean;
+  hasCommand?: (bin: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -44,7 +44,7 @@ export class TmuxOptionDefaultsApplier {
   private tmuxAdapter: TmuxAdapter;
   private readTmuxOptionDefaults: () => { statusBar: boolean };
   private platform: NodeJS.Platform;
-  private hasCommand: (bin: string) => boolean;
+  private hasCommand: (bin: string) => boolean | Promise<boolean>;
   private serverDefaultsAsserted = false;
 
   constructor(deps: TmuxOptionDefaultsDeps) {
@@ -120,7 +120,14 @@ export class TmuxOptionDefaultsApplier {
       warnings.push(`tmux "set-clipboard" server option not set: ${clip.message}`);
     }
 
-    const copyCommand = resolveCopyCommand(this.platform, this.hasCommand);
+    let copyCommand: string | null;
+    try {
+      copyCommand = await resolveCopyCommand(this.platform, this.hasCommand);
+    } catch {
+      this.serverDefaultsAsserted = false;
+      warnings.push("Clipboard lookup interrupted (250 ms limit); copy-command left unchanged (OSC 52 if unset). Will retry on the next fresh session.");
+      return;
+    }
     if (copyCommand !== null) {
       const cc = await this.tmuxAdapter.setServerOption("copy-command", copyCommand);
       if (!cc.ok) {
@@ -141,14 +148,14 @@ export class TmuxOptionDefaultsApplier {
  * Pure: platform + a `command -v` probe in, the command string (or null)
  * out. One table, no side effects — the applier decides whether to write.
  */
-export function resolveCopyCommand(
+export async function resolveCopyCommand(
   platform: NodeJS.Platform,
-  hasCommand: (bin: string) => boolean,
-): string | null {
+  hasCommand: (bin: string) => boolean | Promise<boolean>,
+): Promise<string | null> {
   if (platform === "darwin") return "pbcopy";
   if (platform === "linux") {
-    if (hasCommand("wl-copy")) return "wl-copy";
-    if (hasCommand("xclip")) return "xclip -selection clipboard -i";
+    if (await hasCommand("wl-copy")) return "wl-copy";
+    if (await hasCommand("xclip")) return "xclip -selection clipboard -i";
     return null;
   }
   return null;
@@ -156,16 +163,18 @@ export function resolveCopyCommand(
 
 /**
  * OPR.0.4.6.02 S1 — default `command -v <bin>` probe (POSIX shell builtin).
- * Returns true when the binary resolves on PATH. Cheap + best-effort; any
- * failure (spawn error, non-shell env) reads as absent.
+ * Returns true when the binary resolves on PATH. A killed probe rejects so
+ * the applier can warn and retry; other failures read as absent.
  */
-function defaultHasCommand(bin: string): boolean {
+async function defaultHasCommand(bin: string): Promise<boolean> {
   try {
-    const r = runSyncSite("tmux_options.command_v", () =>
-      spawnSync(`command -v ${bin}`, { shell: true, stdio: "ignore" })
-    );
-    return r.status === 0;
-  } catch {
+    return await runAsyncSite("tmux_options.command_v", () => new Promise<boolean>((resolve, reject) => {
+      execFile("/bin/sh", ["-c", 'command -v "$1"', "--", bin], {
+        timeout: 250, killSignal: "SIGKILL", maxBuffer: 1024,
+      }, error => error?.killed ? reject(error) : resolve(!error));
+    }));
+  } catch (error) {
+    if ((error as { killed?: boolean } | null)?.killed) throw error;
     return false;
   }
 }

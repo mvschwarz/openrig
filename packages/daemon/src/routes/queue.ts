@@ -1441,6 +1441,11 @@ export function queueRoutes(): Hono {
     return c.json(items);
   });
 
+  // Each connected assistant on this host and whether it's checking its queue, with this daemon's own host id: the check-ins
+  // are this host's, so a reader matches members to it without needing a terminal seat to learn it. A status only:
+  // work addressed to an assistant that isn't checking in still queues and is rung as before. Precedes /:qitemId.
+  app.get("/hosted-members", (c) => c.json({ hostId: getSelfHostId(), members: getRepo(c).hostedMemberCheckIns() }));
+
   // GET /undelivered — surfaces pending create-path nudge failures plus active
   // human-notification episodes whose gateway delivery ledger failed or never posted.
   // Rig-scoped + bounded + compact-by-default, mirroring /overdue.

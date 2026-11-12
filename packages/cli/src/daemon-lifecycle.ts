@@ -22,7 +22,14 @@ export interface DaemonState {
   host?: string;
   db: string;
   startedAt: string;
+  /** The pid namespace (Linux `/proc/self/ns/pid`) of the shell that started the daemon. A shell
+   *  in another namespace cannot tell a missing pid from an invisible one, nor map the number.
+   *  Absent on older records. */
+  pidNamespace?: string;
 }
+
+/** Linux' initial pid namespace: where an older record, which names no namespace, is read. */
+const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 
 /**
  * OPR.0.4.3.21 — event-loop wedge evidence read from the enriched `/healthz`
@@ -64,6 +71,10 @@ export interface DaemonStatus {
   eventLoop?: DaemonEventLoopEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
+  /** The recorded pid looks missing and the connection was refused, but this shell is not in the
+   *  daemon's pid namespace and no clean-shutdown receipt matches: nothing here shows the daemon is
+   *  down (#2860). */
+  pidUnseen?: true;
   /** T2 — a refused listener under a live start reservation (daemon-start.lock): a launch is in
    *  progress and not listening yet. `pid` is the live launcher (else child) PID; `since` its start. */
   startPending?: { pid: number; since?: string };
@@ -149,6 +160,15 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       fact: `Daemon is starting (launch reserved by pid ${status.startPending.pid}${since}); it isn't listening yet.`,
       consequence: "This command needs a responsive daemon.",
       action: "Wait, then re-check with 'rig daemon status'.",
+      ...causeCode,
+    };
+  }
+  // #2860: a refused probe and a missing pid, seen from outside the daemon's pid namespace.
+  if (status.pidUnseen) {
+    return {
+      fact: "Couldn't connect to the daemon from this shell; it may still be running.",
+      consequence: "This shell can't see the daemon's process (a sandbox or another namespace) and no clean shutdown was recorded, so a refused connection here doesn't show it is down.",
+      action: "Don't start another daemon from here. Check from a normal terminal with 'rig daemon status'.",
       ...causeCode,
     };
   }
@@ -248,6 +268,9 @@ export interface LifecycleDeps {
   /** #275 — three-state liveness for status reads (production: realDeps). Optional so existing
    *  mocks keep the boolean rule; absent = derived from isProcessAlive. */
   processLiveness?: (pid: number) => ProcessLiveness;
+  /** This shell's pid namespace ("host" where the OS has none, undefined when unreadable).
+   *  Production: realDeps. Absent = no namespace evidence, a missing pid counts as dead. */
+  pidNamespace?: () => string | undefined;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -889,7 +912,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     }
     assertChild();
     if (!deps.isProcessAlive(pid!)) throw new Error(`Daemon child ${pid} liveness could not be confirmed; state not published`);
-    const state: DaemonState = { pid: pid!, port, host: probeHost, db, startedAt: new Date().toISOString() };
+    const namespace = deps.pidNamespace?.();
+    const state: DaemonState = { pid: pid!, port, host: probeHost, db, startedAt: new Date().toISOString(), ...(namespace && namespace !== "host" ? { pidNamespace: namespace } : {}) };
     try {
       deps.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
       assertChild();
@@ -948,6 +972,17 @@ function receiptMatchesState(receipt: DaemonShutdownReceipt | undefined, state: 
 
 function isCleanShutdown(receipt: DaemonShutdownReceipt | undefined): boolean {
   return receipt?.outcome === "clean" && receipt.phase === "complete" && receipt.failures.length === 0;
+}
+
+/** Whether the recorded pid number means the same process in this shell. A recorded namespace must
+ *  be this shell's own: another namespace (even the host's) numbers processes differently, so its
+ *  missing number says nothing. Only an older record, which names none, is read as the host's. */
+function sharesPidNamespace(state: DaemonState, deps: LifecycleDeps): boolean {
+  if (!deps.pidNamespace) return true;
+  const own = deps.pidNamespace();
+  if (own === undefined) return false;
+  if (state.pidNamespace) return own === state.pidNamespace;
+  return own === "host" || own === INITIAL_PID_NAMESPACE;
 }
 
 function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: DaemonState): void {
@@ -1153,7 +1188,23 @@ export async function getDaemonStatus(
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
+      if (!isRefusedError(err)) return { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
+      // #2860: a loopback URL that is this home's recorded daemon is judged like the record: a refusal
+      // alone proves nothing from a shell that can't see the pid. No record for it keeps the plain rule.
+      const recorded = "explicitRemote" in endpoint ? null : readState(deps);
+      if (!recorded || recorded.port !== ("port" in endpoint ? endpoint.port : undefined)) return { state: "stopped" };
+      const recordedHost = recorded.host ?? DEFAULT_HOST;
+      const recordedLiveness: ProcessLiveness = deps.processLiveness
+        ? deps.processLiveness(recorded.pid)
+        : deps.isProcessAlive(recorded.pid) ? "alive" : "dead";
+      const { receipt } = readShutdownReceipt(deps, resolveLifecycleFile(deps, "daemon.json"));
+      if ((receiptMatchesState(receipt, recorded) && isCleanShutdown(receipt))
+        || (recordedLiveness === "dead" && sharesPidNamespace(recorded, deps))) return { state: "stopped" };
+      const startPending = liveStartReservation(deps);
+      return {
+        state: "unverified", pid: recorded.pid, port: recorded.port, host: recordedHost, ...(startPending ? { startPending } : {}),
+        ...(recordedLiveness !== "alive" && !startPending ? { pidUnseen: true as const } : {}), ...probeErrorCodeOf(err),
+      };
     }
   }
 
@@ -1187,17 +1238,21 @@ export async function getDaemonStatus(
     }
   }
 
-  const liveness: ProcessLiveness = deps.processLiveness
+  let liveness: ProcessLiveness = deps.processLiveness
     ? deps.processLiveness(state.pid)
     : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  // #2860: down needs positive evidence: the daemon's clean-shutdown receipt, or a missing pid seen
+  // from the daemon's own pid namespace. Elsewhere a missing pid may just be invisible.
+  const stateFile = resolveLifecycleFile(deps, "daemon.json");
+  const { receipt } = readShutdownReceipt(deps, stateFile);
+  const cleanShutdown = receiptMatchesState(receipt, state) && isCleanShutdown(receipt);
   if (liveness === "dead") {
-    // A status read must not erase the identity needed to judge a failed stop.
-    const stateFile = resolveLifecycleFile(deps, "daemon.json");
-    const { receipt } = readShutdownReceipt(deps, stateFile);
-    if (options.cleanupStaleState !== false && receiptMatchesState(receipt, state) && isCleanShutdown(receipt)) {
+    if (cleanShutdown && options.cleanupStaleState !== false) {
+      // A status read must not erase the identity needed to judge a failed stop.
       removeMatchingState(deps, stateFile, state);
     }
-    return { state: "stale" };
+    if (cleanShutdown || sharesPidNamespace(state, deps)) return { state: "stale" };
+    liveness = "unknown";
   }
 
   const host = state.host ?? DEFAULT_HOST;
@@ -1213,7 +1268,9 @@ export async function getDaemonStatus(
       // T2: unless a live start reservation says a launch is in progress.
       if (isRefusedError(err)) {
         const startPending = liveStartReservation(deps);
-        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
+        if (startPending) return { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) };
+        // #2860: a refusal from a shell that can't see the pid proves nothing without a clean shutdown.
+        return cleanShutdown ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, pidUnseen: true, ...probeErrorCodeOf(err) };
       }
       return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }

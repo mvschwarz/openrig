@@ -141,6 +141,22 @@ export class SeatIdentityReconciler {
     `).all() as RunningSeatRow[];
   }
 
+  /** Nodes whose latest session `rig unclaim` released (detached, origin claimed). Unclaim leaves the process running,
+   *  so the node's last recorded process stays on record: a fresh launch reads it before reopening a tmux server, and
+   *  must not start a second occupant beside a process that still runs. An older schema without `origin` keeps none. */
+  private releasedSeats(): string[] {
+    try {
+      return (this.db.prepare(`
+        SELECT n.id as node_id FROM nodes n
+        JOIN sessions s ON s.node_id = n.id
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        WHERE s.status = 'detached' AND s.origin = 'claimed'
+      `).all() as Array<{ node_id: string }>).map((r) => r.node_id);
+    } catch {
+      return [];
+    }
+  }
+
   /** Reconcile every running tmux-bound seat once and persist the verdicts. */
   async reconcileAll(): Promise<void> {
     // Skip ticks while actual reads are pending; never release on a deadline
@@ -156,8 +172,8 @@ export class SeatIdentityReconciler {
 
   private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
-    // Prune verdicts for nodes no longer running (keep the table bounded).
-    this.store.pruneExcept(seats.map((s) => s.node_id));
+    // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
+    this.store.pruneExcept([...seats.map((s) => s.node_id), ...this.releasedSeats()]);
     if (seats.length === 0) return;
 
     const observedAt = this.now().toISOString();
