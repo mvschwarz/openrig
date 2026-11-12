@@ -651,6 +651,9 @@ export interface AgentActivity {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
   livenessSeconds?: number | null;
+  /** #99: when a Claude usage limit (StopFailure/rate_limit) says it resets, read by the relay from Claude's own
+   *  message. Only the instant is kept, never the message. */
+  resetsAt?: string | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
