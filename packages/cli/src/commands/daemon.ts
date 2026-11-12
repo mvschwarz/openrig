@@ -6,6 +6,7 @@ import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-sta
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { personRegistrationOffer } from "../person-registration-offer.js";
 import {
   startDaemon,
   stopDaemon,
