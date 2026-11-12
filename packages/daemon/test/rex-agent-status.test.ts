@@ -21,17 +21,25 @@ type Clients = Record<string, Array<{ tty: string; termtype: string }> | null>;
 function rig(clients: Clients, seats: Record<string, SeatActivity> = {}) {
   const writes: Array<{ tty: string; text: string }> = [];
   const refusing = new Set<string>();
+  /** Terminals whose next write goes out only partly, with how many bytes. */
+  const partial = new Map<string, number>();
   let listings = 0;
   const clock = { now: 0 };
   const relay = new RexAgentStatusRelay({
     clients: { async listSessionClientTerminals(session) { listings++; return session in clients ? clients[session]! : []; } },
     resolve: (seat) => seats[seat] ?? { activity: null, runtime: null },
-    writeTty: async (tty, text) => { if (refusing.has(tty)) throw new Error("EAGAIN"); writes.push({ tty, text }); },
+    writeTty: async (tty, text) => {
+      if (refusing.has(tty)) throw new Error("EAGAIN");
+      const n = partial.get(tty);
+      if (n !== undefined) { partial.delete(tty); writes.push({ tty, text: text.slice(0, n) }); return n; }
+      writes.push({ tty, text });
+      return Buffer.byteLength(text);
+    },
     now: () => clock.now,
     sweep: false,
   });
   const to = (tty: string) => writes.filter((w) => w.tty === tty).map((w) => w.text);
-  return { relay, writes, refusing, clock, to, listings: () => listings };
+  return { relay, writes, refusing, partial, clock, to, listings: () => listings };
 }
 
 const at = (state: AgentActivityState, runtime = "claude-code", reason?: string): SeatActivity => ({ activity: activity(state, reason), runtime });
@@ -62,10 +70,37 @@ describe("rex agent status: relay", () => {
     expect(r.writes).toEqual([{ tty: "/dev/t1", text: osc("state=idle:app=claude-code") }]);
   });
 
-  it("writes nothing for a newly opened seat whose state is unknown", async () => {
-    const r = rig({ "op@k": [rex("/dev/t1")] }, { "op@k": at("unknown") });
-    await r.relay.tilesOpened(["op@k"]);
-    expect(r.writes).toEqual([]);
+  it("clears a tile after a daemon restart when the activity is now unknown, so it doesn't keep showing idle", async () => {
+    const clients: Clients = { "op@k": [rex("/dev/t1")] };
+    const before = rig(clients, { "op@k": at("idle") });
+    await before.relay.tilesOpened(["op@k"]);
+    expect(before.to("/dev/t1")).toEqual([osc("state=idle:app=claude-code")]);
+    const after = rig(clients, { "op@k": at("unknown") });
+    await after.relay.activityChanged("op@k");
+    expect(after.to("/dev/t1")).toEqual([osc("state=clear")]);
+  });
+
+  it("gives a client that moved to another seat that seat's state, a clear included", async () => {
+    const clients: Clients = { "a@k": [rex("/dev/t1")], "b@k": [] };
+    const r = rig(clients, { "b@k": at("unknown") });
+    await r.relay.activityChanged("a@k", at("running"));
+    clients["a@k"] = [];
+    clients["b@k"] = [rex("/dev/t1")];
+    await r.relay.tilesOpened(["b@k"]);
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
+  });
+
+  it("starts the next write with ST after a partial one, so the terminal isn't left inside the report", async () => {
+    const r = rig({ "op@k": [rex("/dev/t1")] });
+    r.partial.set("/dev/t1", 5);
+    await r.relay.activityChanged("op@k", at("running"));
+    await r.relay.activityChanged("op@k", at("running"));
+    await r.relay.activityChanged("op@k", at("idle"));
+    expect(r.to("/dev/t1")).toEqual([
+      osc("state=working:app=claude-code").slice(0, 5),
+      "\x1b\\" + osc("state=working:app=claude-code"),
+      osc("state=idle:app=claude-code"),
+    ]);
   });
 
   it("writes each change once, without listing clients again for an unchanged report, and clears on unknown", async () => {
@@ -130,7 +165,7 @@ describe("rex agent status: relay", () => {
     const relay = new RexAgentStatusRelay({
       clients: { async listSessionClientTerminals(s) { if (first) { first = false; await gate; } return clients[s]!; } },
       resolve: () => at("idle"),
-      writeTty: async (tty) => { writes.push(tty); },
+      writeTty: async (tty, text) => { writes.push(tty); return Buffer.byteLength(text); },
       sweep: false,
     });
     const inFlight = relay.activityChanged("op@k");
@@ -171,14 +206,11 @@ describe("rex agent status: relay", () => {
     expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code")]);
   });
 
-  it("clears a delivered state when the seat's runtime is no longer known, and sends nothing to a fresh tile", async () => {
+  it("clears a delivered state when the seat's runtime is no longer known", async () => {
     const r = rig({ "op@k": [rex("/dev/t1")] });
     await r.relay.activityChanged("op@k", at("idle"));
     await r.relay.activityChanged("op@k", { activity: activity("idle"), runtime: null });
     expect(r.to("/dev/t1")).toEqual([osc("state=idle:app=claude-code"), osc("state=clear")]);
-    const fresh = rig({ "op@k": [rex("/dev/t2")] }, { "op@k": { activity: activity("idle"), runtime: null } });
-    await fresh.relay.tilesOpened(["op@k"]);
-    expect(fresh.writes).toEqual([]);
   });
 
   it("recovers through the sweep when the seat's first tmux listing fails", async () => {

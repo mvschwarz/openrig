@@ -231,7 +231,8 @@ export class RexAdapter implements TerminalProvider {
         if (!pane.host) local.push(pane.seat);
       }
     });
-    if (local.length > 0) await this.tilesOpened?.(local).catch(() => {});
+    // The tiles' status follows on its own; the view's result doesn't wait for it.
+    if (local.length > 0) void this.tilesOpened?.(local).catch(() => {});
     return {
       ...base,
       ok: opened.length > 0 || view.opened.length === 0,

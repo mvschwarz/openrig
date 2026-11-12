@@ -2163,6 +2163,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const { RexAgentStatusRelay } = await import("./domain/terminal/rex-agent-status.js");
     const rexStatusRelay = new RexAgentStatusRelay({ clients: tmuxAdapter, resolve: currentSeatActivity });
     rexSeatActivity = (sessionName, current) => { void rexStatusRelay.activityChanged(sessionName, current); };
+    deps.rexStatusRelay = rexStatusRelay;
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
     const { createScopedTaskResolver } = await import("./domain/terminal/scope-task-terminal-view.js");

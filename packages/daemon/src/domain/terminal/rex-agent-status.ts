@@ -44,7 +44,6 @@ export function rexStatusReport(status: RexAgentStatus, runtime: string | null):
   return `\x1b]7501;${fields}\x1b\\`;
 }
 
-const CLEAR = rexStatusReport({ state: "clear" }, null);
 
 const isRex = (termtype: string): boolean => /^rex\b/i.test(termtype);
 
@@ -55,37 +54,43 @@ export const REX_CLIENT_RECHECK_MS = 5 * 60_000;
  *  client and to retry a report a client missed. Within it, an unchanged report costs no tmux call. */
 export const REX_CLIENT_REFRESH_MS = 5_000;
 
-async function writeTty(tty: string, text: string): Promise<void> {
+/** String Terminator: closes an OSC a partial write left open, and does nothing otherwise. */
+const ST = "\x1b\\";
+
+/** Writes to a terminal and returns how many bytes went out. */
+async function writeTty(tty: string, text: string): Promise<number> {
   // O_NOCTTY: never take the client's terminal as the daemon's own. O_NONBLOCK: a stalled terminal drops the report
   // instead of holding the seat's later reports behind it.
   const handle = await open(tty, constants.O_WRONLY | constants.O_NOCTTY | constants.O_NONBLOCK);
   try {
-    const { bytesWritten } = await handle.write(text);
-    if (bytesWritten !== Buffer.byteLength(text)) throw new Error(`wrote ${bytesWritten} of ${Buffer.byteLength(text)} bytes`);
+    return (await handle.write(text)).bytesWritten;
   } finally {
     await handle.close();
   }
 }
 
-/** A seat with Rex clients: the report each client last took ("" when that isn't known), and when the clients were
- *  last listed. */
+/** A seat with Rex clients: the report each client last took ("" when that isn't known, such as a client this relay
+ *  hasn't written to since the daemon started or since it moved from another seat), and when the clients were last
+ *  listed. */
 interface ShownSeat { delivered: Map<string, string>; listedAt: number }
 
 export class RexAgentStatusRelay {
   private readonly clients: RexStatusClients;
   private readonly resolve: ResolveSeatActivity;
-  private readonly write: (tty: string, text: string) => Promise<void>;
+  private readonly write: (tty: string, text: string) => Promise<number>;
   private readonly now: () => number;
   private readonly sweeps: boolean;
   private readonly shown = new Map<string, ShownSeat>();
   /** When a seat was last found without a Rex client. */
   private readonly unshownAt = new Map<string, number>();
+  /** Terminals a partial write left inside an unfinished OSC. */
+  private readonly dangling = new Set<string>();
   /** One report at a time per seat, so two quick changes reach the tile in order. */
   private readonly pending = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: {
-    clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<void>; now?: () => number;
+    clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<number>; now?: () => number;
     /** False keeps the periodic sweep off; tests call sweep() themselves. */
     sweep?: boolean;
   }) {
@@ -165,14 +170,18 @@ export class RexAgentStatusRelay {
     this.shown.set(seat, seatState);
     this.startSweeping();
 
-    // A client that never got a report has nothing to clear.
-    const targets = ttys.filter((tty) => {
-      const had = seatState.delivered.get(tty);
-      return had !== report && !(report === CLEAR && had === undefined);
-    });
+    // A client with no record here may still show what this relay told it before a daemon restart, or another seat's
+    // state, so it gets the current report, a clear included.
+    const targets = ttys.filter((tty) => seatState.delivered.get(tty) !== report);
     await Promise.all(targets.map(async (tty) => {
       try {
-        await this.write(tty, report);
+        const text = this.dangling.has(tty) ? ST + report : report;
+        const written = await this.write(tty, text);
+        if (written > 0) this.dangling.delete(tty);
+        if (written !== Buffer.byteLength(text)) {
+          if (written > 0) this.dangling.add(tty);
+          throw new Error(`wrote ${written} of ${Buffer.byteLength(text)} bytes`);
+        }
         seatState.delivered.set(tty, report);
       } catch {
         // What it shows is now unknown, so the next look sends it the current report, whatever that is.

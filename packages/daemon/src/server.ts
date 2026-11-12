@@ -282,6 +282,7 @@ export interface AppDeps {
   reviewGatherer?: import("./domain/review/gather.js").ReviewGatherer;
   // OPR.0.4.6.02 C3 — the terminal-provider-ride composer (herdr/cmux views).
   terminalService?: import("./domain/terminal/terminal-service.js").TerminalService;
+  rexStatusRelay?: import("./domain/terminal/rex-agent-status.js").RexAgentStatusRelay;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   /** User Settings v0 — daemon-side settings store (env > file > default). */
   settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
