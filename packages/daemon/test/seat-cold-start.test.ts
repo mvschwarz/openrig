@@ -492,12 +492,21 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
 
   it("rechecks liveness on the next drain pass without waiting for the TTL", async () => {
     const f = fixture();
+    let now = Date.now();
+    f.deps.now = () => new Date(now);
     f.setLiveSessions([]);
+    const recipe = vi.fn(f.deps.getNodeLaunchRecipe);
+    const probe = vi.fn(f.deps.hasSession);
+    f.deps.getNodeLaunchRecipe = recipe;
+    f.deps.hasSession = probe;
     const pass = {};
     f.starter.notify("dev.impl@fleet", pass);
     await flush();
+    now += 1001;
     f.starter.notify("dev-impl@fleet", pass);
     await flush();
+    expect(recipe).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledTimes(2);
     expect(f.logs).toHaveLength(1);
     f.setLiveSessions(["dev-rev@fleet"]);
     f.starter.notify("dev.impl@fleet", {});

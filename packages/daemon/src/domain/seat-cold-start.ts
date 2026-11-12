@@ -222,7 +222,7 @@ export class SeatColdStarter {
     const evaluations = drainPass ? this.drainEvaluations.get(drainPass) ?? new Map<string, number>() : this.evaluations;
     if (drainPass) this.drainEvaluations.set(drainPass, evaluations);
     const now = this.currentTime().getTime();
-    for (const [key, expiry] of evaluations) if (expiry <= now) evaluations.delete(key);
+    if (!drainPass) for (const [key, expiry] of evaluations) if (expiry <= now) evaluations.delete(key);
     const address = `${parsed.member.replace(".", "-")}@${parsed.rig}`;
     if (evaluations.has(address)) return undefined;
     evaluations.set(address, now + COLD_START_EVALUATION_TTL_MS);
