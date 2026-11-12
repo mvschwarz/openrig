@@ -301,7 +301,8 @@ export interface CreateScopeAdvisory {
 
 export interface CreateScopeAdvisoryContext {
   verb: "handoff" | "handoff-and-complete";
-  tagSource: "inherited" | "explicit";
+  tagSource: "inherited" | "explicit" | "unknown";
+  delivery?: "forwarded" | "in-process";
 }
 
 function displayScopeTag(raw: string): string | null {
@@ -390,8 +391,16 @@ export function toCreateScopeAdvisory(check: CreateScopeCheck, context?: CreateS
       break;
     }
     case "skipped":
-      advisory = { code: "scope_check_skipped",
-        message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      if (context?.delivery === "in-process") {
+        advisory = { code: "scope_check_skipped",
+          message: `queue ${context.verb} scope check skipped for self-id re-drive (${displayScopeTags(check.tags).join(", ")}); successor was accepted in process.` };
+      } else if (context) {
+        advisory = { code: "scope_check_skipped",
+          message: `queue ${context.verb} scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      } else {
+        advisory = { code: "scope_check_skipped",
+          message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      }
       break;
     default: {
       const unreachable: never = check;
@@ -401,13 +410,14 @@ export function toCreateScopeAdvisory(check: CreateScopeCheck, context?: CreateS
   if (!context) return advisory;
 
   const provenance = context.tagSource === "inherited"
-    ? "the effective scope tags were inherited from the source item"
-    : "the effective scope tags came from explicit tags supplied on this handoff";
+    ? "requested effective scope tags were inherited from the source item"
+    : context.tagSource === "explicit"
+      ? "requested effective scope tags came from explicit tags supplied on this handoff"
+      : "effective scope tag provenance is unknown";
+  const message = advisory.message.replace(/^queue create/, `queue ${context.verb}`);
   return {
     ...advisory,
-    message: advisory.message
-      .replace("queue create", `queue ${context.verb}`)
-      .replace("; row was ", `; ${provenance}; row was `),
+    message: `${message.slice(0, -1)}; ${provenance}.`,
   };
 }
 

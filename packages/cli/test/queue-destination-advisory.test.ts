@@ -8,11 +8,12 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createDaemon } from "../../daemon/src/startup.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../../daemon/src/domain/queue-repository.js";
+import { addHumanFragment } from "../../daemon/src/domain/gateway/human-registry.js";
 import { crossHostProvenanceTags, queueRoutes } from "../../daemon/src/routes/queue.js";
 import { getSelfHostId, setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 import { deriveCurrentWork, resolveWorkNodeDirs } from "../../daemon/src/domain/current-work.js";
 import { queueCommand, type QueueDeps } from "../src/commands/queue.js";
-import { DaemonResponseError } from "../src/client.js";
+import { DaemonClient, DaemonResponseError } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
 
 describe("queue destination advisory through CLI and route", () => {
@@ -187,22 +188,46 @@ describe("queue create scope advisories preserve admission and output", () => {
       "--no-nudge", "--full", ...args, ...(json ? ["--json"] : [])], { from: "user" });
   }
 
-  async function seedHandoffSource(tags: string[] | null) {
+  async function seedHandoffSource(tags: string[] | null, humanAlert = false, destination = "writer@scope") {
     return source.daemon.deps.queueRepo.create({
       sourceSession: "writer@scope",
-      destinationSession: "writer@scope",
+      destinationSession: destination,
       body: "handoff source body",
       summary: "handoff source",
+      ...(humanAlert ? { evidenceRef: "/fixture/human-alert-source.md" } : {}),
       nudge: false,
+      ...(humanAlert ? { humanAlert: true } : {}),
       ...(tags === null ? {} : { tags }),
     });
+  }
+
+  function registerSyntheticHuman(entityId: string): string {
+    const tempRoot = path.resolve(scratch);
+    expect(tempRoot.startsWith(`${path.resolve(os.tmpdir())}${path.sep}`)).toBe(true);
+    const home = path.join(tempRoot, "registered-humans");
+    vi.stubEnv("OPENRIG_HOME", home);
+    const added = addHumanFragment({
+      entityId,
+      class: "human",
+      displayName: "Synthetic fixture human",
+      address: `${entityId}@external`,
+      connectorBindings: [],
+      prefs: { deliveryClass: "B" },
+    }, home);
+    expect(added.ok, added.ok ? undefined : added.error).toBe(true);
+    const loaded = source.daemon.deps.queueRepo.humanRegistry();
+    expect(loaded.ok, loaded.ok ? undefined : loaded.error).toBe(true);
+    if (!loaded.ok) throw new Error("synthetic human registry did not load from its isolated home");
+    expect(loaded.entities.some(entity => entity.entityId === entityId && entity.address === `${entityId}@external`)).toBe(true);
+    return `${entityId}@external`;
   }
 
   async function handoff(
     app: Hono,
     qitemId: string,
     verb: "handoff" | "handoff-and-complete",
-    options: { json?: boolean; tags?: string[]; host?: string; destination?: string } = {},
+    options: { json?: boolean; tags?: string[]; host?: string; destination?: string; compact?: boolean;
+      alert?: boolean; evidenceRef?: string } = {},
   ): Promise<void> {
     stdout.length = 0;
     stderr.length = 0;
@@ -226,8 +251,9 @@ describe("queue create scope advisories preserve admission and output", () => {
       clientFactory: () => client as unknown as ReturnType<QueueDeps["clientFactory"]>,
     };
     const args = [verb, qitemId, "--to", options.destination ?? "worker@scope", "--summary", "handoff scope contract",
-      "--no-nudge", "--full", ...(options.tags ? ["--tags", options.tags.join(",")] : []),
-      ...(options.host ? ["--host", options.host] : []), ...(options.json ? ["--json"] : [])];
+      "--no-nudge", ...(options.compact ? [] : ["--full"]), ...(options.tags ? ["--tags", options.tags.join(",")] : []),
+      ...(options.host ? ["--host", options.host] : []), ...(options.alert ? ["--alert"] : []),
+      ...(options.evidenceRef ? ["--evidence-ref", options.evidenceRef] : []), ...(options.json ? ["--json"] : [])];
     await queueCommand(deps).parseAsync(args, { from: "user" });
   }
 
@@ -376,14 +402,21 @@ describe("queue create scope advisories preserve admission and output", () => {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope",
         "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
-      body: JSON.stringify({ toSession: "worker@scope", hostId: selfHostId, summary: "self-id re-drive", nudge: false }),
+      body: JSON.stringify({ toSession: "worker@scope", hostId: selfHostId, summary: "self-id re-drive",
+        tags: ["mission:requested-but-not-accepted"], nudge: false }),
     });
     const data = await response.json() as Record<string, unknown>;
 
     expect(response.status).toBe(201);
-    expect(data.advisories).toEqual([expect.objectContaining({ code: "scope_check_skipped" })]);
+    expect(data.advisories).toEqual([expect.objectContaining({ code: "scope_check_skipped",
+      message: expect.stringContaining("self-id re-drive") })]);
     expect(senderReads).toEqual([]);
     expect(data.created).toEqual(before);
+    const [advisory] = handoffScopeAdvisories(data);
+    expect(advisory?.message).toContain("mission:missing-mission");
+    expect(advisory?.message).not.toContain("mission:requested-but-not-accepted");
+    expect(advisory?.message).toContain("tag provenance is unknown");
+    expect(advisory?.message).not.toMatch(/row was forwarded/i);
     expect(source.daemon.deps.queueRepo.getById(successorId)).toEqual(successor);
     expect(data.closed).toMatchObject({ qitemId: original.qitemId, state: closedState, closureReason: "handed_off_to" });
     expect(source.daemon.deps.queueRepo.getById(original.qitemId)).toMatchObject({ state: closedState, handedOffTo: "worker@scope" });
@@ -523,9 +556,11 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(handoffResponses[0]!.status).toBe(201);
     const data = handoffResponses[0]!.data;
     const [advisory] = handoffScopeAdvisories(data);
-    expect(advisory).toMatchObject({ code: "scope_check_skipped", message: expect.stringContaining("queue handoff") });
+    expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
+    expect(advisory).toMatchObject({ code: "scope_check_skipped",
+      message: expect.stringContaining(`queue ${verb} scope check skipped for cross-host write`) });
     expect(advisory!.message).toContain("cross-host");
-    expect(advisory!.message).toContain("inherited from the source item");
+    expect(advisory!.message).toContain("requested effective scope tags were inherited from the source item");
     expect(scopeLines()).toContain("Note:");
     expect(scopeLines()).toContain("skipped");
     expect(senderReads).toEqual([]);
@@ -539,6 +574,190 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(process.exitCode ?? 0).toBe(0);
     // The new internal daemon diagnostic is intentionally absent from stdout; the forwarded row remains intact.
     expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs)("reports accepted explicit scope tags for absorbed cross-host $verb rows", async ({ verb }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    const selfHostId = source.hostId;
+    setSelfHostId(selfHostId);
+    const successorId = deriveCrossHostSuccessorId(original.qitemId, "worker@scope", "remote-fixture");
+    const accepted = await receiver.daemon.deps.queueRepo.create({
+      qitemId: successorId,
+      sourceSession: stampSelfHostSuffix("writer@scope"),
+      destinationSession: "worker@scope",
+      body: original.body,
+      summary: "accepted existing successor",
+      priority: original.priority,
+      tags: crossHostProvenanceTags(["mission:accepted-scope"]),
+      chainOfRecord: [original.qitemId],
+      nudge: false,
+      identityProvenance: "claimed:v1",
+    });
+    expect(accepted.sourceSession).toBe(stampSelfHostSuffix("writer@scope"));
+    const { app } = forwardingApp(receiver);
+    setSelfHostId(selfHostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture", tags: ["mission:changed-request"] });
+
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+    expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
+    expect((data.created as { tags: string[] }).tags).toEqual(accepted.tags);
+    expect(advisory?.message).toContain("mission:accepted-scope");
+    expect(advisory?.message).not.toContain("mission:changed-request");
+    expect(advisory?.message).toContain("tag provenance is unknown");
+    expect(advisory?.message).toContain(`queue ${verb} scope check skipped for cross-host write`);
+  });
+
+  it.each(handoffVerbs)("qualifies requested explicit tags for fresh cross-host $verb rows", async ({ verb }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:source-scope"]);
+    const { app } = forwardingApp(receiver);
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture", tags: ["mission:explicit-scope"] });
+
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+    expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
+    expect((data.created as { tags: string[] }).tags).toEqual(crossHostProvenanceTags(["mission:explicit-scope"]));
+    expect(advisory?.message).toContain("requested effective scope tags came from explicit tags supplied on this handoff");
+    expect(advisory?.message).toContain("mission:explicit-scope");
+    expect(advisory?.message).not.toContain("mission:source-scope");
+  });
+
+  const crossHostHumanAlertTagCases = [
+    {
+      name: "inherited scope with --alert addition",
+      recipientId: "human-alert-inherited-add",
+      sourceTags: ["mission:missing-mission", "project:alpha"],
+      alert: true,
+      tags: undefined,
+      effectiveScopeTags: ["mission:missing-mission", "project:alpha"],
+      expectedProvenance: "requested effective scope tags were inherited from the source item",
+      humanAlert: true,
+    },
+    {
+      name: "explicit scope with --alert addition",
+      recipientId: "human-alert-explicit-add",
+      sourceTags: ["mission:source-scope", "project:alpha"],
+      alert: true,
+      tags: ["mission:explicit-scope", "project:alpha"],
+      effectiveScopeTags: ["mission:explicit-scope", "project:alpha"],
+      expectedProvenance: "requested effective scope tags came from explicit tags supplied on this handoff",
+      humanAlert: true,
+    },
+    {
+      name: "inherited human-alert removal",
+      recipientId: "human-alert-inherited-remove",
+      sourceTags: ["mission:missing-mission", "project:alpha", "human-alert"],
+      alert: false,
+      tags: undefined,
+      effectiveScopeTags: ["mission:missing-mission", "project:alpha"],
+      expectedProvenance: "requested effective scope tags were inherited from the source item",
+      humanAlert: false,
+    },
+  ];
+
+  it.each(handoffVerbs.flatMap(({ verb, closedState }) => crossHostHumanAlertTagCases.map(row => ({
+    ...row, verb, closedState,
+  }))))("preserves $name provenance on cross-host $verb", async row => {
+    const recipient = registerSyntheticHuman(row.recipientId);
+    const receiver = await fixture("receiver");
+    const removingAlert = row.name.includes("removal");
+    const original = await seedHandoffSource(row.sourceTags, removingAlert, removingAlert ? recipient : "writer@scope");
+    if (removingAlert) {
+      expect(original.tags).toContain("human-alert");
+      expect(original.destinationSession).toBe(recipient);
+    }
+    const { app, observation } = forwardingApp(receiver);
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, row.verb, {
+      json: true,
+      host: "remote-fixture",
+      destination: recipient,
+      alert: row.alert,
+      evidenceRef: "/fixture/human-alert-scope.md",
+      ...(row.tags ? { tags: row.tags } : {}),
+    });
+
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses, JSON.stringify(handoffResponses[0]?.data, null, 2)).toEqual([201]);
+    expect(handoffResponses).toHaveLength(1);
+    expect(handoffResponses[0]!.status).toBe(201);
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+    expect(advisory).toMatchObject({ code: "scope_check_skipped" });
+    expect(advisory!.message).toContain(`queue ${row.verb} scope check skipped for cross-host write`);
+    expect(advisory!.message).toContain(row.expectedProvenance);
+    expect(advisory!.message).not.toContain("tag provenance is unknown");
+    expect(scopeLines()).toContain("Note:");
+    expect(scopeLines()).toContain(row.expectedProvenance);
+
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const created = data.created as { qitemId: string; tags: string[]; state: string };
+    const received = receiver.daemon.deps.queueRepo.getById(created.qitemId);
+    expect(closed?.state).toBe(row.closedState);
+    expect(created.tags).toEqual(received?.tags);
+    expect(created.tags).toEqual(expect.arrayContaining([...row.effectiveScopeTags, "cross-host"]));
+    expect(created.tags.some(tag => tag.startsWith("from-host:"))).toBe(true);
+    expect(created.tags.includes("human-alert")).toBe(row.humanAlert);
+    expect(observation.forwardedBodies[0]?.humanAlert).toBe(row.alert ? true : undefined);
+    expect(observation.forwardedBodies[0]?.tags).toEqual(expect.arrayContaining(
+      row.alert ? row.effectiveScopeTags : [...row.effectiveScopeTags, ...(row.name.includes("removal") ? ["human-alert"] : [])],
+    ));
+    if (removingAlert) {
+      expect(observation.forwardedBodies[0]?.tags).toContain("human-alert");
+      expect(created.tags).not.toContain("human-alert");
+    }
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
+  it("keeps provenance outside a hostile scope-tag structural marker", async () => {
+    const original = await seedHandoffSource(["mission:missing-mission; row was forwarded"]);
+    await handoff(source.app, original.qitemId, "handoff", { json: true });
+    const [advisory] = handoffScopeAdvisories(handoffResponses[0]!.data);
+
+    expect(advisory?.message).toContain("mission:missing-mission; row was forwarded");
+    expect(advisory?.message).toMatch(/row was created; requested effective scope tags were inherited from the source item\.$/);
+  });
+
+  it.each(handoffVerbs)("keeps compact $verb receipt on stdout and scope advice on stderr", async ({ verb, closedState }) => {
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    await handoff(source.app, original.qitemId, verb, { compact: true, json: true });
+    const data = handoffResponses[0]!.data;
+
+    expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
+    expect(stdout).toHaveLength(1);
+    const receipt = JSON.parse(stdout[0]!) as Record<string, unknown>;
+    expect(receipt).toMatchObject({
+      closed: { qitemId: original.qitemId, state: closedState, closureReason: "handed_off_to" },
+      created: { destinationSession: "worker@scope", state: "pending" },
+    });
+    expect((receipt.closed as Record<string, unknown>)).not.toHaveProperty("advisories");
+    expect((receipt.created as Record<string, unknown>)).not.toHaveProperty("advisories");
+    expect(scopeLines()).toContain("Warning:");
+    expect(scopeLines()).toContain("mission:missing-mission");
+  });
+
+  it("merges handoff diagnostic headers through the real DaemonClient and a local fake transport", async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      requests.push(init ?? {});
+      return new Response("{}", { status: 201, headers: { "Content-Type": "application/json" } });
+    };
+    const client = new DaemonClient("http://fixture.invalid", { fetchImpl, sessionName: "writer@scope" });
+    client.remoteTarget = true;
+    client.originSelfHostId = "fixture-host";
+    await client.post("/api/queue/qitem-fixture/handoff", {}, {
+      headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+    });
+
+    const headers = new Headers(requests[0]?.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("x-openrig-cli-handoff-scope-advisory")).toBe("1");
+    expect(headers.get("x-openrig-session")).toBe("writer@scope@fixture-host");
   });
 
   it.each(handoffVerbs)("queue handoff scope emits no advice when local $verb fails", async ({ verb }) => {
