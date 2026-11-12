@@ -21,18 +21,20 @@ export interface RosterInventory {
   sources: Row[];
   /** This host's id, from the local daemon's own nodes; null when it has none to read it from. */
   localHostId?: string | null;
-  /** The local daemon's hosted members with their check-in status; null when it couldn't be read. */
-  checkIns?: Row[] | null;
+  /** The local daemon's hosted members with their check-in status, and that daemon's own host id (the host whose
+   *  check-ins these are); null when it couldn't be read. */
+  checkIns?: { hostId: string | null; members: Row[] } | null;
 }
 
 /** Each hosted member's check-in status, from the local daemon. Null when the daemon isn't running or doesn't answer
  *  (an older daemon has no such read): every hosted member's status then reads unknown. */
-export async function readHostedCheckIns(): Promise<Row[] | null> {
+export async function readHostedCheckIns(): Promise<RosterInventory["checkIns"]> {
   try {
     const status = await getDaemonStatus(realDeps());
     if (status.state !== "running") return null;
     const res = await new DaemonClient(getDaemonUrl(status)).get<unknown>("/api/queue/hosted-members");
-    return res.status < 400 && object(res.data) && Array.isArray(res.data.members) ? res.data.members.filter(object) : null;
+    return res.status < 400 && object(res.data) && Array.isArray(res.data.members)
+      ? { hostId: text(res.data.hostId), members: res.data.members.filter(object) } : null;
   } catch {
     return null;
   }
@@ -73,9 +75,10 @@ export async function readRosterInventory(): Promise<RosterInventory> {
 
 function hostedCheckIn(member: RosterMember, inventory: RosterInventory): Row {
   const unknown = (reason: string) => ({ status: "unknown", lastCheckInAt: null, expectedMinutes: member.check_in_minutes ?? null, reason });
-  if (!inventory.localHostId || member.host !== inventory.localHostId) return unknown("it's listed on another host, whose check-ins this host doesn't hold");
+  // The daemon names its own host with its check-ins, so a team with no terminal seat still matches its members.
   if (!inventory.checkIns) return unknown("this host's daemon gave no check-in status");
-  const row = inventory.checkIns.find((m) => m.seat === member.seat);
+  if (!inventory.checkIns.hostId || member.host !== inventory.checkIns.hostId) return unknown("it's listed on another host, whose check-ins this host doesn't hold");
+  const row = inventory.checkIns.members.find((m) => m.seat === member.seat);
   return row && typeof row.status === "string" && row.status in CHECK_IN_DISPLAY ? row
     : unknown("this host's daemon gave no status for it");
 }

@@ -30,11 +30,11 @@ import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } f
 import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
-import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type InboxCheckIn, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { memberCheckInStatus, readWakeOutcome } from "./connection-contract.js";
+import { readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -619,26 +619,32 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
  *  and what to do. Its work's age runs from each row's own time, which a check-in never resets. Built from the rows' fixed
  *  facts and the member's check-in state, never a current check-in's exact time, so a pass rewrites it only when the rows
  *  or that state change. */
-function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: InboxCheckIn,
-  now: Date, cadenceMinutes: number | null = null): { summary: string; body: string } {
+function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: MemberCheckIn,
+  now: Date): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
-  // Only the words change; when this notice is filed doesn't. A member whose person stated a cadence is judged by it
-  // (overdue past twice it); one with none, by this threshold, as before.
-  const status = cadenceMinutes === null ? null : memberCheckInStatus({ checkInMinutes: cadenceMinutes, checkIn, now }).status;
-  const recent = status !== null ? status === "checking-in"
-    : checkIn.state === "seen" && now.getTime() - Date.parse(checkIn.at) <= thresholdMinutes * 60_000;
-  const checkIns = recent
-    ? cadenceMinutes !== null
-      ? `checking in: its last check-in is within twice its expected ${cadenceMinutes} min`
-      : `checking in: it read its own inbox within the last ${thresholdMinutes} min`
-    : checkIn.state === "seen"
-      ? cadenceMinutes !== null
-        ? `overdue: no check-in since ${checkIn.at}; expected every ${cadenceMinutes} min, so its schedule may be off or waiting for an approval`
-        : `no check-in observed since ${checkIn.at}`
-      : checkIn.state === "never" ? "no check-in observed yet" : "unknown: its check-ins couldn't be read";
+  // The member's shared check-in status, worded. Only the words follow it; when this notice is filed doesn't. A member
+  // with no stated cadence keeps this threshold for whether it read its inbox lately, and no line carries a current
+  // check-in's time, so a check-in alone never rewrites the notice.
+  const at = checkIn.lastCheckInAt;
+  const cadence = checkIn.expectedMinutes;
+  const lately = at !== null && now.getTime() - Date.parse(at) <= thresholdMinutes * 60_000;
+  const recent = checkIn.status === "checking-in" || (checkIn.status === "prompted-only" && lately);
+  const checkIns = ((): string => {
+    switch (checkIn.status) {
+      case "checking-in": return `checking in: its last check-in is within twice its expected ${cadence} min`;
+      case "check-in-overdue":
+        return `overdue: no check-in since ${at}; expected every ${cadence} min, so its schedule may be off or waiting for an approval`;
+      case "prompted-only": return `prompted only (no schedule declared): ${lately
+        ? `it read its own inbox within the last ${thresholdMinutes} min` : `no check-in since ${at}`}`;
+      case "never-checked-in":
+        return `never checked in: no check-in recorded; ${cadence !== null ? `expected every ${cadence} min` : "no schedule declared"}`;
+      case "disconnected": return "disconnected: its connection was revoked or removed";
+      case "unknown": return `unknown: ${checkIn.reason ?? "its check-in status couldn't be read"}`;
+    }
+  })();
   const why = recent
     ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
-    : checkIn.state === "unknown"
+    : checkIn.status === "unknown"
       ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
       : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
@@ -1501,7 +1507,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // A polling member's notice says whether it's checking in; an agent seat's names the route to add instead.
       const polled = rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat);
       const backlogText = (standsFor: BacklogRow[]) => polled
-        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now, deps.queueRepo.hostedMemberCadence(seat))
+        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
         : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
       // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
       // else the operator agent. With none, it stays with the member, which reads it when it next checks.

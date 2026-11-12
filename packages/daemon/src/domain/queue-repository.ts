@@ -5289,14 +5289,13 @@ export class QueueRepository {
       ...memberCheckInStatus({ checkInMinutes: m.check_in_minutes, cadenceProblem: m.check_in_problem, checkIn: this.lastInboxCheckIn(m.seat), now }) }));
   }
 
-  /** The cadence a hosted member's person stated at setup, in minutes; null when none was, or it isn't a hosted member
-   *  on this host. */
-  hostedMemberCadence(seat: string): number | null {
-    try {
-      return this.hostedMembersFn().find((m) => this.isSameSession(m.seat, seat))?.check_in_minutes ?? null;
-    } catch {
-      return null;
-    }
+  /** One member's check-in status, as `hostedMemberCheckIns` gives it. A seat the rosters don't list here (or can't be
+   *  read for) states no cadence, so it reads by its check-ins alone. */
+  hostedMemberCheckIn(seat: string, now: Date = new Date()): MemberCheckIn {
+    let member: RosterMember | undefined;
+    try { member = this.hostedMembersFn().find((m) => this.isSameSession(m.seat, seat)); } catch { member = undefined; }
+    return memberCheckInStatus({ checkInMinutes: member?.check_in_minutes, cadenceProblem: member?.check_in_problem,
+      checkIn: this.lastInboxCheckIn(seat), now });
   }
 
   /** This session's latest recorded check-in under any of its names. */

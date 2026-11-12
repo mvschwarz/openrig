@@ -130,9 +130,10 @@ when it lists the member's own work). Its status compares its last check-in with
 A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
 anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
 isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
-gives each member on this host with its status, last check-in and stated cadence; `rig roster show` and `find` show it
-as `Check-in:`. When the member has unclaimed work, the standing notice described above judges its check-ins by the same
-cadence.
+gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
+reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats.
+When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
+line; when that notice is filed doesn't change.
 
 ## Revoke
 

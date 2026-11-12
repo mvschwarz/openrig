@@ -115,7 +115,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(more).toEqual([]);
     expect(notice!.destinationSession).toBe(PERSON);
     expect(notice!.sourceSession).toBe(MEMBER);
-    expect(notice!.body).toContain(`check-ins: no check-in observed since ${at.toISOString()}`);
+    expect(notice!.body).toContain(`check-ins: prompted only (no schedule declared): no check-in since ${at.toISOString()}`);
     expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
     expect(notice!.body).not.toMatch(/dead/i);
@@ -148,6 +148,17 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notices()[0]!.body).toContain("check-ins: checking in: its last check-in is within twice its expected 240 min");
   });
 
+  it("the notice says what the hosted-members read says: an unusable cadence reads unknown with its reason, even with a fresh check-in", async () => {
+    const member = { ...asListed()[0]!, check_in_problem: "check_in_minutes \"60\" isn't a positive whole number of minutes" };
+    repo = makeRepo({ hostedMembers: () => [member] });
+    repo.recordInboxCheckIn(MEMBER, new Date(Date.now() - 5 * 60_000));
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(repo.hostedMemberCheckIns()[0]).toMatchObject({ status: "unknown", reason: member.check_in_problem });
+    expect(notices()[0]!.body).toContain(`check-ins: unknown: ${member.check_in_problem}`);
+    expect(notices()[0]!.body).not.toContain("checking in");
+  });
+
   it("check-in status is a status, never a refusal: work for an overdue or never-seen member queues and is recorded as before", async () => {
     repo = makeRepo({ hostedMembers: () => asListed(60) });
     repo.recordInboxCheckIn(MEMBER, new Date(Date.now() - 5 * 3_600_000));
@@ -167,17 +178,19 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     repo.recordInboxCheckIn("helper-b@hub", at);
     const res = await appFor(repo).request("/api/queue/hosted-members");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ members: [
+    const body = await res.json() as { hostId: unknown; members: unknown };
+    expect(body).toHaveProperty("hostId");
+    expect(body.members).toEqual([
       { seat: MEMBER, rung: false, status: "checking-in", lastCheckInAt: at.toISOString(), expectedMinutes: 60, reporter: "openrig-observed" },
       { seat: "helper-b@hub", rung: false, status: "prompted-only", lastCheckInAt: at.toISOString(), expectedMinutes: null, reporter: "openrig-observed" },
       { seat: "helper-c@hub", rung: false, status: "never-checked-in", lastCheckInAt: null, expectedMinutes: 30, reporter: "openrig-observed" },
-    ] });
+    ]);
   });
 
   it("a member that never checked in says so", async () => {
     await work(MEMBER, { ageMinutes: 61 });
     await sweep();
-    expect(notices()[0]!.body).toContain("check-ins: no check-in observed yet");
+    expect(notices()[0]!.body).toContain("check-ins: never checked in: no check-in recorded; no schedule declared");
   });
 
   it("polling without claiming: old work still surfaces, and the member's check-ins neither reset its age nor rewrite the notice", async () => {
@@ -186,7 +199,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await poll();
     await sweep();
     const [notice] = notices();
-    expect(notice!.body).toContain("check-ins: checking in: it read its own inbox within the last 60 min");
+    expect(notice!.body).toContain("check-ins: prompted only (no schedule declared): it read its own inbox within the last 60 min");
     expect(notice!.body).toContain("it's checking in, but this work is still unclaimed");
     expect(notice!.body).toContain(`- ${old.qitemId}, unclaimed since ${old.tsCreated}`);
     expect(notice!.body).not.toContain(young.qitemId);

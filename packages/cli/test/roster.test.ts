@@ -148,12 +148,13 @@ it("keeps any positive whole check-in cadence; one that can't be used still load
 it("shows a hosted member's check-in status from this host's daemon; another host's member, or no answer, reads unknown", () => {
   const bot = { ...member, seat: "bot@team", host: "host-a", hosted: true, check_in_minutes: 60 };
   const checkIns = [{ seat: "bot@team", rung: false, status: "check-in-overdue", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: 60, reporter: "openrig-observed" }];
-  const here = { ...inventory([]), localHostId: "host-a", checkIns };
+  const here = { ...inventory([]), localHostId: "host-a", checkIns: { hostId: "host-a", members: checkIns } };
   expect(enrichRosterMember(bot, here).live.checkIn).toMatchObject({ status: "check-in-overdue", lastCheckInAt: "2026-11-12T09:00:00.000Z" });
   expect(formatCheckIn(enrichRosterMember(bot, here).live.checkIn!)).toBe("overdue; last check-in 2026-11-12T09:00:00.000Z; expected every 60 min");
   for (const [missing, reason] of [[{ ...here, checkIns: null }, "this host's daemon gave no check-in status"],
-    [{ ...here, localHostId: "host-b" }, "it's listed on another host, whose check-ins this host doesn't hold"],
-    [{ ...here, checkIns: [{ ...checkIns[0], status: "invented" }] }, "this host's daemon gave no status for it"]] as const) {
+    [{ ...here, checkIns: { hostId: "host-b", members: checkIns } }, "it's listed on another host, whose check-ins this host doesn't hold"],
+    [{ ...here, checkIns: { hostId: null, members: checkIns } }, "it's listed on another host, whose check-ins this host doesn't hold"],
+    [{ ...here, checkIns: { hostId: "host-a", members: [{ ...checkIns[0], status: "invented" }] } }, "this host's daemon gave no status for it"]] as const) {
     expect(enrichRosterMember(bot, missing).live.checkIn).toEqual({ status: "unknown", lastCheckInAt: null, expectedMinutes: 60, reason });
   }
   expect(formatCheckIn({ status: "unknown", lastCheckInAt: null, expectedMinutes: null, reason: "its check-ins couldn't be read" }))
@@ -163,4 +164,10 @@ it("shows a hosted member's check-in status from this host's daemon; another hos
   expect(formatCheckIn({ status: "never-checked-in", lastCheckInAt: null, expectedMinutes: 60 })).toBe("never checked in (none recorded); expected every 60 min");
   expect(formatCheckIn({ status: "prompted-only", lastCheckInAt: "2026-11-12T09:00:00.000Z", expectedMinutes: null })).toBe("prompted only; last check-in 2026-11-12T09:00:00.000Z");
   expect(enrichRosterMember(member, here).live).not.toHaveProperty("checkIn");
+});
+it("a team with no terminal seat still shows its members' check-ins: the daemon names its own host with them", () => {
+  const bot = { ...member, seat: "bot@team", host: "host-a", hosted: true, check_in_minutes: 60 };
+  const fresh = { seat: "bot@team", rung: false, status: "checking-in", lastCheckInAt: "2026-11-12T09:55:00.000Z", expectedMinutes: 60, reporter: "openrig-observed" };
+  const noSeats: RosterInventory = { ...inventory([]), localHostId: null, checkIns: { hostId: "host-a", members: [fresh] } };
+  expect(enrichRosterMember(bot, noSeats).live.checkIn).toMatchObject({ status: "checking-in", lastCheckInAt: fresh.lastCheckInAt });
 });
