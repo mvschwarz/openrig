@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   REX_CLIENT_RECHECK_MS,
   REX_CLIENT_REFRESH_MS,
@@ -88,6 +88,39 @@ describe("rex agent status: relay", () => {
     clients["b@k"] = [rex("/dev/t1")];
     await r.relay.tilesOpened(["b@k"]);
     expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code"), osc("state=clear")]);
+  });
+
+  it("sends a seat's state again to a client that moved to another seat and back before the seat's next listing", async () => {
+    const clients: Clients = { "a@k": [rex("/dev/t1")], "b@k": [] };
+    const r = rig(clients);
+    await r.relay.activityChanged("a@k", at("running"));
+    clients["a@k"] = [];
+    clients["b@k"] = [rex("/dev/t1")];
+    await r.relay.activityChanged("b@k", at("idle"));
+    clients["a@k"] = [rex("/dev/t1")];
+    clients["b@k"] = [];
+    await r.relay.activityChanged("a@k", at("running"));
+    expect(r.to("/dev/t1")).toEqual([osc("state=working:app=claude-code"), osc("state=idle:app=claude-code"), osc("state=working:app=claude-code")]);
+  });
+
+  it("doesn't start sweeping when a report finishes after stop()", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const setInterval = vi.spyOn(globalThis, "setInterval");
+    try {
+      const relay = new RexAgentStatusRelay({
+        clients: { async listSessionClientTerminals() { await gate; return [rex("/dev/t1")]; } },
+        resolve: () => at("idle"),
+        writeTty: async (_tty, text) => Buffer.byteLength(text),
+      });
+      const inFlight = relay.activityChanged("op@k");
+      relay.stop();
+      release();
+      await inFlight;
+      expect(setInterval).not.toHaveBeenCalled();
+    } finally {
+      setInterval.mockRestore();
+    }
   });
 
   it("starts the next write with ST after a partial one, so the terminal isn't left inside the report", async () => {

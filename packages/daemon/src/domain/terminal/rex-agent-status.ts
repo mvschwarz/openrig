@@ -85,9 +85,12 @@ export class RexAgentStatusRelay {
   private readonly unshownAt = new Map<string, number>();
   /** Terminals a partial write left inside an unfinished OSC. */
   private readonly dangling = new Set<string>();
+  /** The seat each terminal was last written for, so a seat whose terminal another seat wrote to since sends again. */
+  private readonly lastWriter = new Map<string, string>();
   /** One report at a time per seat, so two quick changes reach the tile in order. */
   private readonly pending = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
 
   constructor(deps: {
     clients: RexStatusClients; resolve: ResolveSeatActivity; writeTty?: (tty: string, text: string) => Promise<number>; now?: () => number;
@@ -123,6 +126,7 @@ export class RexAgentStatusRelay {
 
   /** Stop the periodic sweep. */
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
@@ -145,7 +149,8 @@ export class RexAgentStatusRelay {
     const status = rexAgentStatus(activity);
     const report = rexStatusReport(status, runtime);
     const known = this.shown.get(seat);
-    const everyClientHasIt = known !== undefined && known.delivered.size > 0 && [...known.delivered.values()].every((r) => r === report);
+    const hasIt = (tty: string, delivered: string) => delivered === report && this.lastWriter.get(tty) === seat;
+    const everyClientHasIt = known !== undefined && known.delivered.size > 0 && [...known.delivered].every(([tty, r]) => hasIt(tty, r));
     if (everyClientHasIt && now - known.listedAt < REX_CLIENT_REFRESH_MS) return;
 
     const clients = await this.clients.listSessionClientTerminals(seat);
@@ -172,10 +177,11 @@ export class RexAgentStatusRelay {
 
     // A client with no record here may still show what this relay told it before a daemon restart, or another seat's
     // state, so it gets the current report, a clear included.
-    const targets = ttys.filter((tty) => seatState.delivered.get(tty) !== report);
+    const targets = ttys.filter((tty) => !hasIt(tty, seatState.delivered.get(tty) ?? ""));
     await Promise.all(targets.map(async (tty) => {
       try {
         const text = this.dangling.has(tty) ? ST + report : report;
+        this.lastWriter.set(tty, seat);
         const written = await this.write(tty, text);
         if (written > 0) this.dangling.delete(tty);
         if (written !== Buffer.byteLength(text)) {
@@ -191,7 +197,7 @@ export class RexAgentStatusRelay {
   }
 
   private startSweeping(): void {
-    if (this.timer || !this.sweeps) return;
+    if (this.stopped || this.timer || !this.sweeps) return;
     this.timer = setInterval(() => { void this.sweep(); }, REX_CLIENT_REFRESH_MS);
     this.timer.unref?.();
   }
