@@ -2118,7 +2118,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.sliceIndexer = sliceIndexer;
     if (sliceIndexer.isReady()) {
       const { watchProofSources } = await import("./domain/proof/source-watch.js");
-      deps.proofSourceWatch = watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
+      deps.proofSourceWatch = await watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
         sliceIndexer.invalidate();
         eventBus.emit({ type: "scope.sources_changed", scope: sliceIndexer.slicesRoot });
       });
@@ -2544,6 +2544,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     });
     deps.watchdogPolicyEngine = watchdogPolicyEngine;
     deps.watchdogScheduler = watchdogScheduler;
+    // The outbound network connector: a pass per active `rig network` binding. With none, it makes no network call.
+    {
+      const { NetworkConnectorService } = await import("./domain/network/network-connector.js");
+      const { NetworkBindingStore } = await import("./domain/network/network-bindings.js");
+      const pollSeconds = Number(process.env.OPENRIG_NETWORK_POLL_SECONDS);
+      deps.networkConnector = new NetworkConnectorService({
+        db: queueRepoInstance.db,
+        queueRepo: queueRepoInstance,
+        bindings: new NetworkBindingStore(queueRepoInstance.db, OPENRIG_HOME),
+        home: OPENRIG_HOME,
+        log: (line) => console.log(`[network] ${line}`),
+      }, Number.isFinite(pollSeconds) && pollSeconds >= 5 ? { intervalMs: pollSeconds * 1000 } : {});
+    }
 
     // OPR.0.5.6.24 F-14 — ONE parked-owner supervisor job per rig (mini-req 1):
     // ensured idempotently on the (policy, target_session) tuple; the anchor is

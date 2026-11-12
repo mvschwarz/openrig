@@ -116,6 +116,16 @@ export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
 const hookEvidenceSeq = new Map<string, number>();
 // What each seat's runner has said about its turns, for deciding whether a working beat counts (the runner contract §4).
 const workingLiveness = new WorkingLivenessGate();
+/** #99: the reset instant the relay read from a Claude usage limit, as a canonical ISO timestamp, or null. The store
+ *  keeps it only on the typed StopFailure/rate_limit row; the provider lane decides whether it is still ahead. */
+function limitResetsAt(body: Record<string, unknown>): string | null {
+  if (typeof body.resetsAt !== "string" || body.resetsAt.length > 40) return null;
+  const ms = Date.parse(body.resetsAt);
+  // The relay's eight-day horizon, enforced at ingress too: no sender can park a pool for longer than the relay could.
+  return Number.isFinite(ms) && ms <= Date.now() + LIMIT_RESET_MAX_MS ? new Date(ms).toISOString() : null;
+}
+const LIMIT_RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+
 function sourceSequence(body: Record<string, unknown>): number | null {
   return typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null;
 }
@@ -727,6 +737,8 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     livenessSeconds: beat ? workingLivenessSeconds(body.livenessSeconds)
       : typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
         && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
+    resetsAt: limitResetsAt(body),
+    sessionId: stringOrNull(body.sessionId),
   });
 
   if (!result.ok) {

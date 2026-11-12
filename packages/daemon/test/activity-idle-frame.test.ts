@@ -16,6 +16,8 @@ const oldIdle = { state: "idle", reason: "stop_hook", evidenceSource: "runtime_h
 const CNAME = "review-r1@sample-rig";
 const cframe = readFileSync(new URL("./fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt", import.meta.url), "utf8");
 const codexFrame = readFileSync(new URL("./fixtures/input-box/codex-0.160.0/after-enter-15s.J.txt", import.meta.url), "utf8");
+const codexCompleted = readFileSync(new URL("./fixtures/input-box/codex-0.167.0/completed.txt", import.meta.url), "utf8");
+const codexWorking = readFileSync(new URL("./fixtures/input-box/codex-0.167.0/working.txt", import.meta.url), "utf8");
 const busyFrame = cframe.replace(/^✻ Churned for 4s · done 5:24 PM$/m, "✻ Working… (3s · thinking)");
 async function adapterFold(frame: string, opts: { age?: number; sourceName?: string; sourceRuntime?: "claude-code" | "codex"; runtime?: string; hook?: object | null; lastWriteAge?: number; motion?: boolean } = {}) {
   const capturedAt = new Date(NOW.getTime() - (opts.age ?? 0));
@@ -56,6 +58,63 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
     expect((await adapterFold(codexFrame, { sourceRuntime: "codex" })).activity.state).toBe("idle");
     const streaming = codexFrame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer");
     expect((await adapterFold(streaming, { sourceRuntime: "codex" })).activity.state).toBe("running");
+  });
+  it.each(["0.167.0", "99.0.0"])("an unrecorded Codex %s frame stays unknown under redraw motion", async (version) => {
+    // Synthetic version edits of the recorded 0.160 fixture, not native newer-version captures.
+    const frame = codexFrame.replaceAll("0.160.0", version);
+    for (const pane of [frame, frame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer")]) {
+      expect(readSeatBeforePaste(pane, "codex")).toBe("unknown");
+      const result = await adapterFold(pane, { sourceRuntime: "codex", hook: null, lastWriteAge: 2000 });
+      expect(result.activity.state).toBe("unknown");
+      expect(result.activity.reason).not.toBe("window_activity_motion");
+    }
+  });
+  it("the captured Codex agents hint preserves completed idle despite redraws", async () => {
+    expect.soft(readSeatBeforePaste(codexCompleted, "codex")).toBe("idle");
+    for (const hook of [null, oldIdle]) {
+      const result = await adapterFold(codexCompleted, { sourceRuntime: "codex", hook });
+      expect.soft(result.activity.state).toBe("idle");
+      expect(result.activity.evidenceSource).toBe("pane_heuristic");
+    }
+  });
+  it("the captured working frame remains running without motion", async () => {
+    expect(readSeatBeforePaste(codexWorking, "codex")).toBe("not-idle");
+    expect((await adapterFold(codexWorking, { sourceRuntime: "codex", hook: null, motion: false })).activity.state).toBe("running");
+  });
+  it("the agents footer alone cannot prove idle while output is unfinished", async () => {
+    // Synthetic spinner-hidden stream, not a native streaming capture.
+    const stream = codexCompleted.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer");
+    expect(readSeatBeforePaste(stream, "codex")).toBe("unknown");
+    expect((await adapterFold(stream, { sourceRuntime: "codex", hook: null })).activity.state).toBe("running");
+    const badHint = codexCompleted.replace("← for agents", "unknown hint");
+    expect(readSeatBeforePaste(badHint, "codex")).toBe("unknown");
+  });
+  it("an unsupported Codex frame cannot turn an idle or stale hook into running, while positive work and attention remain", async () => {
+    const frame = codexFrame.replaceAll("0.160.0", "99.0.0");
+    for (const hook of [oldIdle, { ...oldIdle, state: "unknown", stale: true }]) {
+      expect((await adapterFold(frame, { sourceRuntime: "codex", hook })).activity.state).toBe("unknown");
+    }
+    for (const state of ["running", "needs_input"]) {
+      expect((await adapterFold(frame, { sourceRuntime: "codex", hook: { ...oldIdle, state } })).activity.state).toBe(state);
+    }
+  });
+  it.each(["  >_ OpenAI Codex (v99.0.0)", "Update available! 99.0.0 -> 99.1.0"])("a fresh idle hook wins without motion on a version-named screen: %s", async (header) => {
+    const frame = `${header}\n${codexCompleted}`;
+    const hook = { ...oldIdle, sampledAt: NOW.toISOString() };
+    expect(readSeatBeforePaste(frame, "codex")).toBe("unknown");
+    const still = await adapterFold(frame, { sourceRuntime: "codex", hook, motion: false });
+    expect(still.observation).toMatchObject({ state: "unknown", reason: "unrecognized_client_version" });
+    expect(still.activity).toEqual(hook);
+    const moving = await adapterFold(frame, { sourceRuntime: "codex", hook, motion: true });
+    expect(moving.activity).toMatchObject({ state: "unknown", reason: "unrecognized_client_version" });
+  });
+  it.each([false, true])("positive pane work survives a version header with motion=%s", async (motion) => {
+    // Synthetic version header over the recorded working frame.
+    const frame = `  >_ OpenAI Codex (v99.0.0)\n${codexWorking}`;
+    expect(readSeatBeforePaste(frame, "codex")).toBe("not-idle");
+    const result = await adapterFold(frame, { sourceRuntime: "codex", hook: null, motion });
+    expect(result.observation).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    expect(result.activity).toMatchObject({ state: "running", evidenceSource: "pane_heuristic", reason: "mid_work_pattern" });
   });
   it("a newer redraw after an old idle capture keeps D2 running", async () => {
     expect((await adapterFold(cframe, { age: 2000 })).activity.state).toBe("running");

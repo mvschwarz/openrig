@@ -4,6 +4,9 @@ import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import { reactiveEventSignal, type ReactiveEventKind } from "./provider-signals.js";
 import type { ProviderSignal } from "./provider-types.js";
 
+/** #99: the farthest a stated Claude reset may sit after its failure: the relay's own cap (activity-relay.cjs). */
+const CLAUDE_STATED_RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+
 interface ReactiveSeat {
   seatSession: string;
   runtime: string;
@@ -98,9 +101,13 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapR
         || isVerificationReason(event.reason) || event.stale) continue;
       const eventAtMs = Date.parse(event.eventAt ?? "");
       if (!Number.isFinite(eventAtMs) || eventAtMs > nowMs || nowMs >= eventAtMs + deps.freshnessMs) continue;
+      // #99: the reset Claude's message stated, when the relay could read one, after the failure and within the relay's
+      // eight-day cap. The cap is enforced here too, so no other sender can park a pool longer than the relay could.
+      const resetMs = Date.parse(event.resetsAt ?? "");
       signals.push(reactiveEventSignal({
         provider: "claude", seatSession: seat.seatSession, kind: "at_limit",
         asOf: event.eventAt!, staleAfter: new Date(eventAtMs + deps.freshnessMs).toISOString(),
+        ...(Number.isFinite(resetMs) && resetMs > eventAtMs && resetMs <= eventAtMs + CLAUDE_STATED_RESET_MAX_MS ? { resetsAt: new Date(resetMs).toISOString() } : {}),
       }));
       continue;
     }
