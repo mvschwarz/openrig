@@ -273,7 +273,7 @@ packagesRoutes.post("/install", async (c) => {
   }
 
   // Verify
-  const verification = installVerifier.verify(result.installId);
+  const verification = installVerifier.verify(result.installId, { skipped: result.notes?.length ?? 0 });
   if (!verification.passed) {
     eventBus.emit({ type: "package.install_failed", packageName: resolved.manifest.name, code: "verification_failed", message: "Post-apply verification failed" });
     return c.json({
@@ -281,6 +281,7 @@ packagesRoutes.post("/install", async (c) => {
       code: "verification_failed",
       installId: result.installId,
       verification,
+      ...(result.notes?.length ? { notes: result.notes } : {}),
     }, 500);
   }
 

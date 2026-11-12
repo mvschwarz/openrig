@@ -101,7 +101,7 @@ export class PackageInstallService {
     }
 
     // Verify
-    const verification = this.installVerifier.verify(result.installId);
+    const verification = this.installVerifier.verify(result.installId, { skipped: result.notes?.length ?? 0 });
     if (!verification.passed) {
       return { ok: false, code: "verification_failed", message: "Post-apply verification failed" };
     }
