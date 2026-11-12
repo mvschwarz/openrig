@@ -540,7 +540,8 @@ function deliveryResolutionEvidence(
   if (kind === "unclaimed-obligation" && !quiet && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
     return "informational update to a registered human requires no claim";
   }
-  if (kind !== "undelivered-human-notice" && row.lastNudgeResult === "retained:typing_guard") {
+  // A temporary hold resolves a failed wake, but unclaimed work still needs its existing standing finding.
+  if (kind === "undelivered-wake" && row.lastNudgeResult === "retained:typing_guard") {
     return "source wake held by the seat typing guard";
   }
   return null;
