@@ -1085,7 +1085,7 @@ export class SeatHandoverService {
         limit = Number(settings.resolveOne("output.rebuild_recaps").value);
       } catch {
         // Optional presentation settings must not interrupt successor delivery.
-        limit = Number(settings.resolveOne("output.rebuild_recaps", {}).defaultValue);
+        limit = 3;
       }
       const folder = dirname(newest.address);
       // A folder pointer replaces paths only when it covers EVERY optional artifact.

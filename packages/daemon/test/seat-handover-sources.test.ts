@@ -365,7 +365,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(delivered.includes("All 5 older recaps:")).toBe(limit !== "0");
   });
 
-  it("rebuild: unreadable preview settings preserve delivery and successor binding with the default limit", async () => {
+  it.each(["malformed config", "removed context setting"])("rebuild: preview settings failure preserves delivery and successor binding with the default limit (%s)", async (failure) => {
     seedSeat();
     vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "0");
     const configPath = new SettingsStore().configPath;
@@ -375,9 +375,11 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
       label: `superseded recap (${index + 1} generations back)`,
       optional: true as const,
     }));
-    rebuildChain.mockReturnValue({ artifacts });
+    const required = { address: "/seats/dev-impl/RECAP.md", label: "authored seat recap" };
+    rebuildChain.mockReturnValue({ artifacts: [required, ...artifacts] });
     checkReady.mockImplementation(async () => {
-      writeFileSync(configPath, "{malformed");
+      if (failure === "malformed config") writeFileSync(configPath, "{malformed");
+      else vi.stubEnv("OPENRIG_CONTEXT_PACKS_ROOT", "/retired/context-packs");
       return { ready: true };
     });
     try {
@@ -386,10 +388,11 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
         ok: true,
         result: {
           currentStatus: { continuityOutcome: "rebuilt", handoverResult: "complete" },
-          sourceOutcome: { primedArtifacts: artifacts, gaps: [] },
+          sourceOutcome: { primedArtifacts: [required, ...artifacts], gaps: [] },
         },
       });
       const delivered = sendText.mock.calls.map((call) => String(call[1] ?? call[0])).join("\n");
+      expect(delivered).toContain(`- ${required.address} — ${required.label}`);
       for (const artifact of artifacts.slice(0, 3)) expect(delivered).toContain(artifact.address);
       for (const artifact of artifacts.slice(3)) expect(delivered).not.toContain(artifact.address);
       expect(delivered).toContain("All 5 older recaps: /seats/dev-impl/recap-superseded/");
