@@ -5,6 +5,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { RunnerPermissions } from "../src/domain/runner-permissions.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { pruneEvents } from "../src/domain/queue-retention.js";
 import { eraseQueue } from "../src/domain/queue-erasure.js";
 import { CoreAppJob } from "../src/domain/core-app-job.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
@@ -327,6 +328,37 @@ describe("authenticated invalidation refresh", () => {
     expect((await stream.next()).kind).toBe("heartbeat");
     await stream.reader.cancel(); expect(f.bus.subscriberCount).toBe(0);
     expect((await f.send("/v1/events", undefined, "operator")).status).toBe(401);
+  });
+  it.each([500, 501])("counts only matching invalidations across replay pages: %s matches", async matches => {
+    const f = await jobFixture(), cursor = f.job.cursor();
+    const sequences: number[] = [];
+    for (let i = 0; i < 1002; i++) f.bus.emit({ type: "test.internal" } as any);
+    for (let i = 0; i < matches; i++) {
+      sequences.push(f.bus.emit({ type: "queue.updated", qitemId: `fictional-${i}` }).seq);
+      f.bus.emit({ type: "test.internal" } as any);
+    }
+    expect(f.job.eventReplay(cursor)).toEqual(matches > 500 ? null : { head: f.bus.maxSeq(), sequences });
+  });
+  it("resets replay after real pruning while queue-backed request reads and later replay remain available", async () => {
+    const f = await jobFixture(), cursor = f.job.cursor();
+    const old = f.bus.emit({ type: "queue.updated", qitemId: f.ask.qitemId }).seq;
+    f.bus.emit({ type: "test.internal" } as any);
+    const retainedCursor = f.job.cursor();
+    const retained = f.bus.emit({ type: "queue.updated", qitemId: f.ask.qitemId }).seq;
+    f.db.prepare("UPDATE events SET created_at=CASE WHEN seq=? THEN '2026-06-01 00:00:00' ELSE '2026-07-15 18:00:00' END").run(old);
+    const credential = f.access.authenticate(`Bearer ${f.token}`);
+    const before = f.job.request(credential, f.ask.qitemId, PERSON);
+
+    const result = await pruneEvents(f.db, { nowIso: "2026-07-15T18:00:00.000Z", eventsRetentionDays: 14, eventsYield: async () => {} });
+
+    expect(result.deletedRows).toBe(1);
+    expect(f.db.prepare("SELECT seq FROM events WHERE seq=?").get(old)).toBeUndefined();
+    expect(f.job.eventReplay(cursor)).toBeNull();
+    expect(f.job.eventReplay(retainedCursor)).toEqual({ head: retained, sequences: [retained] });
+    expect(f.job.request(credential, f.ask.qitemId, PERSON)).toEqual(before);
+    const stream = await appStream(f, f.token, cursor);
+    expect(await stream.next()).toEqual({ kind: "reset", reason: "continuity-unproven" });
+    expect(await stream.next()).toBeNull();
   });
   it.each(["invalid", "old-boot", "ahead", "retained-floor", "deleted-row", "overflow"])("resets and closes when continuity is unproven: %s", async reason => {
     const f = await jobFixture(); let cursor = f.job.cursor();

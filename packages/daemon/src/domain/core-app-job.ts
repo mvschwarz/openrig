@@ -38,9 +38,20 @@ export class CoreAppJob {
       if (after === null || after > head || after < floor) return null;
       const count = (this.access.db.prepare("SELECT COUNT(*) n FROM events WHERE seq > ? AND seq <= ?").get(after, head) as { n: number }).n;
       if (count !== head - after) return null;
-      const rows = this.access.db.prepare(`SELECT seq FROM events WHERE seq > ? AND seq <= ?
-        AND type IN ('queue.created', 'queue.updated', 'mission_control.action_executed') ORDER BY seq LIMIT 501`).all(after, head) as Array<{ seq: number }>;
-      return rows.length > 500 ? null : { head, sequences: rows.map(row => row.seq) };
+      // Notifications are prunable history. Filter retained pages in memory only after proving continuity.
+      const sequences: number[] = [];
+      let replayAfter = after;
+      while (replayAfter < head) {
+        const page = this.bus.replayPage(replayAfter, head, 500);
+        for (const event of page) {
+          if (event.type === "queue.created" || event.type === "queue.updated" || event.type === "mission_control.action_executed") {
+            sequences.push(event.seq);
+            if (sequences.length > 500) return null;
+          }
+        }
+        replayAfter = page[page.length - 1]!.seq;
+      }
+      return { head, sequences };
     })();
   }
   snapshot<T>(read: () => T): T & { readAt: string; cursor: string } {
