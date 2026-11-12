@@ -382,7 +382,9 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     const f = fixture();
     f.deps.launchSingleNode = async () => ({ ok: false, code: "no_usable_snapshot", message: "no snapshot" });
     const starter = new SeatColdStarter(f.deps);
+    const startedAt = Date.now();
     for (let round = 0; round < 4; round++) {
+      f.deps.now = () => new Date(startedAt + round * COLD_START_MIN_INTERVAL_MS);
       // Age out the interval gate between rounds; failures accumulate.
       f.db.prepare("UPDATE seat_cold_starts SET last_attempt_at = ? WHERE node_id = 'n1'")
         .run(new Date(Date.now() - COLD_START_MIN_INTERVAL_MS * 2).toISOString());
@@ -415,6 +417,7 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     await flush();
     expect(f.ledger()?.consecutive_failures).toBe(0);
     f.setLiveSessions(["dev-rev@fleet"]);
+    f.deps.now = () => new Date(Date.now() + 1001);
     f.starter.notify("dev.impl@fleet");
     await vi.waitFor(() => expect(f.launches).toHaveLength(1));
     f.db.close();
@@ -435,6 +438,44 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.starter.notify("no-such-seat@fleet");
     await flush();
     expect(f.launches).toHaveLength(0);
+    f.db.close();
+  });
+
+  it("deduplicates refusal resolution, probes and logging until the short TTL expires", async () => {
+    const f = fixture();
+    let now = Date.now();
+    f.deps.now = () => new Date(now);
+    f.setLiveSessions([]);
+    const recipe = vi.fn(f.deps.getNodeLaunchRecipe);
+    const probe = vi.fn(f.deps.hasSession);
+    f.deps.getNodeLaunchRecipe = recipe;
+    f.deps.hasSession = probe;
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    f.starter.notify("dev-impl@fleet");
+    await flush();
+    expect(recipe).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(f.logs).toHaveLength(1);
+    now += 1001;
+    f.setLiveSessions(["dev-rev@fleet"]);
+    f.starter.notify("dev.impl@fleet");
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    f.db.close();
+  });
+
+  it("rechecks liveness on the next drain pass without waiting for the TTL", async () => {
+    const f = fixture();
+    f.setLiveSessions([]);
+    const pass = {};
+    f.starter.notify("dev.impl@fleet", pass);
+    await flush();
+    f.starter.notify("dev-impl@fleet", pass);
+    await flush();
+    expect(f.logs).toHaveLength(1);
+    f.setLiveSessions(["dev-rev@fleet"]);
+    f.starter.notify("dev.impl@fleet", {});
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
     f.db.close();
   });
 });

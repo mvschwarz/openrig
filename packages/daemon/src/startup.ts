@@ -871,7 +871,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     hasSession: (sessionName) => tmuxAdapter.hasSession(sessionName),
     getNodeLaunchRecipe: (nodeId) => rigRepo.getNodeLaunchRecipe(nodeId),
   });
-  queueRepoInstance.attachWakeWithoutReceiverNotifier(destination => seatColdStarter.notify(destination));
+  queueRepoInstance.attachWakeWithoutReceiverNotifier((destination, pass) => seatColdStarter.notify(destination, pass));
 
   // Connect to cmux at startup — degrades gracefully if absent
   await cmuxAdapter.connect();

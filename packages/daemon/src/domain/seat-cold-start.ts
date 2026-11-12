@@ -42,6 +42,7 @@ export const COLD_START_MIN_INTERVAL_MS = 60_000;
 /** After this many consecutive failed attempts the seat stops cold-starting until a launch succeeds. */
 export const COLD_START_MAX_CONSECUTIVE_FAILURES = 3;
 export const COLD_START_FAILURE_WINDOW_MS = 15 * 60_000;
+export const COLD_START_EVALUATION_TTL_MS = 1_000;
 
 /**
  * The stops the daemon itself may undo on new work. A resource-reclaiming stop is not an
@@ -186,13 +187,15 @@ export interface SeatColdStartLedgerRow {
 
 export class SeatColdStarter {
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly evaluations = new Map<string, number>();
+  private readonly drainEvaluations = new WeakMap<object, Map<string, number>>();
 
   constructor(private readonly deps: SeatColdStartDeps) {}
 
   /** Queue hook entry: a wake for `destinationSession` found no receiver. Fire-and-forget; never throws. */
-  notify(destinationSession: string): void {
+  notify(destinationSession: string, drainPass?: object): void {
     try {
-      const started = this.start(destinationSession);
+      const started = this.start(destinationSession, drainPass);
       if (started) started.catch(() => { /* attempt() records its own failures */ });
     } catch (err) {
       this.log(`notify failed for ${destinationSession}: ${err instanceof Error ? err.message : String(err)}`);
@@ -204,9 +207,16 @@ export class SeatColdStarter {
   }
 
   /** Joins concurrent notifications for the same node into one launch attempt; undefined when the address is not a resolvable seat. */
-  private start(destinationSession: string): Promise<void> | undefined {
+  private start(destinationSession: string, drainPass?: object): Promise<void> | undefined {
     const parsed = parseSessionName(destinationSession);
     if (parsed.kind !== "canonical") return undefined;
+    const evaluations = drainPass ? this.drainEvaluations.get(drainPass) ?? new Map<string, number>() : this.evaluations;
+    if (drainPass) this.drainEvaluations.set(drainPass, evaluations);
+    const now = this.currentTime().getTime();
+    for (const [key, expiry] of evaluations) if (expiry <= now) evaluations.delete(key);
+    const address = `${parsed.member.replace(".", "-")}@${parsed.rig}`;
+    if (evaluations.has(address)) return undefined;
+    evaluations.set(address, now + COLD_START_EVALUATION_TTL_MS);
     const seat = this.resolveSeat(parsed.member, parsed.rig, destinationSession);
     if (!seat) return undefined;
     const existing = this.inFlight.get(seat.nodeId);

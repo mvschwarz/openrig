@@ -1075,7 +1075,7 @@ export class QueueRepository {
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
   /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
-  private wakeWithoutReceiverNotifier: ((destinationSession: string) => void) | undefined;
+  private wakeWithoutReceiverNotifier: ((destinationSession: string, drainPass?: object) => void) | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1348,7 +1348,7 @@ export class QueueRepository {
   /** #2829 slice 1 — late-wired cold-start notifier. Fired (fire-and-forget, never
    * awaited, never throwing) whenever a wake's destination provably has no receiver:
    * the drain's skip branch and the unroutable send classification both land here. */
-  attachWakeWithoutReceiverNotifier(notifier: (destinationSession: string) => void): void {
+  attachWakeWithoutReceiverNotifier(notifier: (destinationSession: string, drainPass?: object) => void): void {
     this.wakeWithoutReceiverNotifier = notifier;
   }
 
@@ -1822,6 +1822,7 @@ export class QueueRepository {
       waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
     const attempted = new Set<string>();
+    const coldStartPass = {};
     // Notifications left alone for want of a receiver; one a later claim in this pass attempted isn't waiting.
     const skipped = new Map<string, string>();
     const result = () => {
@@ -1845,7 +1846,7 @@ export class QueueRepository {
     // records why it didn't land.
     const eligible = (entry: OutboxEntry): boolean => {
       if (opts?.stopRequested?.()) return false;
-      if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession)) return true;
+      if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession, coldStartPass)) return true;
       skipped.set(entry.outboxId, entry.destinationSession);
       return false;
     };
@@ -1875,16 +1876,16 @@ export class QueueRepository {
    * move the row's last nudge time, which the stuck sweep reads as new evidence; #2939), or the newest session under
    * the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A canonical
    * address resolves to its current physical session first. Anything unknown may have a receiver. */
-  private wakeHasNoReceiver(destinationSession: string): boolean {
+  private wakeHasNoReceiver(destinationSession: string, drainPass?: object): boolean {
     try {
       const destClass = this.classifyDestinationOf(destinationSession).class;
-      if (destClass === "unroutable") return this.noteWakeWithoutReceiver(destinationSession);
+      if (destClass === "unroutable") return this.noteWakeWithoutReceiver(destinationSession, drainPass);
       if (destClass !== "pane-bound") return false;
       const physical = physicalSessionName(this.db, destinationSession);
       if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physical)) return true;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
         .get(physical) as { status: string } | undefined;
-      return (newest?.status === "exited" || newest?.status === "detached") && this.noteWakeWithoutReceiver(destinationSession);
+      return (newest?.status === "exited" || newest?.status === "detached") && this.noteWakeWithoutReceiver(destinationSession, drainPass);
     } catch {
       return false;
     }
@@ -1892,9 +1893,9 @@ export class QueueRepository {
 
   /** #2829 slice 1 — positive no-receiver evidence is the cold-start trigger. The notifier is
    * fire-and-forget and can never change the predicate's value or throw into its caller. */
-  private noteWakeWithoutReceiver(destinationSession: string): boolean {
+  private noteWakeWithoutReceiver(destinationSession: string, drainPass?: object): boolean {
     try {
-      this.wakeWithoutReceiverNotifier?.(destinationSession);
+      this.wakeWithoutReceiverNotifier?.(destinationSession, drainPass);
     } catch {
       /* a notifier failure must never change delivery semantics */
     }

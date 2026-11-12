@@ -3,12 +3,13 @@
 // no-receiver rule) fires the cold-start notifier, and the notifier can never
 // change the send's own outcome. This is the seam the daemon wires to
 // SeatColdStarter; the starter's own gates are covered in seat-cold-start.test.ts.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 
 const SEED = `INSERT INTO rigs(id,name) VALUES ('r0','home');
   INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('n0','r0','dev.peer','pi');
@@ -48,6 +49,26 @@ describe("queue → cold-start notifier wiring (#2829 slice 1)", () => {
     const f = repo(() => { throw new Error("notifier bug"); });
     await expect(f.repo.maybeNudge("q-missing", "dev.impl@no-such-rig", undefined)).resolves.toBeUndefined();
     expect(f.notified).toEqual(["dev.impl@no-such-rig"]);
+    f.db.close();
+  });
+
+  it("shares an evaluation token within a drain and renews it for the next pass", async () => {
+    const f = repo(() => {});
+    const outbox = new OutboxHandler(f.db);
+    f.repo.attachOutbox(outbox);
+    for (let i = 0; i < 2; i++) {
+      const item = await f.repo.create({ sourceSession: "dev-peer@home", destinationSession: "dev.impl@no-such-rig", body: `work ${i}` });
+      await vi.waitFor(() => expect(outbox.getById(`${WAKE_INTENT_PREFIX}${item.qitemId}`)?.deliveryState).toBe("failed"));
+    }
+    const passes: Array<object | undefined> = [];
+    f.repo.attachWakeWithoutReceiverNotifier((_destination, pass) => { passes.push(pass); });
+    await f.repo.drainPendingWakeIntents();
+    expect(passes).toHaveLength(2);
+    expect(passes[0]).toBeDefined();
+    expect(passes[0]).toBe(passes[1]);
+    await f.repo.drainPendingWakeIntents();
+    expect(passes).toHaveLength(4);
+    expect(passes[2]).not.toBe(passes[0]);
     f.db.close();
   });
 });
