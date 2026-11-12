@@ -1646,6 +1646,32 @@ describe("rig queue CLI", () => {
     expect(logs.join("\n")).toContain("tag filters cannot be blank");
   });
 
+  it("issue2728 clears captured list tags after blank refusal when reusing the same command", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/queue/list?tag=fresh&limit=100": { status: 200, data: [] },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "stale", "--tag", " ", "--json",
+    ]);
+    expect(calls).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "fresh", "--json",
+    ]);
+
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(["fresh"]);
+  });
+
   it("issue2728 does not print rows when a daemon returns a row missing a requested tag", async () => {
     const { deps, calls } = makeDeps({
       routes: {

@@ -566,9 +566,20 @@ describe("QueueRepository", () => {
       sourceSession: "lead@r", destinationSession: "worker@r", body: "newer row with only one tag",
       tags: ["review"], nudge: false,
     });
+    const nearMatches = [
+      { body: "case variant is not exact", tags: ["Review", "publish"] },
+      { body: "substring is not exact", tags: ["reviewer", "publish"] },
+      { body: "comma-joined tag stays literal", tags: ["review,publish"] },
+    ];
+    for (const item of nearMatches) {
+      await repo.create({
+        sourceSession: "lead@r", destinationSession: "worker@r", ...item, nudge: false,
+      });
+    }
 
     const both = repo.list({ tag: ["review", "publish"], limit: 1 });
     expect(both.map((item) => item.qitemId)).toEqual([older.qitemId]);
+    expect(repo.list({ tag: ["review", "publish"], limit: 10 }).map((item) => item.qitemId)).toEqual([older.qitemId]);
     expect(repo.list({ tag: "review", limit: 10 }).map((item) => item.qitemId)).toHaveLength(2);
   });
 

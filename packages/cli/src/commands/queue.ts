@@ -2036,13 +2036,14 @@ Examples:
       host?: string;
     }) => {
       const useJson = opts.json || opts.o === "json";
+      const orderedTags = listTagFiltersInArgumentOrder.splice(0);
       const invalidTag = [...(opts.tag ?? []), ...(opts.mission ?? []), ...(opts.slice ?? [])]
         .some((value) => value.trim().length === 0);
       if (invalidTag) {
         emitQueueListFilterError({ error: "tag_invalid", message: "tag filters cannot be blank" }, useJson);
         return;
       }
-      const tags = [...new Set(listTagFiltersInArgumentOrder.splice(0))];
+      const tags = [...new Set(orderedTags)];
       const deps = getDeps();
       const remote = remoteHostOf(opts.host);
       // The seat env names a seat of THIS host. On another host's daemon (a --host that resolves remote) it scopes

@@ -1834,11 +1834,18 @@ describe("queue routes", () => {
     await seed({ body: "wrong destination", tags: ["review", "publish"], destinationSession: "other@rig-a", createdAt: "2026-01-04T00:00:00.000Z" });
     await seed({ body: "wrong state", tags: ["review", "publish"], state: "done", createdAt: "2026-01-05T00:00:00.000Z" });
     await seed({ body: "wrong rig", tags: ["review", "publish"], sourceSession: "lead@other-rig", destinationSession: "worker@other-rig", createdAt: "2026-01-06T00:00:00.000Z" });
+    await seed({ body: "case variant is not exact", tags: ["Review", "publish"], createdAt: "2026-01-07T00:00:00.000Z" });
+    await seed({ body: "substring is not exact", tags: ["reviewer", "publish"], createdAt: "2026-01-08T00:00:00.000Z" });
+    await seed({ body: "comma-joined tag stays literal", tags: ["review,publish"], createdAt: "2026-01-09T00:00:00.000Z" });
 
     const query = "targetRepo=repo-a&destinationSession=worker%40rig-a&state=pending&rig=rig-a";
     const bounded = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=1`);
     expect(bounded.status).toBe(200);
     expect(((await bounded.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
+
+    const exactOnly = await app.request(`/api/queue/list?tag=review&tag=publish&${query}&limit=10`);
+    expect(exactOnly.status).toBe(200);
+    expect(((await exactOnly.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([olderMatch]);
 
     const single = await app.request(`/api/queue/list?tag=review&${query}&limit=5`);
     expect(((await single.json()) as Array<{ qitemId: string }>).map((item) => item.qitemId)).toEqual([newerOneTag, olderMatch]);
