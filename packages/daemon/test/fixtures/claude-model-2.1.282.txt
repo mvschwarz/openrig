@@ -1,0 +1,19 @@
+❯ /model
+────────────────────────────────────────────────────────── worker-a@demo ─
+
+────────────────────────────────────────────────────────────────────────────────
+  Select model
+  Switch between Claude models. Your pick becomes the default for new
+  sessions. For other/previous model names, specify with --model.
+
+  ↑ 2. Sonnet                 Sonnet 5 · Efficient for routine tasks
+    3. Fable                  Fable 5.1 · Most capable for your hardest and
+                              longest-running tasks
+    4. Opus                   Opus 5.5 · Best for everyday, complex tasks
+    5. Haiku                  Haiku 4.5 · Fastest for quick answers
+  ❯ 6. claude-haiku-5-5 ✔     Custom model
+     … +1 model
+
+  ● High effort (default) ←/→ to adjust
+
+  Enter to set as default · s to use this session only · Esc to cancel
