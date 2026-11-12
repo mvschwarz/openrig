@@ -74,6 +74,8 @@ it.each([{phase:'submitted_no_result',expected:'(may have been submitted, no res
 
 it('Pi uncertain trigger says input may have reached the seat',async()=>{const f=fixture();f.post.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',attemptId:'attempt-1',stage:'uncertain'}} as any);await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('uncertain — input may have reached the seat; no result yet');expect(out).toContain('(attempt: attempt-1)');expect(out).not.toContain('was not started');});
 
+it('Pi uncertain trigger passes the transport\'s pasted-without-Enter detail through',async()=>{const f=fixture();f.post.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',attemptId:'attempt-1',stage:'uncertain',error:'Text was written to \'writer@demo\' but Enter was not sent: a draft holds the box. Inspect the input with rig capture writer@demo.'}} as any);await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('uncertain — input may have reached the seat; no result yet');expect(out).toContain('Inspect the input with rig capture writer@demo');});
+
 it('help qualifies asynchronous unsupported detection, example refusals and ignored Pi skip-map', () => {
  const f = fixture(); let text = '';
  f.cmd.configureOutput({ writeOut: value => { text += value; } });

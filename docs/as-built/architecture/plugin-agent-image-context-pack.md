@@ -352,9 +352,11 @@ dispatches `/api/compaction/trigger` and `/api/compaction/state` by runtime.
 1. The service mints one attempt id and sends the reserved
    `/openrig-compact <attempt-id>` input with `openrigNotice`. It uses no raw tmux
    call and no separate state probe. The guarded send path supplies what the
-   removed handshake covered: a person's draft (the delivery guard holds a
-   non-empty composer), a typing-guard hold, an interactive prompt, and the bound
-   occupant/pane. Those are the same refusals every other send to the seat gets.
+   removed handshake covered: a typing-guard hold, an interactive prompt, the bound
+   occupant/pane, and a person's draft where the seat's draft protection reads the
+   Pi editor. Otherwise the control can join a draft, as any message to a Pi agent
+   can, and that attempt reads uncertain. Those are the same refusals every other
+   send to the seat gets.
 2. The selected node, session and pane are re-checked by the delivery guard at the
    actual text write and at Enter. The service binds the runner's `launchId`
    before the send and checks it at those same two moments, through the send's
@@ -369,6 +371,13 @@ dispatches `/api/compaction/trigger` and `/api/compaction/state` by runtime.
    text and Enter, and `uncertain` when input may have been written but the result
    is unconfirmed. Only a proven pre-input refusal (the transport's own reasons,
    an already-running compaction, unsupported, or the policy) is "not started".
+   The send passes the transport's bounded idle wait: a working agent is waited
+   for, an over-budget wait returns the transport's own not-idle reason, and an
+   unknown reading still sends. No probe and no new refusal code are added.
+   A request is recorded before its send is awaited, so two overlapping triggers
+   share one send. Only a run that actually started and has no end holds a later
+   request; an attempt that never got its own record reads `uncertain` but no
+   longer blocks `already_in_progress`.
 
 ### The requested run, scoped to its launch
 
@@ -382,14 +391,17 @@ It stamps that attempt id onto the sidecar `compaction` record at
   `Stop/compaction` unless pending attention suppresses that advisory post.
 - The service reads the sidecar, not the activity, for status. The requested
   attempt reports `completed`, `failed`, `aborted` or `unsupported` only from a
-  record whose attempt id matches. A record from an automatic run, or from an
-  earlier request, is never this request's answer: it is shown separately as
-  `automatic`, and the new attempt stays `uncertain`.
+  record whose attempt id matches. The runner keeps the last attempt-stamped
+  record in `requestedCompaction`, beside `compaction`: a later automatic run
+  replaces `compaction` without erasing a requested completion. A record from an
+  earlier request is never this request's answer; the automatic run is shown
+  separately as `automatic`.
 - A request that may have been submitted with no result, and a start with no end,
   both report `uncertain` (`submitted_no_result` and `started_no_end`), including
-  in the CLI, never "was not started". The sidecar record survives later writes
-  until the next `compaction_start` replaces it; runner restart drops it as
-  launch-scoped state.
+  in the CLI, never "was not started". The runner records
+  `pendingCompaction.attemptId` before it sends the compact RPC, so a daemon
+  restart reads the newest request as `uncertain` instead of an older completion.
+  Runner restart drops the launch-scoped record and pending id.
 - The runner re-arms idle heartbeats at `compaction_end` even when the terminal
   post is lost or attention suppresses it. Activity is advisory; completion is
   durable in the sidecar.
@@ -401,11 +413,11 @@ is accepted but ignored for Pi; `--cancel` rejects Pi with `runtime_filter` and
 supplies no native abort path.
 
 [`pi-compaction-seam.test.ts`](../../../packages/daemon/test/pi-compaction-seam.test.ts)
-drives the real `RunnerCore` input/RPC handling, atomic sidecar output, the
-service and the activity store. Its cases cover optional request identity,
-delayed or lost terminal activity, ordered beats, durable completion scoped by
-attempt id, and idle re-arming. This is an executable producer/consumer proof, not
-a live Pi process or tmux test.
+service and the activity store, with synthetic runner events. Its cases cover
+optional request identity, delayed or lost terminal activity, ordered beats,
+durable completion scoped by attempt id, a requested completion kept beside a
+later automatic run, and idle re-arming. This is an executable producer/consumer
+proof using the real runner and sidecar, not a live Pi process or tmux test.
 
 ## Related maps
 

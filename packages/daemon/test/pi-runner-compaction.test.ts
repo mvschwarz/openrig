@@ -78,6 +78,37 @@ describe("Pi compaction sidecar", () => {
     expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", reason: "manual" });
   });
 
+  it("persists the pending attempt before sending the compact RPC, clearing it at start", () => {
+    const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    // The sidecar names the newest request before the RPC leaves, so a daemon
+    // restart reads it as uncertain instead of falling back to an older result.
+    expect(f.sidecars.at(-1)?.pendingCompaction).toEqual({ attemptId: "attempt-1", requestedAt: "2026-11-11T10:00:00.000Z" });
+    expect(f.rpc.at(-1)).toEqual({ type: "compact", id: "pi-runner-compact:attempt-1" });
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
+    expect(f.sidecars.at(-1)?.pendingCompaction).toBeUndefined();
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", reason: "manual" });
+  });
+
+  it("keeps a requested completion beside a later automatic run", () => {
+    const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
+    f.advance();
+    f.event({ type: "compaction_end", reason: "manual", requestId: "request-1", result: { summary: "summary" } });
+    expect(f.sidecars.at(-1)?.requestedCompaction).toMatchObject({ attemptId: "attempt-1",
+      startedAt: "2026-11-11T10:00:00.000Z", endedAt: "2026-11-11T10:00:01.000Z", result: { summary: "summary" } });
+    // Pi's next automatic compaction replaces `compaction` only.
+    f.advance();
+    f.event({ type: "compaction_start", reason: "threshold", requestId: "auto-1" });
+    expect(f.sidecars.at(-1)?.compaction).not.toHaveProperty("attemptId");
+    f.advance();
+    f.event({ type: "compaction_end", reason: "threshold", requestId: "auto-1" });
+    expect(f.sidecars.at(-1)?.compaction).not.toHaveProperty("attemptId");
+    expect(f.sidecars.at(-1)?.requestedCompaction).toMatchObject({ attemptId: "attempt-1",
+      endedAt: "2026-11-11T10:00:01.000Z", result: { summary: "summary" } });
+  });
+
   it("records an unsupported compact RPC against the attempt that asked for it", () => {
     const f = fixture();
     f.core.handleUserBlock("/openrig-compact attempt-1");

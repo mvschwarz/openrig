@@ -77,9 +77,12 @@ Stopped attempts may retry automatically after the cooldown; cancellation does n
 Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.
 Pi seats send the reserved /openrig-compact <attempt-id> input through the same
 guarded send path every other message to the seat uses: the session transport
-and its delivery guard, which respects a person's draft, a hold, a prompt and
-the bound occupant. The runner turns it into Pi's native compact RPC (not
-prompt text). Each request has one attempt id, carried into that command and
+and its delivery guard. A person's draft is respected where the seat's draft
+protection reads the Pi editor; otherwise the control can join a draft, as any
+message to a Pi agent can, and that attempt reads uncertain. A hold, a prompt
+and the bound occupant follow the guard's usual rules, and the send uses the
+transport's bounded idle wait so a working agent is waited for. The runner
+turns it into Pi's native compact RPC (not
 back into the runner sidecar, so the requested run is reported separately from
 an automatic one and an earlier completion never answers a new request.
 A successful trigger is reported as "submitted, unconfirmed"; when input may
@@ -160,6 +163,9 @@ is recorded; --state then reports unsupported and later triggers refuse.
       const outcome = stage === "uncertain" ? "uncertain — input may have reached the seat; no result yet"
         : compact ?? "submitted, unconfirmed";
       console.log(`Manual compaction for ${session}: ${outcome}${attemptId ? ` (attempt: ${attemptId})` : ""} (runtime: pi)`);
+      // The transport's own detail when it left text in the input box without Enter.
+      const detail = res.data["error"] as string | undefined;
+      if (detail) console.log(detail);
       if (opts.skipMap) console.log("--skip-map is ignored for Pi; no restore-map lifecycle is used.");
       console.log(`Pi runs its native compact RPC. Read the requested run with rig compact ${session} --state; the sidecar is authoritative and activity is advisory. OpenRig sends no restore or audit prompts for Pi.`);
       return;

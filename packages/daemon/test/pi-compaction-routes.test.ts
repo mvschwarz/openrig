@@ -86,6 +86,19 @@ describe("Pi compaction route with real runner", () => {
       state: { status: "completed", attemptId: "attempt-1" } });
   });
 
+  it("keeps a requested completion when an automatic run follows", async () => {
+    const f = fixture();
+    expect(await f.trigger()).toMatchObject({ status: 200 });
+    f.core.handlePiLine(JSON.stringify({ type: "compaction_start", reason: "manual" }));
+    f.core.handlePiLine(JSON.stringify({ type: "compaction_end", reason: "manual" }));
+    expect(await (await f.state()).json()).toMatchObject({ state: { status: "completed", attemptId: "attempt-1" } });
+    // Pi's next automatic compaction replaces the one record; the request still reads completed.
+    f.core.handlePiLine(JSON.stringify({ type: "compaction_start", reason: "threshold", requestId: "auto-1" }));
+    f.core.handlePiLine(JSON.stringify({ type: "compaction_end", reason: "threshold", requestId: "auto-1" }));
+    expect(await (await f.state()).json()).toMatchObject({ state: { status: "completed", attemptId: "attempt-1",
+      automatic: { reason: "threshold" } } });
+  });
+
   it("preserves bearer auth for Pi trigger and state", async () => {
     const f = fixture();
     const trigger = await f.app.request("/api/compaction/trigger", { method: "POST", body: JSON.stringify({ session: "pi@test" }) });

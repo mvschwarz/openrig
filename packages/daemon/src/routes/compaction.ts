@@ -70,7 +70,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       const outcome = await service.trigger({ nodeId: row.node_id, sessionName, runtime: row.runtime },
         { source: "caller", session: transportSenderSession(c) ?? null });
       if (outcome.triggered) return c.json({ ok: true, session: sessionName, runtime: "pi",
-        attemptId: outcome.attemptId, stage: outcome.stage });
+        attemptId: outcome.attemptId, stage: outcome.stage, ...(outcome.detail ? { error: outcome.detail } : {}) });
       const status = outcome.reason === "unsupported" || outcome.reason === "runtime_filter"
         || outcome.reason === "terminal_policy_refused" ? 422
         : outcome.reason === "session_missing" || outcome.reason === "guard_target_unknown" ? 404

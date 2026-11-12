@@ -102,6 +102,16 @@ describe("Pi runner -> requested compaction status", () => {
         expect(activity.getLatestForNode({ nodeId: node.id })).toMatchObject({ state: "idle",
           rawEvent: "Stop", rawSubtype: "idle_heartbeat" });
         expect(service.getState(sessionName)).toMatchObject({ status: "completed", attemptId: "seam-attempt" });
+
+        // Then a later automatic run replaces `compaction` only; the request still reads completed.
+        event({ type: "compaction_start", reason: "threshold", requestId: "auto-1" });
+        event({ type: "compaction_end", reason: "threshold", requestId: "auto-1" });
+        expect(service.getState(sessionName)).toMatchObject({ status: "completed", attemptId: "seam-attempt",
+          automatic: { reason: "threshold" } });
+        // Recreating the service over the same sidecar (a daemon restart) still answers with
+        // the requested attempt's own completion, never the automatic run.
+        const restarted = new PiCompactionService({ readSidecar, send: terminal.send, newAttemptId: () => "next-attempt" });
+        expect(restarted.getState(sessionName)).toMatchObject({ status: "completed", attemptId: "seam-attempt" });
       } finally {
         terminal.editor.close();
         db.close();

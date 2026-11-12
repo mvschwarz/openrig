@@ -1083,11 +1083,15 @@ For a Pi seat:
 
 - `rig compact builder@my-rig` sends the reserved `/openrig-compact <attempt-id>`
   input through the same guarded send path every other message to the seat uses:
-  the session transport and its delivery guard. A person's draft, a hold, an
-  interactive prompt and the bound occupant are respected; the selected node,
-  session and pane are re-checked at the actual write and at Enter, and the
-  runner launch is checked there too. There is no separate state probe, no editor
-  inspection handshake and no raw tmux write.
+  the session transport and its delivery guard. A person's draft is respected
+  only where the seat's draft protection reads the Pi editor; otherwise the
+  control can join a draft, as any message to a Pi agent can, and that attempt
+  reads uncertain. A hold, an interactive prompt and the bound occupant follow
+  the guard's usual rules, and the send uses the transport's bounded idle wait
+  so a working agent is waited for; the selected node, session and pane are
+  re-checked at the actual write and at Enter, and the runner launch is checked
+  there too. There is no separate state probe, no editor inspection handshake
+  and no raw tmux write.
 - The runner turns that input into Pi's native `compact` RPC, not a model prompt
   or interactive `/compact`. One attempt id is minted at the trigger, carried into
   that command and stamped onto the runner sidecar's compaction record, so the
@@ -1101,6 +1105,11 @@ For a Pi seat:
   `aborted` or `unsupported`. An attempt that may have been submitted without a
   result, or that started without an end, is reported as `uncertain` (with
   `phase: submitted_no_result` or `phase: started_no_end`), not as "not started".
+  A requested completion is kept beside a later automatic run, so it still reads
+  `completed` after one; an earlier completion, and an automatic threshold/overflow
+  run (reported separately as `automatic`), never answers a newer request. Activity
+  delivery can lag or be lost without preventing sidecar completion; the sidecar is
+  authoritative.
   An earlier completion, and an automatic threshold/overflow run (reported
   separately as `automatic`), never answers a newer request. Activity delivery can
   lag or be lost without preventing sidecar completion; the sidecar is authoritative.
