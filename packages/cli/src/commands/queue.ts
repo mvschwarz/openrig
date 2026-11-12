@@ -16,6 +16,7 @@ import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
+import { queueRecoveryCommand, quoteQueueRecoveryValue } from "../queue-recovery-command.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 
 /**
@@ -687,8 +688,8 @@ async function printQueueItemResult(
     body = {
       ...body,
       hint: `Queue item ${JSON.stringify(qitemId)} was not found on ${daemon}.\n`
-        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`
-        + (remoteHost ? "" : `\nOr name that host: rig queue show ${shellQuote(qitemId)} --host <host-id> --full --json`),
+        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: ${queueRecoveryCommand(qitemId, "<daemon-url>")}`
+        + (remoteHost ? "" : `\nOr name that host: rig queue show ${quoteQueueRecoveryValue(qitemId)} --host <host-id> --full --json`),
     };
   }
   await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, remoteHost !== undefined);
@@ -1200,11 +1201,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         // Keep timestamp-based fallback consumers, with 64 random bits so an
         // accidental collision is not mistaken for an intentional retry.
         const qitemId = opts.id ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
-        const show = `rig queue show ${shellQuote(qitemId)} --full --json`;
+        const show = queueRecoveryCommand(qitemId);
         const reconcile = hostResolved.hostId && hostResolved.hostId !== "local"
-          ? `For destination host ${shellQuote(hostResolved.hostId)}, replace <destination-daemon-url> with its registered daemon URL and run: OPENRIG_URL='<destination-daemon-url>' ${show}.`
+          ? `For destination host ${shellQuote(hostResolved.hostId)}, replace <destination-daemon-url> with its registered daemon URL and run: ${queueRecoveryCommand(qitemId, "<destination-daemon-url>")}.`
           : `At the same endpoint and OPENRIG_HOME, run: ${show}.`;
-        const recovery = `${reconcile} If retrying, repeat the same create with --id ${shellQuote(qitemId)} and unchanged source, destination, body and options. A missing row does not rule out a pending commit; retrying without this ID creates new work.`;
+        const recovery = `${reconcile} If retrying, repeat the same create with --id ${quoteQueueRecoveryValue(qitemId)} and unchanged source, destination, body and options. A missing row does not rule out a pending commit; retrying without this ID creates new work.`;
         // stderr survives an interrupted wait without adding a second JSON
         // document to stdout. This is a request identity, NOT a commit receipt.
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);

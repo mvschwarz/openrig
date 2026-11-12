@@ -1,3 +1,6 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
+import { allowFetchTarget } from "./fetch-guard.js";
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http --grant-service against the daemon's real routes and a fake grant service speaking
 // openrig.grant/v1: each request's key is checked with the grant service for this daemon's self id, every answer but
 // active is refused with no fallback, and an external caller reaches only its own items and the team's questions to it.
@@ -7,7 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client as ModernClient, StreamableHTTPClientTransport as ModernTransport } from "@modelcontextprotocol/client";
@@ -68,7 +71,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-"));
-    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-shared-")));
+    const canonical = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+    shared = canonical(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-shared-")));
     process.env.OPENRIG_HOME = home;
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     const bus = new EventBus(db);
@@ -78,7 +82,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     setup = createTestApp(db, { appDeps: { queueRepo: repo, missionControlWriteContract, filesAllowlist: [{ name: "proof", canonicalPath: shared }] } });
     broken = undefined;
     const fetchRoute = (...args: Parameters<typeof setup.app.fetch>) => broken?.(args[0]) ?? setup.app.fetch(...args);
-    daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: fetchRoute, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    daemon = await serveOwnedHonoFixture(fetchRoute);
+    allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
     setSelfHostId(INSTANCE);
     asked = [];
@@ -92,7 +97,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
         res.writeHead(status, { "Content-Type": "application/json" }).end(typeof reply === "string" ? reply : JSON.stringify(reply));
       });
     });
-    await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+    await listenOwnedHttpFixture(service);
     serviceUrl = `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`;
     seat("team-a", "cus-vvmaexample01-caller");
   });
@@ -120,6 +125,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
   async function listen(header?: { name: string; value: string }, taskDestination?: string) {
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
       taskDestination, grantService: { url: serviceUrl, ...(header ? { header } : {}), timeoutMs: 1_000 } });
+    allowFetchTarget(served.url);
     closers.push(() => served.close());
     return served;
   }
@@ -1098,6 +1104,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
 
       const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
         grantService: { url: serviceUrl, timeoutMs: 1_000 }, oauth: { resource, issuer } });
+      allowFetchTarget(served.url);
       closers.push(() => served.close());
       const root = served.url.replace(/\/mcp$/, "");
       const before = asked.length;

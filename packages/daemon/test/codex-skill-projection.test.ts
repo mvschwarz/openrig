@@ -7,10 +7,11 @@ import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import { hashContent } from "../src/domain/conflict-detector.js";
 import { claudeConflictTargetPath, planProjection, projectionConflictWarnings, type ProjectionInput, type ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { resourceDirectoryPath } from "../src/domain/resource-directory-name.js";
 
-const sourceFile = "/fixture/shared/skills/shared-skill/SKILL.md";
-const claudeFile = "/fixture/project/.claude/skills/shared-skill/SKILL.md";
-const codexFile = "/fixture/project/.agents/skills/shared-skill/SKILL.md";
+const sourceFile = nodePath.resolve("/fixture/shared/skills/shared-skill/SKILL.md");
+const claudeFile = nodePath.resolve("/fixture/project/.claude/skills/shared-skill/SKILL.md");
+const codexFile = nodePath.resolve("/fixture/project/.agents/skills/shared-skill/SKILL.md");
 const sourceText = "# Shared skill\nRead the project context.\n";
 const editedText = "# Operator edit\nKeep this local change.\n";
 
@@ -22,7 +23,7 @@ const start = instantiator.indexOf("    const planResult = planProjection({");
 const end = instantiator.indexOf("    const resolvedFiles = this.buildResolvedStartupFiles(", start);
 if (start < 0 || end < start) throw new Error("Production projection planning block not found");
 const buildPlan = new Function(
-  "planProjection", "claudeConflictTargetPath", "projectionConflictWarnings", "nodePath",
+  "planProjection", "claudeConflictTargetPath", "projectionConflictWarnings", "nodePath", "resourceDirectoryPath",
   "input", "configResult", "resolveResult", "projectionManifest", "launchResult", "canonicalSessionName", "adapter",
   "keptSkillWarnings", "claudeSkillTargetRoot", "codexSkillTargetRoot",
   instantiator.slice(start, end) + "\nreturn planResult.plan;",
@@ -33,9 +34,9 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
   if (target !== "absent") files.set(codexFile, target === "identical" ? sourceText : editedText);
   const writes: string[] = [];
   const fsOps = {
-    exists: (path: string) => files.has(path),
+    exists: (path: string) => files.has(nodePath.resolve(path)),
     readFile: (path: string) => {
-      const text = files.get(path);
+      const text = files.get(nodePath.resolve(path));
       if (text === undefined) throw new Error(`Unexpected virtual read: ${path}`);
       return text;
     },
@@ -45,12 +46,12 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
       files.set(path, text);
     },
     mkdirp: (path: string) => {
-      if (!path.startsWith("/fixture/project/.agents/skills/")) throw new Error(`Unexpected virtual directory: ${path}`);
+      if (!path.startsWith(nodePath.resolve("/fixture/project/.agents/skills") + nodePath.sep)) throw new Error(`Unexpected virtual directory: ${path}`);
     },
-    listFiles: (path: string) => path === nodePath.dirname(sourceFile) ? ["SKILL.md"] : [],
+    listFiles: (path: string) => nodePath.resolve(path) === nodePath.dirname(sourceFile) ? ["SKILL.md"] : [],
   };
   const config: ProjectionInput["config"] = {
-    runtime, cwd: "/fixture/project", restorePolicy: "resume_if_possible",
+    runtime, cwd: nodePath.resolve("/fixture/project"), restorePolicy: "resume_if_possible",
     selectedResources: {
       skills: [{ effectiveId: "shared-skill", sourceSpec: "shared", sourcePath: "/fixture/shared", resource: { id: "shared-skill", path: "skills/shared-skill" } }],
       guidance: [], subagents: [], plugins: [], runtimeResources: [],
@@ -61,7 +62,7 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
   const plan: ProjectionPlan = buildPlan.call(
     { deps: { fsOps, rigRepo: { getRigClaudeManagedBlockFile: () => "CLAUDE.local.md" } } },
     (input: ProjectionInput) => { resolveTargetPath = input.resolveTargetPath!; return planProjection(input); },
-    claudeConflictTargetPath, projectionConflictWarnings, nodePath,
+    claudeConflictTargetPath, projectionConflictWarnings, nodePath, resourceDirectoryPath,
     { member: { runtime }, rigId: "fixture", force }, { config }, { collisions: [] },
     { lastHash: (path: string) => path === codexFile ? hashContent(sourceText) : null },
     // A seat without its own skill storage (OPR.0.7.0.13): its targets stay in the project, as before.
@@ -124,17 +125,18 @@ describe("Codex skill projection in a shared project", () => {
 describe("OMP skill projection in a shared project", () => {
   it("projects the OMP seat's skill even when a Claude seat's identical copy is in the shared cwd", async () => {
     const seat = "dev-omp@fixture";
-    const ompFile = nodePath.join(piSeatPaths("/fixture/state/omp", seat).agentDir, "skills", "shared-skill", "SKILL.md");
+    const stateRoot = nodePath.resolve("/fixture/state/omp");
+    const ompFile = nodePath.join(piSeatPaths(stateRoot, seat).agentDir, "skills", "shared-skill", "SKILL.md");
     const files = new Map([[sourceFile, sourceText], [claudeFile, sourceText]]);
     const fsOps = {
-      exists: (path: string) => files.has(path),
-      readFile: (path: string) => files.get(path)!,
+      exists: (path: string) => files.has(nodePath.resolve(path)),
+      readFile: (path: string) => files.get(nodePath.resolve(path))!,
       writeFile: (path: string, text: string) => { files.set(path, text); },
       mkdirp: () => {},
-      listFiles: (path: string) => path === nodePath.dirname(sourceFile) ? ["SKILL.md"] : [],
+      listFiles: (path: string) => nodePath.resolve(path) === nodePath.dirname(sourceFile) ? ["SKILL.md"] : [],
     };
     const config: ProjectionInput["config"] = {
-      runtime: "omp", cwd: "/fixture/project", restorePolicy: "resume_if_possible",
+      runtime: "omp", cwd: nodePath.resolve("/fixture/project"), restorePolicy: "resume_if_possible",
       selectedResources: {
         skills: [{ effectiveId: "shared-skill", sourceSpec: "shared", sourcePath: "/fixture/shared", resource: { id: "shared-skill", path: "skills/shared-skill" } }],
         guidance: [], subagents: [], plugins: [], runtimeResources: [],
@@ -142,12 +144,12 @@ describe("OMP skill projection in a shared project", () => {
       startup: { files: [], actions: [] }, resolvedSpecName: "qa", resolvedSpecVersion: "1.0", resolvedSpecHash: "fixture",
     };
     const omp = new OmpRuntimeAdapter({
-      fsOps, stateRoot: "/fixture/state/omp", runnerEntryPath: "/daemon/pi-runner.js",
+      fsOps, stateRoot, runnerEntryPath: "/daemon/pi-runner.js",
       tmux: new Proxy({}, { get() { throw new Error("No tmux calls allowed"); } }) as never,
     });
     const plan = (runtime: string, adapter: RuntimeAdapter): ProjectionPlan => buildPlan.call(
       { deps: { fsOps, rigRepo: { getRigClaudeManagedBlockFile: () => null } } },
-      planProjection, claudeConflictTargetPath, projectionConflictWarnings, nodePath,
+      planProjection, claudeConflictTargetPath, projectionConflictWarnings, nodePath, resourceDirectoryPath,
       { member: { runtime }, rigId: "fixture" }, { config: { ...config, runtime } }, { collisions: [] },
       { lastHash: () => null }, { warnings: [], binding: { tmuxSession: seat } }, seat, adapter, [],
     );

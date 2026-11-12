@@ -1,38 +1,72 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { createServer, type Server } from "node:net";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
+import { createServer, createServer as createHttpServer, type Server } from "node:http";
 import { lstatSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { OpenShellPodmanObserver } from "../src/adapters/openshell-podman-observer.js";
 import type { EnvironmentBinding } from "../src/domain/environment-platform.js";
 const closers: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => { for (const close of closers.splice(0).reverse()) await close(); });
-const supported = process.platform === "linux" && process.getuid?.() !== 0;
+const supported = process.platform === "win32" || process.platform === "linux" && process.getuid?.() !== 0;
 async function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "podman-observer-"))); closers.push(() => rmSync(root, { recursive: true, force: true }));
-  const socket = join(root, "engine.sock"), server: Server = createServer(); await new Promise<void>(resolve => server.listen(socket, resolve));
+  const socket = process.platform === "win32" ? `\\\\.\\pipe\\openrig-owned-engine-${randomUUID()}` : join(root, "engine.sock");
+  const server: Server = createServer((req, res) => {
+    const path = req.url ?? ""; wirePaths.push(path);
+    if (path === "/version") { res.end(JSON.stringify({ ApiVersion: "1.44", Components: [{ Name: engineName, Details: { APIVersion: apiVersion } }] })); return; }
+    if (!path.startsWith("/v6.1.4/libpod/") && !path.startsWith("/containers/") && path !== "/volumes") { res.writeHead(404); res.end("Not Found\n"); return; }
+    void engineRead(path.startsWith("/v6.1.4") ? path.slice("/v6.1.4".length) : path).then(result => { res.writeHead(result.status, { "content-type": "application/json" }); res.end(result.status === 404 ? "Not Found\n" : JSON.stringify(result.body)); });
+  }); await new Promise<void>(resolve => server.listen(socket, resolve));
   closers.push(() => new Promise<void>(resolve => server.close(() => resolve())));
   const id = "compute-one", workloadId = "a".repeat(64), supervisorId = "b".repeat(64);
   let rows: Record<string, any>[] = [{ Id: workloadId, Names: ["workload"], Labels: { "openshell.managed": "true", "openshell.ai/sandbox-id": id, "openshell.ai/isolation-role": "sandbox", "openshell.ai/sandbox-workspace": "workspace" } },
     { Id: supervisorId, Names: [`openshell-supervisor-${id}`], Labels: {} }];
   let volumeStatus = 200;
+  let rootless = true, graphRoot = "/home/owned/.local/share/containers/storage";
+  let engineName = "Podman Engine", apiVersion = "6.1.4";
+  const wirePaths: string[] = [];
   const paths: string[] = [];
-  const observer = new OpenShellPodmanObserver(async (_socket, path) => {
+  const engineRead = async (path: string) => {
     paths.push(path);
+    if (path === "/libpod/info") return { status: 200, body: { host: { os: "linux", hostname: "owned-engine", security: { rootless }, idMappings: { uidmap: [{ container_id: 0, host_id: 1000 }] } }, store: { graphRoot } } };
     if (path.startsWith("/containers/json")) return { status: 200, body: rows };
     if (path.startsWith("/containers/")) return { status: 200, body: { Id: path.includes(workloadId) ? workloadId : supervisorId,
       Mounts: [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`].map(Name => ({ Type: "volume", Name })) } };
     return { status: volumeStatus, body: { Volumes: [], Warnings: [] } };
-  });
+  };
+  const observer = new OpenShellPodmanObserver();
   const binding = { resource: { id }, placement: { workspace: "workspace" } } as EnvironmentBinding;
-  return { observer, binding, socket, paths, disappear: () => { rows = [{ Id: "c".repeat(64), Names: ["unrelated"], Labels: {} }]; }, failVolume: () => { volumeStatus = 500; } };
+  return { observer, binding, socket, paths, wirePaths, incompatible: (name: string, version: string) => { engineName = name; apiVersion = version; }, disappear: () => { rows = [{ Id: "c".repeat(64), Names: ["unrelated"], Labels: {} }]; }, failVolume: () => { volumeStatus = 500; }, rootful: () => { rootless = false; }, replaceEngine: () => { graphRoot = "/different-engine"; } };
 }
 it.skipIf(!supported)("captures exact local workload/supervisor/volumes then ignores unrelated engine resources", async () => {
   const f = await fixture(), selected = await f.observer.capture(f.binding, f.socket);
   expect(selected).toMatchObject({ resourceId: "compute-one", workloadId: "a".repeat(64), supervisorId: "b".repeat(64) });
   f.disappear(); expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: false, supervisor: false, volumes: false });
-  expect(f.paths.every(path => path.startsWith("/containers/") || path === "/volumes")).toBe(true);
+  expect(f.wirePaths).toContain("/version");
+  expect(f.wirePaths.every(path => path === "/version" || path.startsWith("/v6.1.4/libpod/") || path.startsWith("/containers/") || path === "/volumes")).toBe(true);
+  expect(f.paths.every(path => path.startsWith("/containers/") || path === "/volumes" || process.platform === "win32" && path === "/libpod/info")).toBe(true);
+});
+it.skipIf(!supported)("rejects Docker compatibility versions and malformed Podman API paths before inventory", async () => {
+  const f = await fixture();
+  for (const [name, version] of [["Docker Engine", "6.1.4"], ["Podman Engine", "6.1.4/../../other"]]) {
+    f.incompatible(name, version);
+    await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_engine_unsupported" });
+  }
+  expect(f.paths).toEqual([]);
+});
+it.skipIf(process.platform !== "win32")("requires a native owned pipe and a rootless engine identity, retaining that identity for absence checks", async () => {
+  const f = await fixture();
+  await expect(f.observer.capture(f.binding, "\\\\foreign\\pipe\\engine")).rejects.toMatchObject({ code: "environment_engine_changed" });
+  const selected = await f.observer.capture(f.binding, f.socket);
+  expect(selected.windowsPipe?.pid).toBe(process.pid);
+  expect(selected.windowsPipe?.sid).toMatch(/^S-1-/);
+  expect(selected.engineFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  f.replaceEngine(); f.disappear();
+  await expect(f.observer.observe(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
+  f.rootful();
+  await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_engine_unsupported" });
 });
 it.skipIf(!supported)("does not treat an engine error or missing original inventory as cleanup", async () => {
   const f = await fixture(), selected = await f.observer.capture(f.binding, f.socket); f.disappear(); f.failVolume();
@@ -80,7 +114,7 @@ async function httpFixture(failure?: "404" | "malformed", mountedVolumes?: strin
   };
 }
 
-it("uses the engine's HTTP routes and positive inventories to verify exact dependent cleanup", async () => {
+it.skipIf(process.platform === "win32")("uses the engine's HTTP routes and positive inventories to verify exact dependent cleanup", async () => {
   const f = await httpFixture(), selected = await f.observer.capture(f.binding, f.socket);
   expect(selected).toMatchObject({ resourceId: "compute-one", workloadId: "a".repeat(64), supervisorId: "b".repeat(64) });
   expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: true, supervisor: true, volumes: true });
@@ -94,14 +128,14 @@ it("uses the engine's HTTP routes and positive inventories to verify exact depen
   expect(f.requests.some(req => req.path?.startsWith("/libpod/"))).toBe(false);
 });
 
-it.each(["404", "malformed"] as const)("keeps an HTTP %s inventory response unconfirmed", async failure => {
+it.skipIf(process.platform === "win32").each(["404", "malformed"] as const)("keeps an HTTP %s inventory response unconfirmed", async failure => {
   const f = await httpFixture(failure);
   await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
-  expect(f.requests).toHaveLength(1);
+  expect(f.requests).toHaveLength(2);
   expect(f.requests[0]?.method).toBe("GET");
 });
 
-it("captures a custom-image sandbox without inventing a workspace volume or selecting user mounts", async () => {
+it.skipIf(process.platform === "win32")("captures a custom-image sandbox without inventing a workspace volume or selecting user mounts", async () => {
   const volumes = ["openshell-control-compute-one", "openshell-channel-compute-one"];
   const f = await httpFixture(undefined, [...volumes, "user-data", "openshell-control-another"]);
   const selected = await f.observer.capture(f.binding, f.socket);
@@ -113,7 +147,7 @@ it("captures a custom-image sandbox without inventing a workspace volume or sele
   expect(f.requests.every(req => req.method === "GET")).toBe(true);
 });
 
-it.each(["control", "channel"])("refuses an unattributable %s volume even when other mounts exist", async missing => {
+it.skipIf(process.platform === "win32").each(["control", "channel"])("refuses an unattributable %s volume even when other mounts exist", async missing => {
   const volumes = ["openshell-control-compute-one", "openshell-channel-compute-one", "openshell-sandbox-compute-one-workspace"]
     .filter(name => name !== `openshell-${missing}-compute-one`);
   const f = await httpFixture(undefined, volumes);

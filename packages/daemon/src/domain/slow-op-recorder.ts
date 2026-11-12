@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import type { MiddlewareHandler } from "hono";
+import { windowsPrivateAppendHelper } from "./windows-owned-text.js";
 
 export const SLOW_OPERATION_BARRIER_TIMEOUT_MS = 250;
 export const SLOW_OPERATION_THRESHOLD_MS = 250;
@@ -101,16 +102,24 @@ interface Span {
 const WORKER_SOURCE = String.raw`
   const fs = require("node:fs");
   const path = require("node:path");
-  const { parentPort } = require("node:worker_threads");
+  const { parentPort, workerData } = require("node:worker_threads");
+  const { execFileSync } = require("node:child_process");
+  function privateOperation(operation, file, input) {
+    if (!workerData.privateAppendHelper) throw new Error("native private log helper unavailable");
+    execFileSync(workerData.privateAppendHelper, [operation, path.toNamespacedPath(file)], {
+      input, windowsHide: true, timeout: 10000, stdio: ["pipe", "pipe", "pipe"]
+    });
+  }
 
   function rotate(logPath, rotationCount) {
     for (let index = rotationCount; index >= 1; index -= 1) {
       const source = index === 1 ? logPath : logPath + "." + (index - 1);
       const target = logPath + "." + index;
       if (!fs.existsSync(source)) continue;
+      if (process.platform === "win32") privateOperation("seal-private", source);
       if (fs.existsSync(target)) fs.rmSync(target, { force: true });
       fs.renameSync(source, target);
-      fs.chmodSync(target, 0o600);
+      if (process.platform !== "win32") fs.chmodSync(target, 0o600);
     }
   }
 
@@ -121,6 +130,10 @@ const WORKER_SOURCE = String.raw`
     try { size = fs.statSync(message.logPath).size; } catch {}
     if (size > 0 && size + Buffer.byteLength(line) > message.maxBytes) {
       rotate(message.logPath, message.rotationCount);
+    }
+    if (process.platform === "win32") {
+      privateOperation("append-private", message.logPath, Buffer.from(line, "utf8").toString("base64"));
+      return;
     }
     const fd = fs.openSync(message.logPath, "a", 0o600);
     try {
@@ -182,7 +195,12 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     this.rotationCount = options.rotationCount ?? SLOW_OPERATION_ROTATION_COUNT;
     this.slowThresholdMs = options.slowThresholdMs ?? SLOW_OPERATION_THRESHOLD_MS;
     this.barrierTimeoutMs = options.barrierTimeoutMs ?? SLOW_OPERATION_BARRIER_TIMEOUT_MS;
-    this.worker = new Worker(WORKER_SOURCE, { eval: true, execArgv: [] });
+    let privateAppendHelper: string | undefined;
+    if (process.platform === "win32") {
+      try { privateAppendHelper = windowsPrivateAppendHelper(); }
+      catch { /* Worker writes fail visibly without falling back to mode-only files. */ }
+    }
+    this.worker = new Worker(WORKER_SOURCE, { eval: true, execArgv: [], workerData: { privateAppendHelper } });
     this.worker.unref();
     this.worker.on("message", (message: { id?: string; ok?: boolean }) => {
       if (!message.id) return;

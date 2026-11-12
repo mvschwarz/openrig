@@ -33,6 +33,19 @@ function heading(line: number, text: string, depth = 0): ProgressRow {
   return { line, depth, status: "unknown", text, kind: "heading" };
 }
 
+it.each([
+  ["MiSSioNS/alpha/Progress.MD", "mission"], ["ROADMAP/progress.md", "lane"],
+  ["DELIVERY-READY/MODE-2/Progress.md", "lane"], ["sLiCeS/one/progress.md", "slice"],
+] as const)("classifies remote native Windows path %s without using the browser platform", (relative, expected) => {
+  const file = makeFile({ relPath: relative });
+  for (const prefix of ["C:\\owned\\", "\\\\owned-server\\share\\", "\\\\?\\C:\\owned\\"]) {
+    file.absolutePath = prefix + relative.replaceAll("/", "\\");
+    expect(classifyPriorityRailLevel(file)).toBe(expected);
+  }
+  file.absolutePath = "/owned/" + relative;
+  expect(classifyPriorityRailLevel(file)).toBe("intermediate");
+});
+
 describe("OSR v0 — classifyPriorityRailLevel", () => {
   it("STEERING.md → 'steering'", () => {
     expect(classifyPriorityRailLevel(makeFile({ relPath: "STEERING.md" }))).toBe("steering");

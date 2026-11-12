@@ -70,6 +70,24 @@ test("the content scan executes the named full-mode guard with the artifact boun
   }
 });
 
+test("nested native package roots are scanned while a sibling root is refused without replacing a receipt", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const packageRoot = join(repo, "packages/fixture space");
+    const publicFile = join(packageRoot, "public/guide.md");
+    write(join(packageRoot, "package.json"), JSON.stringify({ name: "nested-fixture", version: "1.0.0", files: ["public"] }));
+    write(publicFile, "Generic product guidance.\n");
+    commitAll(repo, "nested package");
+    const cutSha = gitHead(repo);
+    writeFileSync(review, JSON.stringify({ surfaces: [{ path: "public/guide.md", sha256: sha256(publicFile), verdict: "ship", reason: "Generic guidance.", candidateDispositions: [] }] }));
+    const result = runGate({ repo, rules, review, receipt, cutSha, packageRoot });
+    assert.equal(result.status, 0, result.stderr);
+    const original = readFileSync(receipt, "utf8");
+    const outside = runGate({ repo, rules, review, receipt, cutSha, packageRoot: repo + "-sibling" });
+    assert.equal(outside.status, 1); assert.match(outside.stderr, /package root must be inside/);
+    assert.equal(readFileSync(receipt, "utf8"), original);
+  });
+});
+
 test("the substance gate needs the leak guard's term lists: --rules or the file the environment names", () => {
   withFixture(({ repo, rules, review, receipt }) => {
     const publicFile = join(repo, "public/guide.md");
@@ -417,7 +435,7 @@ test("npm output that is a JSON string is refused, even when the string holds a 
     chmodSync(join(bin, "npm"), 0o755);
 
     const result = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      env: { ...process.env, ...(process.platform === "win32" ? { npm_execpath: join(bin, "npm") } : {}), PATH: [bin, process.env.PATH].join(process.platform === "win32" ? ";" : ":") } });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /npm artifact enumeration returned no files array/);
   });
@@ -436,7 +454,7 @@ test("npm output that lists more than one package is refused before any scan or 
       chmodSync(join(bin, "npm"), 0o755);
 
       const result = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo),
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+        env: { ...process.env, ...(process.platform === "win32" ? { npm_execpath: join(bin, "npm") } : {}), PATH: [bin, process.env.PATH].join(process.platform === "win32" ? ";" : ":") } });
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /npm artifact enumeration listed 2 packages where one was packed; run the gate for one package \(check --package-root and any npm workspaces setting\)/);
       assert.equal(existsSync(receipt), false);
@@ -459,7 +477,7 @@ function writeGateHarness(root, source, invocationPath) {
   mkdirSync(root, { recursive: true });
   const gate = join(root, "check-substance-gate.mjs");
   writeFileSync(gate, source);
-  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs", "npm-pack-json.mjs"]) {
+  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs", "npm-pack-json.mjs", "npm-command.mjs"]) {
     writeFileSync(join(root, module), readFileSync(resolve("scripts", module)));
   }
   writeFileSync(join(root, "check-internal-leak-guard.mjs"), [
@@ -513,11 +531,11 @@ function withFixture(run) {
   }
 }
 
-function runGate({ repo, rules, review, receipt, cutSha, gate = GATE, env = process.env }) {
+function runGate({ repo, rules, review, receipt, cutSha, gate = GATE, env = process.env, packageRoot = repo }) {
   return spawnSync(process.execPath, [
     gate,
     "--repo", repo,
-    "--package-root", repo,
+    "--package-root", packageRoot,
     "--surface-manifest", join(repo, "substance-surfaces.json"),
     "--rules", rules,
     "--review", review,

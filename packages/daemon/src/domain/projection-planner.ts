@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { resourceDirectoryPath } from "./resource-directory-name.js";
 import * as os from "node:os";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import type { SkillOnRestore, SkillResource, StartupBlock } from "./types.js";
@@ -286,13 +287,14 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
  *   - tilde-home (`~/...` or `~`)  → expanded to os.homedir()
  *   - OpenRig home (`openrig-home:plugins/...`) → configured daemon home
  *   - relative (`plugins/...`)     → resolved against specSourcePath
+ * Windows also accepts the native `~\` home prefix; POSIX preserves it literally.
  * `~user/...` (with explicit username) is NOT expanded; treated as a
  * literal relative segment per Node's nodePath convention.
  */
 export function resolvePluginPath(rawPath: string, specSourcePath: string, openrigHome: string = OPENRIG_HOME): string {
   if (rawPath.startsWith("openrig-home:")) return nodePath.resolve(openrigHome, rawPath.slice("openrig-home:".length));
   if (rawPath === "~") return os.homedir();
-  if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));
+  if (rawPath.startsWith("~/") || (process.platform === "win32" && rawPath.startsWith("~\\"))) return nodePath.join(os.homedir(), rawPath.slice(2));
   if (nodePath.isAbsolute(rawPath)) return rawPath;
   return nodePath.resolve(specSourcePath, rawPath);
 }
@@ -312,7 +314,7 @@ export function claudeConflictTargetPath(
 ): string | null {
   switch (category) {
     case "skill":
-      return nodePath.join(cwd, ".claude", "skills", effectiveId, "SKILL.md");
+      return nodePath.join(resourceDirectoryPath(nodePath.join(cwd, ".claude", "skills"), effectiveId), "SKILL.md");
     case "subagent":
       return sourcePath ? nodePath.join(cwd, ".claude", "agents", nodePath.basename(sourcePath)) : null;
     case "guidance":

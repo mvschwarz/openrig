@@ -100,7 +100,7 @@ claims:
     kind: operational
     check: derive-pack-path
   - id: run-public-verifier
-    statement: "Run `sh verify-world.sh` in that derived directory instead of teaching a machine-specific path."
+    statement: "Run `node verify-world-native.mjs` in that derived directory instead of teaching a machine-specific path."
     kind: operational
     check: run-public-verifier
   - id: boundary-coverage
@@ -165,6 +165,10 @@ claims:
     check: public-manifest-authored-claims
   - id: public-manifest-summary-verify-world
     statement: "Portable named checks with loud failures and skips."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-verify-world-native
+    statement: "Native Node checks with the same failures and skips."
     kind: structural
     check: public-manifest-authored-claims
   - id: public-manifest-probe-enter-the-world-prompt

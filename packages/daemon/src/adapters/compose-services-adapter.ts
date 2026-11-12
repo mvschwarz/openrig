@@ -1,12 +1,16 @@
 import { connect } from "node:net";
-import type { ExecFn } from "./tmux.js";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { ArgvExecFn, ExecFn } from "./tmux.js";
 
 // -- Result types --
 
 /** Outcome of a TCP wait-target check. `reason` says why a failed check failed. */
 export type TcpCheckResult =
   | { ok: true }
-  | { ok: false; reason: "malformed" | "unreachable" | "named_port_needs_nc" };
+  | { ok: false; reason: "malformed" | "unreachable" | "named_port_needs_nc" | "named_port_unknown" };
 
 export type ComposeResult =
   | { ok: true }
@@ -74,14 +78,22 @@ export function composeMissingMessage(detail: string): string {
 export class ComposeServicesAdapter {
   private exec: ExecFn;
 
-  constructor(exec: ExecFn) {
+  constructor(exec: ExecFn, private readonly nativeArgv?: ArgvExecFn) {
     this.exec = exec;
+  }
+
+  private docker(args: string[], legacy: string): Promise<string> {
+    return this.nativeArgv ? this.nativeArgv(["docker", ...args]) : this.exec(legacy);
+  }
+
+  private composeArgv(opts: { composeFile: string; projectName: string; profiles?: string[] }): string[] {
+    return ["compose", "-f", opts.composeFile, "-p", opts.projectName, ...(opts.profiles ?? []).flatMap(profile => ["--profile", profile])];
   }
 
   /** Whether Docker Compose v2 is available to this Docker. */
   async composeAvailable(): Promise<{ ok: true } | { ok: false; message: string }> {
     try {
-      await this.exec("docker compose version 2>&1");
+      await this.docker(["compose", "version"], "docker compose version 2>&1");
       return { ok: true };
     } catch (err) {
       // Docker's own reason: not the exec's "Command failed" header, nor Docker's pointer to its help after it.
@@ -101,7 +113,7 @@ export class ComposeServicesAdapter {
    *  can't be read. */
   async projectContainers(projectName: string): Promise<string[] | null> {
     try {
-      const out = await this.exec(`docker ps -aq --filter ${sq(`label=com.docker.compose.project=${projectName}`)} 2>&1`);
+      const out = await this.docker(["ps", "-aq", "--filter", `label=com.docker.compose.project=${projectName}`], `docker ps -aq --filter ${sq(`label=com.docker.compose.project=${projectName}`)} 2>&1`);
       return out.split(/\s+/).filter(Boolean);
     } catch {
       return null;
@@ -117,7 +129,7 @@ export class ComposeServicesAdapter {
     const args = this.baseArgs(opts.composeFile, opts.projectName, opts.profiles);
     const cmd = `docker compose ${args} up -d 2>&1`;
     try {
-      await this.exec(cmd);
+      await this.docker([...this.composeArgv(opts), "up", "-d"], cmd);
       return { ok: true };
     } catch (err) {
       const compose = await this.composeMissingBehind(err);
@@ -140,7 +152,7 @@ export class ComposeServicesAdapter {
     const volumeFlag = opts.policy === "down_and_volumes" ? " --volumes" : "";
     const cmd = `docker compose ${args} down${volumeFlag} 2>&1`;
     try {
-      await this.exec(cmd);
+      await this.docker([...this.composeArgv(opts), "down", ...(opts.policy === "down_and_volumes" ? ["--volumes"] : [])], cmd);
       return { ok: true };
     } catch (err) {
       // Without Compose v2 nothing of this project could have started through it. When plain Docker confirms the project
@@ -160,7 +172,7 @@ export class ComposeServicesAdapter {
     const args = this.baseArgs(opts.composeFile, opts.projectName, opts.profiles);
     const cmd = `docker compose ${args} ps --format json 2>&1`;
     try {
-      const output = await this.exec(cmd);
+      const output = await this.docker([...this.composeArgv(opts), "ps", "--format", "json"], cmd);
       const parseInput = this.extractComposePsPayload(output);
       const services = this.parseComposePs(parseInput);
       // `[]` is how array-format Compose releases report a project with no containers.
@@ -186,7 +198,7 @@ export class ComposeServicesAdapter {
     const tailArg = Number.isFinite(opts.tail) ? ` --tail ${opts.tail}` : "";
     const cmd = `docker compose ${args} logs${tailArg}${serviceArg} 2>&1`;
     try {
-      const output = await this.exec(cmd);
+      const output = await this.docker([...this.composeArgv(opts), "logs", ...(Number.isFinite(opts.tail) ? ["--tail", String(opts.tail)] : []), ...(opts.service ? [opts.service] : [])], cmd);
       return { ok: true, output };
     } catch (err) {
       return { ok: false, output: "", error: formatExecError(err) };
@@ -217,6 +229,19 @@ export class ComposeServicesAdapter {
    * redirects are not followed. This proves the server answered, not application readiness. */
   async probeHttp(url: string, timeoutMs: number = 5000): Promise<boolean> {
     try {
+      if (this.nativeArgv && process.platform === "win32") {
+        const target = new URL(url);
+        if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+        return await new Promise<boolean>(resolve => {
+          const request = (target.protocol === "https:" ? httpsRequest : httpRequest)(target, { signal: AbortSignal.timeout(timeoutMs) }, response => {
+            const status = response.statusCode ?? 0;
+            response.destroy();
+            resolve(status >= 200 && status < 400);
+          });
+          request.once("error", () => resolve(false));
+          request.end();
+        });
+      }
       const cmd = `curl -sf -o /dev/null -w '%{http_code}' --max-time ${Math.ceil(timeoutMs / 1000)} ${sq(url)} 2>/dev/null`;
       const output = await this.exec(cmd);
       const code = parseInt(output.trim(), 10);
@@ -251,6 +276,14 @@ export class ComposeServicesAdapter {
     // and never starts with `-`, so nothing reads as an `nc` option.
     if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(portStr) || !/[A-Za-z]/.test(portStr)) {
       return { ok: false, reason: "malformed" };
+    }
+    if (this.nativeArgv && process.platform === "win32") {
+      try {
+        const services = await readFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "drivers", "etc", "services"), "utf8");
+        const port = windowsServicePort(services, portStr);
+        if (port === undefined) return { ok: false, reason: "named_port_unknown" };
+        return await this.connectTcp(host, port, timeoutMs) ? { ok: true } : { ok: false, reason: "unreachable" };
+      } catch { return { ok: false, reason: "named_port_unknown" }; }
     }
     try {
       await this.exec("command -v nc");
@@ -341,4 +374,16 @@ export class ComposeServicesAdapter {
       health: typeof obj["Health"] === "string" ? obj["Health"] : null,
     };
   }
+}
+
+/** The Windows services database names TCP ports and their aliases. */
+export function windowsServicePort(services: string, name: string): number | undefined {
+  for (const line of services.split(/\r?\n/)) {
+    const [canonical, target, ...aliases] = line.split("#", 1)[0]!.trim().split(/\s+/);
+    const match = /^(\d+)\/tcp$/i.exec(target ?? "");
+    if (!match || ![canonical, ...aliases].some(value => value?.toLowerCase() === name.toLowerCase())) continue;
+    const port = Number(match[1]);
+    if (port >= 1 && port <= 65535) return port;
+  }
+  return undefined;
 }

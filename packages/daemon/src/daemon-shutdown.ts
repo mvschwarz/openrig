@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync } from "node:fs";
+export { requestWindowsDaemonStop, startWindowsDaemonControl } from "./windows-daemon-control.js";
 
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DAEMON_STOP_WAIT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS + 2_000;
@@ -12,6 +13,7 @@ export interface DaemonShutdownReceipt {
   outcome: "clean" | "failed" | "timed-out";
   phase: string;
   failures: Array<{ phase: string; error: string }>;
+  requestId?: string;
 }
 
 interface ServerShutdownHandle {
@@ -110,9 +112,9 @@ export function createDaemonShutdown(options: {
   timeoutMs?: number;
   exit?: (code: number) => void;
   log?: (message: string) => void;
-}): (signal: string) => void {
+}): (signal: string, requestId?: string) => void {
   let started = false;
-  return (signal) => {
+  return (signal, requestId) => {
     if (started) return;
     started = true;
     let finished = false;
@@ -135,6 +137,7 @@ export function createDaemonShutdown(options: {
         schema: "openrig.daemon-shutdown/v1", pid: process.pid, startedAt,
         completedAt: new Date().toISOString(), outcome,
         phase: outcome === "clean" ? "complete" : phase, failures,
+        ...(requestId ? { requestId } : {}),
       };
       try {
         const temp = `${options.receiptPath}.${process.pid}.tmp`;

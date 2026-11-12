@@ -1,18 +1,19 @@
 // A hosted member's last call, as `rig mcp serve --http` records it: once per seat per interval, by atomic rename, at mode
-// 0600, beside the token file. A missing or unreadable record is unknown (an empty map), and a write that fails never
+// 0600 (a protected current-user DACL on Windows), beside the token file. A missing or unreadable record is unknown (an empty map), and a write that fails never
 // reaches the caller.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { mcpPresenceFilePath, presenceRecorder, readPresence } from "../src/mcp-presence.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 describe("a hosted member's last call", () => {
   let dir: string;
   beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-presence-")); });
   afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
-  it("is recorded once per seat per interval, each seat on its own, at mode 0600", () => {
+  it("is recorded once per seat per interval, each seat on its own, with private access", () => {
     const file = mcpPresenceFilePath(dir);
     expect(file).toBe(path.join(dir, "mcp-http-presence.json"));
     let now = Date.parse("2026-10-26T12:00:00.000Z");
@@ -28,7 +29,7 @@ describe("a hosted member's last call", () => {
     now += 31_000;
     record("grok@lab", "grok");
     expect(readPresence(file)["grok@lab"]!.lastCallAt).toBe("2026-10-26T12:01:01.000Z");
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expectPrivateFile(file);
     expect(fs.readdirSync(dir)).toEqual(["mcp-http-presence.json"]);
   });
 

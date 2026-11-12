@@ -4,7 +4,7 @@
 // SESSION-scope (setSessionOption); set-clipboard/copy-command are SERVER-scope
 // (setServerOption) — the two are never crossed.
 import { describe, it, expect, vi } from "vitest";
-import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import {
   TmuxOptionDefaultsApplier,
   resolveCopyCommand,
@@ -15,14 +15,36 @@ const OK: TmuxResult = { ok: true };
 function mockAdapter(overrides?: {
   setSessionOption?: (s: string, k: string, v: string) => Promise<TmuxResult>;
   setServerOption?: (o: string, v: string) => Promise<TmuxResult>;
+  setNativeServerOption?: (s: string, o: string, v: string) => Promise<TmuxResult>;
 }) {
   const setSessionOption = vi.fn(overrides?.setSessionOption ?? (async () => OK));
   const setServerOption = vi.fn(overrides?.setServerOption ?? (async () => OK));
-  const adapter = { setSessionOption, setServerOption } as unknown as TmuxAdapter;
-  return { adapter, setSessionOption, setServerOption };
+  const setNativeServerOption = vi.fn(overrides?.setNativeServerOption ?? (async () => OK));
+  const adapter = { setSessionOption, setServerOption, setNativeServerOption } as unknown as TmuxAdapter;
+  return { adapter, setSessionOption, setServerOption, setNativeServerOption };
 }
 
 describe("TmuxOptionDefaultsApplier", () => {
+  it("routes native server options through the exact target and retains unsupported-option warnings", async () => {
+    const argv: string[][] = [];
+    const adapter = new TmuxAdapter(async () => { throw new Error("No shell transport"); }, undefined, async args => { argv.push(args); return ""; }, "psmux");
+    expect(await adapter.setNativeServerOption("owned", "set-clipboard", "on")).toEqual({ ok: true });
+    expect(argv).toEqual([["tmux", "set-option", "-s", "-t", "=owned:", "set-clipboard", "on"]]);
+    const mocked = mockAdapter({ setNativeServerOption: async () => ({ ok: false, code: "unknown", message: "unknown option" }) });
+    const warnings = await new TmuxOptionDefaultsApplier({ tmuxAdapter: mocked.adapter, platform: "win32" }).applyToFreshSession("owned");
+    expect(warnings.join()).toContain("unknown option");
+    expect(mocked.setServerOption).not.toHaveBeenCalled();
+  });
+  it("sets native clipboard only on each freshly created psmux session server", async () => {
+    const { adapter, setNativeServerOption, setServerOption } = mockAdapter();
+    const applier = new TmuxOptionDefaultsApplier({ tmuxAdapter: adapter, platform: "win32" });
+    expect(await applier.applyToFreshSession("owned-first")).toEqual([]);
+    expect(await applier.applyToFreshSession("owned-second")).toEqual([]);
+    expect(setNativeServerOption.mock.calls).toEqual([
+      ["owned-first", "set-clipboard", "on"], ["owned-second", "set-clipboard", "on"],
+    ]);
+    expect(setServerOption).not.toHaveBeenCalled();
+  });
   it("sets mouse on + status off (default) on the given session via SESSION scope only", async () => {
     const { adapter, setSessionOption, setServerOption } = mockAdapter();
     // default reader (omitted) → statusBar false.

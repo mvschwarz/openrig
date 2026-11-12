@@ -9,7 +9,8 @@ const context = JSON.parse(readFileSync(join(root, "context.json"), "utf8")) as 
 const gone = join(root, "gone");
 mkdirSync(gone);
 process.chdir(gone);
-if (mode === "deleted-cached") process.cwd();
+if (mode.endsWith("cached")) process.cwd();
+if (mode.startsWith("relocated")) process.chdir(root);
 rmdirSync(gone);
 const result = await withNodeConfigResolver(async resolve => {
   const first = await resolve(context);

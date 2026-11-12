@@ -34,7 +34,7 @@ console.log(JSON.stringify({ source: call.cwd }));`);
   return { root, home, cwd, cli, env, calls: async () => (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line)) };
 }
 
-it.each([false, true])("helpers preserve a live cwd and recover a deleted cwd (deleted: %s)", async deleted => {
+it.each([false, true])("helpers preserve cwd after an attempted removal, recovering only if the OS permits deletion (remove: %s)", async deleted => {
   const f = await fixture();
   try {
     const probe = join(f.root, "probe.ts");
@@ -45,8 +45,11 @@ import { openTerminalInWindow } from ${JSON.stringify(source("terminals/open-win
 import { launchProcess, spawnLaunch } from ${JSON.stringify(source("specs/launch.ts"))};
 async function run() {
   process.chdir(${JSON.stringify(f.cwd)});
-  if (${deleted}) rmSync(${JSON.stringify(f.cwd)}, { recursive: true });
   const result: Record<string, unknown> = {};
+  if (${deleted}) {
+    try { rmSync(${JSON.stringify(f.cwd)}, { recursive: true }); result.removed = true; }
+    catch (error) { result.removalError = (error as NodeJS.ErrnoException).code; }
+  }
   result.read = await readLocal(${JSON.stringify(f.cli)}, { op: 'roots' });
   try { result.terminal = await openTerminalInWindow('saved:fixture', 'http://selected.example:7433', ${JSON.stringify(f.cli)}, 'same-plan'); }
   catch (error) { result.terminal = String(error); }
@@ -59,11 +62,16 @@ void run();
 `);
     const { stdout } = await promisify(execFile)(process.execPath, [runner, "--script", probe], { env: f.env, timeout: 15_000 });
     const result = JSON.parse(stdout.split("RESULT:")[1]!);
-    const expected = deleted ? f.home : f.cwd;
+    const removed = deleted && process.platform !== "win32";
+    if (deleted && process.platform === "win32") {
+      expect(result.removed).toBeUndefined();
+      expect(["EPERM", "EBUSY", "EACCES"]).toContain(result.removalError);
+    } else if (deleted) expect(result.removed).toBe(true);
+    const expected = removed ? f.home : f.cwd;
     expect(result.read).toEqual({ source: expected });
     expect(result.terminal).toMatchObject({ ok: true, opened: ["fixture"] });
     expect(result.launch).toBe(0);
-    expect(result.parentCwd).toBe(deleted ? "ENOENT" : f.cwd);
+    expect(result.parentCwd).toBe(removed ? "ENOENT" : f.cwd);
     const calls = await f.calls();
     expect(calls.map(call => call.cwd)).toEqual([expected, expected, expected]);
     expect(calls.map(call => call.args)).toEqual([
@@ -75,7 +83,7 @@ void run();
   } finally { await rm(f.root, { recursive: true, force: true }); }
 }, 25_000);
 
-it("the running TUI can repeat its startup helper after its start folder is deleted", async () => {
+it("the running TUI repeats its startup helper after an OS-specific start-folder removal attempt", async () => {
   const f = await fixture();
   // A private server returns a failed read; it never accepts a lifecycle operation.
   const server = createServer((_, res) => { res.writeHead(503); res.end("fixture unavailable"); });
@@ -97,12 +105,14 @@ it("the running TUI can repeat its startup helper after its start folder is dele
   }
   try {
     await until(async () => output.includes("rig doctor --help") && (await f.calls()).some(call => call.args[0] === "crash-cart"));
-    await rm(f.cwd, { recursive: true });
+    if (process.platform === "win32") {
+      await expect(rm(f.cwd, { recursive: true })).rejects.toMatchObject({ code: expect.stringMatching(/^(EPERM|EBUSY|EACCES)$/) });
+    } else await rm(f.cwd, { recursive: true });
     child.stdin.write("r");
     await until(async () => (await f.calls()).filter(call => call.args[0] === "crash-cart").length === 2);
     const calls = await f.calls();
     expect(calls.find(call => call.args[0] === "config")?.cwd).toBe(f.cwd);
-    expect(calls.filter(call => call.args[0] === "crash-cart").map(call => call.cwd)).toEqual([f.cwd, f.home]);
+    expect(calls.filter(call => call.args[0] === "crash-cart").map(call => call.cwd)).toEqual([f.cwd, process.platform === "win32" ? f.cwd : f.home]);
     expect(errors).not.toContain("uv_cwd");
   } finally {
     child.kill("SIGKILL"); await ended;

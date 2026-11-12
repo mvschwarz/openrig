@@ -20,6 +20,7 @@ import type { FileWriteService } from "../files/file-write-service.js";
 import { FileWriteError } from "../files/file-write-service.js";
 import type { AllowlistRoot } from "../files/path-safety.js";
 import type { ComposedSliceReview, LockState, VerdictCell } from "./types.js";
+import { sliceRelativeMediaPath } from "./media-path.js";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
 const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov"]);
@@ -67,9 +68,10 @@ function verdictChip(cell: VerdictCell): string {
  * unavailable branch — never silent, never inlined).
  */
 function containedMediaPath(sliceDir: string, ref: string): string | null {
-  if (ref.startsWith("/")) return null;
+  const relative = sliceRelativeMediaPath(ref, "");
+  if (relative === null) return null;
   const rootResolved = path.resolve(sliceDir);
-  const resolved = path.resolve(sliceDir, ref);
+  const resolved = path.resolve(sliceDir, relative);
   if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) return null;
   try {
     const real = fs.realpathSync(resolved);
@@ -222,12 +224,13 @@ export type FreezeOutcome =
 export function resolveAllowlisted(allowlist: AllowlistRoot[], absDir: string): { root: string; rel: string } | null {
   let real: string;
   try {
-    real = fs.realpathSync(absDir);
+    real = process.platform === "win32" ? fs.realpathSync.native(absDir) : fs.realpathSync(absDir);
   } catch {
     return null;
   }
   for (const r of allowlist) {
-    if (real === r.canonicalPath || real.startsWith(r.canonicalPath + path.sep)) {
+    const rootWithSep = r.canonicalPath.endsWith(path.sep) ? r.canonicalPath : r.canonicalPath + path.sep;
+    if (real === r.canonicalPath || real.startsWith(rootWithSep)) {
       return { root: r.name, rel: path.relative(r.canonicalPath, real) };
     }
   }

@@ -19,6 +19,7 @@ import {
 } from "../lib/codex-auth.js";
 import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
 import { realDeps } from "./daemon.js";
+import { operatorShellWord } from "@openrig/daemon/windows-launch";
 
 export interface AuthCommandDeps {
   /** env source (default process.env) — tests point CODEX_HOME at a fixture. */
@@ -62,7 +63,7 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
     await runOnSshHost(opts.host!, `auth ${verb}`, ["auth", verb, ...args, "--runtime", opts.runtime, ...home], {
       origin,
       // A switch changes that home; status and list only read.
-      ...(verb === "switch" ? { changes: { check: `rig auth status --host ${opts.host} --codex-home ${opts.codexHome} (a switch copies the same saved profile again if repeated)` } } : {}),
+      ...(verb === "switch" ? { changes: { check: `rig auth status --host ${operatorShellWord(opts.host!)} --codex-home ${operatorShellWord(opts.codexHome!)} (a switch copies the same saved profile again if repeated)` } } : {}),
     }, depsOverride?.host);
   };
 

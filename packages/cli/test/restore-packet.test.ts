@@ -880,6 +880,22 @@ describe("M2c-CLI packet-writer atomic emission", () => {
     };
   }
 
+  it("emits a complete packet under a valid long directory name", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const name = "p".repeat(240);
+    const targetDir = path.join(tmpRoot, name);
+    const result = await writePacket(buildBaselineOpts(targetDir) as Parameters<typeof writePacket>[0]);
+    expect(result.targetDir).toBe(targetDir);
+    expect(fs.readdirSync(targetDir).sort()).toEqual([
+      "restore-instructions.md", "restore-summary.json", "touched-files.md", "transcript-latest.md",
+    ]);
+    const summary = JSON.parse(fs.readFileSync(result.summaryPath, "utf8"));
+    expect(validateRestoreSummary(summary).valid).toBe(true);
+    expect(fs.readdirSync(tmpRoot)).toEqual([name]);
+  });
+
   it("emits 4 required files + restore-summary.json schema-valid", async () => {
     const { writePacket } = await import("../src/restore-packet/packet-writer.js");
     const fs = await import("node:fs");

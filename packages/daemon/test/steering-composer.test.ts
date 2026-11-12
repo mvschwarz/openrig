@@ -14,7 +14,7 @@
 //   - empty/unset env yields composer with isReady() false
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -96,6 +96,14 @@ describe("Operator Surface Reconciliation v0 — SteeringComposer", () => {
   });
 
   afterEach(() => rmSync(cleanup, { recursive: true, force: true }));
+
+  it.runIf(process.platform === "win32")("keeps a mixed-case native delivery lane's canonical ID and actual file path", () => {
+    const dir = join(workspaceRoot, "Delivery-Ready", "Mode-2"); mkdirSync(dir, { recursive: true });
+    const file = join(dir, "progress.MD"); writeFileSync(file, "- [ ] owned next pull\n");
+    const payload = new SteeringComposer({ workspaceRoot }).compose();
+    expect(payload.laneRails).toHaveLength(1);
+    expect(payload.laneRails[0]).toMatchObject({ laneId: "mode-2", absolutePath: realpathSync.native(file), nextPullLine: 1 });
+  });
 
   it("isReady() = false when no sources resolvable (empty workspace + no overrides)", () => {
     const composer = new SteeringComposer({ workspaceRoot: null });

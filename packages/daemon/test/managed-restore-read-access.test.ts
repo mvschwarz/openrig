@@ -44,11 +44,25 @@ function spellings(dir: string): string[] {
     try { real = path.join(realpathSync.native(real), ...rest); break; }
     catch { rest.unshift(path.basename(real)); real = path.dirname(real); }
   }
-  return [...new Set([path.resolve(dir), real])];
+  return [...new Set([path.resolve(dir), real])].map(portablePath);
 }
+const portablePath = (file: string) => file.split(path.sep).join("/");
 function settings(command: string) {
   // No provider executable: a private shell function records its arguments with NUL separators.
-  const args = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\0' "$@"; }; ${command}`], { encoding: "utf8" }).split("\0");
+  // Adapter command strings retain POSIX grammar before the native tmux shell
+  // bridge. Git Bash supplies that parsing oracle on Windows, without running
+  // a provider or pretending to qualify the later PowerShell bridge here.
+  const shell = process.platform === "win32" ? path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe") : "/bin/sh";
+  const script = `claude() { printf '%s\\0' "$@"; }; ${command}`;
+  let shellArgs = ["-c", script];
+  if (process.platform === "win32") {
+    // Passing nested POSIX quoting through Windows' -c argv adds another parser.
+    // A file leaves only the grammar under test between source and shell.
+    const root = mkdtempSync(path.join(tmpdir(), "restore-argv-")); roots.push(root);
+    const file = path.join(root, "capture.sh"); writeFileSync(file, script);
+    shellArgs = ["--noprofile", "--norc", portablePath(file)];
+  }
+  const args = execFileSync(shell, shellArgs, { encoding: "utf8", windowsHide: true }).split("\0");
   expect(args.filter(x => x === "--settings")).toHaveLength(1);
   return JSON.parse(args[args.indexOf("--settings") + 1]!);
 }
@@ -83,7 +97,7 @@ it("runtime-switch command keys restore files to the canonical seat, not its sta
   f.binding.tmuxSession = "openrig-switch-x";
   expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig" })).ok).toBe(true);
   const allow = settings(f.commands[0]!).permissions.allow as string[];
-  expect(allow).toContain(`Read(/${f.marker})`);
+  expect(allow).toContain(`Read(/${portablePath(f.marker)})`);
   expect(allow.some(rule => rule.includes("openrig-switch-x"))).toBe(false);
 });
 
@@ -93,8 +107,8 @@ it.each([false, true])("legacy resume, explicit mode=%s: command keeps the exact
   vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
   await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined, "node", undefined, undefined, false, true);
   const allow = settings(f.commands[0]!).permissions.allow as string[];
-  expect(allow).toContain(`Read(/${f.marker})`);
-  expect(allow).toContain(`Read(//tmp/claude-compaction-restore/${CHILD}-*/restore-instructions.md)`);
+  expect(allow).toContain(`Read(/${portablePath(f.marker)})`);
+  for (const packets of spellings("/tmp/claude-compaction-restore")) expect(allow).toContain(`Read(/${packets}/${CHILD}-*/restore-instructions.md)`);
   expect(f.commands[0]).toMatch(/--permission-mode'? '?acceptEdits/);
 });
 
@@ -119,7 +133,7 @@ it("grants each restore file both where it's named and where it resolves, when a
   // Claude Code applies an allow rule to a read through a symlink only when the requested path and the file it resolves to
   // both match, so a Mac seat (whose /tmp is /private/tmp) or a symlinked home or project needs both spellings.
   const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
-  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-link-"))); roots.push(root);
+  const root = portablePath(realpathSync.native(mkdtempSync(path.join(tmpdir(), "restore-link-")))); roots.push(root);
   for (const dir of ["home", "project", "packets"]) mkdirSync(path.join(root, `real-${dir}`));
   for (const dir of ["home", "project", "packets"]) symlinkSync(path.join(root, `real-${dir}`), path.join(root, dir));
   // The packet root may not exist yet at launch: it keeps its name under the nearest real parent.
@@ -171,7 +185,7 @@ it.each([
   const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
   const { buildPostCompactRestorePrompt } = await import("../src/domain/claude-compaction-enforcer.js");
   vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "/tmp/claude-compaction-restore");
-  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-parity-"))); roots.push(root);
+  const root = portablePath(realpathSync.native(mkdtempSync(path.join(tmpdir(), "restore-parity-")))); roots.push(root);
   const home = path.join(root, "home"), cwd = path.join(root, "project"), prep = configured ? path.join(root, "maps") : null;
   const extra = configured ? path.join(root, "elsewhere", "team-restore.md") : path.join(home, "compaction", "post-compact-extra.md");
   if (link) {
@@ -183,10 +197,10 @@ it.each([
   // The request names the setting trimmed.
   const prompt = buildPostCompactRestorePrompt({ sessionName: "owner@rig", openrigHome: home, attemptMapPath: map, sessionId: CHILD,
     postCompactInstructionFilePath: setting ?? extra });
-  const named = [...prompt.matchAll(/(\/[^\s;,]+?)(?=[.;,]?(?:\s|$))/g)].map(m => m[1]!).filter(p => p.startsWith(root));
+  const named = [...prompt.matchAll(/((?:[A-Za-z]:[\\/]|\/)[^\s;,]+?)(?=[.;,]?(?:\s|$))/g)].map(m => portablePath(m[1]!)).filter(p => p.startsWith(root));
   const allow = (JSON.parse(withManagedRestoreReads([], { openrigHome: home, session: "owner@rig", cwd, nativeSessionId: CHILD,
     extraInstructionFile: setting, preparationRoot: prep })[1]!).permissions.allow as string[]).filter(rule => rule.startsWith("Read(/"));
-  expect(named).toContain(extra);
+  expect(named).toContain(portablePath(extra));
   expect(named.length).toBeGreaterThanOrEqual(4);
   // Claude Code needs both the path read and the file it resolves to.
   expect(named.flatMap(spellings).filter(p => !allow.some(rule => ruleRegex(rule).test(p)))).toEqual([]);
@@ -195,10 +209,49 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
-it("both Claude launch paths grant the configured extra file the restore will name", async () => {
+it.each([false, true].flatMap(managed => ["fresh", "fork", "resume", "legacy-resume"].map(kind => ({ kind, managed }))))("does not dispatch $kind (managed=$managed) after selection changes during restore-home lookup", async ({ kind, managed }) => {
+  const f = fixture(managed);
+  // The actual transport invokes this guard at its write boundary. Model that
+  // contract without recording an effect when the selected-history guard refuses.
+  f.tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    f.commands.push(command); return { ok: true };
+  });
+  let release!: (home: string) => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  Object.assign(f.tmux, { getSessionEnv: vi.fn(() => {
+    observed(); return new Promise<string>(resolve => { release = resolve; });
+  }) });
+  const restoreReadPolicy = () => ({ extraInstructionFile: "~/owned-restore.md" });
+  const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, restoreReadPolicy,
+    ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}),
+    fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+  vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+  const legacy = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, restoreReadPolicy,
+    ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}) });
+  vi.spyOn(legacy as any, "verifyResume").mockResolvedValue({ ok: true });
+  let selected = true;
+  const beforeNativeDispatch = () => selected;
+  const pending = kind === "legacy-resume"
+    ? legacy.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined, "node", undefined, undefined, false, true,
+      undefined, undefined, undefined, beforeNativeDispatch)
+    : adapter.launchHarness(f.binding, { name: "owner@rig", beforeNativeDispatch,
+      ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: PARENT } } : {}),
+      ...(kind === "resume" ? { resumeToken: CHILD } : {}) });
+  await started;
+  selected = false;
+  release(path.join(f.root, "selected-user-home"));
+  expect(await pending).toMatchObject({ ok: false });
+  expect(f.commands).toEqual([]);
+  expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("both Claude launch paths grant the configured extra file the restore will name (session tilde=%s)", async tilde => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");
-  const restoreReadPolicy = () => ({ extraInstructionFile: custom, preparationRoot: null });
+  Object.assign(f.tmux, { getSessionEnv: vi.fn(async () => path.dirname(custom)) });
+  const restoreReadPolicy = () => ({ extraInstructionFile: tilde ? "~/team-restore.md" : custom, preparationRoot: null });
   const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, restoreReadPolicy,
     fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
   vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
@@ -217,6 +270,6 @@ it.each([false, true])("legacy resume composes member deny rules with managed re
   await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined,
     "node", undefined, undefined, false, true, undefined, undefined, { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] });
   const result = settings(f.commands[0]!);
-  expect(result.permissions.allow).toEqual(expect.arrayContaining(["Read(./work/**)", `Read(/${f.marker})`]));
+  expect(result.permissions.allow).toEqual(expect.arrayContaining(["Read(./work/**)", `Read(/${portablePath(f.marker)})`]));
   expect(result.permissions.deny).toEqual(["Read(./private/**)"]);
 });

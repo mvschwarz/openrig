@@ -15,11 +15,11 @@ const WINDOWS = [
 ] as const;
 const PANES = [["%1", 4242, "node"], ["%2", 5151, "zsh"], ["%3", 0, ""], ["%4", 7777, "codex"]] as const;
 const unquote = (t: string) => t.replace(/^'(.*)'$/, "$1");
-function fakeExec() {
+function fakeExec(newline = "\n") {
   const calls: string[] = [];
   const exec = vi.fn(async (cmd: string) => {
     calls.push(cmd);
-    if (cmd.startsWith("tmux list-windows -a")) return WINDOWS.map(([s, a, t]) => `${a}|${t}|${s}`).join("\n") + "\n";
+    if (cmd.startsWith("tmux list-windows -a")) return WINDOWS.map(([s, a, t]) => `${a}|${t}|${s}`).join(newline) + newline;
     if (cmd.startsWith("tmux list-panes -a")) return PANES.map(([p, pid, c]) => `${p}|${pid}|0|${c}`).join("\n") + "\n";
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
@@ -83,6 +83,14 @@ const SEATS: Array<[string, string, string, string?]> = [["n1", "s1@rig", "%1"],
 const NOW = () => new Date(1790000102 * 1000);
 
 describe("batched tmux reads: the separator inside a session name or a command", () => {
+  it("preserves CRLF session keys without trimming meaningful name characters",async()=>{
+    const name="odd|name@rig ";
+    const tmux=new TmuxAdapter((async(cmd:string)=>cmd.includes("#{window_width}")
+      ? `1|1790000100|80x24:%1:42:80x24:0:0:0,0|${name}\r\n`
+      : `1|1790000100|${name}\r\n`) as never);
+    expect(await tmux.readAllSessionWindowActivity()).toEqual(new Map([[name,1790000100]]));
+    expect(await tmux.readAllSessionWindows()).toEqual(new Map([[name,{activity:1790000100,size:"80x24:%1:42:80x24:0:0:0,0"}]]));
+  });
   it("keeps a session name and a pane command that contain the field separator intact", async () => {
     const exec = vi.fn(async (cmd: string) => {
       if (cmd.startsWith("tmux list-windows -a")) return "1|1790000100|odd|name@rig\n0|1790000200|odd|name@rig\n";
@@ -96,9 +104,9 @@ describe("batched tmux reads: the separator inside a session name or a command",
 });
 
 describe("SeatActivityService sweep with the batch", () => {
-  async function sweep(batched: boolean) {
+  async function sweep(batched: boolean, newline = "\n") {
     const db = createFullTestDb(); seed(db, SEATS);
-    const { exec, calls } = fakeExec(); const real = new TmuxAdapter(exec as never);
+    const { exec, calls } = fakeExec(newline); const real = new TmuxAdapter(exec as never);
     const tmux = batched
       ? { readPaneLastActivity: (p: string) => real.readPaneLastActivity(p), readAllSessionWindowActivity: () => real.readAllSessionWindowActivity() }
       : { readPaneLastActivity: (p: string) => real.readPaneLastActivity(p) };
@@ -109,8 +117,8 @@ describe("SeatActivityService sweep with the batch", () => {
     return { out, calls };
   }
 
-  it("same observations as the per-seat path, in one tmux call, and no per-target query for a seat the batch lacks", async () => {
-    const per = await sweep(false), bat = await sweep(true);
+  it.each(["\n","\r\n"])("same activity observations as per-seat reads with %j line endings, in one call", async newline => {
+    const per = await sweep(false,newline), bat = await sweep(true,newline);
     expect(bat.out).toEqual(per.out);
     expect(per.calls).toHaveLength(5);                                   // one display-message per seat before
     expect(bat.calls.filter((c) => c.startsWith("tmux list-windows -a"))).toHaveLength(1);

@@ -1,3 +1,5 @@
+import { captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
+import { listNamedSessionPanes, listNamedSessionWindows } from "../adapters/session-pane-lookup.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "./pi-account-state.js";
 import { piSeatPaths } from "../adapters/pi-runner-protocol.js";
@@ -40,6 +42,8 @@ import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./cla
 import { retireSeatCoreSkillCopies } from "./seat-skill-storage.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
+import { NativeRuntimeSwitchJournal, executeNativeRuntimeExchange } from "./native-runtime-switch-journal.js";
+import type { NativeExchangeIdentity } from "./native-runtime-switch-exchange.js";
 import { inspectStartupStagedText, settleOwnStartupPaste, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox } from "./startup-submission-evidence.js";
 
 /**
@@ -299,7 +303,7 @@ export class SeatRuntimeSwitchService {
     if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
       unsupported === NO_PANE ? NO_PANE_GUIDANCE : undefined);
     try {
-      const [panes, windows] = await Promise.all([tmux.listPanes(sessionName!), tmux.listWindows(sessionName!)]);
+      const [panes, windows] = await Promise.all([listNamedSessionPanes(tmux, sessionName!), listNamedSessionWindows(tmux, sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
         return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: only a single-window, single-pane seat can, and its session has ${windows.length} window(s) and ${panes.length} pane(s).`);
       }
@@ -538,21 +542,43 @@ export class SeatRuntimeSwitchService {
     }
 
     // 4. The exchange, then the commit. A pane exchange the commit doesn't follow is undone (by the same exchange).
-    const swapped = await tmux.swapRuntimeSwitchPanes({ nodeId: node.id, stagingSession: row.staging_session, canonicalSession: sessionName,
-      canonicalPane: ctx.predecessorPane, stagedPane: successorPane! });
-    if (!swapped.ok) return abandon(`The panes couldn't be exchanged: ${swapped.message}.`);
+    const nativeIdentity:NativeExchangeIdentity|undefined=tmux.usesNativeRuntimeExchange?.()?{
+      canonical:sessionName,staging:row.staging_session,parking:`openrig-parking-${id.toLowerCase()}`,
+      predecessorGeneration:ctx.predecessorGeneration,successorGeneration,
+    }:undefined;
+    const nativePending=(message:string):RuntimeSwitchRefusal=>{
+      db.prepare("UPDATE seat_runtime_switches SET attention=?,updated_at=? WHERE id=?").run(message,stamp(),id);
+      return {...failed(message,`Recover with rig seat set-runtime ${ctx.seatRef} --recover.`),switchId:id,recoveryPending:true};
+    };
+    if(nativeIdentity){
+      const exchanged=await executeNativeRuntimeExchange(new NativeRuntimeSwitchJournal(db,id,node.id),tmux.nativeRuntimeExchangeTerminal(node.id,nativeIdentity),nativeIdentity,"forward");
+      if(!exchanged.ok)return nativePending(`The native exchange needs recovery: ${exchanged.message}`);
+      const canonical=await listNamedSessionPanes(tmux, sessionName);
+      if(canonical.length!==1)return nativePending("The native successor pane couldn't be established after exchange.");
+      successorPane=canonical[0]!.id;
+    }else{
+      const swapped=await tmux.swapRuntimeSwitchPanes({nodeId:node.id,stagingSession:row.staging_session,canonicalSession:sessionName,canonicalPane:ctx.predecessorPane,stagedPane:successorPane!});
+      if(!swapped.ok)return abandon(`The panes couldn't be exchanged: ${swapped.message}.`);
+    }
     let committed: { event: PersistedEvent; notifications: PersistedEvent[]; claimsMoved: number; afterCommit: Array<() => void> };
     try {
       committed = this.commit({ ...ctx, id, successorGeneration, successorPane: successorPane!, appliedLaunch: launch.appliedLaunch,
         launchResume: launch.resumeToken ? { type: launch.resumeType, token: launch.resumeToken } : null });
     } catch (error) {
-      const back = await tmux.swapRuntimeSwitchPanes({ nodeId: node.id, stagingSession: row.staging_session, canonicalSession: sessionName,
-        canonicalPane: successorPane!, stagedPane: ctx.predecessorPane });
+      const back = nativeIdentity
+        ? await executeNativeRuntimeExchange(new NativeRuntimeSwitchJournal(db,id,node.id),tmux.nativeRuntimeExchangeTerminal(node.id,nativeIdentity),nativeIdentity,"rollback")
+        : await tmux.swapRuntimeSwitchPanes({nodeId:node.id,stagingSession:row.staging_session,canonicalSession:sessionName,canonicalPane:successorPane!,stagedPane:ctx.predecessorPane});
       if (!back.ok) {
         db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?")
           .run(`The commit failed (${(error as Error).message}) and the panes couldn't be exchanged back: ${back.message}`, stamp(), id);
         return { ...failed(`The commit failed (${(error as Error).message}), and the panes couldn't be put back (${back.message}).`,
           `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true };
+      }
+      if(nativeIdentity){
+        const staged=await listNamedSessionPanes(tmux, row.staging_session);
+        if(staged.length!==1)return nativePending("The restored staging pane couldn't be established after native rollback.");
+        const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId:node.id,stagingSession:row.staging_session,pane:staged[0]!.id,generations:[successorGeneration]});
+        if(!adopted.ok)return nativePending(`Native rollback staging custody needs recovery: ${adopted.message}`);
       }
       return abandon(`The commit failed: ${(error as Error).message}.`);
     }
@@ -593,6 +619,7 @@ export class SeatRuntimeSwitchService {
         throw new Error("the seat's binding, occupant or runtime changed during the switch");
       }
       const at = this.now().toISOString();
+      db.prepare("UPDATE seat_runtime_switches SET successor_pane=? WHERE id=?").run(ctx.successorPane,ctx.id);
       const spec = materials.resolvedSpec;
       db.prepare(`UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = ?, advisor = ?, codex_config_profile = ?,
         ${spec ? "resolved_spec_name = ?, resolved_spec_version = ?, resolved_spec_hash = ?, restore_policy = ?," : ""}
@@ -650,7 +677,7 @@ export class SeatRuntimeSwitchService {
 
   /** The successor's composer, as startup reads it; null when it can't be read. */
   private async readComposer(session: string): Promise<string | null> {
-    try { return await this.deps.tmuxAdapter.capturePaneContent(session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
+    try { return await captureNamedSessionContent(this.deps.tmuxAdapter, session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
   }
 
   /** Startup's check after its Enter: tmux accepting Enter doesn't prove Claude submitted a large paste. While the
@@ -675,6 +702,20 @@ export class SeatRuntimeSwitchService {
   private async finishCommitted(row: Pick<SwitchRow, "id" | "node_id" | "canonical_session" | "staging_session" | "to_runtime" | "from_runtime" | "successor_generation">): Promise<{ ok: true } | { ok: false; message: string }> {
     const { db, tmuxAdapter: tmux } = this.deps;
     const problems: string[] = [];
+    const nativePending=(message:string)=>{
+      db.prepare("UPDATE seat_runtime_switches SET attention=?,updated_at=? WHERE id=?").run(message,this.now().toISOString(),row.id);
+      return {ok:false as const,message};
+    };
+    const native=new NativeRuntimeSwitchJournal(db,row.id,row.node_id).read();
+    if(native){
+      const followed=await tmux.followNativeRuntimeExchangeClients(row.node_id,native.identity);
+      if(!followed.ok)return nativePending(`native client following needs recovery (${followed.message}); predecessor retained`);
+      const panes=await listNamedSessionPanes(tmux, row.staging_session);
+      if(panes.length){
+        const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId:row.node_id,stagingSession:row.staging_session,pane:panes[0]!.id,generations:[native.identity.predecessorGeneration]});
+        if(!adopted.ok)return nativePending(`native predecessor custody needs recovery (${adopted.message})`);
+      }
+    }
     const retired = await this.retireStaging(row.staging_session, row.node_id, "Predecessor");
     if (!retired.ok) problems.push(`the ${row.from_runtime} predecessor couldn't be retired (${retired.message})`);
     const env = await tmux.setRuntimeSwitchEnvironment(row.canonical_session, row.to_runtime, row.successor_generation);
@@ -733,16 +774,54 @@ export class SeatRuntimeSwitchService {
       db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?").run(message, at(), row.id);
       return { ok: false as const, code: "runtime_switch_pending", message, switchId: row.id };
     };
+    const native=new NativeRuntimeSwitchJournal(db,row.id,nodeId).read();
+    if(native){
+      if(!tmux.usesNativeRuntimeExchange?.())return stuck("The recorded native exchange backend is unavailable; neither server was touched.");
+      const backend=tmux.nativeRuntimeExchangeTerminal(nodeId,native.identity);
+      const slots=await backend.observe();
+      const stableCanonical=slots.canonical.state==="present" && slots.parking.state==="absent";
+      const predecessorIdentified=slots.staging.state==="present" && slots.staging.generation===row.predecessor_generation
+        || slots.staging.state==="unknown" && await tmux.getSessionEnv(row.staging_session,"OPENRIG_NODE_ID").catch(()=>undefined)===nodeId
+          && await tmux.getSessionEnv(row.staging_session,"OPENRIG_OCCUPANT_GENERATION").catch(()=>undefined)===row.predecessor_generation;
+      const alreadyCommitted=!!row.committed_at && stableCanonical && slots.canonical.state==="present"
+        && slots.canonical.generation===row.successor_generation && (slots.staging.state==="absent" || predecessorIdentified);
+      const alreadyRolledBack=!row.committed_at && stableCanonical && slots.canonical.state==="present"
+        && slots.canonical.generation===row.predecessor_generation && slots.staging.state==="absent";
+      if(!alreadyCommitted && !alreadyRolledBack){
+        const exchanged=await executeNativeRuntimeExchange(new NativeRuntimeSwitchJournal(db,row.id,nodeId),backend,native.identity,row.committed_at?"forward":"rollback");
+        if(!exchanged.ok)return stuck(`Native exchange recovery is pending: ${exchanged.message}`);
+      }
+      const canonical=await listNamedSessionPanes(tmux, row.canonical_session);
+      if(canonical.length!==1)return stuck("The native canonical pane couldn't be established after recovery.");
+      if(row.committed_at){
+        if(canonical[0]!.id!==row.successor_pane)return stuck("The native successor binding changed after commit; nothing was retired.");
+        const finished=await this.finishCommitted(row);
+        return finished.ok?{ok:true,outcome:`committed: finished; the seat runs ${row.to_runtime}`,switchId:row.id}:stuck(finished.message);
+      }
+      if(canonical[0]!.id!==row.predecessor_pane)return stuck("The native predecessor binding changed after rollback; nothing was retired.");
+      if(!alreadyRolledBack){
+        const staged=await listNamedSessionPanes(tmux, row.staging_session);
+        if(staged.length!==1)return stuck("The native uncommitted successor pane couldn't be established.");
+        const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId,stagingSession:row.staging_session,pane:staged[0]!.id,generations:[row.successor_generation]});
+        if(!adopted.ok)return stuck(`Native staging custody couldn't be restored: ${adopted.message}`);
+        const retired=await this.retireStaging(row.staging_session,nodeId,"Uncommitted successor");
+        if(!retired.ok)return stuck(`The native uncommitted successor couldn't be retired: ${retired.message}`);
+      }
+      tmux.finishLaunchBinding(row.staging_session);
+      const outcome=`interrupted before commit: native exchange rolled back; the ${row.from_runtime} occupant holds the seat`;
+      db.prepare("UPDATE seat_runtime_switches SET phase='abandoned',outcome=?,attention=NULL,updated_at=? WHERE id=?").run(outcome,at(),row.id);
+      return {ok:true,outcome,switchId:row.id};
+    }
     let canonicalPane: string | null = null;
     try {
-      const panes = await tmux.listPanes(row.canonical_session);
+      const panes = await listNamedSessionPanes(tmux, row.canonical_session);
       canonicalPane = panes.length === 1 ? panes[0]!.id : null;
     } catch { /* absent or unreadable: decided below */ }
     const staging = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
     if (staging.state === "unknown") return stuck("The staging session's presence couldn't be established; nothing was touched.");
     let stagingPane: string | null = null;
     if (staging.state === "present") {
-      const panes = await tmux.listPanes(row.staging_session).catch(() => []);
+      const panes = await listNamedSessionPanes(tmux, row.staging_session).catch(() => []);
       stagingPane = panes.length === 1 ? panes[0]!.id : null;
       const adopted = stagingPane ? await tmux.adoptRuntimeSwitchStaging({ nodeId, stagingSession: row.staging_session, pane: stagingPane, generations: [row.successor_generation] })
         : { ok: false as const, message: "it doesn't have exactly one pane" };

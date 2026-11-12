@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { execFile } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -69,7 +70,7 @@ exports:
       await next();
     });
     app.route("/api/packages", packagesRoutes);
-    server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+    server = await serveOwnedHonoFixture(app.fetch);
     if (!server.listening) await new Promise<void>(resolve => server.once("listening", resolve));
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });

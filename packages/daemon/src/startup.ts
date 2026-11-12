@@ -5,6 +5,7 @@ import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
 import { reportPreparationFailure, reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice.js";
+import { readPlatformEnv } from "./domain/platform-env.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -42,7 +43,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
-import { setDaemonTmuxControl, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { setDaemonTmuxAttachCommand, setDaemonTmuxControl, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand, execTmuxCommand } from "./adapters/tmux-exec.js";
@@ -316,6 +317,7 @@ export function collectAllowlistedProviderAuthEnv(
   raw: string | null | undefined,
   env: Record<string, string | undefined>,
   runtime?: "omp",
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   const admitOmp = runtime === "omp";
   const out: Record<string, string> = {};
@@ -324,7 +326,7 @@ export function collectAllowlistedProviderAuthEnv(
     if (!name) continue;
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
     if (!KNOWN_PROVIDER_AUTH_ENV.has(name) && !(admitOmp && Object.hasOwn(OMP_PROVIDER_AUTH_ENV, name))) continue;
-    const value = env[name];
+    const value = readPlatformEnv(env, name, platform);
     if (typeof value === "string" && value.length > 0) {
       out[name] = value;
     }
@@ -568,7 +570,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const argvExec = controlExec ?? spawnedArgvExec;
   // What `rig doctor` reads of it (GET /api/adapters/tmux/control): asked for, and what the server allows.
   setDaemonTmuxControl({ requested: process.env.OPENRIG_TMUX_CONTROL === "1", ...(controlExec ? { status: controlExec.status } : {}) });
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs, process.platform === "win32" && !opts?.tmuxExec ? "psmux" : "tmux");
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
@@ -698,6 +700,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const terminalBearerToken = opts && Object.prototype.hasOwnProperty.call(opts, "terminalBearerToken")
     ? opts.terminalBearerToken ?? null : terminalTokenEnv || null;
   const launchSessionEnv: Record<string, string | undefined> = {
+    ...(process.platform === "win32" ? Object.fromEntries(["SystemRoot", "WINDIR", "ComSpec", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"].map(key => [key, process.env[key]])) : {}),
     PATH: process.env.PATH,
     OPENRIG_HOME,
     OPENRIG_DB: seatDbPath,
@@ -749,6 +752,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
   const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
+    process.platform === "win32" ? "win32" : "posix",
     (nodeId, runtime, ignoreAccountHome) => runtime === "pi"
       ? effectiveRuntimeHome(db, nodeId, "pi", undefined, ignoreAccountHome)
       : ignoreAccountHome
@@ -823,7 +827,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
   const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
   const { ServiceOrchestrator } = await import("./domain/service-orchestrator.js");
-  const composeAdapter = new ComposeServicesAdapter(opts?.tmuxExec ?? execCommand);
+  const composeAdapter = new ComposeServicesAdapter(opts?.tmuxExec ?? execCommand,
+    process.platform === "win32" && !opts?.tmuxExec ? execArgvCommand : undefined);
   const serviceOrchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter });
 
   // Filled after the pod-aware instantiator is constructed below. Keeping this
@@ -950,6 +955,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // before it listens (fresh DB), so a hung binary must not hold it. An injected test exec keeps probing as given.
   const runtimeVerifier = new RuntimeVerifier({ exec, db, ...(opts?.tmuxExec ? {} : { probeExec: boundedProbeExec() }) });
   const probeRegistry = new RequirementsProbeRegistry(exec);
+  if (process.platform === "win32" && !opts?.tmuxExec && !opts?.argvExec) {
+    try {
+      const detected = (await probeRegistry.probeCli("tmux")).detectedPath;
+      if (detected && nodePath.win32.isAbsolute(detected)) setDaemonTmuxAttachCommand([detected]);
+    } catch { /* unavailable discovery retains the normal executable lookup */ }
+  }
   const externalInstallPlanner = new ExternalInstallPlanner();
   const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
   const packageInstallService = new PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });
@@ -1012,15 +1023,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return { enabled, codexVersion: (await runtimeVerifier.verifyCodex()).version ?? undefined };
     } catch { return { enabled }; /* codex not available — skip feature flag */ }
   } });
+  // Readiness and model readers share one bounded census, not one OS spawn per seat.
+  const { ProcessCensus: ModelProcessCensus } = await import("./domain/process-census.js");
+  const modelCensus = new ModelProcessCensus();
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
+  const piAdapter = new PiRuntimeAdapter({ listProcesses: () => modelCensus.list(), managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
   const stubRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/stub-runner.js");
-  const stubAdapter = new StubRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, runnerEntryPath: stubRunnerEntryPath });
+  const stubAdapter = new StubRuntimeAdapter({ listProcesses: () => modelCensus.list(), managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, runnerEntryPath: stubRunnerEntryPath });
 
   // plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag
   // codex_hooks = true is set in ~/.codex/config.toml so plugin-shipped
@@ -1360,9 +1374,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // Shared, read-only current-occupant record path: reporting does not depend on a pin or transport.
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
-  const { ProcessCensus: ModelProcessCensus } = await import("./domain/process-census.js");
   const { CodexThreadIdResolver: ModelThreadResolver } = await import("./domain/codex-thread-id.js");
-  const modelCensus = new ModelProcessCensus();
   const modelThreads = new ModelThreadResolver({ defaultHome: daemonHome, codexHome: configuredCodexHome });
   // A seat with its own CODEX_HOME logs its threads there. The read is gated by the process's identity, so after the
   // daemon's home each declared seat home is tried.
@@ -1375,7 +1387,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const currentModelReader = new CurrentModelReader({
     sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore,
     census: modelCensus,
-    readAllPaneProcesses: () => tmuxAdapter.readAllPaneProcesses(),
+    readAllPaneProcesses: tmuxAdapter.supportsPaneProcessBatch ? () => tmuxAdapter.readAllPaneProcesses() : undefined,
     native: {
       getPanePid: async (target) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(target) : null,
       listProcesses: () => modelCensus.list(),

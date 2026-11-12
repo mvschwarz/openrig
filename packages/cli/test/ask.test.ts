@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -5,6 +6,7 @@ import { askCommand } from "../src/commands/ask.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -129,8 +131,9 @@ describe("Ask CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(server, {}).then(resolve, rejectOwnedListen); });
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => { server.close(); });

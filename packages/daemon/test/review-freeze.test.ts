@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { realpathSync, writeFileSync } from "node:fs";
+import { realpathSync as fsRealpathSync, writeFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -19,9 +19,30 @@ import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { ReviewGatherer } from "../src/domain/review/gather.js";
 import { FileWriteService } from "../src/domain/files/file-write-service.js";
 import { reviewRoutes } from "../src/routes/review.js";
+import { resolveAllowlisted } from "../src/domain/review/freeze.js";
 import { makeFixtureWorkspace, writeFixtureSlice, writeFullGateSet, type FixtureWorkspace } from "./review-fixtures.js";
 
 const NOW = "2026-07-04T12:00:00.000Z";
+const realpathSync = process.platform === "win32" ? fsRealpathSync.native : fsRealpathSync;
+
+it("maps filesystem-root allowlists without doubling their terminal separator", () => {
+  const ws = makeFixtureWorkspace();
+  try {
+    const root = realpathSync(path.parse(ws.root).root);
+    expect(resolveAllowlisted([{ name: "filesystem", canonicalPath: root }], ws.root))
+      .toEqual({ root: "filesystem", rel: path.relative(root, realpathSync(ws.root)) });
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
+
+it.runIf(process.platform === "win32")("maps a native case alias to its canonical allowlist without accepting a sibling", () => {
+  const ws = makeFixtureWorkspace();
+  try {
+    const root = realpathSync(ws.root);
+    expect(resolveAllowlisted([{ name: "workspace", canonicalPath: root }], ws.root.toUpperCase()))
+      .toEqual({ root: "workspace", rel: "" });
+    expect(resolveAllowlisted([{ name: "workspace", canonicalPath: root }], path.dirname(root))).toBeNull();
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
 
 describe("POST /api/review/freeze", () => {
   let ws: FixtureWorkspace;
@@ -266,6 +287,31 @@ describe("POST /api/review/freeze", () => {
     expect(html).not.toContain(secret.toString("base64").slice(0, 24)); // never inlined
     expect((html.match(/media outside slice dir/g) ?? []).length).toBe(3); // visible, per ref
     expect(html).not.toContain('href="../../outside-secret.mp4"'); // no escaping link either
+  });
+
+  it("refuses native non-relative media even when an absolute ref names a real image inside the slice", async () => {
+    const dir = approvedSlice("36-native-media");
+    const bytes = Buffer.from("owned native media witness");
+    const inside = path.join(dir, "inside.png");
+    writeFileSync(inside, bytes);
+    const refs = [inside, "C:inside.png", "\\\\host\\share\\inside.png", "..\\outside.png"];
+    writeFileSync(path.join(dir, "PROOF.md"), "# Proof\n\n" + refs.map(ref => `![ref](${ref})`).join("\n\n"));
+    const res = await freeze("36-native-media");
+    expect(res.status).toBe(200);
+    const html = fs.readFileSync((await res.json()).path, "utf8");
+    expect(html).not.toContain(bytes.toString("base64"));
+    expect((html.match(/media outside slice dir/g) ?? []).length).toBe(refs.length);
+  });
+
+  it.runIf(process.platform !== "win32")("keeps a real POSIX media filename containing a literal backslash", async () => {
+    const dir = approvedSlice("36-literal-media");
+    const bytes = Buffer.from("owned literal backslash image");
+    writeFileSync(path.join(dir, "plot\\baseline.png"), bytes);
+    writeFileSync(path.join(dir, "PROOF.md"), "# Proof\n\n![plot](plot\\baseline.png)\n");
+    const res = await freeze("36-literal-media");
+    expect(res.status).toBe(200);
+    const html = fs.readFileSync((await res.json()).path, "utf8");
+    expect(html).toContain("data:image/png;base64," + bytes.toString("base64"));
   });
 
   it("a symlink inside the slice pointing outside is refused (realpath containment)", async () => {

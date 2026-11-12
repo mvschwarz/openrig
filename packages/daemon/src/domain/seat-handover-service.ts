@@ -1,3 +1,4 @@
+import { captureNamedSessionScreen } from "../adapters/session-pane-lookup.js";
 import type { CodexPermissionEnvelope, CodexPermissionContinuity, CodexRebuildPermissions } from "./codex-rebuild-permissions.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
@@ -1206,7 +1207,7 @@ export class SeatHandoverService {
     try {
       // The predecessor's retained scrollback can still contain a Claude
       // composer. Only the visible screen is evidence about this successor.
-      pane = await this.tmuxAdapter.capturePaneScreen(session);
+      pane = await captureNamedSessionScreen(this.tmuxAdapter, session);
     } catch {
       return { state: "unverified", reason: "unobservable", settling: false };
     }

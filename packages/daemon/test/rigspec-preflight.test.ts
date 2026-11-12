@@ -191,14 +191,15 @@ describe("RigSpecPreflight", () => {
   });
 
   it("cwd points to a file -> error", async () => {
-    // /etc/hosts is a file, not a directory
-    const spec = validSpec({
-      nodes: [{ id: "worker", runtime: "claude-code", cwd: "/etc/hosts" }],
-    });
-    const pf = createPreflight();
-    const result = await pf.check(spec);
-    expect(result.ready).toBe(false);
-    expect(result.errors.some((e) => e.includes("/etc/hosts") && e.includes("directory"))).toBe(true);
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "preflight-file-cwd-"));
+    const file = nodePath.join(root, "not a directory");
+    try {
+      fs.writeFileSync(file, "owned fixture");
+      const spec = validSpec({ nodes: [{ id: "worker", runtime: "claude-code", cwd: file }] });
+      const result = await createPreflight().check(spec);
+      expect(result.ready).toBe(false);
+      expect(result.errors.some((e) => e.includes(file) && e.includes("directory"))).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it("cwd points to a directory -> passes cwd check", async () => {
@@ -301,9 +302,10 @@ import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RigSpec as PodRigSpec } from "../src/domain/types.js";
 
 function mockFs(files: Record<string, string>): AgentResolverFsOps {
+  const entries = new Map(Object.entries(files).map(([file, contents]) => [nodePath.resolve(file), contents]));
   return {
-    readFile: (p: string) => { if (p in files) return files[p]!; throw new Error(`Not found: ${p}`); },
-    exists: (p: string) => p in files,
+    readFile: (p: string) => { const contents = entries.get(nodePath.resolve(p)); if (contents !== undefined) return contents; throw new Error(`Not found: ${p}`); },
+    exists: (p: string) => entries.has(nodePath.resolve(p)),
   };
 }
 

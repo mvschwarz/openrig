@@ -9,9 +9,10 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, isAbsolute } from "node:path";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
@@ -45,11 +46,16 @@ interface AddSpecSource {
   yamlPath: string;
   installName: string;
   installKind: "file" | "directory";
-  libraryEntrySuffix: string;
 }
 
-function normalizePathForMatch(path: string): string {
-  return path.replaceAll("\\", "/");
+function isInstalledSpecSource(candidate: string, installed: string): boolean {
+  try {
+    if (typeof candidate !== "string" || !isAbsolute(candidate)) return false;
+    const realpath = process.platform === "win32" ? realpathSync.native : realpathSync;
+    // Canonical paths admit filesystem aliases without conflating distinct
+    // hardlink locations or same-name entries in another library root.
+    return realpath(candidate) === realpath(installed);
+  } catch { return false; }
 }
 
 function requireRegularFile(path: string, label: string): void {
@@ -94,7 +100,6 @@ function resolveAddSpecSource(inputPath: string): AddSpecSource {
       yamlPath: inputPath,
       installName: basename(inputPath),
       installKind: "file",
-      libraryEntrySuffix: basename(inputPath),
     };
   }
 
@@ -116,7 +121,6 @@ function resolveAddSpecSource(inputPath: string): AddSpecSource {
     yamlPath: rootSpec,
     installName,
     installKind: "directory",
-    libraryEntrySuffix: normalizePathForMatch(join(installName, basename(rootSpec))),
   };
 }
 
@@ -376,10 +380,9 @@ Examples:
         const syncRes = await client.post<LibraryEntry[]>("/api/specs/library/sync");
         const entries = syncRes.data ?? [];
         const name = (res.data as Record<string, unknown>)["name"] as string ?? source.installName;
-        const newEntry = entries.find((e) => (
-          e.name === name &&
-          normalizePathForMatch(e.sourcePath).endsWith(source.libraryEntrySuffix)
-        ));
+        const installedYaml = source.installKind === "directory" ? join(dest, basename(source.yamlPath)) : dest;
+        const matches = entries.filter((e) => e.name === name && e.kind === kind && isInstalledSpecSource(e.sourcePath, installedYaml));
+        const newEntry = matches.length === 1 ? matches[0] : undefined;
 
         if (opts.json) {
           console.log(JSON.stringify({ name, kind, path: dest, id: newEntry?.id ?? null, entry: newEntry ?? null }));

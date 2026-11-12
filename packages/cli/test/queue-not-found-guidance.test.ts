@@ -65,9 +65,14 @@ for (const json of [false, true]) {
       const body = JSON.parse(output.join("\n"));
       expect(body.error).toBe("qitem_not_found");
       expect(body.message).toBe("original detail");
-      expect(body.hint).toBe(`Queue item "${id}" was not found on daemon "selected-host".\n`
-        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(id)} --full --json\n`
-        + `Or name that host: rig queue show ${shellQuote(id)} --host <host-id> --full --json`);
+      const prefix = `Queue item "${id}" was not found on daemon "selected-host".\n`
+        + "If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: ";
+      if (process.platform === "win32") {
+        expect(body.hint).toContain(prefix);
+        expect(body.hint).toContain(`$env:OPENRIG_URL = '<daemon-url>'; rig queue show '${id}' --full --json`);
+        expect(body.hint).toContain("finally { [Environment]::SetEnvironmentVariable");
+      } else expect(body.hint).toContain(prefix + `OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(id)} --full --json`);
+      expect(body.hint).toContain(`Or name that host: rig queue show ${shellQuote(id)} --host <host-id> --full --json`);
       expect(calls).toHaveLength(2);
       expect(calls[1]).toEqual({ path: "/healthz", options: { timeoutMs: 1_000 } });
       expect(calls.some(c => c.path.includes("/hosts"))).toBe(false);
@@ -104,7 +109,8 @@ it("quotes the supplied ID without guessing a host or suggesting a write replay"
   const { deps, calls } = setup();
   await queueCommand(deps).parseAsync(["node", "rig", "update", supplied, "--note", "keep", "--json"]);
   const body = JSON.parse(output.join("\n"));
-  expect(body.hint).toContain(`rig queue show ${shellQuote(supplied)} --full --json`);
+  const quoted = process.platform === "win32" ? "'remote'' item'" : shellQuote(supplied);
+  expect(body.hint).toContain(`rig queue show ${quoted} --full --json`);
   expect(body.hint).not.toContain("queue update");
   expect(calls[0]?.path).toBe(`/api/queue/${encodeURIComponent(supplied)}/update`);
   expect(process.exitCode).toBe(1);

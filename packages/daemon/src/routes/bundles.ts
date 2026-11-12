@@ -493,13 +493,14 @@ interface AuthorBundleCrossPrimitives {
 }
 
 function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBundleCrossPrimitives {
+  const canonicalPath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
   const authorBundlePath = nodePath.join(sourceRoot, "bundle.yaml");
   if (!fs.existsSync(authorBundlePath)) return {};
   // Canonicalize sourceRoot before vendoring (banked 79a89d40 B1 guard
   // catch: lexical containment + dereference allows symlinks under
   // sourceRoot to escape). realpath the root once; every declared path's
   // realpath must stay within this boundary.
-  const sourceRootReal = fs.realpathSync(sourceRoot);
+  const sourceRootReal = canonicalPath(sourceRoot);
   const stagingResolved = nodePath.resolve(staging);
 
   /** Realpath-contain check: the actual file/dir behind `absPath` (after
@@ -509,7 +510,7 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
   const assertSourceRealContained = (absPath: string, kindLabel: string, declared: string): string => {
     let realPath: string;
     try {
-      realPath = fs.realpathSync(absPath);
+      realPath = canonicalPath(absPath);
     } catch (err) {
       throw new Error(`author bundle ${kindLabel} '${declared}' does not exist in source: ${(err as Error).message}`);
     }
@@ -540,7 +541,7 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
           // Realpath the symlink target; reject if escapes sourceRootReal
           let entryReal: string;
           try {
-            entryReal = fs.realpathSync(entryAbs);
+            entryReal = canonicalPath(entryAbs);
           } catch (err) {
             throw new Error(`author bundle ${kindLabel} '${declared}' has unreadable symlink at '${nodePath.relative(sourceRootReal, entryAbs)}': ${(err as Error).message}`);
           }
@@ -612,7 +613,7 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
         const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) collectSources(child, relativePath);
         else if (entry.isSymbolicLink() && fs.statSync(child).isDirectory()) {
-          collectSources(fs.realpathSync(child), relativePath);
+          collectSources(canonicalPath(child), relativePath);
         } else if (entry.isFile() || entry.isSymbolicLink()) {
           sources.push({ path: nodePath.join(declared, relativePath), bytes: fs.readFileSync(child) });
         }

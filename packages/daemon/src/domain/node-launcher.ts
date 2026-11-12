@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -380,15 +381,20 @@ export class NodeLauncher {
   private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
     Promise<{ ok: true; warnings?: string[] } | { ok: false; code: string; message: string }> {
     let panes: Array<{ id: string }> = [];
-    try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
+    try { panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
+    let shell: string | null = null;
+    if (this.tmuxAdapter.isNativeWindows) {
+      shell = await this.tmuxAdapter.getDefaultShell();
+      if (!shell) return { ok: false, code: "default_shell_unavailable", message: "The Windows default shell could not be read, so nothing was stopped. Check the psmux default-shell option and retry." };
+    }
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
-    const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    shell ??= (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };

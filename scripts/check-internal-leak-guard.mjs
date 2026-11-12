@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   buildInternalLeakMessage,
   scanInternalLeaks,
@@ -87,7 +87,8 @@ function selectFiles(options) {
     if (options.filesManifest) {
       return readFilesManifest(options.filesManifest).map((path) => {
         const absolutePath = resolve(options.tree, path);
-        if (absolutePath !== options.tree && !absolutePath.startsWith(`${options.tree}/`)) {
+        const withinTree = relative(options.tree, absolutePath);
+        if (withinTree === ".." || withinTree.startsWith(`..${sep}`) || isAbsolute(withinTree)) {
           throw new Error(`Artifact path escapes scan tree: ${path}`);
         }
         if (!existsSync(absolutePath)) throw new Error(`Artifact file not found under scan tree: ${path}`);
@@ -201,7 +202,9 @@ function splitNul(bytes) {
     .sort();
 }
 
-if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { /* imported without an existing entry file */ }
+if (invokedDirectly) {
   try {
     process.exitCode = main();
   } catch (error) {

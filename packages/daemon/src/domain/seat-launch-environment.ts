@@ -1,10 +1,47 @@
+import { readNamedSessionCommand } from "../adapters/session-pane-lookup.js";
 import { ACCOUNT_HOME_PROVIDER_ENV, PI_ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_VAR, type HomeRuntime } from "./seat-runtime-home.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
-import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
+import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch, renderWindowsArgvForwarder } from "../adapters/windows-launch.js";
+import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
+import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { readPlatformEnv } from "./platform-env.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { windowsCommunityCommand } from "./windows-community-command.js";
+
+// Only the literal /usr/bin/env prefixes emitted by the community adapter.
+// Interpret their data as child environment fields, never as a Windows program.
+const COMMUNITY_LAUNCH_ENV = new Set([
+  "OPENRIG_FIRST_INPUT", "OPENRIG_MODEL", "OPENRIG_LAUNCH_RESULT",
+  "OPENRIG_LAUNCH_ATTEMPT", "OPENRIG_RESUME_REF", "OPENRIG_CONVERSATION",
+  "OPENRIG_LAUNCH_WRAPPER",
+]);
+function nativeCommunityCommand(command: string, env: Record<string, string>): { command: string; remove: string[] } {
+  const words = parseLiteralLaunchWords(command);
+  const remove = new Set<string>();
+  while (words.at(0) === "/usr/bin/env") {
+    words.shift();
+    while (words.length) {
+      if (words[0] === "-u") {
+        words.shift();
+        const key = words.shift();
+        if (!key || !COMMUNITY_LAUNCH_ENV.has(key)) throw new Error("Unsupported community launch environment removal");
+        delete env[key]; remove.add(key);
+        continue;
+      }
+      const equals = words[0]!.indexOf("=");
+      if (equals < 1) break;
+      const assignment = words.shift()!, key = assignment.slice(0, equals);
+      if (!COMMUNITY_LAUNCH_ENV.has(key)) throw new Error("Unsupported community launch environment assignment");
+      env[key] = assignment.slice(equals + 1); remove.delete(key);
+    }
+  }
+  return { command: words.map(shellQuote).join(" "), remove: [...remove] };
+}
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -15,9 +52,12 @@ export const SEAT_PUBLIC_ENV_KEYS = [
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
 ] as const;
 
-export function publicSeatEnvironment(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
+export function publicSeatEnvironment(env: Readonly<Record<string, string | undefined>>, platform: NodeJS.Platform = process.platform): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const key of SEAT_PUBLIC_ENV_KEYS) if (env[key] !== undefined) result[key] = env[key]!;
+  for (const key of SEAT_PUBLIC_ENV_KEYS) {
+    const value = readPlatformEnv(env, key, platform);
+    if (value !== undefined) result[key] = value;
+  }
   if (result.OPENRIG_URL) {
     try {
       const url = new URL(result.OPENRIG_URL);
@@ -51,8 +91,12 @@ function pairedCli(): string {
  * Child tools still inherit the pane PATH. Unrecognised env shebang syntax
  * falls back to the old literal-PATH command instead of guessing its meaning.
  */
-function codexEntry(searchPath: string, cwd: string): string {
-  const executable = launchExecutable("codex", searchPath, cwd);
+function codexEntry(searchPath: string, cwd: string, windows = false, env: Readonly<Record<string, string | undefined>> = {}): string {
+  if (windows) {
+    const selected = resolveWindowsProviderCommand("codex", { ...env, PATH: searchPath }, cwd);
+    return [selected.command, ...selected.prefix].map(shellQuote).join(" ");
+  }
+  const executable = launchExecutable("codex", searchPath, cwd, windows);
   const fd = openSync(executable, "r");
   let firstLine: string;
   try {
@@ -67,19 +111,28 @@ function codexEntry(searchPath: string, cwd: string): string {
 }
 
 /** Resolve exactly on the daemon launch PATH, without consulting the pane rc. */
-export function launchExecutable(name: string, searchPath: string, cwd: string): string {
+export function launchExecutable(name: string, searchPath: string, cwd: string, windows = false): string {
   for (const entry of searchPath.split(path.delimiter)) {
-    const file = path.resolve(cwd, entry, name);
-    try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch { /* next entry */ }
+    for (const suffix of windows ? [".exe", ".cmd", ".bat", ""] : [""]) {
+      const file = path.resolve(cwd, entry, name + suffix);
+      try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch { /* next entry */ }
+    }
   }
   throw new Error(`Seat launch requires ${name} on the daemon launch PATH.`);
 }
 
 /** Resolve and validate a `launch_wrapper` argv against the daemon launch PATH and daemon cwd. */
-export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath: string, cwd: string): string[] {
+export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath: string, cwd: string, platform: NodeJS.Platform = process.platform): string[] {
   if (!searchPath) throw new Error("Seat launch requires a daemon launch PATH.");
   const validated = validateLaunchWrapper([...wrapper]);
   if (validated.length === 0) throw new Error("launch_wrapper: must not be an empty array");
+  if (platform === "win32") {
+    const selected = windowsCommunityCommand(validated, searchPath, readPlatformEnv(process.env, "PATHEXT"), cwd);
+    if (!selected[0] || !path.win32.isAbsolute(selected[0]) || !/\.(exe|com)$/i.test(selected[0]) || !statSync(selected[0]).isFile()) {
+      throw new Error("launch_wrapper requires a native executable or recognized Node npm entry.");
+    }
+    return selected;
+  }
   return [launchExecutable(validated[0]!, searchPath, cwd), ...validated.slice(1)];
 }
 
@@ -89,15 +142,22 @@ export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath:
  * is reasserted for Codex only; an unset selection retains the pane's defaults.
  */
 export class SeatLaunchEnvironment {
+  private readonly launchPlatform: "posix" | "win32";
+  private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined;
   constructor(private readonly tmux: TmuxAdapter,
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly daemonCwd: string,
     private readonly cliPath?: string,
     private readonly codexHome?: string,
-    private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {}
+    platformOrAccountHome: "posix" | "win32" | ((nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) = "posix",
+    selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {
+    this.launchPlatform = typeof platformOrAccountHome === "string" ? platformOrAccountHome : "posix";
+    this.selectedAccountHome = typeof platformOrAccountHome === "function" ? platformOrAccountHome : selectedAccountHome;
+  }
 
   resolveLaunchWrapper(wrapper: readonly string[]): string[] {
-    return resolveLaunchWrapperArgv(wrapper, this.sessionEnv.PATH ?? "", this.daemonCwd);
+    const platform = this.launchPlatform === "win32" ? "win32" : "linux";
+    return resolveLaunchWrapperArgv(wrapper, readPlatformEnv(this.sessionEnv, "PATH", platform) ?? "", this.daemonCwd, platform);
   }
 
   /** The persisted account selection, also used to decide whether a bare launch fallback is safe. */
@@ -108,11 +168,36 @@ export class SeatLaunchEnvironment {
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
     accessSync(cli, constants.X_OK);
-    if (!statSync(cli).isFile() || !this.sessionEnv.OPENRIG_HOME) throw new Error("Paired CLI or instance home unavailable");
+    const instanceHome = readPlatformEnv(this.sessionEnv, "OPENRIG_HOME", this.launchPlatform === "win32" ? "win32" : "linux");
+    if (!statSync(cli).isFile() || !instanceHome) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
-    const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
+    // New shim content gets a new directory; keep existing daemons' immutable
+    // aliases intact instead of refusing or overwriting their older scripts.
+    const identity = createHash("sha256").update(cli);
+    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v5");
+    const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", identity.digest("hex"));
     mkdirSync(bin, { recursive: true });
+    if (this.launchPlatform === "win32") {
+      // PowerShell, native cmd and Git Bash each need their own argument-preserving entry.
+      // Keep the batch entry ASCII: cmd decodes script literals using its code
+      // page. %~dp0 expands the Unicode sibling path without decoding it again.
+      if (/[\r\n"]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
+      const shims: Record<string, string> = {
+        // Windows PowerShell 5 needs a BOM to decode non-ASCII fixed paths.
+        "rig.ps1": `\uFEFF${renderWindowsArgvForwarder(process.execPath, [cli])}exit $LASTEXITCODE\n`,
+        "rig.cmd": `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0rig.ps1" %*\r\n`,
+        rig: `#!/bin/sh\nexec ${shellQuote(process.execPath.replace(/\\/g, "/"))} ${shellQuote(cli.replace(/\\/g, "/"))} "$@"\n`,
+      };
+      for (const [name, content] of Object.entries(shims)) {
+        const shim = path.join(bin, name);
+        try { writeFileSync(shim, content, { flag: "wx", mode: 0o700 }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+        if (readFileSync(shim, "utf8") !== content) throw new Error("Seat bin content differs from the paired CLI");
+      }
+      if (readdirSync(bin).some(name => !(name in shims))) throw new Error("Seat bin is not rig-only");
+      return bin;
+    }
     const link = path.join(bin, "rig");
     try { symlinkSync(cli, link); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -121,7 +206,7 @@ export class SeatLaunchEnvironment {
   }
 
   /** Build an identity-bound child command, scrubbing inherited credentials for a selected account home or refusing its launch. */
-  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
+  async command(session: string, command: string, target: { cwd?: string; codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
     /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
     codexHome?: string;
     accountHome?: string | null;
@@ -144,7 +229,8 @@ export class SeatLaunchEnvironment {
     const homeVar = RUNTIME_HOME_VAR[target.runtime as HomeRuntime];
     const clearStep = clearing && homeVar ? `unset ${homeVar}; ${configuredHome !== undefined ? `export ${homeVar}=${shellQuote(configuredHome)}; ` : ""}` : "";
     const codexHome = (target.runtime === "codex" ? accountHome : undefined) ?? target.codexHome ?? this.codexHome;
-    const searchPath = this.sessionEnv.PATH;
+    const platform = this.launchPlatform === "win32" ? "win32" : "linux";
+    const searchPath = readPlatformEnv(this.sessionEnv, "PATH", platform);
     const selectedPiHome = target.runtime === "pi" ? accountHome ?? configuredHome : undefined;
     const scrub = target.runtime === "pi" ? [...ACCOUNT_HOME_PROVIDER_ENV, ...PI_ACCOUNT_HOME_PROVIDER_ENV] : ACCOUNT_HOME_PROVIDER_ENV;
     const accountStep = clearStep + (accountHome || selectedPiHome ? `unset ${scrub.join(" ")}; ` : "");
@@ -155,15 +241,15 @@ export class SeatLaunchEnvironment {
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${program}` : program;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
-      const shell = path.basename(target.launchShell ?? await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
-      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing || wrapped || target.failClosed) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
+      const shell = path.basename(target.launchShell ?? await readNamedSessionCommand(this.tmux, session) ?? "").replace(/^-/, "");
+      if (shell === "nu" || shell === "nu.exe" || (this.launchPlatform !== "win32" && (accountHome || clearing || wrapped || target.failClosed) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
-      if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
+      if (this.launchPlatform !== "win32" && target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
         throw new Error("Unsupported Pi pane shell");
       }
       const identity: Record<string, string | undefined> = {};
       for (const key of ["OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION"]) {
-        identity[key] = await this.tmux.getSessionEnv(session, key);
+        identity[key] = (await this.tmux.getSessionEnv(session, key)) ?? undefined;
       }
       if (!identity.OPENRIG_NODE_ID || !identity.OPENRIG_SESSION_NAME) {
         throw new Error("Seat launch requires the session's OpenRig identity.");
@@ -179,7 +265,7 @@ export class SeatLaunchEnvironment {
       // interpreter selection while child tools retain the user's PATH.
       if (target.codexCwd !== undefined) {
         if (!searchPath || !command.startsWith("codex ")) throw new Error("Expected a Codex launch command and PATH.");
-        command = codexEntry(searchPath, target.codexCwd) + command.slice(5);
+        command = codexEntry(searchPath, target.codexCwd, this.launchPlatform === "win32", this.sessionEnv) + command.slice(5);
       }
       let prefix = "";
       if (wrapped) {
@@ -189,9 +275,42 @@ export class SeatLaunchEnvironment {
         prefix = this.resolveLaunchWrapper(wrapped).map((arg) => shellQuote(arg)).join(" ") + " ";
       }
       const binDir = this.rigBin();
-      const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
+      const env: Record<string, string> = { OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...publicSeatEnvironment(this.sessionEnv, platform), ...publicSeatEnvironment(identity, platform) };
       if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       if (accountHome && target.runtime === "claude-code") env.CLAUDE_CONFIG_DIR = accountHome;
+      if (target.runtime === "pi" && selectedPiHome) env.PI_CODING_AGENT_DIR = selectedPiHome;
+      if (this.launchPlatform === "win32") {
+        if (!searchPath) throw new Error("Launch PATH unavailable");
+        env.PATH = `${binDir}${path.delimiter}${searchPath}`;
+        const community = isCommunityHarnessRuntime(target.runtime) ? nativeCommunityCommand((target.launcherPrefix ?? "") + command, env) : undefined;
+        if (community) command = windowsCommunityCommand(parseLiteralLaunchWords(community.command), env.PATH,
+          readPlatformEnv(this.sessionEnv, "PATHEXT", "win32"), target.cwd).map(shellQuote).join(" ");
+        // Classic Claude emits only these command-scoped assignments. Decode
+        // their literal words, without exporting the resume marker to the pane.
+        if (target.runtime === "claude-code") {
+          const words = parseLiteralLaunchWords(command);
+          while (words[0] === "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1" || words[0]?.startsWith(`${CLAUDE_RESUME_LAUNCH_ENV}=`)) {
+            const assignment = words.shift()!;
+            const equals = assignment.indexOf("=");
+            env[assignment.slice(0, equals)] = assignment.slice(equals + 1);
+          }
+          // The classic builders pin an executable with POSIX `exec`. Native
+          // ProcessStartInfo already starts that executable directly; `exec`
+          // is not a Windows executable and must not become FileName.
+          if (words[0] === "exec") words.shift();
+          if (!words[0]) throw new Error("Pinned Claude launch executable unavailable");
+          command = words.map(shellQuote).join(" ");
+        }
+        if (clearing && homeVar && configuredHome !== undefined) env[homeVar] = configuredHome;
+        // Resolution above pins the selected runtime/interpreter. Its child tools
+        // retain the pane's post-startup PATH, as on POSIX; expose only paired rig.
+        delete env.PATH;
+        return renderWindowsLaunch(prefix + command, env, {
+          prependPath: binDir,
+          remove: [...(accountHome || selectedPiHome ? scrub : []), ...(clearing && homeVar ? [homeVar] : []), ...(community?.remove ?? [])],
+          ...(target.claudeTokenStep ? { beforeStart: target.claudeTokenStep } : {}),
+        });
+      }
       if (target.runtime === "pi") {
         if (selectedPiHome) env.PI_CODING_AGENT_DIR = selectedPiHome;
       }
@@ -233,6 +352,7 @@ export class SeatLaunchEnvironment {
       }
       return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${target.launcherPrefix ?? ""}${prefix}${command}`;
     } catch {
+      if (this.launchPlatform === "win32") throw new Error("Experimental Windows launch environment could not be prepared; no POSIX fallback was typed.");
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.
       console.warn(wrapped || target.failClosed ? "[seat launch] launch_wrapper unavailable; no agent started."

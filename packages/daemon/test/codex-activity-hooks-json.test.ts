@@ -2,19 +2,26 @@
 // one layer. The user's hooks stay where they are; only OpenRig's own groups are written, moved or removed.
 import { describe, it, expect, vi } from "vitest";
 import { parse as parseToml } from "smol-toml";
+import path from "node:path";
 import { CodexRuntimeAdapter, computeCodexHookTrust, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const RELAY = "/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
 const HOME = "/home/test/.codex";
-const CONFIG = `${HOME}/config.toml`;
-const HOOKS = `${HOME}/hooks.json`;
+const CONFIG = path.join(HOME, "config.toml");
+const HOOKS = path.join(HOME, "hooks.json");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 const LABEL = { SessionStart: "session_start", UserPromptSubmit: "user_prompt_submit", Stop: "stop", PermissionRequest: "permission_request" };
 const USER_GROUP = { matcher: "startup", hooks: [{ type: "command", command: "echo hello", timeout: 10 }] };
 
 function mockCodexFs(files?: Record<string, string>) {
-  const store: Record<string, string> = { ...files };
+  const canonical = (file: string) => file.replaceAll("\\", "/");
+  const store = new Proxy<Record<string, string>>({}, {
+    get: (target, key) => target[canonical(String(key))],
+    set: (target, key, value) => { target[canonical(String(key))] = value; return true; },
+    has: (target, key) => canonical(String(key)) in target,
+  });
+  Object.assign(store, files);
   const writes: string[] = [];
   const fs = {
     readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
@@ -140,7 +147,7 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     adapter(first.fs).ensureCodexActivityHooks();
     let config = first.store[CONFIG]!;
     // The person turns OpenRig's inline Stop hook off in Codex (its group is first among the inline Stop groups).
-    if (disableStop) config = config.replace(`[hooks.state."${CONFIG}:stop:0:0"]\n`, `[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
+    if (disableStop) config = config.replace(`[hooks.state.${JSON.stringify(`${CONFIG}:stop:0:0`)}]\n`, `[hooks.state.${JSON.stringify(`${CONFIG}:stop:0:0`)}]\nenabled = false\n`);
     expect(state(config)[`${CONFIG}:stop:0:0`]?.enabled).toBe(disableStop ? false : undefined);
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP] } }) });
     adapter(m.fs).ensureCodexActivityHooks();
@@ -164,8 +171,8 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
 
   it("removing OpenRig's group keeps a later user hook's trust and disable with it (F2)", () => {
     const later = { hooks: [{ type: "command", command: "echo later", timeout: 7 }] };
-    const config = `model = "gpt"\n\n[hooks.state."${HOOKS}:stop:1:0"]\ntrusted_hash = "openrig-old"\n\n`
-      + `[hooks.state."${HOOKS}:stop:2:0"]\ntrusted_hash = "person-hash"\nenabled = false\n`;
+    const config = `model = "gpt"\n\n[hooks.state.${JSON.stringify(`${HOOKS}:stop:1:0`)}]\ntrusted_hash = "openrig-old"\n\n`
+      + `[hooks.state.${JSON.stringify(`${HOOKS}:stop:2:0`)}]\ntrusted_hash = "person-hash"\nenabled = false\n`;
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP, ours(), later] } }) });
     adapter(m.fs).removeCodexActivityHooks();
     expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, later]);
@@ -190,7 +197,7 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
   it("a config the trust write would make invalid leaves both files untouched (F3)", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     // Valid TOML: a quoted field name the line writer doesn't recognise, on the key OpenRig would write.
-    const config = `model = "gpt"\n\n[hooks.state."${HOOKS}:stop:0:0"]\n"trusted_hash" = "person-choice"\n`;
+    const config = `model = "gpt"\n\n[hooks.state.${JSON.stringify(`${HOOKS}:stop:0:0`)}]\n"trusted_hash" = "person-choice"\n`;
     expect(() => parseToml(config)).not.toThrow();
     const json = JSON.stringify({ hooks: {} });
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: json });

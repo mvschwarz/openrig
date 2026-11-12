@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // The opt-in wake loop in the openrig-user skill, run exactly as shipped: extracted from the skill, executed by sh,
 // calling the built `rig` CLI against the daemon's real queue routes over HTTP. It must wake on new owned work,
 // survive failed polls, and end at its deadline.
@@ -8,7 +9,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import type Database from "better-sqlite3";
 import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { createDb } from "../../daemon/src/db/connection.js";
@@ -56,9 +57,7 @@ async function fixture(onTestFinished: TestContext["onTestFinished"]) {
     },
   });
   const state = { failLists: 0, failListsAfter: Infinity, listCalls: 0 };
-  server = await new Promise<ServerType>((resolve) => {
-    const s = serve({
-      fetch: (request: Request) => {
+  server = await serveOwnedHonoFixture( (request: Request) => {
         if (new URL(request.url).pathname === "/api/queue/list") {
           state.listCalls++;
           if (state.failLists > 0 || state.listCalls > state.failListsAfter) {
@@ -67,10 +66,7 @@ async function fixture(onTestFinished: TestContext["onTestFinished"]) {
           }
         }
         return app.fetch(request);
-      },
-      port: 0, hostname: "127.0.0.1",
-    }, () => resolve(s));
-  });
+      });
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   /** Run the shipped loop as a background command would: its own process, this seat's identity, short timings. */

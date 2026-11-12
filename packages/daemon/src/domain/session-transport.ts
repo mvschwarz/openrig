@@ -1,4 +1,7 @@
+import { readNamedSessionPid, captureNamedSessionContent, captureNamedSessionScreen } from "../adapters/session-pane-lookup.js";
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
+import { restoreSessionUserHome } from "./managed-restore-read-access.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
@@ -45,7 +48,8 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
+import { verifyWindowsPaneReceiver } from "./windows-pane-receiver.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
@@ -1026,7 +1030,12 @@ export async function probeSessionActivity(input: {
   if (runtime === "terminal") {
     try {
       const paneCommand = await tmuxAdapter.getPaneCommand(readTarget);
-      if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
+      // A native pane reports its hosting shell even when no command is
+      // running. Its name alone proves neither an active receiver nor idle.
+      const nativeShell = tmuxAdapter.isNativeWindows && isWindowsShellHost(paneCommand ?? "");
+      const active = nativeShell ? await verifyWindowsPaneReceiver({ target: readTarget, getPanePid: target => tmuxAdapter.getPanePid(target) })
+        : paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand);
+      if (active) {
         return {
           state: "running",
           reason: "foreground_command",
@@ -1472,21 +1481,27 @@ function currentMenuKeyHint(lines: string[]): boolean {
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
-const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
-const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
+function hasTuiPathPrefix(value: string): boolean {
+  return /^[~/]/.test(value) || /^[A-Za-z]:[\\/]/.test(value)
+    || /^\\\\[^\\\s]+\\[^\\\r\n]+(?:\\|$)/.test(value);
+}
+function codexStatusLine(line: string, allowNativePath = true): boolean {
+  const location = /^ {2}[^\s·][^·]* · (.+)/.exec(line)?.[1];
+  return location !== undefined && (/^[~/]/.test(location) || (allowNativePath && hasTuiPathPrefix(location)));
+}
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
 /** The supported status/path + optional hint footer ends at the visible bottom.
  * Share only its boundary: capture's placeholder heuristic is not close authority. */
-function codexFooterSeparator(lines: string[], allowNativePath = false): number {
+function codexFooterSeparator(lines: string[], allowNativePath = true): number {
   let last = lines.length - 1;
   while (last >= 0 && !lines[last]!.trim()) last--;
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)))
+  if (last < 0 || footer.length > 2 || !codexStatusLine(footer[0]!, allowNativePath)
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
@@ -1495,7 +1510,7 @@ function codexFooterSeparator(lines: string[], allowNativePath = false): number 
 /** The current Codex input box: its normalized text ("" when empty), its rows as drawn (the prompt glyph removed)
  *  and where its prompt row is, or null when the layout is not the recognized one (another footer, a selector, no
  *  blank separator, an older TUI). */
-function codexInputBox(pane: string, allowNativePath = false): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
+function codexInputBox(pane: string, allowNativePath = true): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
   const lines = pane.split("\n");
   const separator = codexFooterSeparator(lines, allowNativePath);
   if (separator < 0) return null;
@@ -1831,7 +1846,7 @@ const SEAT_IDLE_SHAPES: {
     // Any other row reads unknown.
     statusSlot: {
       finishedTurn: (lines: string[], at: number) => CLAUDE_COMPLETION_ROW.test(lines[at] ?? ""),
-      freshSession: (lines: string[], at: number) => at >= 2 && /^ ▝▝ {3}▝▝ {3}[~/]/.test(lines[at]!)
+      freshSession: (lines: string[], at: number) => at >= 2 && hasTuiPathPrefix(/^ ▝▝ {3}▝▝ {3}(.*)$/.exec(lines[at]!)?.[1] ?? "")
         && /^▝▜██████▀ {2}\S/.test(lines[at - 1]!) && /^ ▐▛███▛█ {3}Claude Code v2\.1\.296$/.test(lines[at - 2]!),
     },
   },
@@ -1849,7 +1864,7 @@ const SEAT_IDLE_SHAPES: {
         if (!/^ {2}\S/.test(lines[at] ?? "")) return false;
         let i = at - 1;
         while (i >= 0 && !lines[i]!.trim()) i--;
-        return i >= 2 && i < at - 1 && /^ {2}permissions: \S/.test(lines[i]!) && /^ {5}[~/]/.test(lines[i - 1]!)
+        return i >= 2 && i < at - 1 && /^ {2}permissions: \S/.test(lines[i]!) && hasTuiPathPrefix(/^ {5}(.*)$/.exec(lines[i - 1]!)?.[1] ?? "")
           && /^ {2}>_ OpenAI Codex \(v0\.160\.0\)$/.test(lines[i - 2]!);
       },
     },
@@ -2332,6 +2347,10 @@ export class SessionTransport {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
       (session, text, opts) => this.sendUnguarded(session, text, opts));
+  }
+
+  async restoreUserHome(session: string): Promise<string | undefined> {
+    return restoreSessionUserHome(this.tmuxAdapter, physicalSessionName(this.db, session));
   }
 
   configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {
@@ -4063,7 +4082,7 @@ export class SessionTransport {
   private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null, rotation: ClaudeResumeRotation | null = null): Promise<ClaudeDeliveryObservation> {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
-      const panes = await this.tmuxAdapter.listPanes(sessionName);
+      const panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName);
       if (!pane && panes.length > 1) {
         return { state: "conflict", detail: "The session has several panes but no recorded bound pane" };
       }
@@ -4073,7 +4092,7 @@ export class SessionTransport {
       if (!pane || panes.length === 0) return unknown;
       let panePid: number | null;
       if (panes.length === 1) {
-        const [sessionPid, observedPanePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
+        const [sessionPid, observedPanePid] = await Promise.all([readNamedSessionPid(this.tmuxAdapter, sessionName), this.tmuxAdapter.getPanePid(pane)]);
         if (sessionPid && observedPanePid && sessionPid !== observedPanePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
         panePid = observedPanePid;
       } else {
@@ -4085,7 +4104,7 @@ export class SessionTransport {
       const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
-      const after = await this.tmuxAdapter.listPanes(sessionName);
+      const after = await listNamedSessionPanes(this.tmuxAdapter, sessionName);
       if (after.length > 0 && !after.some(candidate => candidate.id === pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
       const currentPid = await this.tmuxAdapter.getPanePid(pane);
       if (panePid && currentPid && panePid !== currentPid) return { state: "conflict", detail: "The bound pane process changed during delivery verification" };
@@ -4103,7 +4122,9 @@ export class SessionTransport {
     } catch {
       return null;
     }
-    if (!paneCommand || !isShellForeground(paneCommand)) return null;
+    const nativeCodexHost = runtime === "codex" && (this.tmuxAdapter.isNativeWindows || process.platform === "win32")
+      && isWindowsShellHost(paneCommand ?? "");
+    if (!paneCommand || (!isShellForeground(paneCommand) && !nativeCodexHost)) return null;
     if (runtime === "codex" && pane) {
       // Reuse stable, foreground, pane-descendant Codex proof. A resumed process
       // must name this session's token. Stale UI, a Node
@@ -4320,8 +4341,9 @@ export class SessionTransport {
     const runtimeNames = ["OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
     const inspected = typeof this.tmuxAdapter?.hasSessionEnvBatch === "function" || typeof this.tmuxAdapter?.hasSessionEnv === "function";
     if (typeof this.tmuxAdapter?.hasSessionEnvBatch === "function") {
-      // One fresh listing for every name, read once per diagnosis: all aliases see the same moment. A failed listing
-      // leaves every name unknown (never absent) and is not retried name by name.
+      // One batch API call per diagnosis. The adapter may need independent
+      // native selectors or lossless decoding, so this is not an atomic snapshot.
+      // Unknown entries stay unknown; this layer never retries them individually.
       let presence: Record<string, boolean | null> = {};
       try {
         presence = await this.tmuxAdapter.hasSessionEnvBatch(sessionName, [...urlNames, ...tokenNames, ...runtimeNames]);
@@ -4510,7 +4532,7 @@ export class SessionTransport {
 
     const lines = opts?.lines ?? 20;
     const read = async (): Promise<CaptureResult> => {
-      const content = await this.tmuxAdapter.capturePaneContent(sessionName, lines);
+      const content = await captureNamedSessionContent(this.tmuxAdapter, sessionName, lines);
       if (content === null) {
         return {
           ok: false,
@@ -4626,7 +4648,7 @@ export class SessionTransport {
     let last: string | null = null;
     for (let look = 0; look < 12 && this.now().getTime() + 150 <= deadline; look++) {
       await this.sleep(150);
-      const screen = await this.tmuxAdapter.capturePaneScreen(sessionName).catch(() => null);
+      const screen = await captureNamedSessionScreen(this.tmuxAdapter, sessionName).catch(() => null);
       if (screen !== null && screen === last) return;
       last = screen;
     }
@@ -4637,7 +4659,7 @@ export class SessionTransport {
   private async capturePromptPane(sessionName: string, content: string, runtime: string | null | undefined): Promise<CaptureResult["promptPane"]> {
     const prompt = classifyPaneActivity(content, { runtime });
     if (prompt.reason !== "permission_prompt" && prompt.reason !== "selection_prompt") return undefined;
-    const panes = await this.tmuxAdapter.listPanes(sessionName).catch(() => []);
+    const panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName).catch(() => []);
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
     return { width: pane.width, height: pane.height,
@@ -4668,7 +4690,7 @@ export class SessionTransport {
   private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
     try {
       const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
-      const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
+      const screen = await captureNamedSessionContent(this.tmuxAdapter, sessionName, 0, { escapeSequences: true });
       const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
       const steady = before && after && before.x === after.x && before.y === after.y
         && before.width === after.width && before.height === after.height ? after : null;

@@ -2,12 +2,19 @@
 // into ~/.claude/skills and ~/.agents/skills from the installed openrig-core plugin, and the mirror check
 // sees the installed-package layout instead of a source checkout.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { skillsRoutes } from "../src/routes/skills.js";
+
+const { nativeHome } = vi.hoisted(() => ({ nativeHome: vi.fn() }));
+vi.mock("node:os", async original => {
+  const os = await original<typeof import("node:os")>();
+  nativeHome.mockImplementation(os.homedir);
+  return { ...os, homedir: nativeHome };
+});
 
 const SKILL = "---\nname: openrig-skills\ndescription: index\nmetadata:\n  openrig:\n    stage: shipped\n---\n\n# index\n";
 
@@ -28,6 +35,7 @@ describe("GET /api/skills/audit on a clean-install fixture (#802)", () => {
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "skill-audit-route-"));
     home = join(root, "home");
+    nativeHome.mockReturnValue(home);
     pluginsDir = join(root, "openrig-home/plugins");
     // node_modules/@openrig/ as the published daemon resolves it: no scripts/mirror-skills.mjs.
     installedPackageRoot = join(root, "node_modules/@openrig");
@@ -45,13 +53,13 @@ describe("GET /api/skills/audit on a clean-install fixture (#802)", () => {
       writeFileSync(join(copy, ".openrig-vendor-version"), "0.1.4\n");
     }
   });
-  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
-  async function audit(): Promise<AuditBody> {
+  async function audit(contextHome = true): Promise<AuditBody> {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("skillLibraryDiscoveryService" as never, {} as never);
-      c.set("homedir" as never, home as never);
+      if (contextHome) c.set("homedir" as never, home as never);
       // The report's daemon ran from $HOME, so its projected copies were discovered as rig_bundled.
       c.set("cwd" as never, home as never);
       c.set("pluginsDir" as never, pluginsDir as never);
@@ -85,8 +93,17 @@ describe("GET /api/skills/audit on a clean-install fixture (#802)", () => {
     appendFileSync(join(home, ".claude/skills/openrig-skills/SKILL.md"), "\nLocal note.\n");
     const body = await audit();
     expect(body.totalFindings).toBe(3);
-    const edited = body.entries.find((e) => e.path.includes("/.claude/"));
+    const edited = body.entries.find((e) => e.path === join(home, ".claude/skills/openrig-skills"));
     expect(edited?.bundledFrom).toBeNull();
     expect(edited?.findings).toHaveLength(3);
+  });
+
+  it("discovers user-global skills from the native home when HOME and context override are absent", async () => {
+    vi.stubEnv("HOME", undefined);
+    const skill = join(home, ".agents/skills/native-user-skill");
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "SKILL.md"), SKILL.replaceAll("openrig-skills", "native-user-skill"));
+    const body = await audit(false);
+    expect(body.entries.some(entry => entry.path === skill && !entry.shadowed)).toBe(true);
   });
 });

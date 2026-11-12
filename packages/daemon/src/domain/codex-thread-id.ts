@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { readWindowsProcessFacts } from "./windows-process-facts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +32,10 @@ export type ResolveHomeDirByPid = (pid: number) => Promise<string | undefined> |
 
 export async function defaultResolveHomeDirByPid(pid: number): Promise<string | undefined> {
   try {
+    if (process.platform === "win32") {
+      const facts = await readWindowsProcessFacts(pid);
+      return facts?.env.HOME || facts?.env.USERPROFILE || undefined;
+    }
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
     const output = (await runAsyncSite("codex_thread_id.resolve_home", async () => {
@@ -285,7 +290,8 @@ void _resolveRequiresIdentityPin;
 
 function uniqueHomes(candidateHomes: Array<string | undefined>): string[] {
   const homes = candidateHomes.filter((home): home is string => Boolean(home));
-  // os.homedir() honors HOME. The passwd home must not bypass an explicit provider/test home.
+  // os.homedir() honors the platform home selector (HOME on POSIX, USERPROFILE on Windows).
+  // The passwd home must not bypass an explicit provider/test home.
   homes.push(os.homedir());
   return [...new Set(homes)];
 }
@@ -384,7 +390,7 @@ function readCodexThreadIdFromLogs(
   return undefined;
 }
 
-/** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
+/** Parse native Windows ISO creation time or `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
  *  SECONDS. The reader gates STRICTLY (`ts > startTs`, r2 round-6): lstart
  *  carries no subsecond component, so ownership of a row INSIDE the start
  *  second is undecidable — retired A can log at ts == B.startTs in the same
@@ -394,6 +400,12 @@ function readCodexThreadIdFromLogs(
  *  back to the ungated read rather than inventing a gate). */
 export function lstartToMinTs(identity: string | undefined): number | undefined {
   if (!identity) return undefined;
+  // CIM creation identity carries a timezone. Keep the same conservative
+  // whole-second exclusion as lstart; never turn a Windows read into ungated PID reuse.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(identity)) {
+    const parsed = Date.parse(identity);
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : undefined;
+  }
   const m = identity.match(/^\w{3}\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})$/);
   if (!m) return undefined;
   const parsed = Date.parse(`${m[1]} ${m[2]}, ${m[4]} ${m[3]}`);

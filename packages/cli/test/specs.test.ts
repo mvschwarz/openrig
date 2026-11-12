@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -96,7 +97,7 @@ describe("Specs CLI", () => {
         res.writeHead(404).end();
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -231,7 +232,7 @@ describe("Specs CLI", () => {
         { ...LIBRARY_ENTRIES[0], id: "bbb", sourcePath: "/other/review-rig.yaml" },
       ]));
     });
-    await new Promise<void>((resolve) => { dupServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(dupServer, {});
     const dupPort = (dupServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -257,7 +258,7 @@ describe("Specs CLI", () => {
         res.writeHead(404).end();
       }
     });
-    await new Promise<void>((resolve) => { dupServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(dupServer, {});
     const dupPort = (dupServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -329,9 +330,10 @@ describe("Specs CLI", () => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(req.url?.endsWith("/review") ? review : [entry]));
     });
-    await new Promise<void>(resolve => { previewServer.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(previewServer, {}).then(resolve, rejectOwnedListen); });
     try {
       for (const json of [false, true]) {
+        allowOwnedHttpFixture(previewServer);
         const program = new Command().addCommand(specsCommand(runningDeps((previewServer.address() as { port: number }).port)));
         const { logs, exitCode } = await captureLogs(() => program.parseAsync([
           "node", "rig", "specs", "preview", entry.id, "--kind", String(kind), ...(json ? ["--json"] : []),
@@ -399,7 +401,7 @@ describe("Specs CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { addServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(addServer, {});
     const addPort = (addServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -500,7 +502,7 @@ describe("Specs CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { addServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(addServer, {});
     const addPort = (addServer.address() as { port: number }).port;
 
     const prog = new Command();

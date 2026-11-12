@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import { DEFAULT_SYSTEM_WORLD_MANIFEST } from "../src/domain/system-world.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +54,20 @@ function runJsonFileResult(scriptPath: string, args: string[], env?: NodeJS.Proc
   return { status: result.status, body: JSON.parse(output) };
 }
 
+function writeInterposedHelper(destination: string, source: string): void {
+  // Interpose the migration seam while keeping its real sibling transport.
+  fs.copyFileSync(path.join(skillRoot, "scripts", "run-rig.mjs"), path.join(path.dirname(destination), "run-rig.mjs"));
+  fs.writeFileSync(destination, source);
+}
+
 function writeRigInventory(root: string, entries: Array<Record<string, unknown>>): string {
+  if (process.platform === "win32") {
+    return writeWindowsNodeFixture(root, "rig", `
+if (JSON.stringify(process.argv.slice(2)) === JSON.stringify(["ps", "--nodes", "-A", "--json", "--full"])) {
+  console.log(${JSON.stringify(JSON.stringify({ entries, totalNodes: entries.length, truncated: false }))});
+} else { console.error("unexpected rig command: " + JSON.stringify(process.argv.slice(2))); process.exitCode = 7; }
+`);
+  }
   const fakeRig = path.join(root, "rig");
   fs.writeFileSync(fakeRig, `#!/bin/sh
 if [ "$*" = "ps --nodes -A --json --full" ]; then
@@ -160,8 +174,8 @@ describe("openrig-upgrade stays agent-driven", () => {
     }
   });
 
-  it("ships four bounded helpers and mirrors them byte-for-byte", () => {
-    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs", "migrate-telemetry-state-0.5.9.mjs"]) {
+  it("ships its bounded helpers and command transport and mirrors them byte-for-byte", () => {
+    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs", "migrate-telemetry-state-0.5.9.mjs", "run-rig.mjs"]) {
       const source = path.join(skillRoot, "scripts", helper);
       const mirror = path.join(repoRoot, "skills/_canonical/core/openrig-upgrade/scripts", helper);
       expect(fs.existsSync(source), `missing source helper ${helper}`).toBe(true);
@@ -263,7 +277,10 @@ describe("refresh-managed-plugin helper", () => {
     write(live, "hooks/run.cjs", "same bytes");
     fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
     fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o644);
-    fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o600);
+    // Windows chmod exposes the read-only attribute, not POSIX owner bits.
+    fs.chmodSync(path.join(live, "hooks/run.cjs"), process.platform === "win32" ? 0o444 : 0o600);
+    const changedMode = fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777;
+    expect(changedMode).not.toBe(fs.statSync(path.join(ancestor, "hooks/run.cjs")).mode & 0o777);
 
     const planned = runJson("refresh-managed-plugin.mjs", [
       "--ancestor", ancestor,
@@ -281,7 +298,7 @@ describe("refresh-managed-plugin helper", () => {
       "--apply-safe",
     ]);
     expect(applied.written).not.toContain("hooks/run.cjs");
-    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(changedMode);
   });
 
   it("still refreshes when the live file matches the ancestor in bytes AND mode", () => {
@@ -298,7 +315,8 @@ describe("refresh-managed-plugin helper", () => {
     write(live, "hooks/run.cjs", "old");
     fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
     fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o644);
-    fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o755);
+    fs.chmodSync(path.join(target, "hooks/run.cjs"), process.platform === "win32" ? 0o444 : 0o755);
+    const targetMode = fs.statSync(path.join(target, "hooks/run.cjs")).mode & 0o777;
 
     const applied = runJson("refresh-managed-plugin.mjs", [
       "--ancestor", ancestor,
@@ -308,7 +326,7 @@ describe("refresh-managed-plugin helper", () => {
     ]);
     expect(applied.written).toContain("hooks/run.cjs");
     expect(fs.readFileSync(path.join(live, "hooks/run.cjs"), "utf8")).toBe("new");
-    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(targetMode);
   });
 
   it("preserves target descendants beneath unsupported live parents", () => {
@@ -378,10 +396,10 @@ describe("refresh-managed-plugin helper", () => {
 });
 
 describe("backup-sqlite helper", () => {
-  it("creates a verified backup without changing the source database", () => {
+  it("creates a verified backup without changing the source database", (context) => {
     const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
     const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
-    if (!hasSqlite && !DatabaseSync) return;
+    if (!hasSqlite && !DatabaseSync) { context.skip(); return; }
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
@@ -447,10 +465,10 @@ describe("backup-sqlite helper", () => {
     expect(row).toBe("kept");
   });
 
-  it("refuses to overwrite an existing destination", () => {
+  it("refuses to overwrite an existing destination", (context) => {
     const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
     const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
-    if (!hasSqlite && !DatabaseSync) return;
+    if (!hasSqlite && !DatabaseSync) { context.skip(); return; }
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
@@ -482,8 +500,16 @@ describe("backup-sqlite helper", () => {
 describe("inspect-upgrade helper", () => {
   it("keeps all-rig node evidence and teaches the next probe when a surface is unavailable", () => {
     const root = temporaryRoot();
-    const fakeRig = path.join(root, "rig");
-    fs.writeFileSync(fakeRig, `#!/bin/sh
+    const fakeRig = process.platform === "win32" ? writeWindowsNodeFixture(root, "rig", `
+switch (JSON.stringify(process.argv.slice(2))) {
+  case '["--version"]': console.log("0.5.7 (abc12345)"); break;
+  case '["daemon","status"]': console.log("Daemon running (pid 42)"); break;
+  case '["ps","--nodes","-A","--json"]': console.log('[{"rigName":"demo","logicalId":"lead"},{"rigName":"other","logicalId":"worker"}]'); break;
+  case '["plugin","list","--json"]': console.error("plugin lookup unavailable"); process.exitCode = 9; break;
+  default: process.exitCode = 7;
+}
+`) : path.join(root, "rig");
+    if (process.platform !== "win32") fs.writeFileSync(fakeRig, `#!/bin/sh
 case "$*" in
   "--version") echo "0.5.7 (abc12345)" ;;
   "daemon status") echo 'Daemon running (pid 42)' ;;
@@ -510,6 +536,33 @@ esac
 
 describe("0.5.9 telemetry-state migration helper", () => {
   const helper = "migrate-telemetry-state-0.5.9.mjs";
+
+  it.each(["bytes", "read-only"])("preserves a prepared System World with %s drift", (drift) => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{ runtime: "claude-code", sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName, cwd: fixture.cwd }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before-drift");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    writeTelemetryPair(fixture, "state", new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString(), 31);
+    const artifact = path.join(fixture.home, "context", "system", "system-world.yaml");
+    const originalMode = fs.statSync(artifact).mode & 0o777;
+    expect(manifest.systemWorld.mode).toBe(originalMode);
+    try {
+      if (drift === "bytes") fs.appendFileSync(artifact, "\n# operator change\n");
+      else fs.chmodSync(artifact, 0o444);
+      const before = fs.readFileSync(artifact);
+      const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+      expect(result.status).toBe(1);
+      expect(result.body.issues).toContainEqual(expect.objectContaining({ code: "system_world_conflict", path: artifact }));
+      expect(fs.readFileSync(artifact)).toEqual(before);
+      if (drift === "read-only") expect(fs.statSync(artifact).mode & 0o222).toBe(0);
+    } finally {
+      fs.chmodSync(artifact, originalMode);
+    }
+  });
 
   it("prints help without inventorying and refuses unknown options before planning", () => {
     const root = temporaryRoot();
@@ -686,8 +739,8 @@ exit 7
       complete: true,
     }));
     expect(planned.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "context", path: expect.stringContaining("/context/") }),
-      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "provider", path: expect.stringContaining("/provider-usage/") }),
+      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "context", path: path.join(fixture.home, "context", `${fixture.sessionName}.json`) }),
+      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "provider", path: path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`) }),
       expect.objectContaining({ decision: "pin-library-during-activation", to: path.join(fixture.home, "context-packs") }),
     ]));
     expect(fs.existsSync(path.join(fixture.home, "state"))).toBe(false);
@@ -703,7 +756,7 @@ exit 7
       expect.objectContaining({
         originalPath: path.join(fixture.home, "context", `${fixture.sessionName}.json`),
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-        storedAs: expect.stringMatching(/^files\/\d{4}-[a-f0-9]{64}$/),
+        storedAs: expect.stringMatching(/^files[\\/]\d{4}-[a-f0-9]{64}$/),
       }),
     ]));
     expect(manifest.libraryPlan).toMatchObject({
@@ -847,7 +900,7 @@ exit 7
     const seam = `  try {\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`;
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    fs.mkdirSync(${JSON.stringify(lateDirectory)});\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `  try {\n    fs.mkdirSync(${JSON.stringify(lateDirectory)});\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
     const result = runJsonFileResult(interposedHelperPath, [
       "--home", prepared.fixture.home,
@@ -875,7 +928,7 @@ exit 7
     const seam = `function copyEntryOpaque(source, destination) {\n  const stat = fs.lstatSync(source);`;
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `function copyEntryOpaque(source, destination) {\n  if (source.endsWith(${JSON.stringify(`${path.sep}b.txt`)})) throw new Error("injected mid-root copy interruption");\n  const stat = fs.lstatSync(source);`));
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `function copyEntryOpaque(source, destination) {\n  if (source.endsWith(${JSON.stringify(`${path.sep}b.txt`)})) throw new Error("injected mid-root copy interruption");\n  const stat = fs.lstatSync(source);`));
 
     const interrupted = runJsonFileResult(interposedHelperPath, [
       "--home", prepared.fixture.home,
@@ -1036,7 +1089,7 @@ exit 7
       const replacement = change === "type"
         ? `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
         : `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
-      fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
+      writeInterposedHelper(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
       const result = runJsonFileResult(interposedHelperPath, [
         "--home", prepared.fixture.home,
@@ -1137,7 +1190,7 @@ exit 7
     const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
     expect(manifest.systemWorld).toMatchObject({
       existed: false,
-      mode: 0o644,
+      mode: process.platform === "win32" ? 0o666 : 0o644,
       sha256: sha256(DEFAULT_SYSTEM_WORLD_MANIFEST),
     });
 
@@ -1406,7 +1459,7 @@ exit 7
     const interposedHelperPath = path.join(root, helper);
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `    {
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `    {
       const target = ${JSON.stringify(contextPath)};
       fs.writeFileSync(target, "resumed legacy writer", { mode: 0o600 });
     }

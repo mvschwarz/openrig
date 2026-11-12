@@ -7,6 +7,8 @@ import { subscribeActivityEvents } from "../src/live-events.js";
 import { createLiveRefresh } from "../src/live.js";
 import { emptySnapshot } from "../src/state.js";
 import type { FleetSnapshot } from "../src/types.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
+import { listenOwnedHttpFixture } from "../../cli/test/helpers/owned-http-fixture.js";
 
 // OPR.0.5.5.19 AM-R18 — the open view updates ITSELF: pushes from the oracle's SSE
 // stream drive the refresh owner; zero clicks, zero manual refresh, zero idle polling.
@@ -14,7 +16,7 @@ import type { FleetSnapshot } from "../src/types.js";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 function sseServer(): Promise<{ server: Server; url: string; push: (data: unknown) => void; pushRaw: (frame: string) => void; connections: () => number }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const sockets = new Set<import("node:http").ServerResponse>();
     const server = createServer((req, res) => {
       if (!req.url!.endsWith("/api/activity/events")) { res.writeHead(404); res.end(); return; }
@@ -23,24 +25,24 @@ function sseServer(): Promise<{ server: Server; url: string; push: (data: unknow
       sockets.add(res);
       req.on("close", () => sockets.delete(res));
     });
-    server.listen(0, "127.0.0.1", () => {
+    void listenOwnedHttpFixture(server).then(() => {
       resolve({
         server,
-        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        url: httpFixtureOrigin(server),
         push: (data) => { for (const s of sockets) s.write(`data: ${JSON.stringify(data)}\n\n`); },
         pushRaw: (frame) => { for (const s of sockets) s.write(frame); },
         connections: () => sockets.size,
       });
-    });
+    }, reject);
   });
 }
 
-function until(cond: () => boolean, ms = 2_000): Promise<void> {
+function until(cond: () => boolean, ms = 2_000, phase = "condition", details: () => unknown = () => undefined): Promise<void> {
   return new Promise((resolve, reject) => {
-    const t0 = Date.now();
+    const t0 = performance.now();
     const tick = () => {
       if (cond()) return resolve();
-      if (Date.now() - t0 > ms) return reject(new Error("condition not reached"));
+      if (performance.now() - t0 > ms) return reject(new Error(`${phase} not reached after ${Math.round(performance.now() - t0)}ms: ${JSON.stringify(details())}`));
       setTimeout(tick, 10);
     };
     tick();
@@ -51,12 +53,16 @@ describe("S19 AM-R18 — the subscription path", () => {
   it("each pushed oracle change fires onEvent with the notification payload (no activity fields consumed)", async () => {
     const { server, url, push, connections } = await sseServer();
     const events: Array<{ type: string; seq?: number }> = [];
-    const sub = subscribeActivityEvents({ open: () => fetch(`${url}/api/activity/events`), onEvent: (e) => events.push(e) });
+    const errors: string[] = [], statuses: string[] = [];
+    const sub = subscribeActivityEvents({ open: async () => {
+      try { return await fetch(`${url}/api/activity/events`); }
+      catch (error) { errors.push(String(error)); throw error; }
+    }, onEvent: (e) => events.push(e), onStatus: s => statuses.push(s) });
     try {
-      await until(() => connections() === 1);
+      await until(() => connections() === 1, 2000, "SSE connection", () => ({ url, errors, statuses, connections: connections() }));
       push({ type: "seat.activity_changed", seatNodeId: "node-1", seq: 7 });
       push({ type: "seat.activity_changed", seatNodeId: "node-1", seq: 8 });
-      await until(() => events.length === 2);
+      await until(() => events.length === 2, 2000, "two SSE notifications", () => ({ url, errors, statuses, connections: connections(), events }));
       expect(events[0]).toMatchObject({ type: "seat.activity_changed", seq: 7 });
     } finally {
       sub.close();
@@ -129,8 +135,8 @@ describe("S19 AM-R18 — the subscription path", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end("{}");
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    await listenOwnedHttpFixture(server);
+    const url = httpFixtureOrigin(server);
     const statuses: string[] = [];
     const open = async () => {
       const res = await fetch(`${url}/api/activity/events`, { headers: { accept: "text/event-stream" } });
@@ -237,13 +243,13 @@ describe("bounded activity stream frames", () => {
     const sub = subscribeActivityEvents({ open, onEvent: e => events.push(e), onStatus: s => statuses.push(s), reconnectDelayMs: 200 });
     try {
       first.write(frame);
-      await until(() => first.cancel.mock.calls.length === 1, 500);
+      await until(() => first.cancel.mock.calls.length === 1, 500, `${_name}: cancellation`, () => ({ statuses, opens: open.mock.calls.length, cancels: first.cancel.mock.calls.length }));
       expect(events).toEqual([]);
       expect(statuses).toEqual(["connected", "dropped"]);
       expect(open).toHaveBeenCalledTimes(1);
-      await until(() => open.mock.calls.length === 2, 600);
+      await until(() => open.mock.calls.length === 2, 600, `${_name}: reconnection`, () => ({ statuses, opens: open.mock.calls.length }));
       recovered.write('data: {"type":"seat.activity_changed","seq":7}\n\n');
-      await until(() => events.length === 1, 300);
+      await until(() => events.length === 1, 300, `${_name}: recovered notification`, () => ({ statuses, opens: open.mock.calls.length, events }));
       expect(events).toEqual([{ type: "seat.activity_changed", seq: 7 }]);
     } finally { sub.close(); }
   });

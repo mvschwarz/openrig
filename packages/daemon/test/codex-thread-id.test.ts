@@ -13,6 +13,16 @@ afterEach(() => {
 });
 const identity = "Sun Sep  6 23:52:32 2026";
 const start = lstartToMinTs(identity)!;
+
+it.each(["2026-09-06T15:52:32.1234567Z", "2026-09-06T23:52:32.1234567+08:00"])("retains the second-level PID reuse gate for Windows identity %s", value => {
+  expect(lstartToMinTs(value)).toBe(Date.parse("2026-09-06T15:52:32Z") / 1000);
+});
+
+it("does not resolve a retired PID's conversation when Windows supplies an ISO creation time", async () => {
+  const f = fixture(); f.thread("retired"); f.log("retired", start - 1);
+  const resolver = f.finish();
+  expect(await resolver.resolve(60422, new Date(start * 1000 + 123).toISOString())).toBeUndefined();
+});
 function fixture() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-first-turn-")); roots.push(home);
   fs.mkdirSync(path.join(home, ".codex"));
@@ -28,10 +38,10 @@ function fixture() {
   };
 }
 
-describe("Codex home discovery respects an explicit HOME", () => {
+describe("Codex home discovery respects an explicit platform home", () => {
   it("reads the default home before resolving a process home and never consults passwd", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-default-home-")); roots.push(home);
-    vi.stubEnv("HOME", home);
+    vi.stubEnv(process.platform === "win32" ? "USERPROFILE" : "HOME", home);
     const passwd = vi.spyOn(os, "userInfo").mockImplementation(() => { throw new Error("passwd home must not be read"); });
     const processHome = vi.fn(() => "/synthetic-other-home");
     const read = vi.fn((_pid: number, candidate: string) => candidate === home ? "conversation" : undefined);
@@ -44,7 +54,7 @@ describe("Codex home discovery respects an explicit HOME", () => {
 
   it("candidate-home fallback finds fixture logs without searching the passwd home", () => {
     const f = fixture(); f.thread("conversation"); f.log("conversation"); f.finish();
-    vi.stubEnv("HOME", f.home);
+    vi.stubEnv(process.platform === "win32" ? "USERPROFILE" : "HOME", f.home);
     const passwd = vi.spyOn(os, "userInfo").mockImplementation(() => { throw new Error("passwd home must not be read"); });
     expect(readCodexThreadIdFromCandidateHomes(60422, [])).toBe("conversation");
     expect(passwd).not.toHaveBeenCalled();
@@ -53,7 +63,7 @@ describe("Codex home discovery respects an explicit HOME", () => {
   it("an empty fixture home never resolves another home's conversation", () => {
     const foreign = fixture(); foreign.thread("foreign-conversation"); foreign.log("foreign-conversation"); foreign.finish();
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-empty-home-")); roots.push(home);
-    vi.stubEnv("HOME", home);
+    vi.stubEnv(process.platform === "win32" ? "USERPROFILE" : "HOME", home);
     const passwd = vi.spyOn(os, "userInfo").mockReturnValue({ homedir: foreign.home } as ReturnType<typeof os.userInfo>);
     expect(readCodexThreadIdFromCandidateHomes(60422, [])).toBeUndefined();
     expect(passwd).not.toHaveBeenCalled();

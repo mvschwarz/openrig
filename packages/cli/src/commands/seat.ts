@@ -773,7 +773,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue" || path === "restart"
+      res = path === "launch" || path === "continue" || path === "restart" || path === "restart-plan" || path === "restart-verify"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.

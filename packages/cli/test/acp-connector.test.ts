@@ -1,18 +1,34 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { answerCommand, classify, chooseOption, runAcpAssignment, type AcpQueue, type AcpQueueRow, type AcpRunOptions } from "../src/acp/connector.js";
+import { resolveAcpAgentCommand } from "../src/acp/agent-command.js";
 
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 const DETACH_RUNNER = fileURLToPath(new URL("./fixtures/acp-detach-runner.ts", import.meta.url));
 const SEAT = "builder@studio";
 const dirs: string[] = [];
 const leftovers: number[] = [];
-afterEach(() => {
+const companionStops: string[] = [];
+afterEach(async () => {
   vi.unstubAllEnvs();
+  for (const pidFile of companionStops.splice(0)) {
+    if (!existsSync(pidFile)) continue;
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    writeFileSync(pidFile + ".stop", "owner-request");
+    await expect.poll(() => {
+      try { return JSON.parse(readFileSync(pidFile + ".stopped", "utf8")); } catch { return null; }
+    }, { timeout: 3000 }).toMatchObject({ pid, reason: "owner-request" });
+    const stopped = JSON.parse(readFileSync(pidFile + ".stopped", "utf8"));
+    expect(realpathSync(stopped.cwd)).toBe(realpathSync(dirname(pidFile)));
+    await expect.poll(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return true; throw error; }
+    }, { timeout: 3000 }).toBe(true);
+  }
   for (const pid of leftovers.splice(0)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -73,6 +89,50 @@ function owner(q: ReturnType<typeof memoryQueue>, seat: string, answers: string[
 const outcomeNote = (q: ReturnType<typeof memoryQueue>) => q.task().notes.find((note) => /^ACP run \S+ outcome /.test(note)) ?? "";
 
 describe("rig acp run", () => {
+  it.runIf(process.platform === "win32").each([
+    [false, false, "fixture-acp"], [true, false, "fixture-acp"],
+    [false, true, "fixture-acp"], [true, true, "fixture-acp"],
+    [false, false, "fixture.acp"], [false, true, "fixture.acp"],
+  ] as const)("runs a Windows npm ACP agent with exact arguments (explicit path: %s, local install: %s, name: %s)", async (explicit, local, agentName) => {
+    const q = memoryQueue("scenario:reply NATIVE-PONG");
+    const run = options();
+    const prefix = join(run.cwd, "npm bin 中文");
+    const bin = local ? join(prefix, "node_modules", ".bin") : prefix;
+    const root = join(prefix, "node_modules", "@fixture", "acp-agent");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    const argvFile = join(run.cwd, "argv.json");
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@fixture/acp-agent", type: "module", bin: { [agentName]: "agent.mjs" } }));
+    writeFileSync(join(root, "agent.mjs"), `import { writeFileSync as recordArgv } from "node:fs"; recordArgv(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\n${readFileSync(FAKE_AGENT, "utf8").replace(/^#![^\n]*\n/, "")}`);
+    const shim = join(bin, `${agentName}.cmd`);
+    writeFileSync(shim, `@ECHO off\r\nSET dp0=%~dp0\r\nSET "_prog=node"\r\n"%_prog%" "%dp0%\\${local ? ".." : "node_modules"}\\@fixture\\acp-agent\\agent.mjs" %*\r\n`);
+    vi.stubEnv("PATH", `${bin};${dirname(process.execPath)}`);
+    vi.stubEnv("PATHEXT", ".CMD;.EXE");
+    writeFileSync(join(bin, `${agentName}.exe`), "synthetic decoy: must not execute when CMD precedes EXE");
+    const args = ["中文 space", "apostrophe'", 'quote"', "", "trailing\\", "%OPENRIG_NODE_ID%", "amp&word"];
+    const outcome = await runAcpAssignment(q.queue, { ...run, agent: [explicit ? shim : agentName, ...args] });
+    expect(outcome).toMatchObject({ kind: "completed", text: "working… NATIVE-PONG" });
+    expect(JSON.parse(readFileSync(argvFile, "utf8"))).toEqual(args);
+    expect(outcomeNote(q)).toContain("outcome completed");
+    expect(q.task().state).toBe("in-progress");
+    // The synchronous stop-command path uses the same selected entry and argv.
+    const selected = resolveAcpAgentCommand(explicit ? shim : agentName, run.cwd);
+    const stopped = spawnSync(selected.command, [...selected.prefix, ...args], { cwd: run.cwd, stdio: "ignore", windowsHide: true });
+    expect(stopped.error).toBeUndefined();
+    expect(stopped.status).toBe(0);
+    expect(JSON.parse(readFileSync(argvFile, "utf8"))).toEqual(args);
+  }, 30_000);
+
+  it.runIf(process.platform === "win32")("records an unrelated batch launcher as failed without executing it", async () => {
+    const q = memoryQueue("scenario:reply PONG");
+    const run = options();
+    const marker = join(run.cwd, "unexpected.txt");
+    const shim = join(run.cwd, "unrelated.cmd");
+    writeFileSync(shim, `@echo unexpected > "${marker}"\r\n`);
+    expect(await runAcpAssignment(q.queue, { ...run, agent: [shim] })).toMatchObject({ kind: "failed" });
+    expect(outcomeNote(q)).toContain("recognized npm Node launcher");
+    expect(existsSync(marker)).toBe(false);
+  });
   it("sends the row's task to the agent and records its answer on that same row, leaving the row open for the owner", async () => {
     const q = memoryQueue("scenario:reply PONG");
     const outcome = await runAcpAssignment(q.queue, options());
@@ -258,10 +318,10 @@ describe("rig acp run", () => {
     const q = memoryQueue("scenario:reply PONG");
     const run = options();
     const pidFile = join(run.cwd, "companion.pid");
+    companionStops.push(pidFile);
     vi.stubEnv("FAKE_ACP_COMPANION_PID_FILE", pidFile);
     await runAcpAssignment(q.queue, run);
     const companion = Number(readFileSync(pidFile, "utf8"));
-    leftovers.push(companion);
     expect(() => process.kill(companion, 0)).not.toThrow();
     expect(q.task().notes.at(-1)).toMatch(new RegExp(`incomplete: 1 process\\(es\\) carrying this run's marker still run \\(${companion}\\)`));
   });

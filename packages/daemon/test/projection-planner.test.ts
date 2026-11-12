@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import nodePath from "node:path";
 import { planProjection, type ProjectionFsOps, type ProjectionInput } from "../src/domain/projection-planner.js";
 import { hashContent } from "../src/domain/conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
@@ -46,10 +47,10 @@ function makeConfig(overrides?: Partial<ResolvedNodeConfig>): ResolvedNodeConfig
 }
 
 function mockFs(files?: Record<string, string>): ProjectionFsOps {
-  const store = files ?? {};
+  const store = Object.fromEntries(Object.entries(files ?? {}).map(([file, text]) => [nodePath.resolve(file), text]));
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
-    exists: (p: string) => p in store,
+    readFile: (p: string) => { const file = nodePath.resolve(p); if (file in store) return store[file]!; throw new Error(`Not found: ${p}`); },
+    exists: (p: string) => nodePath.resolve(p) in store,
   };
 }
 
@@ -331,12 +332,12 @@ import {
 describe("P17 — production conflict-target resolver (claudeConflictTargetPath)", () => {
   it("maps skill -> the projected SKILL.md, subagent -> agents/<source basename>, guidance -> CLAUDE.md", () => {
     expect(claudeConflictTargetPath("skill", "skill-a", "/w", "/agents/base/skills/a")).toBe(
-      "/w/.claude/skills/skill-a/SKILL.md",
+      nodePath.normalize("/w/.claude/skills/skill-a/SKILL.md"),
     );
     expect(claudeConflictTargetPath("subagent", "rev", "/w", "/agents/base/subagents/reviewer.md")).toBe(
-      "/w/.claude/agents/reviewer.md",
+      nodePath.normalize("/w/.claude/agents/reviewer.md"),
     );
-    expect(claudeConflictTargetPath("guidance", "tdd", "/w", "/agents/base/guidance/tdd.md")).toBe("/w/CLAUDE.md");
+    expect(claudeConflictTargetPath("guidance", "tdd", "/w", "/agents/base/guidance/tdd.md")).toBe(nodePath.normalize("/w/CLAUDE.md"));
   });
 
   it("returns null for merged/complex categories (plugin, runtime_resource) — classification stays deferred", () => {

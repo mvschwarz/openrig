@@ -12,7 +12,7 @@
 // Pure unit tests — no Hono app, no daemon wiring.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync as jsRealpath, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,6 +22,7 @@ import {
   resolveAllowedFile,
   resolveAllowedPath,
 } from "../src/domain/files/path-safety.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 describe("UI Enhancement Pack v0 — readAllowlistFromEnv", () => {
   it("returns empty list when env unset", () => {
@@ -49,7 +50,7 @@ describe("UI Enhancement Pack v0 — readAllowlistFromEnv", () => {
       OPENRIG_FILES_ALLOWLIST: "x:/path/a, x:/path/b",
     });
     expect(list).toHaveLength(1);
-    expect(list[0]?.canonicalPath).toContain("/path/b");
+    expect(list[0]?.canonicalPath).toContain(join("path", "b"));
   });
 
   it("falls back to RIGGED_FILES_ALLOWLIST when OPENRIG_FILES_ALLOWLIST is empty", () => {
@@ -83,6 +84,15 @@ describe("UI Enhancement Pack v0 — resolveAllowedPath", () => {
   it("resolves a relative path inside the root", () => {
     const resolved = resolveAllowedPath(allowlist, "workspace", "STEERING.md");
     expect(resolved).toBe(realpathSync(join(tempDir, "workspace", "STEERING.md")));
+  });
+
+  it.runIf(process.platform === "win32")("canonicalizes mixed-case roots and internal aliases while rejecting sibling aliases", () => {
+    const roots = readAllowlistFromEnv({ OPENRIG_FILES_ALLOWLIST: `workspace:${join(tempDir, "workspace").toUpperCase()}` });
+    symlinkSync(join(tempDir, "workspace", "STEERING.md"), join(tempDir, "workspace", "inside-link"));
+    symlinkSync(join(tempDir, "outside-root", "secret.txt"), join(tempDir, "workspace", "outside-link"));
+    expect(resolveAllowedPath(roots, "workspace", "inside-link")).toBe(realpathSync(join(tempDir, "workspace", "STEERING.md")));
+    expect(() => resolveAllowedPath(roots, "workspace", "outside-link")).toThrow(/falls outside/);
+    expect(() => resolveAllowedPath(roots, "workspace", "C:STEERING.md")).toThrow(/drive-relative/);
   });
 
   it("resolves '' (empty path) to the root itself", () => {

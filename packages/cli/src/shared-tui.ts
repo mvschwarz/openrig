@@ -1,5 +1,6 @@
 import { DaemonClient } from "./client.js";
-import { assertLocalTmux, attachTmux, readTmuxServerArgs, type TmuxAttachment } from "./tmux-attachment.js";
+import { assertLocalTmux, attachTmux, readTmuxAttachCommand, readTmuxServerArgs, type TmuxAttachment } from "./tmux-attachment.js";
+export { detachedTerminalEnvironment as sharedTuiEnvironment } from "./terminal-environment.js";
 
 interface SharedTuiClient {
   readonly baseUrl?: string;
@@ -22,6 +23,7 @@ export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient
     logicalId: string; runtime: string | null;
     canonicalSessionName: string | null; tmuxAttachCommand: string | null;
     tmuxServerArgs?: string[];
+    tmuxCommand?: unknown;
     tmuxServerMode?: "inherit" | "isolated";
   }>>(`/api/rigs/${encodeURIComponent(kernel.rigId)}/nodes`);
   if (nodes.status >= 400) throw new Error(`Cannot read kernel terminals (HTTP ${nodes.status}); run rig status.`);
@@ -30,7 +32,8 @@ export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient
     throw new Error("The kernel has no bound shared terminal. Inspect rig ps --nodes --rig kernel; restore the existing terminal rather than launching another kernel. Standalone: rig tui.");
   }
   await assertLocalTmux(client, terminal.tmuxServerMode, "Shared attachment uses local tmux. The selected daemon's instance identity could not be confirmed locally; run rig tui --shared on that daemon's machine. Standalone rig tui can use this remote connection.");
-  return { session: terminal.canonicalSessionName, serverArgs: readTmuxServerArgs(terminal.tmuxServerArgs) };
+  return { session: terminal.canonicalSessionName, serverArgs: readTmuxServerArgs(terminal.tmuxServerArgs),
+    ...(terminal.tmuxCommand !== undefined ? { command: readTmuxAttachCommand(terminal.tmuxCommand) } : {}) };
 }
 
 export async function attachSharedTui(target: TmuxAttachment): Promise<number> {

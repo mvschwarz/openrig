@@ -59,7 +59,12 @@ export async function existingArchive(root: string, paths = LOGIN_FILES.map(file
 }
 
 export function expectLoginMessage(message: string, file: string): void {
-  expect(message).toContain(file);
+  if (process.platform === "win32") {
+    // Local author findings use native paths; archive findings use `/`, and
+    // JSON output escapes native backslashes. Match the same literal components.
+    const components = file.split("/").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    expect(message).toMatch(new RegExp(components.join(String.raw`[\\/]+`)));
+  } else expect(message).toContain(file);
   expect(message).toMatch(/harness login file/i);
   expect(message).toMatch(/anyone with the bundle could read/i);
   expect(message).toMatch(/remove it from the agent folder/i);

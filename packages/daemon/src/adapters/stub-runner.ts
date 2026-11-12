@@ -13,8 +13,9 @@
 
 import nodeFs from "node:fs";
 import nodePath from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { resolveRunnerHome } from "./runner-home.js";
 import {
   stubSeatSidecarPath,
   stubSeatScriptPath,
@@ -279,7 +280,7 @@ export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: 
   }
   if (!baseUrl || !token) {
     try {
-      const home = env.OPENRIG_HOME?.trim() || nodePath.join(env.HOME ?? "", ".openrig");
+      const home = resolveRunnerHome(env);
       const parsed = JSON.parse(nodeFs.readFileSync(nodePath.join(home, "activity-endpoint.json"), "utf8"));
       if (!baseUrl && typeof parsed.baseUrl === "string") baseUrl = parsed.baseUrl;
       if (!token && typeof parsed.token === "string") token = parsed.token;
@@ -326,7 +327,7 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
   // default) and EXECUTE its steps against the real IO seam. `emit compaction` fires
   // the exact shipped precompact seam (arch R3: TRIGGER, never fabricate). A broken
   // scenario script fails LOUDLY on the pane rather than silently no-opping.
-  const openrigHome = process.env.OPENRIG_HOME?.trim() || nodePath.join(process.env.HOME ?? "", ".openrig");
+  const openrigHome = resolveRunnerHome(process.env);
   // The stub compacts its OWN authored transcript (never a foreign one discovered
   // under ~/.claude/projects) — authored below from the resolved script.
   const transcriptPath = nodePath.join(args.cwd, ".openrig", "stub", "transcript.jsonl");
@@ -426,9 +427,15 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
 }
 
 // ── Self-invocation guard (Pi precedent) — run ONLY as the process entry. ──
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+const invokedDirectly = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return process.platform === "win32"
+      ? nodeFs.realpathSync.native(fileURLToPath(import.meta.url)) === nodeFs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(entry).href;
+  } catch { return false; }
+})();
 
 if (invokedDirectly) {
   runStubRunner(parseStubRunnerArgs(process.argv.slice(2))).catch((err) => {

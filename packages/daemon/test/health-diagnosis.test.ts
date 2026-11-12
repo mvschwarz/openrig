@@ -174,6 +174,18 @@ it("policy changes are versioned and audited, invalid or replayed changes write 
   t.policy.apply(next, "editor@rig");
   expect(() => t.policy.apply({ ...next, diagnosis: { ...next.diagnosis, cooldownSeconds: 0 } }, "editor@rig")).toThrow();
   expect(readdirSync(join(t.home, "health", "policy-history"))).toEqual(files);
+  // A second actual update exercises replacement of the existing policy file,
+  // including Windows metadata-preserving publication rather than first creation.
+  const revised = { ...next, thresholds: { ...next.thresholds, ceremonyRatio: 999 } };
+  const replacement = t.policy.apply(revised, "second-editor@rig");
+  expect(replacement.version).not.toBe(changed.version);
+  expect(t.policy.read()).toEqual(replacement);
+  expect(JSON.parse(readFileSync(t.policy.path, "utf8"))).toEqual(revised);
+  const history = readdirSync(join(t.home, "health", "policy-history"));
+  expect(history).toHaveLength(2);
+  const added = history.find(file => !files.includes(file))!;
+  expect(JSON.parse(readFileSync(join(t.home, "health", "policy-history", added), "utf8")))
+    .toMatchObject({ actor: "second-editor@rig", previous: changed, policy: revised });
 });
 
 async function checkpointSetup() {

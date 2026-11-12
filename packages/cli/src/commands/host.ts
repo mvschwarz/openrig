@@ -1,3 +1,5 @@
+import { openPrivateTextFile } from "../lib/private-text-file.js";
+import { closeSync } from "node:fs";
 // OPR.0.4.4.13 — the host-registry verbs (add / list / doctor — arch
 // R13-2a originally: no edit/remove/tunnel/bootstrap verbs; hand-editing
 // hosts.yaml remains the path for exotica; the bootstrap ships as script +
@@ -23,14 +25,16 @@ import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
-import { connect } from "node:net";
+import { connect, isIP, type Socket } from "node:net";
+import { execFile } from "node:child_process";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
-import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
+import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
+import { runCrossHostCommand, type CrossHostResult, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient, operatorAuthHeaders } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
+import { resolvePosturePorts, type PostureOptions } from "../host-posture-options.js";
 
 // ---------------------------------------------------------------------------
 // rig host pair — the approval wait is BOUNDED.
@@ -67,7 +71,7 @@ export interface CheckRow {
 }
 
 export interface DoctorDeps {
-  run: (host: HostEntry, argv: readonly string[]) => Promise<CrossHostResult>;
+  run: (host: HostEntry, argv: readonly string[], opts?: Pick<RunCrossHostCommandOpts, "stdin">) => Promise<CrossHostResult>;
   httpGet: (url: string, headers?: Record<string, string>) => Promise<{ status: number; body: string }>;
   /** OPR.0.4.6.MH1 FR-6: bounded JSON POST for the pair handshake.
    *  Optional so existing DoctorDeps fixtures keep compiling; the pair
@@ -138,9 +142,31 @@ function tailscaleRunSshFromPrefs(text: string): boolean | undefined {
     ?? nestedBoolean(parsed, ["CurrentProfile", "RunSSH"]);
 }
 
+/** A local observer failure is not an outside-vantage closed-port observation. */
+export function probeHostTcp(target: string, port: number, timeoutMs: number, dial: typeof connect = connect): Promise<"open" | "closed" | "unknown"> {
+  return new Promise(resolve => {
+    let socket: Socket | undefined, settled = false, addressKnown = isIP(target) !== 0;
+    const finish = (result: "open" | "closed" | "unknown") => {
+      if (settled) return;
+      settled = true; socket?.destroy(); resolve(result);
+    };
+    try { socket = dial({ host: target, port, timeout: timeoutMs }); }
+    catch { finish("unknown"); return; }
+    socket.once("lookup", (error: Error | null, address: string) => {
+      if (error || !isIP(address ?? "")) finish("unknown");
+      else addressKnown = true;
+    });
+    socket.once("connect", () => finish("open"));
+    socket.once("timeout", () => finish(addressKnown ? "closed" : "unknown"));
+    socket.once("close", () => finish("unknown"));
+    socket.once("error", (error: NodeJS.ErrnoException) => finish(
+      ["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ENETDOWN"].includes(error.code ?? "") ? "closed" : "unknown"));
+  });
+}
+
 function defaultDoctorDeps(): DoctorDeps {
   return {
-    run: (host, argv) => runCrossHostCommand(host, argv),
+    run: (host, argv, opts) => runCrossHostCommand(host, argv, opts),
     httpGet: async (url, headers) => {
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
       return { status: res.status, body: await res.text() };
@@ -154,13 +180,7 @@ function defaultDoctorDeps(): DoctorDeps {
       });
       return { status: res.status, body: await res.text() };
     },
-    tcpProbe: (target, port, timeoutMs) =>
-      new Promise((resolve) => {
-        const sock = connect({ host: target, port, timeout: timeoutMs });
-        sock.on("connect", () => { sock.destroy(); resolve("open"); });
-        sock.on("timeout", () => { sock.destroy(); resolve("closed"); });
-        sock.on("error", () => { sock.destroy(); resolve("closed"); });
-      }),
+    tcpProbe: probeHostTcp,
     learnHostBinding: (alias, observedHostId, observedUrl) => recordHostObservation({ alias, observedHostId, observedUrl }),
     replyRoute: replyRouteFromDisk,
     learnedHostId: (alias) => loadHostBindings().bindings[alias]?.hostId ?? null,
@@ -354,7 +374,7 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
   return rows;
 }
 
-/** FR-2 — THE one built-in posture profile (arch R13-2b: a named constant
+/** FR-2 — the POSIX built-in posture profile (a named constant
  *  table, no framework). Every item is three-valued; UNKNOWN is never
  *  smoothed to pass, and every non-pass carries its fix. */
 export const POSTURE_PROFILE_ID = "product-factory-vps";
@@ -362,8 +382,9 @@ export const POSTURE_PROFILE_ID = "product-factory-vps";
 export async function postureCheck(
   host: HostEntry,
   deps: DoctorDeps,
-  opts: { publicAddr?: string } = {},
+  opts: PostureOptions = {},
 ): Promise<CheckRow[]> {
+  const { daemonPort, sshPort } = resolvePosturePorts(opts);
   if (host.transport !== "ssh") {
     // Posture needs a shell. Report every item unknown — honestly.
     return POSTURE_ITEM_IDS.map((id) => ({
@@ -371,6 +392,14 @@ export async function postureCheck(
       status: "unknown" as const,
       detail: "posture checks need shell access; this host is registered with http transport",
       fix: "register an ssh-transport entry for this host (or run the checks on the host per the runbook)",
+    }));
+  }
+  if (host.remoteShell === "powershell") {
+    return POSTURE_ITEM_IDS.map((id) => ({
+      step: id,
+      status: "unknown" as const,
+      detail: `${POSTURE_PROFILE_ID} is a POSIX VPS baseline; its account, sshd, UFW and listener checks are not qualified for native Windows`,
+      fix: "Assess Windows account permissions, OpenSSH configuration, Windows Firewall, Tailscale and listener bindings on this host. This profile cannot certify the Windows equivalents.",
     }));
   }
 
@@ -470,14 +499,14 @@ export async function postureCheck(
   // public IP bind must fail exactly like a wildcard — pass is an
   // ALLOWLIST (loopback or the tailnet CGNAT range 100.64.0.0/10), never
   // "not wildcard".
-  const ss = await sh("ss -tln 2>/dev/null | grep ':7433' || true");
+  const ss = await sh(`ss -tln 2>/dev/null | grep ':${daemonPort}' || true`);
   const ssOut = ss.ok ? ss.stdout : "";
   const listenAddrs = ssOut
     .split("\n")
-    .map((line) => line.match(/(\S+):7433\b/)?.[1])
+    .map((line) => line.match(new RegExp(`(\\S+):${daemonPort}\\b`))?.[1])
     .filter((a): a is string => a !== undefined);
   if (listenAddrs.length === 0) {
-    rows.push({ step: "daemon-bind-not-public", status: "unknown", detail: "no listener on :7433 observed (daemon may be down)", fix: "start the daemon, then re-check: ss -tln | grep 7433" });
+    rows.push({ step: "daemon-bind-not-public", status: "unknown", detail: `no listener on :${daemonPort} observed (daemon may be down)`, fix: `verify the selected daemon, then re-check: ss -tln | grep ':${daemonPort}'` });
   } else {
     const isLoopbackOrTailnet = (addr: string): boolean => {
       const a = addr.replace(/^\[|\]$/g, "");
@@ -487,17 +516,19 @@ export async function postureCheck(
     };
     const offending = listenAddrs.filter((a) => !isLoopbackOrTailnet(a));
     rows.push(offending.length === 0
-      ? { step: "daemon-bind-not-public", status: "pass", detail: `listener(s) bound loopback/tailnet only: ${listenAddrs.join(", ")}` }
-      : { step: "daemon-bind-not-public", status: "fail", detail: `daemon listens on a non-loopback/non-tailnet address: ${offending.join(", ")}`, fix: "bind the daemon to loopback/tailnet only (OPENRIG daemon host config); never expose :7433 publicly" });
+      ? { step: "daemon-bind-not-public", status: "pass", detail: `listener(s) on :${daemonPort} bound loopback/tailnet only: ${listenAddrs.join(", ")}` }
+      : { step: "daemon-bind-not-public", status: "fail", detail: `daemon on :${daemonPort} listens on a non-loopback/non-tailnet address: ${offending.join(", ")}`, fix: `bind the daemon to loopback/tailnet only (OPENRIG daemon host config); never expose :${daemonPort} publicly` });
   }
 
   // 8+9. public reachability probes — only meaningful with a known PUBLIC address.
   if (opts.publicAddr) {
-    for (const [step, port] of [["public-daemon-port-unreachable", 7433], ["public-ssh-unreachable-or-accepted", 22]] as const) {
-      const probe = await deps.tcpProbe(opts.publicAddr, port, 5000);
+    for (const [step, port] of [["public-daemon-port-unreachable", daemonPort], ["public-ssh-unreachable-or-accepted", sshPort]] as const) {
+      let probe: "open" | "closed" | "unknown" = "unknown";
+      try { probe = await deps.tcpProbe(opts.publicAddr, port, 5000); } catch { /* unavailable stays unknown */ }
       rows.push(probe === "open"
-        ? { step, status: "fail", detail: `${opts.publicAddr}:${port} is publicly reachable`, fix: "remove the public allow rule / firewall the port (the smoke-test hardening bar: public :22/:7433 time out)" }
-        : { step, status: "pass", detail: `${opts.publicAddr}:${port} not reachable (${probe})` });
+        ? { step, status: "fail", detail: `${opts.publicAddr}:${port} is publicly reachable`, fix: `inspect public ingress for the selected :${port}; remove unintended public access` }
+        : probe === "closed" ? { step, status: "pass", detail: `${opts.publicAddr}:${port} not reachable (refusal/filter/timeout)` }
+        : { step, status: "unknown", detail: `${opts.publicAddr}:${port} probe unavailable`, fix: "repeat the outside-vantage probe when its connectivity and permissions are available" });
     }
   } else {
     const unknownProbe = (step: string, port: number): CheckRow => ({
@@ -505,8 +536,8 @@ export async function postureCheck(
       detail: `public reachability of :${port} not probed (no public address known — the registry target may be a tailnet alias)`,
       fix: `re-run with --public-addr <ip> to probe from this vantage`,
     });
-    rows.push(unknownProbe("public-daemon-port-unreachable", 7433));
-    rows.push(unknownProbe("public-ssh-unreachable-or-accepted", 22));
+    rows.push(unknownProbe("public-daemon-port-unreachable", daemonPort));
+    rows.push(unknownProbe("public-ssh-unreachable-or-accepted", sshPort));
   }
 
   return rows;
@@ -566,16 +597,20 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .requiredOption("--transport <transport>", "ssh or http")
     .option("--target <target>", "SSH target (DNS name, ssh-config alias, or IP) — ssh transport")
     .option("--user <user>", "SSH user — ssh transport")
+    .option("--remote-shell <shell>", "Remote SSH shell: posix (default) or powershell")
+    .option("--rig-path <path>", "Absolute remote rig JavaScript entry for powershell SSH")
     .option("--url <url>", "Remote daemon base URL — http transport")
     .option("--bearer-env <name>", "Env var NAME holding the bearer token — http transport (optional pointer, never a value; omit both bearer flags for a tokenless daemon)")
     .option("--bearer-file <path>", "File PATH holding the bearer token — http transport (optional pointer, never a value; at most one bearer flag)")
     .option("--notes <text>", "Free-form operator note")
     .option("--json", "JSON output")
     .addHelpText("after", rewritesRegistry)
-    .action((opts: { id: string; transport: string; target?: string; user?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {
+    .action((opts: { id: string; transport: string; target?: string; user?: string; remoteShell?: string; rigPath?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {
       const rawEntry: Record<string, unknown> = { id: opts.id, transport: opts.transport };
       if (opts.target !== undefined) rawEntry["target"] = opts.target;
       if (opts.user !== undefined) rawEntry["user"] = opts.user;
+      if (opts.remoteShell !== undefined) rawEntry["remoteShell"] = opts.remoteShell;
+      if (opts.rigPath !== undefined) rawEntry["rigPath"] = opts.rigPath;
       if (opts.url !== undefined) rawEntry["url"] = opts.url;
       if (opts.bearerEnv !== undefined) rawEntry["bearer_env"] = opts.bearerEnv;
       if (opts.bearerFile !== undefined) rawEntry["bearer_file"] = opts.bearerFile;
@@ -699,14 +734,18 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .argument("<id>", "A registered host id")
     .option("--target <target>", "SSH target — ssh transport")
     .option("--user <user>", "SSH user — ssh transport (empty string clears the value)")
+    .option("--remote-shell <shell>", "Remote SSH shell: posix or powershell; empty clears")
+    .option("--rig-path <path>", "Absolute remote rig JavaScript entry; empty clears")
     .option("--url <url>", "Remote daemon base URL — http transport")
     .option("--notes <text>", "Free-form operator note (empty string clears the value)")
     .option("--json", "JSON output")
     .addHelpText("after", rewritesRegistry)
-    .action((id: string, opts: { target?: string; user?: string; url?: string; notes?: string; json?: boolean }) => {
+    .action((id: string, opts: { target?: string; user?: string; remoteShell?: string; rigPath?: string; url?: string; notes?: string; json?: boolean }) => {
       const changes: Record<string, unknown> = {};
       if (opts.target !== undefined) changes["target"] = opts.target;
       if (opts.user !== undefined) changes["user"] = opts.user;
+      if (opts.remoteShell !== undefined) changes["remoteShell"] = opts.remoteShell;
+      if (opts.rigPath !== undefined) changes["rigPath"] = opts.rigPath;
       if (opts.url !== undefined) changes["url"] = opts.url;
       if (opts.notes !== undefined) changes["notes"] = opts.notes;
 
@@ -911,7 +950,9 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       // changed since preflight).
       try {
         mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-        writeFileSync(tokenPath, `${outcome.token}\n`, { mode: 0o600, flag: "wx" });
+        const tokenFd = openPrivateTextFile(tokenPath);
+        try { writeFileSync(tokenFd, `${outcome.token}\n`); }
+        finally { closeSync(tokenFd); }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "EEXIST") {
           console.error(`a credential file appeared at ${tokenPath} during pairing — refusing to overwrite it. Nothing was persisted by this request.`);
@@ -1072,12 +1113,14 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
 
   cmd
     .command("doctor")
-    .description("Stepwise host verification (+ --posture for the product-factory-vps baseline)")
+    .description("Stepwise host verification with an optional POSIX posture baseline")
     .argument("<id>", "Registered host id")
-    .option("--posture <profile>", `Run the posture baseline (only built-in profile: ${POSTURE_PROFILE_ID})`)
+    .option("--posture <profile>", `Run the optional POSIX posture baseline: ${POSTURE_PROFILE_ID}`)
     .option("--public-addr <ip>", "Public address for the outside-vantage reachability probes (posture items 8-9)")
+    .option("--daemon-port <port>", "Posture daemon listener/public-probe port (default: 7433)")
+    .option("--ssh-port <port>", "Posture public SSH probe port (default: 22)")
     .option("--json", "JSON output")
-    .action(async (id: string, opts: { posture?: string; publicAddr?: string; json?: boolean }) => {
+    .action(async (id: string, opts: { posture?: string; publicAddr?: string; daemonPort?: string; sshPort?: string; json?: boolean }) => {
       const deps: DoctorDeps = doctorDepsOverride ?? defaultDoctorDeps();
       const loaded = loadHostRegistry();
       if (!loaded.ok) {
@@ -1093,14 +1136,20 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         return;
       }
       if (opts.posture !== undefined && opts.posture !== POSTURE_PROFILE_ID) {
-        console.error(`unknown posture profile '${opts.posture}'. The only built-in profile is: ${POSTURE_PROFILE_ID}`);
+        console.error(`unknown posture profile '${opts.posture}'. Built-in profile: ${POSTURE_PROFILE_ID}`);
         process.exitCode = 1;
         return;
       }
+      if (!opts.posture && (opts.daemonPort !== undefined || opts.sshPort !== undefined)) {
+        console.error("--daemon-port and --ssh-port require --posture"); process.exitCode = 1; return;
+      }
+      let ports: ReturnType<typeof resolvePosturePorts>;
+      try { ports = resolvePosturePorts(opts); }
+      catch (error) { console.error((error as Error).message); process.exitCode = 1; return; }
 
       const rows = await doctorLegs(resolved.host, deps);
       if (opts.posture) {
-        rows.push(...await postureCheck(resolved.host, deps, { publicAddr: opts.publicAddr }));
+        rows.push(...await postureCheck(resolved.host, deps, { publicAddr: opts.publicAddr, ...ports }));
       }
       renderRows(rows, opts.json);
       if (rows.some((r) => r.status === "fail")) process.exitCode = 1;

@@ -1,4 +1,6 @@
-import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncOwnedFilesystemPath } from "./filesystem-sync.js";
+import { ensureWindowsPrivateDirectory } from "./windows-owned-text.js";
 import { join, posix, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EnvironmentPlatform, EnvironmentError, identifier, regularBytes, relativeGuestPath, sha256, type EnvironmentBinding, type EnvironmentDriver, type Placement } from "./environment-platform.js";
@@ -36,8 +38,9 @@ function privateDirectory(path: string): void {
     current = resolve(current, "..");
   }
   mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") ensureWindowsPrivateDirectory(path);
 }
-function syncFile(path: string): void { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
+function syncFile(path: string): void { syncOwnedFilesystemPath(path); }
 /** Existing binding/effect journal, with no task duplication or provider-wide policy engine. */
 export class EnvironmentLifecycle {
   private readonly driver: EnvironmentLifecycleDriver;
@@ -245,7 +248,7 @@ export class EnvironmentLifecycle {
       const checkpoint: EnvironmentCheckpoint = { version: 1, checkpointId: input.operationId, bindingId: id, nodeId: binding.nodeId!, seat: binding.seat,
         generation: input.generation, nativeType: native.nativeType, nativeId: native.nativeId, predecessorResourceId: binding.resource!.id,
         destinationCwd: posix.join(binding.guestRoot, "work"), nativeState: posix.join(binding.guestRoot, "native"), artifacts: selected.artifacts, files };
-      this.verifyCheckpoint(checkpoint); this.selected(id, input.generation); syncFile(directory); this.save(input.operationId, checkpoint); return checkpoint;
+      this.verifyCheckpoint(checkpoint); this.selected(id, input.generation); syncOwnedFilesystemPath(directory, true); this.save(input.operationId, checkpoint); return checkpoint;
     } finally { rmSync(stage, { recursive: true }); }
   }
   async recreate(id: string, input: { operationId: string; generation: string; checkpointId: string; resumeType: string; resumeToken: string; placement: Placement }): Promise<Record<string, unknown>> {

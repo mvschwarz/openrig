@@ -53,7 +53,11 @@ export async function checkBundleFolder(folder: string) {
         add("referenced_files", "finding", `Declared file is ${actual}, expected ${wanted}.`, path.relative(root, path.resolve(base, relative)));
         return null;
       }
-      fs.accessSync(full, fs.constants.R_OK);
+      if (kind.isDirectory()) fs.readdirSync(full);
+      else {
+        const fd = fs.openSync(full, "r");
+        fs.closeSync(fd);
+      }
       return full;
     } catch { add("referenced_files", "finding", "Declared file is missing, unreadable or outside the bundle folder.", path.relative(root, path.resolve(base, relative))); return null; }
   };
@@ -130,7 +134,8 @@ export async function checkBundleFolder(folder: string) {
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (++visitedFiles > 10_000) throw new Error();
-        if (entry.name === ".git" || entry.name === "node_modules") continue; // Not bundle content.
+        const name = process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+        if (name === ".git" || name === "node_modules") continue; // Not bundle content.
         const file = path.join(dir, entry.name);
         if (entry.isSymbolicLink()) { add("credential_paths", "not_checked", "Symlink content was not scanned.", path.relative(root, file)); continue; }
         if (entry.isDirectory()) walk(file);

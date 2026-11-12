@@ -9,6 +9,11 @@ import { codexDaemonSupportProbe, probeCodexDaemonSupport, type CodexDaemonSuppo
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+// These tests replace the executor; native executable discovery is covered by
+// windows-codex-command.test.ts rather than the host's real installations.
+vi.mock("../src/domain/windows-provider-command.js", () => ({ resolveCodexCommand: () => ({ command: "codex", prefix: [] }) }));
+vi.mock("../src/domain/windows-job-process.js", () => ({ prepareWindowsJobProcess: (file: string, args: string[], options: object) => ({ file, args, options, dispose: () => {} }) }));
+
 // #69 — Codex versions using a shared app-server daemon can run tool shells there, so a seat's tools
 // can inherit another seat's OpenRig identity. Supported binaries must launch with
 // --no-daemon on every path; a positively legacy binary keeps its current invocation;
@@ -197,15 +202,15 @@ describe("#69 production detector with a fake executor", () => {
   const kinds = ["fresh", "fork", "resume", "restore", "last"] as const;
 
   function fixture(kind: typeof kinds[number], detectDaemonSupport?: CodexDaemonSupportDetector,
-    posture: "floor" | "full_bypass" = "floor", profile?: string) {
+    posture: "floor" | "full_bypass" = "floor", profile?: string, selectedPath = launchPath) {
     const tmux = mockTmux();
     const model = "model's name";
     const adapter = new CodexRuntimeAdapter({
       tmux, fsOps: mockFs(), listProcesses: () => [], sleep: async () => {},
-      launchPath, detectDaemonSupport, verifyProfilePreflight: async () => ({ ok: true }),
+      launchPath: selectedPath, detectDaemonSupport, verifyProfilePreflight: async () => ({ ok: true }),
     });
     const restore = new CodexResumeAdapter(tmux, {
-      launchPath, detectDaemonSupport, sleep: async () => {}, maxWaitMs: 0, exec: async () => "",
+      launchPath: selectedPath, detectDaemonSupport, sleep: async () => {}, maxWaitMs: 0, exec: async () => "",
     });
     const run = () => kind === "restore" || kind === "last"
       ? restore.resume("r01-qa", kind === "last" ? "codex_last" : "codex_id", "thread's id", cwd, profile, posture, model)
@@ -217,6 +222,12 @@ describe("#69 production detector with a fake executor", () => {
     return { run, commands: () => sentCommands(tmux) };
   }
 
+  it.each(kinds)("%s keeps an explicitly empty PATH in the dispatched command", async kind => {
+    const actual = fixture(kind, undefined, "floor", undefined, "");
+    await actual.run();
+    expect(actual.commands().find(command => command.includes("codex"))).toContain("env PATH='' ");
+  });
+
   for (const kind of kinds) {
     for (const posture of ["floor", "full_bypass"] as const) {
       it(`${kind}/${posture}: cwd/PATH parity, one probe, legacy bytes, model and profile survive`, async () => {
@@ -226,7 +237,7 @@ describe("#69 production detector with a fake executor", () => {
           expect(args).toEqual(["--help"]);
           expect(options.cwd).toBe(cwd);
           expect(options.env.PATH).toBe(launchPath);
-          expect(nodePath.resolve(options.cwd, options.env.PATH.split(":")[0], file)).toBe("/seat space's/bin/codex");
+          expect(nodePath.resolve(options.cwd, options.env.PATH.split(":")[0], file)).toBe(nodePath.resolve(cwd, "bin", "codex"));
           expect(options.timeout).toBe(10_000);
           expect(options.killSignal).toBe("SIGKILL");
           callback(null, help);

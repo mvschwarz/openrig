@@ -27,13 +27,15 @@ import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
-import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { daemonTmuxAttachCommand, daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { powershellQuote } from "../adapters/windows-launch.js";
+import { providerRecoveryCommand } from "./provider-recovery-command.js";
 
 // -- Row types for SQL results --
 
@@ -115,11 +117,15 @@ interface BindingRow {
 // -- Helpers --
 
 function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
+  return providerRecoveryCommand(buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp));
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
+
+function recoveryDirectoryCommand(cwd: string): string {
+  return process.platform === "win32" ? `Set-Location -LiteralPath ${powershellQuote(cwd)}` : `cd ${shellQuote(cwd)}`;
+}
 
 function computeRecoveryGuidance(input: {
   runtime: string | null;
@@ -142,7 +148,7 @@ function computeRecoveryGuidance(input: {
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     commands.push(["claude --resume", ...claudeMcpArgs(claudeMcp).map(shellQuote)].join(" "));
 
@@ -155,7 +161,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? "Try native Claude resume first, then fall back to the workspace-local picker if needed."
         : "No stored Claude resume token. Use the workspace-local Claude picker fallback.",
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }
@@ -169,7 +175,7 @@ function computeRecoveryGuidance(input: {
       commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     if (!resumeToken) {
       commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
@@ -190,7 +196,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
         : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }
@@ -818,6 +824,8 @@ function buildInventoryEntry(
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
+    ...(row.binding_attachment_type === "tmux" && row.session_name
+      ? { tmuxCommand: daemonTmuxAttachCommand() } : {}),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerArgs().length
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),

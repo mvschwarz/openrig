@@ -807,6 +807,8 @@ export interface NodeInventoryEntry {
   tmuxAttachCommand: string | null;
   /** Structured server identity for clients that attach without a shell. */
   tmuxServerArgs?: string[];
+  /** Executable and prefix arguments for direct local attachment. */
+  tmuxCommand?: string[];
   /** Effective mode; inherited non-default sockets also have server arguments. */
   tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;

@@ -1,17 +1,18 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // The TUI's "Open terminals" path end to end: the TUI's preview, its planId passed as the expected plan, and the CLI
 // window opener with the provider omitted (`rig terminal open --window --expected-plan <planId> -- <view>`).
 // Real: the daemon's terminal routes and TerminalService (provider selection, composition, plan hashing) over
 // localhost, the TUI and CLI daemon clients, and the window opener's plain-tmux fallback on an isolated tmux server.
 // Stubbed: the provider adapters' status and liveness, the Herdr binary probe, and the macOS desktop launcher
 // (osascript), which records its command instead of opening a window.
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it as platformIt, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
+
 import { DaemonClient as CliClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { DaemonClient as TuiClient } from "../../tui/src/daemon-client.js";
@@ -22,6 +23,9 @@ import type { TerminalProvider } from "../../daemon/src/domain/terminal/terminal
 
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "window-fixture" }));
 
+// This fixture launches POSIX tmux/shell viewers. Native Windows plans and
+// expected-plan handling live in terminal-window-windows.test.ts.
+const it = platformIt.skipIf(process.platform === "win32");
 const env = { ...process.env }; delete env["TMUX"];
 const sockets: string[] = [];
 const dirs: string[] = [];
@@ -69,9 +73,9 @@ async function fixture(herdrAvailable: boolean) {
   app.get("/healthz", c => c.json({ selfHostId: "window-fixture" }));
   app.use("*", async (c, next) => { (c.set.bind(c) as (k: string, v: unknown) => void)("terminalService", service); await next(); });
   app.route("/api/terminal", terminalRoutes());
-  const port = await new Promise<number>(resolve => {
-    servers.push(serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, info => resolve(info.port)));
-  });
+  const server = await serveOwnedHonoFixture(app.fetch);
+  servers.push(server);
+  const port = (server.address() as {port:number}).port;
   const baseUrl = `http://127.0.0.1:${port}`;
   const launched: string[] = [];
   const deps: WindowDeps = {

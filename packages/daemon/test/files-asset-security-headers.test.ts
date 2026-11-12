@@ -1,10 +1,11 @@
 // Explicit previews retain their content type and scripts; ordinary HTML reads stay text.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, writeFileSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync as jsRealpath, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../src/routes/files.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 const html = '<!doctype html><p id="preview">waiting</p><script>document.getElementById("preview").textContent="ready";</script>';
 const script = 'document.getElementById("preview").textContent="ready";';
@@ -23,7 +24,6 @@ describe("GET /api/files/asset — previews and retained boundaries", () => {
     writeFileSync(join(root, "图表.svg"), svg);
     writeFileSync(join(root, "sample.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     writeFileSync(join(outside, "other.html"), "outside");
-    symlinkSync(join(outside, "other.html"), join(root, "link.html"));
     app = new Hono();
     app.use("*", async (c, next) => {
       c.set("filesAllowlist" as never, [{ name: "ws", canonicalPath: realpathSync(root) }]);
@@ -93,6 +93,9 @@ describe("GET /api/files/asset — previews and retained boundaries", () => {
   });
 
   it.each(["../other.html", "/etc/passwd", "link.html"])("retains path containment for %s", async (file) => {
+    // Only this case needs a file symlink. A host privilege limitation must
+    // not prevent independent ordinary asset/range cases from executing.
+    if (file === "link.html") symlinkSync(join(outside, "other.html"), join(root, file));
     const res = await app.request(url(file, "&render=1"));
     expect(res.status).toBe(400);
     expect(await res.text()).not.toBe("outside");
@@ -102,5 +105,16 @@ describe("GET /api/files/asset — previews and retained boundaries", () => {
     const res = await app.request("/api/files/asset?root=unknown&path=mock.html&render=1");
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("root_unknown");
+  });
+
+  it.runIf(process.platform === "win32")("serves an in-root junction asset and refuses an outside junction asset", async () => {
+    const inside = join(root, "inside"); mkdirSync(inside);
+    writeFileSync(join(inside, "page.html"), html);
+    symlinkSync(inside, join(root, "inside-junction"), "junction");
+    symlinkSync(outside, join(root, "outside-junction"), "junction");
+    const accepted = await app.request(url("inside-junction/page.html", "&render=1"));
+    expect(accepted.status).toBe(200); expect(await accepted.text()).toBe(html);
+    const refused = await app.request(url("outside-junction/other.html", "&render=1"));
+    expect(refused.status).toBe(400); expect(await refused.text()).not.toBe("outside");
   });
 });

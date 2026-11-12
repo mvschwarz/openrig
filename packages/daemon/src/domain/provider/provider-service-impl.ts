@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
+import { readPlatformEnv } from "../platform-env.js";
 import type Database from "better-sqlite3";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
@@ -36,6 +37,7 @@ import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
+import { operatorShellWord } from "../../adapters/shell-quote.js";
 
 /** The Codex logins saved in a home (`rig auth`'s file operations, which never return a token). */
 export interface CodexHomeLogins {
@@ -162,9 +164,9 @@ export class ProviderServiceImpl implements ProviderService {
       auth: readAuth(),
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
-      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
-      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
-      home: env.HOME ?? os.homedir(),
+      codexHome: resolveCodexHome(env).codexHome,
+      claudeConfigDir: readPlatformEnv(env, "CLAUDE_CONFIG_DIR"),
+      home: readPlatformEnv(env, "HOME") || os.homedir(),
     });
     return { ...model, usage: allUsage, seatAccounts };
   }
@@ -252,7 +254,7 @@ export class ProviderServiceImpl implements ProviderService {
     const seat = { home: plan.codexHome, activity: plan.activity.state, peers: plan.peers };
     if (!this.codexLogins().list(plan.codexHome).includes(input.toAccount)) {
       return { ok: false, verdict: { safe: false, reasons: ["target_not_in_seat_home"], seat,
-        message: `No login named "${input.toAccount}" is saved in ${plan.codexHome}, the Codex home this seat runs on. List them with: rig auth list --codex-home ${plan.codexHome}` } };
+        message: `No login named "${input.toAccount}" is saved in ${plan.codexHome}, the Codex home this seat runs on. List them with: rig auth list --codex-home ${operatorShellWord(plan.codexHome)}` } };
     }
     return { ok: true, verdict: { safe: true, seat }, home: plan.codexHome, peers: plan.peers };
   }
@@ -294,7 +296,7 @@ export class ProviderServiceImpl implements ProviderService {
     }
     const savedBefore = saved.ok ? saved.name : null;
     const report: SeatSwitchReport = { seat: input.seat, home, account: input.toAccount, loginChanged: false, savedBefore,
-      undo: savedBefore ? `rig auth switch --codex-home ${home} ${savedBefore}` : null, peers: withRestartSteps(peers, input.toAccount) };
+      undo: savedBefore ? `rig auth switch --codex-home ${operatorShellWord(home)} ${operatorShellWord(savedBefore)}` : null, peers: withRestartSteps(peers, input.toAccount) };
     const activated = logins.activate(home, input.toAccount);
     if (!activated.ok) {
       return { outcome: "failed_safely", reasons: ["login_not_activated"], seat: report,

@@ -66,6 +66,40 @@ it("stages all resolved startup inputs before native dispatch and binds separate
   expect(receipt.receipt_json).toContain("grant-one"); expect(receipt.receipt_json).not.toContain("fixture-token");
   expect(f.tmux.sendShellCommand).toHaveBeenCalledTimes(1);
 });
+it.each(["initial", "after-prepare", "before-viewer-write"])("preserves native launch custody when selection changes at %s", async phase => {
+  const f = await fixture();
+  let selected = phase !== "initial";
+  const guest = f.guest.getMockImplementation()!;
+  f.guest.mockImplementation(async (binding, args) => {
+    const result = await guest(binding, args);
+    if (args[0] === "--prepare" && phase === "after-prepare") selected = false;
+    return result;
+  });
+  const effects: string[] = [];
+  const tmux = { sendShellCommand: vi.fn(async (_session: string, command: string, beforeWrite?: () => void) => {
+    if (phase === "before-viewer-write") selected = false;
+    try { beforeWrite?.(); } catch { return { ok: false as const, code: "selection_changed", message: "Selected history changed" }; }
+    effects.push(command); return { ok: true as const };
+  }) };
+  await expect(f.startup.launch(f.binding, { beforeNativeDispatch: () => selected }, tmux)).rejects.toMatchObject({
+    code: phase === "initial" ? "environment_selection_changed" : "environment_viewer_unconfirmed",
+  });
+  expect(effects).toEqual([]);
+  if (phase === "initial") {
+    expect(f.activity).not.toHaveBeenCalled();
+    expect(f.guest).not.toHaveBeenCalled();
+    expect(f.db.prepare("SELECT count(*) AS count FROM environment_operations WHERE kind='launch'").get()).toEqual({ count: 0 });
+    return;
+  }
+  expect(f.db.prepare("SELECT state FROM environment_operations WHERE kind='launch'").get()).toEqual({ state: "requested" });
+  selected = true;
+  expect((await f.startup.launch(f.binding, { beforeNativeDispatch: () => selected }, tmux)).ok).toBe(true);
+  expect(f.activity).toHaveBeenCalledTimes(1);
+  expect(f.guest.mock.calls.filter(call => call[1][0] === "--prepare")).toHaveLength(1);
+  expect(f.db.prepare("SELECT state FROM environment_operations WHERE kind='launch'").get()).toEqual({ state: "confirmed" });
+  expect(effects).toEqual([]); // Reconciliation never replays the viewer or native launch.
+});
+
 it("reconciles a lost latch reply without issuing another grant or rewriting an execution", async () => {
   const f = await fixture(); f.losePrepare();
   await expect(f.startup.launch(f.binding, {}, f.tmux)).rejects.toThrow("Lost preparation reply");

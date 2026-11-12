@@ -28,8 +28,8 @@ afterAll(() => rmSync(appHome, { recursive: true, force: true }));
 describe("herdr-app as the TUI's terminal target", () => {
   it("resolves herdr-app's home as herdr-app does", () => {
     expect(herdrAppHome({ HERDR_APP_HOME: "/a" })).toBe("/a");
-    expect(herdrAppHome({ XDG_CONFIG_HOME: "/x", HOME: "/h" })).toBe("/x/herdr-app");
-    expect(herdrAppHome({ HOME: "/h" })).toBe("/h/.config/herdr-app");
+    expect(herdrAppHome({ XDG_CONFIG_HOME: "/x", HOME: "/h" })).toBe(join("/x", "herdr-app"));
+    expect(herdrAppHome({ HOME: "/h" })).toBe(join("/h", ".config", "herdr-app"));
   });
 
   it("needs the core terminal's markers AND that home's window socket: markers alone invent no endpoint", () => {

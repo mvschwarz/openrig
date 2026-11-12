@@ -1,5 +1,5 @@
 import { ConfigStore } from "./config-store.js";
-import { shellQuote } from "./cross-host-executor.js";
+import { queueRecoveryCommand, quoteQueueRecoveryValue } from "./queue-recovery-command.js";
 
 /**
  * Slice 15 (OPR.0.7.0.15) P1 — the short receipt a queue WRITE prints when the
@@ -68,8 +68,8 @@ const isRow = (v: unknown): v is Row => typeof v === "object" && v !== null && !
 
 function showCommand(id: string, remoteHost?: string): string {
   return remoteHost
-    ? `rig queue show ${shellQuote(id)} --host ${shellQuote(remoteHost)} --full --json`
-    : `rig queue show ${shellQuote(id)} --full --json`;
+    ? `rig queue show ${quoteQueueRecoveryValue(id)} --host ${quoteQueueRecoveryValue(remoteHost)} --full --json`
+    : queueRecoveryCommand(id);
 }
 
 interface WakeEvidence {

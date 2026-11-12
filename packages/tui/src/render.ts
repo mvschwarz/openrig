@@ -656,14 +656,17 @@ function specSourceLines(spec: FleetSnapshot["specs"][number], snap: FleetSnapsh
 
 function displayPath(path: string, max = 68): string {
   if (path.length <= max) return path;
-  const parts = path.split("/").filter(Boolean);
+  const windows = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path);
+  const separator = windows && path.includes("\\") ? "\\" : "/";
+  const parts = path.split(windows ? /[\\/]/ : /\//).filter(Boolean);
   const kept: string[] = [];
   while (parts.length > 0) {
     const candidate = [parts.at(-1)!, ...kept];
-    if (`…/${candidate.join("/")}`.length > max) break;
+    if (`…${separator}${candidate.join(separator)}`.length > max) break;
     kept.unshift(parts.pop()!);
   }
-  return `…/${kept.join("/")}`;
+  // Even a single oversized filename must retain its identifying suffix.
+  return kept.length ? `…${separator}${kept.join(separator)}` : `…${path.slice(-(max - 1))}`;
 }
 
 function wrappedList(prefix: string, values: string[], max = 84): ContentLine[] {

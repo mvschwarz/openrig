@@ -11,6 +11,7 @@ import { createProgram } from "../src/index.js";
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), "../../../docs/reference/keeping-a-watch.md");
 
 function commandsInPage(markdown: string): string[] {
+  markdown = markdown.replace(/\r\n/g, "\n");
   const commands: string[] = [];
   for (const block of markdown.matchAll(/```bash\n([\s\S]*?)```/g)) {
     const joined = block[1]!.replace(/\\\n\s*/g, " ");
@@ -41,6 +42,11 @@ describe("keeping-a-watch reference page", () => {
   it("names the commands the watch pattern relies on", () => {
     const names = commands.map((c) => resolve(program, c).sub.name());
     for (const needed of ["create", "block", "show", "update", "list"]) expect(names).toContain(needed);
+  });
+
+  it("extracts the same commands from LF and CRLF documents", () => {
+    const lf = page.replace(/\r\n/g, "\n");
+    expect(commandsInPage(lf.replace(/\n/g, "\r\n"))).toEqual(commandsInPage(lf));
   });
 
   it.each(commands)("%s resolves to a real subcommand with declared options", (command) => {

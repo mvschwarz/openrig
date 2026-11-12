@@ -8,7 +8,8 @@ import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from ".
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
+import { verifyPaneIdleShell } from "./native-process-lineage.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { terminatePaneInPlace, type PaneTerminationResult } from "./pane-cutover.js";
@@ -136,6 +137,7 @@ export class SuccessorSessionLauncher {
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
   private exitPollMs: number;
   private exitTimeoutMs: number;
+  private nativeIdleShell: (pane: string) => Promise<boolean>;
 
   constructor(
     tmuxAdapter: TmuxAdapter,
@@ -163,6 +165,8 @@ export class SuccessorSessionLauncher {
       /** Cutover retiree-exit poll interval + total bounded timeout (per graceful/forced phase). */
       exitPollMs?: number;
       exitTimeoutMs?: number;
+      /** Native process/console witness; shell names alone never prove idle. */
+      nativeIdleShell?: (pane: string) => Promise<boolean>;
     } = {},
   ) {
     this.tmuxAdapter = tmuxAdapter;
@@ -177,6 +181,7 @@ export class SuccessorSessionLauncher {
     this.tmuxOptionDefaults = opts.tmuxOptionDefaults ?? null;
     this.exitPollMs = opts.exitPollMs ?? 100;
     this.exitTimeoutMs = opts.exitTimeoutMs ?? 3_000;
+    this.nativeIdleShell = opts.nativeIdleShell ?? (target => verifyPaneIdleShell({ target, tmux: this.tmuxAdapter }));
   }
 
   /**
@@ -248,6 +253,13 @@ export class SuccessorSessionLauncher {
       };
     }
 
+    let blankShell: string | null = null;
+    if (this.tmuxAdapter.isNativeWindows) {
+      blankShell = await this.tmuxAdapter.getDefaultShell();
+      if (!blankShell) return { ok: false, code: "default_shell_unavailable", step: "create_successor", replacementStarted: false,
+        message: "The Windows default shell could not be read, so the retiree was not stopped. Check the psmux default-shell option and retry." };
+    }
+
     // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
     //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
     //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
@@ -263,7 +275,7 @@ export class SuccessorSessionLauncher {
     // Adopted/hand-recovered panes carry a full harness invocation there (`codex … resume
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
-    const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    blankShell ??= (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(pane.id, blankShell, { cwd, env });
     if (!respawned.ok) {
       return {
@@ -359,21 +371,28 @@ export class SuccessorSessionLauncher {
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration,
     });
     try {
+      let shell: string | null = null;
+      if (this.tmuxAdapter.isNativeWindows) {
+        shell = await this.tmuxAdapter.getDefaultShell();
+        if (!shell) return { ok: false, code: "default_shell_unavailable",
+          message: "The Windows default shell could not be read, so no staging session was created. Check the psmux default-shell option and retry." };
+      }
       const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env);
       if (!created.ok) return { ok: false, code: created.code ?? "successor_create_failed", message: created.message ?? "The staging session couldn't be created." };
       const panes = await this.tmuxAdapter.listPanes(input.stagingSession);
       if (panes.length !== 1) return { ok: false, code: "pane_unresolved", message: "The staging session should have exactly one new pane." };
       const pane = panes[0]!.id;
       input.onPaneCreated(pane);
-      await this.tmuxOptionDefaults?.applyToFreshSession(input.stagingSession);
-      const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+      const optionWarnings = await this.tmuxOptionDefaults?.applyToFreshSession(input.stagingSession) ?? [];
+      shell ??= (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
       const blank = await this.verifyPaneIsBlankShell(pane, shell);
       if (!blank.ok) {
         return { ok: false, code: "successor_pane_not_blank", message: `The staging pane is running ${blank.observed ?? "an unknown command"}, not a blank shell; the target runtime wasn't started.` };
       }
       const started = await this.startAgent(input.node, input.stagingSession, pane, input.node.cwd ?? undefined,
         undefined, input.occupantGeneration, { ...input.staged, canonicalSession: input.canonicalSession });
-      return started.ok ? { ...started, tmuxPane: pane } : started;
+      return started.ok ? { ...started, tmuxPane: pane,
+        ...(optionWarnings.length ? { notes: [...optionWarnings, ...(started.notes ?? [])] } : {}) } : started;
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: (err as Error).message };
     }
@@ -549,6 +568,15 @@ export class SuccessorSessionLauncher {
    *  hard-coded set here false-refused AFTER the destructive cutover). One bounded retry absorbs
    *  shell spawn latency; a null probe counts as unverified (refuse, never assume). */
   private async verifyPaneIsBlankShell(paneId: string, expectedShell: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
+    if (this.tmuxAdapter.isNativeWindows) {
+      let observed: string | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt) await this.sleep(this.exitPollMs);
+        observed = await this.tmuxAdapter.getPaneCommand(paneId);
+        if (observed && isWindowsShellHost(observed) && await this.nativeIdleShell(paneId).catch(() => false)) return { ok: true };
+      }
+      return { ok: false, observed };
+    }
     let observed = await this.tmuxAdapter.getPaneCommand(paneId);
     if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     await this.sleep(this.exitPollMs);
