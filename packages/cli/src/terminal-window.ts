@@ -737,12 +737,17 @@ async function openAllTmuxWindows(
         automationDeniedError = "macOS denied Automation access for remaining rig viewers.";
         windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");
       }
-      const cleanup = created ? await verifyAndCleanupFailedTmuxViewer(runTmux, client, created) : "closed";
+      const cleanup = created ? await verifyAndCleanupFailedTmuxViewer(runTmux, client, created) : "unknown";
+      const retentionNote = cleanup !== "unknown"
+        ? undefined
+        : created
+          ? `Viewing session ${created.sessionName} could not be verified clean and was retained; inspect it or run rig terminal close --all.`
+          : `Attempted viewing session ${viewer} could not be verified absent or cleaned up (partially created viewer may still exist without an ownership record); inspect it before retrying.`;
       rigs.push({
         rig, view, outcome: "failed", opened: [], absent: composed.absent, degraded: composed.degraded, skipped,
         ...(isAutomationDenied ? { code: "automation_denied" } : {}),
         cleanup, error: message,
-        ...(cleanup === "unknown" && created ? { notes: [`Viewing session ${created.sessionName} could not be verified clean and was retained; inspect it or run rig terminal close --all.`] } : {}),
+        ...(retentionNote ? { notes: [retentionNote] } : {}),
       });
     }
   }

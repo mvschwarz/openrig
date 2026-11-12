@@ -293,7 +293,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
     expect(res1.ok).toBe(false);
     expect(res1.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed" });
-    expect(res1.rigs[0]?.cleanup).not.toBe("unknown");
+    expect(res1.rigs[0]?.cleanup).toBe("closed");
     expect(tmux(c1.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toEqual(["op@alpha"]);
     expect(c1.retired).toHaveLength(1);
 
@@ -353,5 +353,43 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(res3.rigs.find(r => r.rig === "gamma")).toMatchObject({ outcome: "failed", code: "automation_denied" });
     expect(c3.registered).toHaveLength(2);
     expect(tmux(c3.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-seq-1");
+  });
+
+  it("reports cleanup: unknown with an inspection note when createTmuxViewerLayout fails after new-session", async () => {
+    const { server, client, registered, retired } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    let launchCalls = 0;
+    const res = await openAllTerminalWindows(client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          launchCalls++;
+          return "window";
+        }
+        if (file === "tmux") {
+          if (args.includes("set-option")) throw new Error("injected set-option failure");
+          return tmux(server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "partialfail",
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    const noteText = (res.rigs[0]?.notes ?? []).join(" ");
+    expect(noteText).toContain("openrig-view-partialfail");
+    expect(noteText).not.toContain("close --all");
+    const sessions = tmux(server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n");
+    expect(sessions).toContain("openrig-view-partialfail");
+    expect(sessions).toContain("op@alpha");
+    expect(registered).toHaveLength(0);
+    expect(retired).toHaveLength(0);
+    expect(launchCalls).toBe(0);
   });
 });
