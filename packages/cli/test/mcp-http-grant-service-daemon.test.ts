@@ -314,6 +314,32 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(nodeReads).toBe(2);
       expect(rows()).toBe(0);
     });
+
+    it("a seat the grant can't address never shadows one it can, by name alone", async () => {
+      namedSeat("team-a", "visible", "Pod_Hidden@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-slug-alone", destination: "pod-hidden", body: "Slug" })).isError).toBe(false);
+      // Another caller's seat whose pod-member form is the name exactly: hidden without team/list, so it doesn't count.
+      namedSeat("team-a", "hidden", "cus-other-connection@team-a");
+      expect((await ask("rig_queue_create", { qitemId: "qitem-slug-beside-hidden", destination: "pod-hidden", body: "Slug" })).isError).toBe(false);
+      for (const qitemId of ["qitem-slug-alone", "qitem-slug-beside-hidden"]) expect(repo.getById(qitemId)).toMatchObject({ destinationSession: "Pod_Hidden@team-a" });
+    });
+
+    it("a configured receiver that names only a hidden seat is unavailable, as when it names none, and never names that seat", async () => {
+      const { url } = await listen(undefined, "pod-hidden@team-a");
+      const ask = await connect(url);
+      const none = await ask("rig_queue_create", { body: "Receiver?" });
+      namedSeat("team-a", "hidden", "cus-other-connection@team-a");
+      const hidden = await ask("rig_queue_create", { body: "Receiver?" });
+      expect(hidden.structured).toEqual(none.structured);
+      expect(hidden.structured.code).toBe("task_destination_unavailable");
+      expect(JSON.stringify(hidden)).not.toContain("cus-other-connection");
+      expect(rows()).toBe(0);
+      namedSeat("team-a", "visible", "Pod_Hidden@team-a");
+      expect((await ask("rig_queue_create", { qitemId: "qitem-receiver-beside-hidden", body: "Receiver" })).isError).toBe(false);
+      expect(repo.getById("qitem-receiver-beside-hidden")).toMatchObject({ destinationSession: "Pod_Hidden@team-a" });
+    });
   });
 
   it("with several rigs, a name alone reaches only the configured receiver of that name; a refusal says to omit destination, without naming it", async () => {

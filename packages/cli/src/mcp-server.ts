@@ -652,10 +652,12 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
 /** The seats of `rigName` that `name` names, each as its actual session: its node's canonical session, or the
  *  pod-member form while the node has no session yet. A name matches, in this order, a seat's session's own name before
  *  `@`, its pod-member form (logical id `pod.member` written `pod-member`), or that own name's slug, so a seat attached
- *  under its own name is found by the name its team shows. The first of these that any seat matches decides, so another
- *  seat's slug never makes an exact name ambiguous. No topology relationship, name convention for a lead, caller identity
- *  or task history supplies a seat. Throws when the rig isn't one active rig here or its node list can't be read. */
-async function namedSeats(client: DaemonClient, rigName: string, name: string): Promise<string[]> {
+ *  under its own name is found by the name its team shows. Only seats the caller may address (`addressable`) count, and
+ *  the first of these that any of them matches decides: another seat's slug never makes an exact name ambiguous, and a
+ *  seat the caller can't address never decides or shadows one it can. No topology relationship, name convention for a
+ *  lead, caller identity or task history supplies a seat. Throws when the rig isn't one active rig here or its node list
+ *  can't be read. */
+async function namedSeats(client: DaemonClient, rigName: string, name: string, addressable: (session: string) => boolean): Promise<string[]> {
   const rig = await resolveRigHandle(client, rigName, { strict: true });
   if (rig.kind !== "resolved") throw new Error(`rig ${rigName} isn't one active rig here`);
   const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
@@ -671,6 +673,7 @@ async function namedSeats(client: DaemonClient, rigName: string, name: string): 
     const session = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
       && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : `${podMember}@${rigName}`;
     const own = session.slice(0, -(rigName.length + 1));
+    if (!addressable(session)) continue;
     if (name === own) byOwn.add(session);
     else if (name === podMember) byPodMember.add(session);
     else if (wanted !== "" && wanted === seatSlug(own)) bySlug.add(session);
@@ -1381,10 +1384,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // Check scope before looking up the configured receiver: configuration never expands a grant or reveals
         // another rig's destination. An explicit destination continues through the existing path below.
         if (!scope?.destination(destination)) return outOfScope("Configured task destination");
-        // The receiver is exactly one seat, and the item goes to that seat's actual session.
+        // The receiver is exactly one seat this connection may address, and the item goes to that seat's actual session.
         const at = destination.lastIndexOf("@");
         let seats: string[];
-        try { seats = await namedSeats(client, destination.slice(at + 1), destination.slice(0, at)); } catch { return unavailable(); }
+        try {
+          seats = await namedSeats(client, destination.slice(at + 1), destination.slice(0, at), (seat) => scope?.destination(seat) === true);
+        } catch { return unavailable(); }
         if (seats.length !== 1) return unavailable();
         destination = seats[0]!;
       } else if (destination !== undefined && access?.external && !destination.includes("@")) {
@@ -1400,14 +1405,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // A name this connection may not address as written (another caller's seat without team/list, or its own) is
         // refused before the team is read, so the answer doesn't say whether such a seat exists.
         if (named !== "" && !scope?.destination(`${named}@${rigName}`)) return outOfScope(`Destination ${named}`, omitHint);
-        let seats: string[];
+        let reachable: string[];
         try {
-          seats = named === "" ? [] : await namedSeats(client, rigName, named);
+          reachable = named === "" ? [] : await namedSeats(client, rigName, named, (seat) => scope?.destination(seat) === true);
         } catch {
           const message = "This connection's team couldn't be read just now, so nothing was written. Try again.";
           return errorResult(message, "destination_unchecked", message);
         }
-        const reachable = seats.filter((seat) => scope?.destination(seat));
         if (reachable.length > 1) {
           const message = `'${named}' names ${reachable.length} seats here. Nothing was written; pass one of these: ${reachable.join(", ")}.`;
           return errorResult(JSON.stringify({ ok: false, code: "destination_ambiguous", message, candidates: reachable }),

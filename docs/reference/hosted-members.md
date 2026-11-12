@@ -176,8 +176,9 @@ and nothing else is offered:
   exactly one existing local node within that request's grant, or nothing is written. An explicit `destination` works as
   before.
 - **A seat by its name:** a `destination` with no `@` names a seat as its team shows it: its session's own name, then its
-  pod-member form, then that name's slug, in the connection's one rig or the configured receiver's. The first of these
-  that any seat matches decides, so another seat's slug never makes an exact name ambiguous. The item is stored under that
+  pod-member form, then that name's slug, in the connection's one rig or the configured receiver's. Only seats the grant
+  can address count, and the first of these that any of them matches decides, so another seat's slug never makes an exact
+  name ambiguous and a seat the grant can't address never shadows one it can. The item is stored under that
   seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
   seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
   or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
