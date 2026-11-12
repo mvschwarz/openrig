@@ -88,12 +88,17 @@ async function successorOf(client: DaemonClient, qitemId: string, closureTarget:
 }
 
 /** The list filter a daemon ignored, if its rows show one: a daemon older than the filter answers the unfiltered list. */
-function ignoredFilter(data: unknown, filters: { since?: string; handedOffFrom?: string }): string | null {
+function ignoredFilter(data: unknown, filters: { since?: string; handedOffFrom?: string; tags?: string[] }): string | null {
   if (!Array.isArray(data)) return null;
-  const rows = data as Array<{ handedOffFrom?: unknown; tsUpdated?: unknown }>;
+  const rows = data as Array<{ handedOffFrom?: unknown; tsUpdated?: unknown; tags?: unknown }>;
   if (filters.handedOffFrom && rows.some((row) => row.handedOffFrom !== filters.handedOffFrom)) return "handedOffFrom";
   const sinceMs = filters.since ? Date.parse(filters.since) : Number.NaN;
   if (!Number.isNaN(sinceMs) && rows.some((row) => typeof row.tsUpdated === "string" && Date.parse(row.tsUpdated) < sinceMs)) return "since";
+  if (filters.tags?.length && rows.some((row) => {
+    if (!row || typeof row !== "object") return true;
+    const rowTags = row.tags;
+    return !Array.isArray(rowTags) || filters.tags!.some((tag) => !rowTags.includes(tag));
+  })) return "tag";
   return null;
 }
 
@@ -309,15 +314,17 @@ function projectForExternal<T>(row: T, view: ExternalView): T {
   return fields as T;
 }
 
-/** A handed-on item as a scoped caller receives it: without the daemon's own successor fields (successors,
- *  successorsTruncated, successorNote), which name rows and remote ids regardless of this caller's scope. Its answer is
- *  show's scope-checked successor (successorOf). */
-function withoutDaemonSuccessors<T>(row: T): T {
+/** An item as a scoped caller receives it: without the daemon's own fields that carry other rows regardless of this
+ *  caller's scope. Those are the successor fields (successors, successorsTruncated, successorNote), which name rows and
+ *  remote ids; a handed-on item's answer is show's scope-checked successor (successorOf). And the answers people returned
+ *  to the item (answers), which are other rows, from people, to its asker. */
+function withoutDaemonLinkedRows<T>(row: T): T {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
   const fields = { ...(row as Record<string, unknown>) };
   delete fields.successors;
   delete fields.successorsTruncated;
   delete fields.successorNote;
+  delete fields.answers;
   return fields as T;
 }
 
@@ -1449,7 +1456,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const view = externalView(scope);
         let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
-        const shownItem = scope ? withoutDaemonSuccessors(item.data) : item.data;
+        const shownItem = scope ? withoutDaemonLinkedRows(item.data) : item.data;
         const data = view
           ? { item: projectForExternal(shownItem, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data }
           : { item: shownItem, transitions: transitions.data };
@@ -1464,13 +1471,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_list")) server.registerTool(
     "rig_queue_list",
     {
-      description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
+      description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went. tags are exact, case-sensitive AND filters; mission and slice add their corresponding exact tags.",
       inputSchema: z.object({
         owned: z.boolean().optional().describe("Only items assigned to this seat: its whole inbox (overrides destination)"),
         mine: z.boolean().optional().describe("Items this seat sent or owns"),
         destination: z.string().optional().describe("Filter by destination seat"),
         source: z.string().optional().describe("Filter by source seat"),
         state: z.string().optional().describe("Only these states, comma-separated; closed states included when named"),
+        tags: z.array(z.string()).optional().describe("Exact, case-sensitive tags; every supplied tag must match. Commas are literal."),
+        mission: z.string().optional().describe("Add the exact mission:<id> tag filter"),
+        slice: z.string().optional().describe("Add the exact slice:<id> tag filter"),
         all: z.boolean().optional().describe("Without state: include closed items"),
         since: z.string().optional().describe("Only items updated at or after this ISO-8601 time, e.g. done work since Monday: state done, since 2026-10-19"),
         handedOffFrom: z.string().optional().describe("The items handed on from this qitemId, in any state and any rig"),
@@ -1478,8 +1488,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       }),
       annotations: READ_ONLY,
     },
-    async ({ owned, mine: mineAsked, destination, source, state, all, since, handedOffFrom, limit }) => {
+    async ({ owned, mine: mineAsked, destination, source, state, tags: requestedTags, mission, slice, all, since, handedOffFrom, limit }) => {
       try {
+        if ([...(requestedTags ?? []), ...(mission === undefined ? [] : [mission]), ...(slice === undefined ? [] : [slice])]
+          .some((value) => value.trim().length === 0)) {
+          const message = "tag filters cannot be blank";
+          return errorResult(JSON.stringify({ error: "tag_invalid", message }), "tag_invalid", message);
+        }
+        const tags = [...new Set([
+          ...(requestedTags ?? []),
+          ...(mission === undefined ? [] : [`mission:${mission}`]),
+          ...(slice === undefined ? [] : [`slice:${slice}`]),
+        ])];
         const params = new URLSearchParams();
         const sessionName = seatOf();
         // An external caller lists its own items only, so the daemon's limit counts those and not the team's.
@@ -1503,11 +1523,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (destination && !owned) params.set("destinationSession", destination);
         if (source) params.set("sourceSession", source);
         if (state) params.set("state", state);
+        for (const tag of tags) params.append("tag", tag);
         if (since) params.set("updatedSince", since);
         if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
         const res = await client.get(`/api/queue/list?${params.toString()}`);
-        const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom }) : null;
+        const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom, tags }) : null;
         if (ignored) {
           const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
           return errorResult(JSON.stringify({ ok: false, error: message }), "filter_unsupported", message);

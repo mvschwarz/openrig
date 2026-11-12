@@ -50,6 +50,24 @@ it("renders an unsent local FYI without inventing an approval or a delivery rece
   expect(text).not.toContain("Delivery receipt:");
 });
 
+it("draws Feed times in the person's zone, as the header does, and redraws them when the zone changes", () => {
+  const item = current(), attention = read([item]);
+  attention.detail = { item, lines: ["Current queue body"], files: [] };
+  const merged = composeHumanUpdates(attention, delivered("other"), item.id)!;
+  const draw = (timeZone: string, attentionOpen: string | null) => attentionLines(
+    { ...createViewState({ instanceId: "owned-fixture", timeZone }).get(), section: "needs" as const, attentionOpen },
+    { ...emptySnapshot(), attentionRead: merged }, 140).map(l => l.text).join("\n");
+  const london = draw("Europe/London", null);
+  expect(london).toContain("instance · 2026-10-01 13:00:00 GMT+1");
+  expect(london).toContain("instance · project unknown · 2026-10-08 13:00:00 GMT+1");
+  expect(london).toContain("Read at 2026-10-09 13:00:00 GMT+1");
+  expect(london).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/);
+  // The same read, drawn after the zone setting arrives: nothing is re-read, and nothing keeps the earlier zone.
+  const angeles = draw("America/Los_Angeles", item.id);
+  expect(angeles).toContain("Observed: 2026-10-01 05:00:00 PDT");
+  expect(angeles).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:|GMT\+1/);
+});
+
 it("does not retain delivered history beyond a successful empty receipt window when only current updates fail", () => {
   const prior = composeHumanUpdates(read([]), delivered())!;
   const failed = read([]);
@@ -155,8 +173,9 @@ it("labels relay bridge acceptance as accepted by the bridge rather than Deliver
     ],
   };
   const openedBridge = composeHumanUpdates(read([]), bridgeUpdates, "human-update:bridge-fyi")!;
-  const bridgeDetailLines = openedBridge.detail?.lines.join("\n") ?? "";
-  expect(bridgeDetailLines).toContain("Accepted by bridge: 2026-10-08T14:00:00Z");
+  const detailState = (id: string) => ({ ...createViewState({ instanceId: "owned-fixture", timeZone: "UTC" }).get(), section: "needs" as const, attentionOpen: id });
+  const bridgeDetailLines = attentionLines(detailState("human-update:bridge-fyi"), { ...emptySnapshot(), attentionRead: openedBridge }, 140).map(l => l.text).join("\n");
+  expect(bridgeDetailLines).toContain("Accepted by bridge: 2026-10-08 14:00:00 UTC");
   expect(bridgeDetailLines).not.toContain("Delivered:");
   expect(openedBridge.sources.find(s => s.source === "delivered updates")?.detail).toContain("accepted by the bridge");
   expect(openedBridge.sources.find(s => s.source === "delivered updates")?.detail).not.toContain("confirmed delivered updates");
@@ -168,8 +187,8 @@ it("labels relay bridge acceptance as accepted by the bridge rather than Deliver
 
   // Slack delivered wording remains unchanged
   const openedSlack = composeHumanUpdates(read([]), delivered("slack-fyi"), "human-update:slack-fyi")!;
-  const slackDetailLines = openedSlack.detail?.lines.join("\n") ?? "";
-  expect(slackDetailLines).toContain("Delivered: 2026-10-08T12:00:00Z");
+  const slackDetailLines = attentionLines(detailState("human-update:slack-fyi"), { ...emptySnapshot(), attentionRead: openedSlack }, 140).map(l => l.text).join("\n");
+  expect(slackDetailLines).toContain("Delivered: 2026-10-08 12:00:00 UTC");
   expect(slackDetailLines).not.toContain("Accepted by bridge:");
   expect(openedSlack.sources.find(s => s.source === "delivered updates")?.detail).toBe(
     "Latest 20 confirmed delivered updates; retained receipt window.",

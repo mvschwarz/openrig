@@ -7,6 +7,7 @@ import { createProgram } from "../src/index.js";
 // it via the narrow @openrig/daemon/gateway-human-registry subpath (the C3/crash-cart rail).
 import { humansDir, loadHumanRegistry } from "@openrig/daemon/gateway-human-registry";
 import { gatewayRoutes } from "../../daemon/src/routes/gateway.js";
+import { REGISTRATION_OFFER } from "../src/person-registration-offer.js";
 
 // M1 A3 pt2 / A4b relocate — `rig gateway human add` verb integration. The verb lazy-imports
 // the relocated daemon surface; these tests drive the real command end-to-end.
@@ -23,6 +24,23 @@ describe("rig gateway human add verb (post-relocate)", () => {
     vi.restoreAllMocks();
     if (prevHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
+  });
+
+  // The kernel operator runs `rig gateway participants` before its greeting: with nobody registered, the output ends with
+  // the same offer `rig daemon start` prints; once someone is, it doesn't.
+  it("participants ends with the registration offer while nobody is registered, and drops it once someone is", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const empty = createProgram(); empty.exitOverride();
+    await empty.parseAsync(["node", "rig", "gateway", "participants"]);
+    const before = log.mock.calls.map((call) => String(call[0]));
+    expect(before.slice(-REGISTRATION_OFFER.length)).toEqual([...REGISTRATION_OFFER]);
+    expect(existsSync(humansDir(home))).toBe(false);
+    const add = createProgram(); add.exitOverride();
+    await add.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--delivery-class", "B"]);
+    log.mockClear();
+    const after = createProgram(); after.exitOverride();
+    await after.parseAsync(["node", "rig", "gateway", "participants"]);
+    expect(log.mock.calls.map((call) => String(call[0]))).not.toContain(REGISTRATION_OFFER[0]);
   });
 
   it("participants --json and the daemon route expose the same filtered view", async () => {
