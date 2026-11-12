@@ -51,7 +51,9 @@ describe("StoryGraph", () => {
     expect(within(childRow).getByText("In progress")).toBeTruthy();
     // date cell shows the calendar date (month + day) + time, never a
     // time-only / relative "Today"/"Yesterday" label (tz-robust shape check)
-    expect(rootRow.textContent).toMatch(/[A-Za-z]{3}\s+\d{1,2}/);
+    for (const part of new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).formatToParts(new Date("2026-06-23T02:00:00.000Z"))) {
+      if (part.type === "month" || part.type === "day") expect(rootRow.textContent).toContain(part.value);
+    }
     expect(rootRow.textContent).toMatch(/\d{1,2}:\d{2}/);
     expect(rootRow.textContent).not.toMatch(/today|yesterday/i);
   });
@@ -101,6 +103,18 @@ describe("StoryGraph", () => {
     expect(getByTestId("story-artifact-/Users/x/proof.png")).toBeTruthy();
     // repo-relative path -> inert (no open trigger)
     expect(queryByTestId("story-artifact-packages/ui/rel.ts")).toBeNull();
+  });
+
+  it.each(["C:\\work\\proof.png", "\\\\host\\share\\proof.png", "C:\\工作 目录\\proof.png", "/books/with spaces/proof.png"])("opens the exact native artifact path %s", artifact => {
+    const setSelection = vi.fn();
+    const reference = artifact.includes(" ") ? `"${artifact}"` : artifact;
+    const forest = buildStoryForest([qitem({ qitemId: "native-art", body: `Created ${reference} alongside C:relative.md and https://example.invalid/proof.png` })]);
+    const { getByTestId, queryByTestId } = render(<DrawerSelectionContext.Provider value={{ selection: null, setSelection }}><StoryGraph forest={forest} /></DrawerSelectionContext.Provider>);
+    fireEvent.click(getByTestId("story-row-native-art"));
+    fireEvent.click(getByTestId(`story-artifact-${artifact}`));
+    expect(setSelection).toHaveBeenCalledWith({ type: "file", data: { path: artifact, absolutePath: artifact } });
+    expect(queryByTestId("story-artifact-C:relative.md")).toBeNull();
+    expect(queryByTestId("story-artifact-https://example.invalid/proof.png")).toBeNull();
   });
 
   // Guard B2 (round 2) — through the DRAWER PATH: "Open full queue item" must carry

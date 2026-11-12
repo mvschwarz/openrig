@@ -4,7 +4,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
 import { RIG_LOGIN_PATH_CHECK, runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
-import { piVersionNotice } from "../adapters/pi-readiness.js";
+import { piExecutableLookup, piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
@@ -538,7 +538,8 @@ function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
   }
   const detail = runtimeProbeFailure(err);
   if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
-    warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
+    const lookup = piExecutableLookup();
+    warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check '${lookup}' in that shell.`);
     return [];
   }
   warnings.push(`Pi version unknown ('pi --version' failed: ${detail}); launch continues. Check 'pi --version' in the pane's shell. If Pi is not installed, install @earendil-works/pi-coding-agent and ensure 'pi' is on PATH.`);

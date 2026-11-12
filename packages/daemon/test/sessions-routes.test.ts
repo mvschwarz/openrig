@@ -669,7 +669,7 @@ describe("Session routes", () => {
     const sendCall = calls.find((c) => c.method === "surface.sendText");
     expect(sendCall).toBeDefined();
     const sendParams = sendCall!.params as Record<string, unknown>;
-    expect(String(sendParams["text"])).toBe("tmux attach -t r01-dev1-impl\n");
+    expect(String(sendParams["text"])).toBe("tmux attach -t =r01-dev1-impl\n");
     expect(sendParams["workspaceId"]).toBe("workspace:1");
 
     const focusCalls = calls.filter((c) => c.method === "surface.focus");

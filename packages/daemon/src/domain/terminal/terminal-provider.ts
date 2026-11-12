@@ -34,6 +34,8 @@ export interface ComposedPane {
   paneCommand: string;
   /** Short, one-shot attach for a person's manual recovery instructions. */
   recoveryCommand?: string;
+  /** Shell on the daemon's host for the manual recovery command. Omitted by older daemons (POSIX). */
+  recoveryShell?: "powershell" | "sh";
   /** The same local attach as an argv, for a provider that reruns it without a shell (a Herdr restart). Absent for an ssh tile. */
   attachArgv?: string[];
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */

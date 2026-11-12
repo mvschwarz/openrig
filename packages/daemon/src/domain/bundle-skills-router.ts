@@ -47,8 +47,8 @@ export interface RoutedSkillRecord {
   /** "routed" = copied successfully; "missing" = source not in bundle;
    * "unsafe" = escapes bundle workspace; "no_library" = target dir not
    * present and caller did not request creation (reserved for future
-   * library-reachability mode). */
-  status: "routed" | "missing" | "unsafe";
+   * library-reachability mode); "conflict" = duplicate native target. */
+  status: "routed" | "missing" | "unsafe" | "conflict";
   /** Where the skill landed in the target library (absolute path), if routed. */
   installedAt?: string;
   /** Human-readable detail (3-part error shape input for caller). */
@@ -73,6 +73,7 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
   const bundleRootResolved = nodePath.resolve(input.bundleRoot);
   const targetRootResolved = nodePath.resolve(input.targetSkillsDir);
   fs.mkdirp(input.targetSkillsDir);
+  const nativeTargets = new Set<string>();
 
   for (const declared of input.declaredSkills) {
     const sourceAbs = nodePath.resolve(input.bundleRoot, declared);
@@ -124,8 +125,14 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
       });
       continue;
     }
+    const targetKey = targetAbs.toLowerCase();
+    if (process.platform === "win32" && nativeTargets.has(targetKey)) {
+      records.push({ declaredPath: declared, status: "conflict", detail: `skill path '${declared}' collides with an earlier native target; only the first is routed` });
+      continue;
+    }
     fs.mkdirp(nodePath.dirname(targetAbs));
     fs.copyFile(sourceAbs, targetAbs);
+    nativeTargets.add(targetKey);
     records.push({
       declaredPath: declared,
       status: "routed",

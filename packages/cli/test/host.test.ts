@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Command } from "commander";
-import { hostCommand, doctorLegs, postureCheck, type DoctorDeps, type CheckRow } from "../src/commands/host.js";
+import { EventEmitter } from "node:events";
+import type { connect } from "node:net";
+import { hostCommand, doctorLegs, postureCheck, probeHostTcp, type DoctorDeps, type CheckRow } from "../src/commands/host.js";
 import type { HostEntry } from "../src/host-registry.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -256,6 +258,60 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     expect(probe.detail).toContain("203.0.113.7:7433");
   });
 
+  it("posture uses selected service ports and keeps unknown outside observations unknown", async () => {
+    const run = vi.fn(async (_host: HostEntry, argv: readonly string[]) => okRun(String(argv[2]).startsWith("ss -tln") ? "LISTEN 0 511 127.0.0.1:17433 0.0.0.0:*" : ""));
+    const tcpProbe = vi.fn(async () => "unknown" as const);
+    const rows = await postureCheck(sshHost, { run, tcpProbe, httpGet: async () => ({ status: 200, body: "" }) },
+      { publicAddr: "203.0.113.7", daemonPort: 17433, sshPort: 2222 });
+    expect(rows.find(row => row.step === "daemon-bind-not-public")?.status).toBe("pass");
+    expect(rows.find(row => row.step === "daemon-bind-not-public")?.detail).toContain(":17433");
+    expect(rows.slice(-2).map(row => row.status)).toEqual(["unknown", "unknown"]);
+    expect(tcpProbe).toHaveBeenNthCalledWith(1, "203.0.113.7", 17433, 5000);
+    expect(tcpProbe).toHaveBeenNthCalledWith(2, "203.0.113.7", 2222, 5000);
+    expect(run.mock.calls.some(([, argv]) => String(argv[2]).includes(":17433"))).toBe(true);
+  });
+
+  it("does not attribute a neighboring port with the same decimal prefix", async () => {
+    const d = depsFromScript(argv => okRun(String(argv[2]).startsWith("ss -tln") ? "LISTEN 0 511 127.0.0.1:17433 0.0.0.0:*" : ""));
+    const rows = await postureCheck(sshHost, d, { daemonPort: 1743 });
+    expect(rows.find(row => row.step === "daemon-bind-not-public")).toMatchObject({ status: "unknown", detail: expect.stringContaining(":1743") });
+  });
+
+  it.each(["EACCES", "EPERM", "EAI_AGAIN"])("local TCP observer failure %s cannot certify closed public ingress", async code => {
+    const sockets: Array<EventEmitter & { destroy: ReturnType<typeof vi.fn> }> = [];
+    const dial = vi.fn(() => {
+      const socket = Object.assign(new EventEmitter(), { destroy: vi.fn() }); sockets.push(socket);
+      queueMicrotask(() => socket.emit("error", Object.assign(new Error("observer unavailable"), { code })));
+      return socket;
+    });
+    const d = depsFromScript(() => okRun(""));
+    d.tcpProbe = (target, port, timeout) => probeHostTcp(target, port, timeout, dial as unknown as typeof connect);
+    const rows = await postureCheck(sshHost, d, { publicAddr: "203.0.113.7", daemonPort: 17433, sshPort: 2222 });
+    expect(rows.slice(-2).every(row => row.status === "unknown" && !!row.fix)).toBe(true);
+    expect(sockets).toHaveLength(2); expect(sockets.every(socket => socket.destroy.mock.calls.length === 1)).toBe(true);
+    expect(dial).toHaveBeenNthCalledWith(1, { host: "203.0.113.7", port: 17433, timeout: 5000 });
+  });
+
+  it.each(["connect", "timeout", "error", "close"])("TCP observer settles and closes its owned socket on %s", async event => {
+    const socket = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const dial = vi.fn(() => { queueMicrotask(() => socket.emit(event, Object.assign(new Error("refused"), { code: "ECONNREFUSED" }))); return socket; });
+    expect(await probeHostTcp("203.0.113.7", 17433, 5000, dial as unknown as typeof connect)).toBe(event === "connect" ? "open" : event === "close" ? "unknown" : "closed");
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["unresolved", "resolved", "lookup-error"])("TCP observer distinguishes DNS %s from a closed endpoint", async state => {
+    const socket = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const dial = vi.fn(() => {
+      queueMicrotask(() => {
+        if (state === "resolved") socket.emit("lookup", null, "203.0.113.7");
+        if (state === "lookup-error") socket.emit("lookup", new Error("lookup unavailable"), undefined);
+        socket.emit("timeout");
+      }); return socket;
+    });
+    expect(await probeHostTcp("owned-host.invalid", 17433, 5000, dial as unknown as typeof connect)).toBe(state === "resolved" ? "closed" : "unknown");
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+  });
+
   // R2-B1 regressions — the two false-green classes, pinned.
   it("posture: a DENY rule on tailscale0 must NOT pass the ingress item", async () => {
     const deps = depsFromScript((argv) => {
@@ -341,6 +397,18 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     const rows = await postureCheck(httpHost, { run: async () => okRun(""), httpGet: async () => ({ status: 200, body: "" }), tcpProbe: async () => "closed" });
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r: CheckRow) => r.status === "unknown")).toBe(true);
+  });
+
+  it("does not misdiagnose a native Windows host using the POSIX VPS posture profile", async () => {
+    const run = vi.fn(async () => ({ ok: false, failedStep: "remote-command-not-found", stdout: "", stderr: "sh unavailable", remoteExitCode: 127, hint: "" } as CrossHostResult));
+    const tcpProbe = vi.fn(async () => "closed" as const);
+    const rows = await postureCheck({ ...sshHost, remoteShell: "powershell", rigPath: "C:/OpenRig/bin.js" }, {
+      run, httpGet: async () => ({ status: 200, body: "" }), tcpProbe,
+    }, { publicAddr: "203.0.113.7" });
+    expect(rows).toHaveLength(9);
+    expect(rows.every(row => row.status === "unknown" && row.detail.includes("POSIX") && !!row.fix)).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(tcpProbe).not.toHaveBeenCalled();
   });
 
   it("doctor over http: anonymous (URL-only) host with an answering daemon passes auth-neutrally (no 'authenticated' claim)", async () => {

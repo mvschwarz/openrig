@@ -23,7 +23,7 @@ export interface TerminalPreview {
   herdrApp?: { appHome?: string };
   composed: {
     id: string;
-    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
+    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string; recoveryShell?: "powershell" | "sh" }>>;
     opened: Array<{ seat: string }>;
     absent: Array<{ seat: string; reason: string }>;
     degraded: Array<{ seat: string; reason: string }>;
@@ -162,7 +162,8 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     for (const member of page) {
       // Current SSH commands already request a TTY; older daemons may omit it.
       const command = (member.recoveryCommand ?? member.paneCommand).replace(/^ssh (?!-t(?:\s|$))/, "ssh -t ");
-      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
+      const reset = member.recoveryShell === "powershell" ? "Remove-Item Env:TMUX -ErrorAction SilentlyContinue; " : "env -u TMUX ";
+      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `${reset}${command}` });
     }
   }
   return wrapDetailLines(lines, width);

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -6,6 +7,7 @@ import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 import { allowFetchTarget } from "./fetch-guard.js";
+import { resolve } from "node:path";
 
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
@@ -272,11 +274,11 @@ function createMockDaemon() {
   return {
     server,
     close: () => new Promise<void>((r) => server.close(() => r())),
-    listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+    listen: () => new Promise<number>((r, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server).then(() => {
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }
@@ -479,7 +481,7 @@ describe("rig package", () => {
     const installBody = capturedBodies[capturedBodies.length - 1];
     expect(installBody).toBeTruthy();
     expect(installBody!["sourceRef"]).toBe("/valid/path");
-    expect(installBody!["targetRoot"]).toBe("/my-repo");
+    expect(installBody!["targetRoot"]).toBe(resolve("/my-repo"));
     expect(installBody!["runtime"]).toBe("codex");
     expect(installBody!["roleName"]).toBe("worker");
     expect(installBody!["allowMerge"]).toBe(true);

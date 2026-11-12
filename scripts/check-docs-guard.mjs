@@ -59,6 +59,8 @@ export function main() {
   process.exitCode = 1;
 }
 
-if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { /* imported without an existing entry file */ }
+if (invokedDirectly) {
   main();
 }

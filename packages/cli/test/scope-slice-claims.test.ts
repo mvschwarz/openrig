@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
 
@@ -26,11 +26,14 @@ describe("public slice creation ordinal claims", () => {
     mission = path.join(workspace, "missions", "release-0.3.2");
     const home = path.join(root, "owned-home");
     fs.mkdirSync(home);
+    const gitConfig = path.join(home, "empty.gitconfig");
+    fs.writeFileSync(gitConfig, "");
     ownedEnv = {
       PATH: process.env.PATH, HOME: home, TMPDIR: root,
+      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: home, TEMP: root, TMP: root } : {}),
       OPENRIG_HOME: path.join(home, ".openrig"),
       CODEX_HOME: path.join(home, "codex"), CLAUDE_CONFIG_DIR: path.join(home, "claude"),
-      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: gitConfig,
     };
     execFileSync("git", ["-C", root, "init", "-q"], { env: ownedEnv });
     fs.mkdirSync(path.join(mission, "slices", "01-existing"), { recursive: true });
@@ -42,7 +45,7 @@ describe("public slice creation ordinal claims", () => {
 
   async function create(slug: string, extra: string[] = [], preload?: string): Promise<Result> {
     const args = [
-      ...(preload ? ["--import", preload] : []),
+      ...(preload ? ["--import", pathToFileURL(preload).href] : []),
       fileURLToPath(new URL("../dist/index.js", import.meta.url)),
       "scope", "slice", "create", "release-0.3.2", slug, ...extra,
       "--workspace", workspace, "--json",
@@ -60,6 +63,9 @@ describe("public slice creation ordinal claims", () => {
   }
 
   function successful(results: Result[]) {
+    for (const result of results) {
+      expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    }
     expect(results.map((result) => ({ code: result.exitCode, stdout: result.stdout, stderr: result.stderr })))
       .toEqual(results.map((result) => ({ code: 0, stdout: result.stdout, stderr: "" })));
     const slices = results.map((result) => JSON.parse(result.stdout).slice as {
@@ -280,10 +286,11 @@ describe("public slice creation ordinal claims", () => {
     const injected = path.join(root, "partial-proof-write.mjs");
     fs.writeFileSync(injected, `
       import fs from "node:fs";
+      import path from "node:path";
       import { execFileSync } from "node:child_process";
       const original = fs.writeFileSync.bind(fs);
       fs.writeFileSync = (target, data, options) => {
-        if (/\\/PROOF\\.md(?:\\.openrig-.*\\.tmp)?$/.test(String(target))) {
+        if (/^PROOF\\.md(?:\\.openrig-.*\\.tmp)?$/.test(path.basename(String(target)))) {
           original(target, "# partial proof", options);
           execFileSync(process.execPath, ${JSON.stringify(competitorArgs)}, { env: ${JSON.stringify(ownedEnv)}, timeout: 15000 });
           original(${JSON.stringify(observed)}, fs.readFileSync(${JSON.stringify(manifest)}, "utf8"));

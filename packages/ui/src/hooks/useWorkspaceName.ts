@@ -6,6 +6,7 @@
 // render an honest "No workspace connected" empty-state.
 
 import { useSettings } from "./useSettings.js";
+import { serverPathBasename } from "../lib/server-path.js";
 
 export interface WorkspaceNameResult {
   /** Live basename of the configured workspace root, or null when unset/unreachable. */
@@ -16,13 +17,6 @@ export interface WorkspaceNameResult {
   settingsAvailable: boolean;
   /** True while initial settings request is in flight. */
   isLoading: boolean;
-}
-
-function basename(p: string): string {
-  if (!p) return "";
-  const trimmed = p.replace(/\/+$/, "");
-  const slash = trimmed.lastIndexOf("/");
-  return slash === -1 ? trimmed : trimmed.slice(slash + 1);
 }
 
 export function useWorkspaceName(): WorkspaceNameResult {
@@ -42,7 +36,7 @@ export function useWorkspaceName(): WorkspaceNameResult {
   const root = typeof rawValue === "string" && rawValue.length > 0 ? rawValue : null;
 
   return {
-    name: root ? basename(root) : null,
+    name: root ? serverPathBasename(root) : null,
     root,
     settingsAvailable: true,
     isLoading,

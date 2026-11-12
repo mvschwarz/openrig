@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
@@ -19,6 +19,7 @@ import {
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
 import { LEAK_GUARD_RULES_ENV, leakGuardRulesPath } from "./leak-guard-rules.mjs";
+import { npmCommand } from "./npm-command.mjs";
 import { packEntries } from "./npm-pack-json.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -132,7 +133,8 @@ function parseArguments(argv) {
   }
   const repo = resolve(values.repo ?? ".");
   const packageRoot = resolve(values["package-root"] ?? join(repo, "packages/cli"));
-  if (packageRoot !== repo && !packageRoot.startsWith(`${repo}/`)) {
+  const packageRelative = relative(repo, packageRoot);
+  if (packageRelative === ".." || packageRelative.startsWith(`..${sep}`) || isAbsolute(packageRelative)) {
     throw new Error(`package root must be inside the cut repository: ${packageRoot}`);
   }
   return {
@@ -149,12 +151,12 @@ function parseArguments(argv) {
 
 function derivePackageArtifacts(packageRoot) {
   if (!existsSync(packageRoot)) throw new Error(`package root not found: ${packageRoot}`);
-  const packed = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+  const packed = spawnSync(...npmCommand(["pack", "--dry-run", "--json", "--ignore-scripts"]), {
     cwd: packageRoot,
     encoding: "utf8",
   });
   if (packed.status !== 0) {
-    throw new Error(`npm artifact enumeration failed:\n${packed.stderr || packed.stdout || `exit ${packed.status}`}`);
+    throw new Error(`npm artifact enumeration failed:\n${packed.error?.message || packed.stderr || packed.stdout || `exit ${packed.status}`}`);
   }
   let entries = [];
   try {

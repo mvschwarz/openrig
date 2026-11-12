@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { startCommand } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
-import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
+import { resetFetchAllowlist } from "./fetch-guard.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 // Keep the real waiter and HTTP path; only shorten the command's 60s test budget.
 vi.mock("../src/daemon-lifecycle.js", async (importOriginal) => {
@@ -29,9 +30,9 @@ async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, 
       : { ok: true };
     response.end(JSON.stringify(payload));
   });
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); servers.push(server);
+  await listenOwnedHttpFixture(server); servers.push(server);
   const port = (server.address() as { port: number }).port;
-  const url = `http://127.0.0.1:${port}`; allowFetchTarget(url);
+  const url = `http://127.0.0.1:${port}`;
   const lifecycleDeps: LifecycleDeps = {
     spawn: () => { throw new Error("must not spawn"); }, fetch: async (target) => fetch(target),
     kill: () => { throw new Error("must not signal"); }, exists: (file) => file === STATE_FILE,
@@ -44,7 +45,7 @@ async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, 
   vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.join(" ")); });
   vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.join(" ")); });
   await startCommand({ lifecycleDeps, clientFactory: (base) => new DaemonClient(base) }).parseAsync([keptDown ? "--last" : "--all", ...(json ? ["--json"] : [])], { from: "user" });
-  return { errors: errors.join("\n"), logs: logs.join("\n"), received, exitCode: process.exitCode ?? 0 };
+  return { url, errors: errors.join("\n"), logs: logs.join("\n"), received, exitCode: process.exitCode ?? 0 };
 }
 describe("rig start kernel wait evidence", () => {
   it.each([undefined, "booting"])("reports deadline evidence without asserting a kernel failure: %s", async (state) => {
@@ -115,7 +116,7 @@ describe("rig start while daemon start restores an existing kernel", () => {
     ["booting", "finished"],
   ])("restore returned without a ready kernel (%s, %s): names rig up kernel --existing and continues", async (state, phase) => {
     const result = await run(state, 200, 200, { existing_restore: phase });
-    expect(result.errors).toContain(`Kernel restore did not bring the kernel up: state=${state}`);
+    expect(result.errors, JSON.stringify(result)).toContain(`Kernel restore did not bring the kernel up: state=${state}`);
     expect(result.errors).toContain("Recover it with: rig up kernel --existing");
     expect(result.errors).not.toContain("Cannot proceed");
     expect(result.received).toContain("/api/rigs/summary");
@@ -124,6 +125,7 @@ describe("rig start while daemon start restores an existing kernel", () => {
 
   it("reports the kernel restore in --json output", async () => {
     const result = await run("booting", 200, 200, { existing_restore: "in_progress" }, true);
+    expect(result.logs, JSON.stringify(result)).not.toBe("");
     expect(JSON.parse(result.logs.split("\n").at(-1)!)).toMatchObject({
       status: "started", kernelRestore: { state: "restoring", kernelState: "booting" },
     });
@@ -142,7 +144,7 @@ describe("rig start while daemon start restores an existing kernel", () => {
 it.each([401, 503])("does not report successful empty restore discovery after HTTP %s", async (status) => {
   const result = await run("ready", 200, status);
   expect(result.exitCode).toBe(1);
-  expect(result.errors).toContain(`HTTP ${status}`);
+  expect(result.errors, JSON.stringify(result)).toContain(`HTTP ${status}`);
   expect(result.received).toContain("/api/rigs/summary");
   expect(result.received).not.toContain("/api/rigs/restorable-rig/up");
   expect(result.received.filter((path) => path.endsWith("/up"))).toEqual([]);

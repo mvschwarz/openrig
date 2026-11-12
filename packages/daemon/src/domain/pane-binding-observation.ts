@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { decodeTime } from "ulid";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
@@ -12,11 +13,11 @@ export type PaneBindingObservation =
 
 /** Observe the sole pane of one tmux session without mutating either tmux or DB. */
 export async function observeSolePane(
-  tmux: Pick<TmuxAdapter, "listPanes">,
+  tmux: Pick<TmuxAdapter, "listPanes"> & Partial<Pick<TmuxAdapter, "listSessionPanes">>,
   sessionName: string,
 ): Promise<PaneBindingObservation> {
   try {
-    const panes = await tmux.listPanes(sessionName);
+    const panes = await listNamedSessionPanes(tmux, sessionName);
     if (panes.length === 1) return { ok: true, pane: panes[0]!.id };
     if (panes.length === 0) {
       return {

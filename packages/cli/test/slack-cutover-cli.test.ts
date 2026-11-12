@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // S10 CUTOVER, CLI side — the relay runners are RETIRED and must refuse with teaching (never
 // silently no-op, never run a second delivery path): successor replaces predecessor. The admin
 // verbs (enable/disable) route to the daemon, where the seeding rule executes before the wire
@@ -176,8 +177,8 @@ describe("Slack verify reports optional capabilities from granted scopes", () =>
           ? error ? { ok: false, error } : { ok: true }
           : { ok: true, channel: { is_member: true, name: "fixture" } }));
       });
-      server.listen(0, "127.0.0.1");
-      await once(server, "listening");
+      await listenOwnedHttpFixture(server);
+      allowOwnedHttpFixture(server);
       const port = (server.address() as { port: number }).port;
       const logs: string[] = [];
       process.exitCode = 0;

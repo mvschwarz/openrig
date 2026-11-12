@@ -31,6 +31,7 @@ function mockTmux(): TmuxAdapter {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     sendText: vi.fn(async () => ({ ok: true as const })),
+    sendShellCommand: vi.fn(async () => ({ ok: true as const })),
     hasSession: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
@@ -54,12 +55,12 @@ function mockClaudeFs(seed: Record<string, string>): ClaudeAdapterFsOps & { _sto
     exists: (p: string) => p in store,
     mkdirp: () => {},
     copyFile: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + path.sep)).map((k) => k.slice(dir.length + 1)),
     _store: store,
   };
 }
 
-const RIG_ROOT = "/project/rigs/test-rig";
+const RIG_ROOT = path.resolve("/project/rigs/test-rig");
 const DEFAULT_CULTURE_PATH = path.resolve(import.meta.dirname, "../assets/guidance/CULTURE-default.md");
 const DEFAULT_CULTURE = fs.readFileSync(DEFAULT_CULTURE_PATH, "utf8");
 const DEFAULT_ONBOARDING = Object.fromEntries(
@@ -129,12 +130,12 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
 
       const fsOps: AgentResolverFsOps = {
         readFile: (p: string) => {
-          if (p === `${RIG_ROOT}/agents/impl/agent.yaml`) {
+          if (p === path.join(RIG_ROOT, "agents/impl/agent.yaml")) {
             return `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`;
           }
           throw new Error(`Not found: ${p}`);
         },
-        exists: (p: string) => p === `${RIG_ROOT}/agents/impl/agent.yaml`,
+        exists: (p: string) => p === path.join(RIG_ROOT, "agents/impl/agent.yaml"),
       };
 
       const inst = new PodRigInstantiator({
@@ -168,7 +169,7 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       };
       const yaml = RigSpecCodec.serialize(spec);
       const result = await inst.instantiate(yaml, RIG_ROOT);
-      expect(result.ok).toBe(true);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
 
       // The Claude adapter's `mergeGuidance` writes to <binding.cwd>/CLAUDE.md
       // wrapped in a `BEGIN OpenRig MANAGED BLOCK` envelope. The cwd for this

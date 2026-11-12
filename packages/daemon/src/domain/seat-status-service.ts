@@ -1,5 +1,7 @@
 import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
+import { homedir } from "node:os";
+import { readPlatformEnv } from "./platform-env.js";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
@@ -89,6 +91,7 @@ interface SeatMatch {
 export class SeatStatusService {
   private rigRepo: RigRepository;
   private env: NodeJS.ProcessEnv;
+  private nativeHome: string | undefined;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
   private activityStore?: Pick<AgentActivityStore, "getPermissionStopForNode">;
 
@@ -98,6 +101,10 @@ export class SeatStatusService {
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
+    // Production startup pins HOME to os.homedir(), rather than the launching
+    // shell's HOME. Explicit test/environment inputs retain their own roots.
+    this.nativeHome = deps.env === undefined ? homedir()
+      : (process.platform === "win32" ? readPlatformEnv(deps.env, "USERPROFILE") : undefined) || readPlatformEnv(deps.env, "HOME");
   }
 
   getStatus(seatRef: string): SeatStatusResult {
@@ -249,10 +256,9 @@ export class SeatStatusService {
     const ignored = own.ignored ? { ignored: own.ignored } : {};
     if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
-    const daemon = runtime === "pi" ? undefined : this.env[variable];
+    const daemon = runtime === "pi" ? undefined : readPlatformEnv(this.env, variable);
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
-    const home = this.env.HOME;
-    // Unconfigured Pi uses its managed seat directory, not the operator's ~/.pi/agent login.
+    const home = this.nativeHome;
     const native = home && runtime !== "pi" ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }

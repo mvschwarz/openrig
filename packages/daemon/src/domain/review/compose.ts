@@ -20,6 +20,8 @@ import { findFrontmatterBlock } from "../frontmatter.js";
 import { createHash } from "node:crypto";
 import type { ScopeReadiness, MissionReadiness } from "../proof/judgments.js";
 import * as posixPath from "node:path/posix";
+import { nonRelativeMediaPath, sliceRelativeMediaPath } from "./media-path.js";
+export { sliceRelativeMediaPath } from "./media-path.js";
 import { renderBriefSpine } from "./brief-spine.js";
 import {
   C1_ARTIFACT_TYPES,
@@ -95,18 +97,6 @@ export function extractMediaRefs(markdown: string | null): string[] {
     if (ref && !ref.startsWith("http")) refs.push(ref);
   }
   return refs;
-}
-
-/** Normalizes a media ref written relative to `baseDir` (slice-relative "")
- *  into a slice-relative path. Returns null when the ref is absolute or
- *  escapes the slice dir — the caller records the defect (FR-5), never a
- *  silent drop. */
-export function sliceRelativeMediaPath(ref: string, baseDir: string): string | null {
-  if (ref.startsWith("/")) return null;
-  const joined = baseDir ? posixPath.join(baseDir, ref) : ref;
-  const normalized = posixPath.normalize(joined);
-  if (normalized === ".." || normalized.startsWith("../")) return null;
-  return normalized;
 }
 
 function toReviewMedia(ref: string, baseDir: string): ReviewMedia | null {
@@ -1213,16 +1203,16 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   // co-located contract (rev1 fixback at d6135921 — slice-19 containment class).
   const defects = [
     ...inputs.mediaRefs
-      .filter((r) => r.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(r))
+      .filter((r) => nonRelativeMediaPath(r) || r.includes("\0") || /(^|[\\/])\.\.([\\/]|$)/.test(r))
       .map((r) =>
-        r.startsWith("/")
+        nonRelativeMediaPath(r)
           ? `absolute media path (must be slice-relative): ${r}`
           : `media ref escapes the slice dir (must be co-located): ${r}`,
       ),
     ...[...escaping]
       .sort()
       .map((r) =>
-        r.startsWith("/")
+        nonRelativeMediaPath(r)
           ? `absolute media path (must be slice-relative): ${r}`
           : `media ref escapes the slice dir (must be co-located): ${r}`,
       ),

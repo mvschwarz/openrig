@@ -23,7 +23,8 @@ function fixture() {
     path.join(root, name), `---\nintent: ${value}\n---\n# ${name}\n${value}\n`,
   );
   const run = (...args: string[]) => execFileSync(
-    "bash", [helper, root, path.join(dir, "state"), ...args],
+    process.platform === "win32" ? process.execPath : "bash",
+    [process.platform === "win32" ? helper.replace(/\.sh$/, ".mjs") : helper, root, path.join(dir, "state"), ...args],
     { encoding: "utf8", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
   );
   return { write, run };

@@ -1,6 +1,7 @@
 import type { DiscoveredSession, RuntimeHint } from "./discovery-types.js";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import type { RigSpec, RigSpecPod, RigSpecPodMember } from "./types.js";
+import { basename } from "node:path";
 
 const VALID_ID_CHARS = /^[a-zA-Z0-9\-_]+$/;
 
@@ -60,7 +61,7 @@ export function generateDraftRig(sessions: DiscoveredSession[]): DraftResult {
   const pods: RigSpecPod[] = [];
 
   for (const [cwd, groupSessions] of cwdGroups) {
-    const baseName = cwd !== "__no-cwd__" ? cwd.split("/").pop() ?? "pod" : "default";
+    const baseName = cwd !== "__no-cwd__" ? basename(cwd) : "default";
     const podId = dedupeId(sanitizeId(baseName), podIds);
 
     const memberIds = new Set<string>();

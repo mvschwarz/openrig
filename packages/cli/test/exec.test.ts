@@ -21,13 +21,15 @@ afterEach(() => { for (const fn of cleanup.splice(0)) fn(); });
 function install(root: string, pkg: string, version: string, bin?: string, extra: Record<string, unknown> = {}) {
   const dir = join(root, "node_modules", pkg);
   mkdirSync(join(dir, "dist"), { recursive: true });
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: pkg, version, ...extra }));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: pkg, version, ...(bin ? { bin: { [bin]: "dist/index.mjs" } } : {}), ...extra }));
   if (!bin) return;
   const program = join(dir, "dist", "index.mjs");
   writeFileSync(program, `#!/usr/bin/env node\nawait import(${JSON.stringify(pathToFileURL(FAKE_AGENT).href)});\n`);
   chmodSync(program, 0o755);
   mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
-  symlinkSync(program, join(root, "node_modules", ".bin", bin));
+  if (process.platform === "win32") {
+    writeFileSync(join(root, "node_modules", ".bin", bin + ".cmd"), `@echo off\r\n@set "dp0=%~dp0"\r\n@set "_prog=node"\r\n"%_prog%" "%dp0%\\..\\${pkg.replaceAll("/", "\\")}\\dist\\index.mjs" %*\r\n`);
+  } else symlinkSync(program, join(root, "node_modules", ".bin", bin));
 }
 
 /** An OpenRig home with both adapters installed and one row owned by this seat, whose body picks the agent's scenario. */
@@ -99,7 +101,7 @@ describe("rig exec", () => {
     const h = setup();
     const claude = resolveHarness(HARNESSES.claude!, { PATH: h.env.PATH });
     expect(claude).toMatchObject({ adapterVersion: "0.101.0", native: "Claude Code 2.1.318, from @anthropic-ai/claude-agent-sdk 0.3.318" });
-    expect(claude.command).toBe(join(h.home, "node_modules", ".bin", "claude-agent-acp"));
+    expect(claude.command).toBe(join(h.home, "node_modules", ".bin", "claude-agent-acp" + (process.platform === "win32" ? ".CMD" : "")));
     expect(resolveHarness(HARNESSES.claude!, { PATH: h.env.PATH, CLAUDE_CODE_EXECUTABLE: "/opt/claude" }).native)
       .toBe("the Claude Code at /opt/claude (CLAUDE_CODE_EXECUTABLE; its version isn't read here), not Claude Code 2.1.318, from @anthropic-ai/claude-agent-sdk 0.3.318");
     expect(resolveHarness(HARNESSES.codex!, { PATH: h.env.PATH })).toMatchObject({ adapterVersion: "2.5.0", native: "Codex 0.165.0 (@openai/codex)" });

@@ -49,6 +49,9 @@ export class FilePathSafetyError extends Error {
 
 const ENV_VAR = "OPENRIG_FILES_ALLOWLIST";
 const LEGACY_ENV_VAR = "RIGGED_FILES_ALLOWLIST";
+// Node's JS realpath retains the caller's Windows casing; the native version
+// gives the filesystem's actual spelling without folding distinct directories.
+const canonicalPath = (file: string): string => process.platform === "win32" ? fs.realpathSync.native(file) : fs.realpathSync(file);
 
 /**
  * Decodes a raw `name:/abs/path,name:/abs/path` allowlist string into
@@ -71,7 +74,7 @@ export function decodeAllowlist(raw: string): AllowlistRoot[] {
     if (!path.isAbsolute(rawPath)) continue;
     let canonical: string;
     try {
-      canonical = fs.realpathSync(rawPath);
+      canonical = canonicalPath(rawPath);
     } catch {
       canonical = path.resolve(rawPath);
     }
@@ -138,17 +141,18 @@ export function resolveAllowedPath(
       }
     }
   }
-  if (path.isAbsolute(relativePath)) {
+  if (relativePath.includes("\0")) throw new FilePathSafetyError("path_invalid", "relative path must not contain NUL", { rootName });
+  if (path.isAbsolute(relativePath) || (process.platform === "win32" && /^[A-Za-z]:/.test(relativePath))) {
     throw new FilePathSafetyError(
       "path_invalid",
-      `relative path '${relativePath}' must not be absolute (reject).`,
+      `relative path '${relativePath}' must not be absolute or drive-relative (reject).`,
       { rootName, relativePath },
     );
   }
   const candidate = path.resolve(root.canonicalPath, relativePath);
   let realpath: string;
   try {
-    realpath = fs.realpathSync(candidate);
+    realpath = canonicalPath(candidate);
   } catch {
     // If the candidate doesn't exist on disk yet, fall back to the
     // unresolved candidate. Subsequent stat will surface the absence

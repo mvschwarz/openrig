@@ -170,6 +170,7 @@ export function routeWorkflowSpecs(
     // Non-YAML suffixes are pre-filtered (status=unsafe) since the scanner
     // ignores non-.yaml/.yml entries entirely.
     const basename = nodePath.basename(declared);
+    const targetKey = process.platform === "win32" ? basename.toLowerCase() : basename;
     const targetAbs = nodePath.resolve(input.targetWorkflowSpecsDir, basename);
     // Sanity check (defensive; basename is structurally safe but the resolve
     // could in theory be a no-op for "" → keep the check, expected always-true).
@@ -187,7 +188,7 @@ export function routeWorkflowSpecs(
     // routedCount equals scanner-visible specs (banked B1 guard catch on
     // d81456dc). Operator-actionable: rename the declared path or curate
     // the bundle manifest.
-    if (routedBasenames.has(basename)) {
+    if (routedBasenames.has(targetKey)) {
       records.push({
         declaredPath: declared,
         status: "conflict",
@@ -196,7 +197,7 @@ export function routeWorkflowSpecs(
       continue;
     }
     fs.copyFile(sourceAbs, targetAbs);
-    routedBasenames.add(basename);
+    routedBasenames.add(targetKey);
     records.push({
       declaredPath: declared,
       status: "routed",

@@ -1,6 +1,7 @@
 // #739 — missed replies in tracked threads and missed messages in mapped channels, recovered
 // through the real router and queue with a fake Slack history.
 import { afterEach, expect, it, vi } from "vitest";
+import nodePath from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -23,10 +24,11 @@ const DAY = 24 * 60 * 60;
 
 function fixture() {
   const files = new Map<string, string>();
+  const key = (p: string) => nodePath.normalize(p).split(nodePath.sep).join("/");
   const fsops: StateFsOps = {
-    readFileSync: p => { if (!files.has(p)) throw Object.assign(new Error("absent"), { code: "ENOENT" }); return files.get(p)!; },
-    writeFileSync: (p, d) => { files.set(p, d); }, appendFileSync: (p, d) => { files.set(p, (files.get(p) ?? "") + d); },
-    rename: (from, to) => { files.set(to, files.get(from)!); files.delete(from); }, mkdirp: () => {},
+    readFileSync: p => { if (!files.has(key(p))) throw Object.assign(new Error("absent"), { code: "ENOENT" }); return files.get(key(p))!; },
+    writeFileSync: (p, d) => { files.set(key(p), d); }, appendFileSync: (p, d) => { files.set(key(p), (files.get(key(p)) ?? "") + d); },
+    rename: (from, to) => { files.set(key(to), files.get(key(from))!); files.delete(key(from)); }, mkdirp: () => {},
   };
   const db = createFullTestDb(); closes.push(() => db.close());
   let now = at(100);

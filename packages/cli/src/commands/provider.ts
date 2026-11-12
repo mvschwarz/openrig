@@ -546,7 +546,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("switch")
-    .description("Move one seat to subscription or API credentials, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux only), a Claude seat to its own token file")
+    .description("Move one seat to subscription or API credentials, keeping its conversation: a Codex seat to a login saved in its Codex home, a Claude seat to its own token file")
     .requiredOption("--seat <s>", "The seat session")
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
@@ -572,7 +572,7 @@ isn't verified until the seat completes a tool turn: run the printed rig seat re
 --expect-account. An uncertain restart is reported, never retried.
 
 Codex limits:
-- Linux only: the in-place restart reads the running process from /proc, so elsewhere it refuses before anything changes.
+- Process observation: the in-place restart reads /proc on Linux or native process metadata on experimental Windows. If the running process, home or conversation cannot be established, it refuses before changing the login. Other platforms have no default process observer.
 - Same home: the login must already be saved in the home the seat runs on; the seat doesn't move to another home.
 
 A Claude seat keeps its config dir and gets its own subscription token: --to-account <your label> --token-file <absolute path

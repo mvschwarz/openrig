@@ -98,13 +98,17 @@ npm test 2>&1 | grep 'DEBUG git init'
 
 If something appears during tests but you don't know which test:
 
-Use the bisection script `find-polluter.sh` in this directory:
+Use the portable Node script `find-polluter.mjs` in this directory (including native Windows):
 
 ```bash
-./find-polluter.sh '.git' 'src/**/*.test.ts'
+node find-polluter.mjs '.git' 'src/**/*.test.ts'
 ```
 
-Runs tests one-by-one, stops at first polluter. See script for usage.
+Runs tests one-by-one, stops at first polluter. Exit 0 means all selected runs
+succeeded without pollution, 1 identifies a polluter, and 2 means no result
+(invalid input, no matches, existing pollution or an incomplete test run).
+The Bash companion remains available on POSIX hosts. Neither helper deletes
+pollution or retries a failed test.
 
 ## Real Example: Empty projectDir
 

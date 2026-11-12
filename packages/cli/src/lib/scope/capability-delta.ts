@@ -57,7 +57,8 @@ export function capabilityDeltaExpiryFindings(missionDir: string): AuditFinding[
 
     try {
       if (!fs.statSync(successorPath).isFile()) continue;
-      fs.accessSync(successorPath, fs.constants.R_OK);
+      const fd = fs.openSync(successorPath, "r");
+      fs.closeSync(fd);
     } catch {
       continue;
     }

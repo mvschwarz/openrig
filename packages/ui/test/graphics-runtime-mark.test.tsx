@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { ActorMark, RuntimeBadge, RuntimeMark, ToolMark, isHumanActor } from "../src/components/graphics/RuntimeMark.js";
@@ -96,7 +96,7 @@ describe("graphics runtime package", () => {
   });
 
   it("ships the operator mask asset in public graphics", () => {
-    const asset = readFileSync(join(process.cwd(), "public/graphics/operator-climber-monochrome.png"));
+    const asset = readFileSync(resolve(import.meta.dirname, "../public/graphics/operator-climber-monochrome.png"));
     expect(asset.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
   });
 });

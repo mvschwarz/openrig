@@ -35,6 +35,15 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }); });
 
 describe("passive CONFIG read view", () => {
+  it.runIf(process.platform === "win32")("shows valid native named paths while retaining sensitive-component withholding", () => {
+    const paths = `notes:${join(home, "owned notes")}, share:\\\\owned.example\\share\\docs`;
+    store.set("files.allowlist", paths);
+    expect(store.resolveOne("files.allowlist").value).toBe(paths);
+    expect(entry("files.allowlist")).toMatchObject({ value: paths, visibility: "shown" });
+    store.set("files.allowlist", `notes:${join(home, "owned")}?token=synthetic`);
+    expect(entry("files.allowlist")).toMatchObject({ value: null, visibility: "withheld" });
+    expect(external).not.toHaveBeenCalled();
+  });
   it("enumerates actual registry and dynamic entries, while missing structured sources stay distinct", () => {
     const first = read();
     expect(first.entries.filter((e) => e.group === "general").map((e) => e.key)).toEqual([...SETTINGS_VALID_KEYS]);

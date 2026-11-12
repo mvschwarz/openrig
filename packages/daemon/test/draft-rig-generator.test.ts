@@ -26,6 +26,18 @@ function makeSession(overrides: Partial<DiscoveredSession>): DiscoveredSession {
 }
 
 describe("Draft rig generator", () => {
+  it.runIf(process.platform === "win32")("names native CWD groups by their final directory and preserves each selected CWD", () => {
+    const first = "C:\\synthetic projects\\code", second = "D:\\synthetic projects\\code\\";
+    const result = generateDraftRig([
+      makeSession({ id: "native-1", tmuxSession: "first", cwd: first }),
+      makeSession({ id: "native-2", tmuxSession: "second", cwd: second }),
+    ]);
+    const raw = RigSpecCodec.parse(result.yaml);
+    const pods = (raw as Record<string, unknown>)["pods"] as Array<{ id: string; members: Array<{ cwd: string }> }>;
+    expect(pods.map(pod => pod.id)).toEqual(["code", "code-2"]);
+    expect(pods.map(pod => pod.members[0]!.cwd)).toEqual([first, second]);
+    expect(RigSpecSchema.validate(raw).valid).toBe(true);
+  });
   // Test 1: groups by shared CWD
   it("groups sessions by shared CWD into pods", () => {
     const sessions = [

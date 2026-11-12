@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { getNodeInventory, getNodeInventoryForAllRigs, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
@@ -141,7 +141,7 @@ describe("Node Inventory Projection", () => {
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t dev-impl@test-rig");
+    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t =dev-impl@test-rig");
   });
 
   it("tmuxAttachCommand names the daemon's tmux server when it isn't the default one", () => {
@@ -150,7 +150,7 @@ describe("Node Inventory Projection", () => {
     setDaemonTmuxServer(["-L", "person"]);
     try {
       const entry = getNodeInventory(db, "rig-1").find((e) => e.logicalId === "dev.impl");
-      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t dev-impl@test-rig");
+      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t =dev-impl@test-rig");
     } finally {
       setDaemonTmuxServer([]);
     }
@@ -178,11 +178,21 @@ describe("Node Inventory Projection", () => {
     seedSession(db, "node-1", "dev-impl@test-rig", { resumeToken });
     const entry = getNodeInventory(db, "rig-1").find(node => node.nodeId === "node-1")!;
     const detail = getNodeDetail(db, "rig-1", "dev.impl")!;
+    if (process.platform === "win32" && selection === "none") {
+      const wrapped = [entry.resumeCommand, ...(detail.recoveryGuidance?.commands ?? [])]
+        .filter(command => command?.includes("windows-provider-recovery.mjs"));
+      expect(wrapped).toHaveLength(resumeToken ? 3 : 1);
+      return; // Actual native argv is checked against an owned npm entry below.
+    }
     const commands = [entry.resumeCommand, ...(detail.recoveryGuidance?.commands ?? [])]
       .filter((command): command is string => command?.startsWith("claude ") === true);
     expect(commands).toHaveLength(resumeToken ? 3 : 1);
     for (const command of commands) {
-      const argv = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).trim().split("\n");
+      const argv: string[] = process.platform === "win32"
+        ? JSON.parse(execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from("function claude { ConvertTo-Json -Compress -InputObject @($args) }\n" + command, "utf16le").toString("base64")],
+          { encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim())
+        : execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).trim().split("\n");
       expect(argv).toContain("--resume");
       expect(argv.filter(arg => arg === "--strict-mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
       expect(argv.filter(arg => arg === "--mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
@@ -190,7 +200,79 @@ describe("Node Inventory Projection", () => {
     }
   });
 
+  it.runIf(process.platform === "win32").each(["claude", "codex"] as const)("served recovery argv reaches the native npm %s entry unchanged", provider => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "recovery npm # 中文-"));
+    const scopeName = provider === "claude" ? "@anthropic-ai" : "@openai", packageLeaf = provider === "claude" ? "claude-code" : "codex";
+    const modules = path.join(root, "node_modules"), scope = path.join(modules, scopeName), pkg = path.join(scope, packageLeaf);
+    for (const directory of [modules, scope, pkg]) fs.mkdirSync(directory);
+    const manifest = path.join(pkg, "package.json"), entry = path.join(pkg, "cli.cjs"), shim = path.join(root, provider + ".cmd"), output = path.join(root, "received.json");
+    try {
+      fs.writeFileSync(manifest, JSON.stringify({ name: scopeName + "/" + packageLeaf, bin: { [provider]: "cli.cjs" } }));
+      fs.writeFileSync(shim, `@rem %dp0%\\node_modules\\${scopeName}\\${packageLeaf}\\cli.cjs\r\n`);
+      fs.writeFileSync(entry, "require('fs').writeFileSync(process.env.OPENRIG_RECOVERY_WITNESS,JSON.stringify(process.argv.slice(2)));process.exit(7);");
+      seedPodAwareRig(db);
+      db.prepare("UPDATE nodes SET claude_mcp = 'none' WHERE id = 'node-1'").run();
+      if (provider === "codex") db.prepare("UPDATE nodes SET runtime = 'codex', codex_config_profile = ? WHERE id = 'node-1'").run("owned'profile");
+      seedSession(db, "node-1", "dev-impl@test-rig", { resumeToken: "saved-history" });
+      const inventory = getNodeInventory(db, "rig-1").find(node => node.nodeId === "node-1")!;
+      const detail = getNodeDetail(db, "rig-1", "dev.impl")!;
+      const commands = [inventory.resumeCommand, ...detail.recoveryGuidance!.commands].filter((command): command is string => command?.includes("windows-provider-recovery.mjs") === true);
+      expect(commands).toHaveLength(provider === "claude" ? 3 : 2);
+      const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !["PATH", "PATHEXT"].includes(key.toUpperCase())));
+      Object.assign(env, { PATH: root + ";" + path.dirname(process.execPath), PATHEXT: ".CMD;.EXE", OPENRIG_RECOVERY_WITNESS: output });
+      for (const [index, command] of commands.entries()) {
+        const script = `function ${provider} { & ${quote(process.execPath)} ${quote(entry)} @args }\n${command}\nexit $global:LASTEXITCODE`;
+        const result = spawnSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+          { cwd: root, env, encoding: "utf8", windowsHide: true, timeout: 15000 });
+        expect(result.status, result.stderr).toBe(7);
+        const expected = provider === "codex" ? ["-p", "owned'profile", "resume", "saved-history"]
+          : [...(index === 2 ? ["--resume"] : ["--permission-mode", "acceptEdits", "--resume", "saved-history"]),
+            ...(index === 1 ? ["--name", "dev-impl@test-rig"] : []), "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'];
+        expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual(expected);
+      }
+      fs.unlinkSync(shim); fs.unlinkSync(output);
+      const missingScript = `function ${provider} { & ${quote(process.execPath)} ${quote(entry)} @args }\n${commands[0]}\nexit $global:LASTEXITCODE`;
+      const missing = spawnSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(missingScript, "utf16le").toString("base64")],
+        { cwd: root, env: { ...env, PATH: root }, encoding: "utf8", windowsHide: true, timeout: 15000 });
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain(`No ${provider} executable`);
+      expect(fs.existsSync(output)).toBe(false);
+    } finally {
+      for (const file of [manifest, entry, shim, output]) if (fs.existsSync(file)) fs.unlinkSync(file);
+      for (const directory of [pkg, scope, modules, root]) fs.rmdirSync(directory);
+    }
+  }, 30000);
+
   // Test 6: resumeCommand is null when no resume token
+  it.each(["claude-code", "codex"])("recovery cwd is literal in the platform shell for %s", runtime => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "recovery-cwd-"));
+    const cwd = path.join(root, "work [1] ' 中文"), decoy = path.join(root, "work 1 ' 中文");
+    fs.mkdirSync(cwd); fs.mkdirSync(decoy);
+    try {
+      seedPodAwareRig(db);
+      db.prepare("UPDATE nodes SET runtime = ?, cwd = ? WHERE id = 'node-1'").run(runtime, cwd);
+      seedSession(db, "node-1", "dev-impl@test-rig", { resumeToken: "saved-history" });
+      const detail = getNodeDetail(db, "rig-1", "dev.impl")!;
+      const command = detail.recoveryGuidance!.commands.find(value => /^(?:cd |Set-Location )/.test(value))!;
+      expect(command).toBeTruthy();
+      let observed: string;
+      if (process.platform === "win32") {
+        const script = "$ErrorActionPreference='Stop'\n" + command + "\n[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).ProviderPath))";
+        const encoded = execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+          { cwd: root, encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim();
+        observed = Buffer.from(encoded, "base64").toString("utf8");
+      } else {
+        observed = execFileSync("/bin/sh", ["-c", command + " && pwd -P"], { cwd: root, encoding: "utf8", timeout: 15000 }).trim();
+      }
+      const actual = fs.statSync(observed, { bigint: true }), wanted = fs.statSync(cwd, { bigint: true });
+      expect([actual.dev, actual.ino]).toEqual([wanted.dev, wanted.ino]);
+    } finally { fs.rmdirSync(cwd); fs.rmdirSync(decoy); fs.rmdirSync(root); }
+  });
+
   it("resumeCommand is null when no resume token", () => {
     seedPodAwareRig(db);
     seedSession(db, "node-1", "dev-impl@test-rig");
@@ -213,7 +295,7 @@ describe("Node Inventory Projection", () => {
     const detail = getNodeDetail(db, "rig-1", "dev.impl");
     expect(detail?.recoveryGuidance?.summary).toContain("native Claude resume");
     expect(detail?.recoveryGuidance?.commands).toContain("claude --permission-mode acceptEdits --resume 'abc-123-def' --name 'dev-impl@test-rig'");
-    expect(detail?.recoveryGuidance?.commands).toContain("cd /project");
+    expect(detail?.recoveryGuidance?.commands).toContain(process.platform === "win32" ? "Set-Location -LiteralPath '/project'" : "cd '/project'");
     expect(detail?.recoveryGuidance?.commands).toContain("claude --resume");
     expect(detail?.recoveryGuidance?.notes).toContain("Look for session name: dev-impl@test-rig");
     expect(detail?.recoveryGuidance?.notes).toContain("Choose the full conversation option, not summary.");
@@ -233,7 +315,7 @@ describe("Node Inventory Projection", () => {
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
     expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
     expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
+    expect(detail?.recoveryGuidance?.commands).toEqual([process.platform === "win32" ? "Set-Location -LiteralPath '/workspace/app'" : "cd '/workspace/app'", "codex -s workspace-write resume --last"]);
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });

@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { SnapshotData, RestoreValidationBlocker, RigServicesRecord } from "./types.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import { resolveActiveSnapshotSession } from "./active-occupant.js";
@@ -216,9 +217,12 @@ export function validatePreRestore(
 
 function pathLike(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && (
-    value.startsWith("/")
+    path.isAbsolute(value)
+    || path.win32.isAbsolute(value)
     || value.startsWith("./")
     || value.startsWith("../")
+    || value.startsWith(".\\")
+    || value.startsWith("..\\")
     || value.startsWith("~")
   );
 }

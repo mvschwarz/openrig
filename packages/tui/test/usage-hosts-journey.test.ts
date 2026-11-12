@@ -4,6 +4,7 @@
 // every state draws from the served fields verbatim, the same facts as `rig provider status --all-hosts`, and that
 // the view only ever GETs the served view: no refresh, no native read anywhere.
 import { afterEach, describe, expect, it } from "vitest";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot } from "../src/state.js";
@@ -21,6 +22,7 @@ const NOW = "2026-10-13T23:30:00.000Z";
 const open: UsageHost[] = [];
 async function host(id: string, opts: UsageHostOptions = {}): Promise<UsageHost> {
   const h = await UsageHost.start(id, { now: () => NOW, routes: { usageAcrossHosts: { now: () => NOW } }, ...opts });
+  allowFetchTarget(h.url);
   open.push(h);
   return h;
 }
@@ -254,6 +256,7 @@ describe("System → Usage across hosts: what #1246 serves since the plan", () =
     const nested = await host("nested", { rewrite: (p, b) => p === "/api/provider/status" ? { ...(b as Body), deep } : b });
     const target = await host("target");
     const relay = await redirectingRelay(target.url);
+    allowFetchTarget(relay.url);
     const broken = await host("broken");
     try {
       // A host whose answer throws while it's read (its status can't be read at all).

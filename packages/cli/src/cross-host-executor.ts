@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import type { HostEntry } from "./host-registry.js";
+import { windowsSshCommand } from "./windows-ssh-command.js";
 
 /**
  * Structured result of a cross-host command. Distinguishes SSH-layer failures
@@ -100,12 +101,9 @@ export async function runCrossHostCommand(
   const innerCommand = opts.originTriple
     ? `OPENRIG_SESSION_NAME=${shellQuote(opts.originTriple)} ${quotedArgv}`
     : quotedArgv;
-  const remoteCommandLine = `sh -lc ${shellQuote(innerCommand)}`;
-  // SEP-1: `--` ends ssh's own option parsing, so a target that begins with `-` reaches ssh as the
-  // destination instead of being read as one more option. That misreading is the harm: `-V`, for
-  // instance, is ssh's own version flag, parsed and exited 0 before any connection, which this
-  // executor would count as a success with no remote command run. With the separator, ssh rejects
-  // the name itself.
+  let remoteCommandLine: string;
+  try { remoteCommandLine = host.remoteShell === "powershell" ? windowsSshCommand(host, argv, opts.originTriple) : `sh -lc ${shellQuote(innerCommand)}`; }
+  catch (error) { return { ok: false, failedStep: "remote-command-failed", stdout: "", stderr: `Native SSH configuration refused: ${(error as Error).message}`, remoteExitCode: 1 }; }
   const fullArgs = [...sshOpts, "--", sshHost.target, remoteCommandLine];
 
   const spawn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);

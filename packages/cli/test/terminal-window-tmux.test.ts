@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it as platformIt, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -9,6 +9,9 @@ import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 // Real isolated tmux servers; the desktop launcher alone is inert.
+// This fixture executes POSIX shell scripts and /dev/null, not native psmux.
+// Windows rendering is exercised by terminal-window-windows.test.ts instead.
+const it = platformIt.skipIf(process.platform === "win32");
 const sockets: string[] = [];
 const dirs: string[] = [];
 const env = { ...process.env }; delete env["TMUX"];

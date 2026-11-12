@@ -1,5 +1,8 @@
 import type { ExecFn } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { stat } from "node:fs/promises";
+import path from "node:path";
+import { readPlatformEnv } from "./platform-env.js";
 
 /** Probe result status — matches Phase 5 spec */
 export type ProbeStatus = "installed" | "missing" | "unsupported" | "unknown";
@@ -18,11 +21,11 @@ export interface ProbeResult {
   status: ProbeStatus;
   /** Version string when provider reports it (e.g. brew). Null for cli_tool probes. */
   version: string | null;
-  /** Resolved binary path from `command -v`. Null for non-cli probes or missing tools. */
+  /** Resolved command path from the platform lookup. Null for non-cli probes or missing tools. */
   detectedPath: string | null;
   /** Provider used for the probe (e.g. 'homebrew'). Null for generic CLI probes. */
   provider: string | null;
-  /** The exact command that was executed. Null if no probe was executed (unsupported). */
+  /** The exact command executed. Null for native filesystem lookup or unsupported probes. */
   command: string | null;
   /** Install hints from the manifest — display only, never executed. */
   installHints: Record<string, string> | null;
@@ -33,6 +36,7 @@ export interface ProbeResult {
 interface ProbeOptions {
   timeoutMs?: number;
   platform?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -45,11 +49,13 @@ export class RequirementsProbeRegistry {
   private exec: ExecFn;
   private timeoutMs: number;
   private platform: string;
+  private env: NodeJS.ProcessEnv;
 
   constructor(exec: ExecFn, opts?: ProbeOptions) {
     this.exec = exec;
     this.timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.platform = opts?.platform ?? process.platform;
+    this.env = opts?.env ?? process.env;
   }
 
   /**
@@ -57,6 +63,17 @@ export class RequirementsProbeRegistry {
    * Returns the resolved binary path in detectedPath, version stays null.
    */
   async probeCli(name: string): Promise<ProbeResult> {
+    if (this.platform === "win32") {
+      const result: ProbeResult = { name, kind: "cli_tool", status: "missing", version: null, detectedPath: null, provider: null, command: null, installHints: null, error: null };
+      try {
+        result.detectedPath = await this.withTimeout(this.findWindowsCommand(name));
+        result.status = result.detectedPath ? "installed" : "missing";
+      } catch (error) {
+        result.status = "unknown";
+        result.error = (error as Error).message;
+      }
+      return result;
+    }
     const cmd = `command -v ${shellQuote(name)}`;
     try {
       const stdout = await this.execWithTimeout(cmd);
@@ -204,11 +221,32 @@ export class RequirementsProbeRegistry {
   }
 
   private async execWithTimeout(cmd: string): Promise<string> {
-    return Promise.race([
-      this.exec(cmd),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("probe timed out")), this.timeoutMs)
-      ),
-    ]);
+    return this.withTimeout(this.exec(cmd));
+  }
+
+  private async withTimeout<T>(operation: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("probe timed out")), this.timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  private async findWindowsCommand(name: string): Promise<string | null> {
+    const extensions = (readPlatformEnv(this.env, "PATHEXT", "win32") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+    // A dot can belong to the command's stem (python3.12.exe, for example).
+    // Native lookup also tries PATHEXT after an exact dotted filename.
+    const names = [...new Set([...(path.extname(name) ? [name] : []), ...extensions.map(extension => name + extension)])];
+    const explicit = /[\\/]/.test(name);
+    const dirs = explicit ? [""] : (readPlatformEnv(this.env, "PATH", "win32") ?? "").split(path.delimiter);
+    for (const dir of dirs) for (const file of names) {
+      const candidate = path.resolve(dir.replace(/^"(.*)"$/, "$1"), file);
+      try { if ((await stat(candidate)).isFile()) return candidate; }
+      catch (error) {
+        if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      }
+    }
+    return null;
   }
 }

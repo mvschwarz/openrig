@@ -9,10 +9,12 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawnRig } = require("./rig-command.cjs");
+const { spawnPython } = require("./python-command.cjs");
 const { recordRefocusResult } = require("./refocus-health.cjs");
-const { openRefocusState, processExists } = require("./refocus-state.cjs");
+const { openCoordinatedRefocusState, processExists } = require("./refocus-state.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
 const childEnv = { ...process.env, PATH: [process.env.PATH, path.dirname(process.execPath)].filter(Boolean).join(path.delimiter) };
@@ -87,7 +89,7 @@ function readConfiguredContent(home) {
   if (contentRef) {
     const timeout = lookupTimeout();
     if (timeout <= MIN_LOOKUP_MS) return { content: null, contentRef, failure: "no time left in the refocus budget" };
-    const result = spawnSync("rig", ["context", "get", contentRef], {
+    const result = spawnRig(["context", "get", contentRef], {
       encoding: "utf8",
       env: childEnv,
       timeout,
@@ -156,7 +158,7 @@ function workPacketEnabled() {
 function readQueueWhoami(timeout = lookupTimeout()) {
   if (timeout <= MIN_LOOKUP_MS) return { unknown: "no time left in the refocus budget" };
   const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
-  let result = spawnSync("rig", args, {
+  let result = spawnRig(args, {
     encoding: "utf8", env: childEnv, timeout, maxBuffer: 16 * 1024 * 1024,
   });
   // A rig CLI older than this hook rejects the flag. Ask again without it, inside what is left of
@@ -165,7 +167,7 @@ function readQueueWhoami(timeout = lookupTimeout()) {
     && /unknown option/i.test(`${result.stderr || ""}${result.stdout || ""}`)) {
     const remaining = remainingLookupBudget();
     if (remaining > 250) {
-      result = spawnSync("rig", ["queue", "whoami", "--json"], {
+      result = spawnRig(["queue", "whoami", "--json"], {
         encoding: "utf8", env: childEnv, timeout: remaining, maxBuffer: 16 * 1024 * 1024,
       });
     }
@@ -227,7 +229,7 @@ function renderRole(result) {
 // start, after reserving python's cap and, when a content ref is configured, the content lookup
 // that runs after python; with 250 ms or less left it is skipped.
 function traceEnv(trees) {
-  const env = { ...childEnv };
+  const env = { ...childEnv, OPENRIG_NODE: process.execPath, PYTHONIOENCODING: "utf-8" };
   const missing = [
     ["OPENRIG_TOPOLOGY_ROOT", "topology", "topology"],
     ["OPENRIG_WORKSPACE_ROOT", "workspace", "work"],
@@ -235,7 +237,7 @@ function traceEnv(trees) {
   if (missing.length === 0) return env;
   const timeout = remainingLookupBudget();
   if (timeout <= 250) return env;
-  const result = spawnSync("rig", ["config", "--json"], {
+  const result = spawnRig(["config", "--json"], {
     encoding: "utf8",
     env: childEnv,
     timeout,
@@ -311,7 +313,7 @@ function renderTrace() {
   const timeout = lookupTimeout(contentReserveMs());
   const result = timeout <= MIN_LOOKUP_MS
     ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
-    : spawnSync(process.env.PYTHON || "python3", args, {
+    : spawnPython(args, {
       encoding: "utf8",
       ...(evidence ? { input: evidence } : {}),
       env,
@@ -384,7 +386,7 @@ function runsForThisSeatsProject(env = process.env) {
   if (event === "SessionStart") process.exit(0);
 
   const seat = process.env.OPENRIG_SESSION_NAME || "unknown-seat";
-  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || "/tmp", ".openrig");
+  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || (process.platform === "win32" ? os.homedir() : "/tmp"), ".openrig");
   const transcriptPath = input.transcript_path || input.transcriptPath || "";
 
   const stateDir = path.join(home, "refocus");
@@ -447,7 +449,7 @@ function runsForThisSeatsProject(env = process.env) {
   const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
   // Only the two state transitions need exclusive access. Trace rendering and
   // stdout run outside the guard so an arriving PostCompact can record its work.
-  const start = openRefocusState(stateFile);
+  const start = await openCoordinatedRefocusState(stateFile);
   const promptId = firstString(input.prompt_id);
   const onDemand = enabled(process.env.OPENRIG_REFOCUS_NOW, false);
   let state, size = 0, grown, claimed;
@@ -656,13 +658,13 @@ function runsForThisSeatsProject(env = process.env) {
       additionalContext,
     },
   });
-  process.stdout.write(output, (error) => {
+  process.stdout.write(output, async (error) => {
     // The report gets its own window after the attempt's lookups, however long they actually took (default lookups keep
     // their fixed caps, so a default attempt can run past its 4.5 s budget).
     recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error), env: childEnv,
       deadlineMs: Math.max(BUDGET_MS, Math.floor(process.uptime() * 1_000)) + REPORT_MS });
     if (!claimed) return;
-    const finish = openRefocusState(stateFile);
+    const finish = await openCoordinatedRefocusState(stateFile);
     try {
       if (!finish.exclusive) return;
       const latest = finish.read();

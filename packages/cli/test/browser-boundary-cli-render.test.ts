@@ -1,7 +1,9 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The real `rig ps` / `rig send` code paths, real DaemonClient and real HTTP, rendering the exact
 // refusal body produced by the daemon's browser boundary. (A real CLI request cannot present an
 // unlisted target name without DNS: Node fetch sends the URL's host, not an explicit Host header.)
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { Command } from "commander";
@@ -23,11 +25,12 @@ beforeAll(async () => {
   const res = await daemon.request("/api/ps", { headers: { Host: "unlisted.example:7433" } });
   refusalBody = await res.text();
   server = http.createServer((_req, res2) => { res2.writeHead(403, { "content-type": "application/json" }); res2.end(refusalBody); });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  await listenOwnedHttpFixture(server);
   port = (server.address() as AddressInfo).port;
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 afterEach(() => { process.exitCode = undefined; });
+beforeEach(() => { allowFetchTarget(`http://127.0.0.1:${port}`); });
 
 function deps() {
   const lifecycleDeps: LifecycleDeps = {

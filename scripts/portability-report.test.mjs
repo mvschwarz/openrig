@@ -98,7 +98,7 @@ test("the report says so when nothing is found and groups findings when somethin
 });
 
 test("the CLI executes through a script path containing spaces and a hash", async () => {
-  const { mkdtempSync, symlinkSync, rmSync } = await import("node:fs");
+  const { mkdtempSync, symlinkSync, copyFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
@@ -106,7 +106,9 @@ test("the CLI executes through a script path containing spaces and a hash", asyn
   const temp = mkdtempSync(join(tmpdir(), "openrig script # "));
   try {
     const script = join(temp, "portability report.mjs");
-    symlinkSync(fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), script);
+    const source = fileURLToPath(new URL("./portability-report.mjs", import.meta.url));
+    if (process.platform === "win32") copyFileSync(source, script);
+    else symlinkSync(source, script);
     const result = spawnSync(process.execPath, [script, "--unknown-option"], { encoding: "utf8" });
     assert.equal(result.status, 2);
     assert.match(result.stderr, /Unknown argument: --unknown-option/);
@@ -123,8 +125,12 @@ test("the CLI executes with preserve-symlinks-main and imports without argv rema
   const temp = mkdtempSync(join(tmpdir(), "openrig preserved # "));
   const source = new URL("./portability-report.mjs", import.meta.url);
   try {
-    const script = join(temp, "report.mjs");
-    symlinkSync(fileURLToPath(source), script);
+    let script = join(temp, "report.mjs");
+    if (process.platform === "win32") {
+      const directory = join(temp, "linked scripts");
+      symlinkSync(fileURLToPath(new URL("./", source)), directory, "junction");
+      script = join(directory, "portability-report.mjs");
+    } else symlinkSync(fileURLToPath(source), script);
     const run = spawnSync(process.execPath, ["--preserve-symlinks-main", script, "--unknown-option"], { encoding: "utf8" });
     assert.equal(run.status, 2, run.stderr);
     assert.match(run.stderr, /Unknown argument/);

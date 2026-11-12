@@ -614,6 +614,40 @@ export class BootstrapOrchestrator {
       detail: { completed: execSummary.completed.length, failed: execSummary.failed.length, skipped: execSummary.skipped.length },
     });
 
+    // A native installer can exit successfully without exposing a usable CLI
+    // to this daemon (for example, a PATH update needs a new login).
+    const nativeIncomplete = [...execSummary.failed, ...execSummary.skipped].filter(result =>
+      taggedActions.some(({ action }) => action.requirementName === result.requirementName && action.provider === "winget"));
+    if (nativeIncomplete.length) {
+      errors.push(`Windows dependency installation did not complete for: ${nativeIncomplete.map(result => result.requirementName).join(", ")}. Inspect the recorded install result before retrying; the host may already have changed.`);
+      this.deps.bootstrapRepo.updateRunStatus(run.id, "partial");
+      return { runId: run.id, status: "partial", stages, errors, warnings };
+    }
+    const nativeCompleted = new Set(execSummary.completed.filter(result =>
+      taggedActions.some(({ action }) => action.requirementName === result.requirementName && action.provider === "winget"))
+      .map(result => result.requirementName));
+    if (nativeCompleted.size) {
+      const requirements = uniqueRequirements.filter(requirement => nativeCompleted.has(requirement.name));
+      try {
+        const verified = await this.deps.probeRegistry.probeAll(requirements);
+        const ready = requirements.every(requirement => verified.some(result => result.name === requirement.name && result.status === "installed"));
+        stages.push({ stage: "verify_external_installs", status: ready ? "ok" : "blocked", detail: { results: verified } });
+        this.deps.bootstrapRepo.journalAction(run.id, seqCounter++, "requirement_check", null, "post-install", ready ? "completed" : "failed", {
+          detailJson: JSON.stringify(verified),
+        });
+        if (!ready) {
+          errors.push("WinGet returned success, but installed tools are not verified on the daemon PATH. Resolve the requirement before retrying bootstrap; an installation may already have changed the host.");
+          this.deps.bootstrapRepo.updateRunStatus(run.id, "partial");
+          return { runId: run.id, status: "partial", stages, errors, warnings };
+        }
+      } catch (error) {
+        stages.push({ stage: "verify_external_installs", status: "blocked", detail: { error: thrownMessage(error) } });
+        errors.push("Post-install tool observation failed; installation outcome is retained but tool readiness is unknown.");
+        this.deps.bootstrapRepo.updateRunStatus(run.id, "partial");
+        return { runId: run.id, status: "partial", stages, errors, warnings };
+      }
+    }
+
     // --- Stage 7: INSTALL_PACKAGES ---
     let packageInstallFailed = false;
     for (const [ref, resolved] of resolvedPackages) {

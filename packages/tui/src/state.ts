@@ -153,9 +153,10 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       const detail = snap.attentionRead?.detail;
       if (!detail || detail.item.id !== next.attentionOpen || !detail.files.some(f => f.path === action.path)) return { ...next, lastError: "Source is no longer in the current Attention read" };
       const hash = action.path.indexOf("#");
-      const target = fileTargetForPath(hash < 0 ? action.path : action.path.slice(0, hash), snap.fileRoots ?? []);
+      const sourcePath = hash < 0 ? action.path : action.path.slice(0, hash);
+      const target = fileTargetForPath(sourcePath, snap.fileRoots ?? []);
       if (target && hash >= 0) target.anchor = action.path.slice(hash + 1);
-      const project = detail.item.project && action.path.startsWith(detail.item.project.root + "/") ? detail.item.project : null;
+      const project = detail.item.project && fileTargetForPath(sourcePath, [{ name: "project", path: detail.item.project.root }]) ? detail.item.project : null;
       return { ...resetContent({ ...next, project, file: target ?? { root: "", path: action.path } }), focusedPane: "content" };
     }
     case "file-open":

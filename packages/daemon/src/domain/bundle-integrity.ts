@@ -66,7 +66,9 @@ export function computeIntegrity(dir: string, fsOps: IntegrityFsOps, includedLog
   const files: Record<string, string> = {};
   const sensitive: string[] = [];
 
-  for (const relPath of allFiles) {
+  for (const nativeRelativePath of allFiles) {
+    // Integrity keys are archive paths, independent of the producer's host.
+    const relPath = nativeRelativePath.split(nodePath.sep).join("/");
     const name = nodePath.basename(relPath);
     if (IGNORE_FILES.has(name)) continue;
     if (CONTROL_FILES.has(relPath)) continue;
@@ -76,7 +78,7 @@ export function computeIntegrity(dir: string, fsOps: IntegrityFsOps, includedLog
       continue;
     }
 
-    const fullPath = nodePath.join(dir, relPath);
+    const fullPath = nodePath.join(dir, nativeRelativePath);
     const content = fsOps.readFileBuffer(fullPath);
     files[relPath] = hashContent(content);
   }
@@ -159,7 +161,8 @@ export function verifyIntegrity(dir: string, manifest: BundleManifest, fsOps: In
   // Check for extra files + sensitive paths
   const allFiles = fsOps.walkFiles(dir);
   const expectedSet = new Set(Object.keys(expectedFiles));
-  for (const relPath of allFiles) {
+  for (const nativeRelativePath of allFiles) {
+    const relPath = nativeRelativePath.split(nodePath.sep).join("/");
     const name = nodePath.basename(relPath);
     if (IGNORE_FILES.has(name)) continue;
     if (CONTROL_FILES.has(relPath)) continue;

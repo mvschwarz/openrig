@@ -1,13 +1,15 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { npmCommand } from "./npm-command.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { packEntry } from "./npm-pack-json.mjs";
 
 test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () => {
-  const output = execSync("npm pack --dry-run --json 2>/dev/null", {
+  const output = execFileSync(...npmCommand(["pack", "--dry-run", "--json"]), {
     cwd: "packages/cli",
     encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
   });
   const files = packEntry(output).files?.map((f) => f.path) ?? [];
 
@@ -59,7 +61,7 @@ test("build-package scans the complete daemon specs tree before LP-7 copies it",
 });
 
 test("build-package emits the substance roots from the staging branches that actually ran", () => {
-  const buildScript = readFileSync("scripts/build-package.sh", "utf8");
+  const buildScript = readFileSync("scripts/build-package.sh", "utf8").replace(/\r\n/g, "\n");
   assert.match(buildScript, /SUBSTANCE_SURFACE_ROOTS=\(\)/);
   const assetsBranch = buildScript.match(/^if \[ -d "\$DAEMON_DIR\/assets" \]; then\n[\s\S]*?^fi$/m)?.[0] ?? "";
   assert.match(assetsBranch, /"\$DAEMON_DIR\/assets" "\$CLI_DIR\/daemon\/assets"/);

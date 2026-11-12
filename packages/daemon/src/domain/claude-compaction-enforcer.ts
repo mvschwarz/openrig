@@ -3,8 +3,9 @@ import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
-import { postCompactExtraSetting } from "./managed-restore-read-access.js";
+import { compactionPacketRoot, postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
+import { checkWindowsDirectoryWriteAccess, readWindowsOwnedText } from "./windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -316,6 +317,7 @@ function resolvePostCompactExtra(
   sessionName: string,
   openrigHome: string,
   globalPath: string | null | undefined,
+  userHome?: string,
 ): ResolvedExtra {
   const seatKey = sanitizeSessionKey(sessionName);
   const perSeatPath = path.join(openrigHome, "compaction", "post-compact-extra", `${seatKey}.md`);
@@ -326,7 +328,7 @@ function resolvePostCompactExtra(
     }
     return { filePath: perSeatPath, ignoredWrongSeat: false };
   }
-  const trimmed = postCompactExtraSetting(globalPath);
+  const trimmed = postCompactExtraSetting(globalPath, openrigHome, userHome);
   if (!trimmed) return { filePath: null, ignoredWrongSeat: false };
   const global = readExtraDeclaredSeat(trimmed);
   // Configured-but-absent: keep the path (the operator may populate it before restore;
@@ -351,6 +353,7 @@ export function buildPostCompactRestorePrompt(input: {
   sessionId?: string | null;
   postCompactInstruction?: string | null;
   postCompactInstructionFilePath?: string | null;
+  userHome?: string;
   ignoredWrongSeatExtra?: boolean;
 }): string {
   const markerPath = path.join(
@@ -373,12 +376,12 @@ export function buildPostCompactRestorePrompt(input: {
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for session id ${input.sessionId}.`);
   } else {
-    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
-  const instructionFilePath = input.postCompactInstructionFilePath?.trim();
+  const instructionFilePath = postCompactExtraSetting(input.postCompactInstructionFilePath, input.openrigHome, input.userHome);
   if (inlineInstruction) {
     pieces.push(`Operator post-compaction instruction: ${inlineInstruction}`);
   }
@@ -1069,9 +1072,15 @@ export class ClaudeCompactionEnforcer {
     // hook can predate it: require live readiness, then admit only unknown after two consecutive owed-stage polls.
     const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
-    const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
-      && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
-    // Owed input uses the ordinary delivery policy, including the operator's explicit draft protection.
+    const stageGen = this.pendingStageGeneration.get(input.sessionName);
+    const isCurrent = () => {
+      const liveGen = stageGen != null ? this.resolveOccupantGeneration?.(input.sessionName) ?? null : null;
+      const enabled = this.settingsStore.resolveClaudeCompactionPolicy().enabled
+        || this.manualCompactionState.get(input.sessionName)?.operatorInitiated === true;
+      return enabled && this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
+        && this.pendingPreCompactPrep.get(input.sessionName) === attempt
+        && (stageGen == null || liveGen == null || stageGen === liveGen);
+    };
     const sendOpts = {
       openrigNotice: true as const,
       allowDraftWhileIdle: true as const,
@@ -1103,7 +1112,6 @@ export class ClaudeCompactionEnforcer {
     // ABSENT/unknown tenure on EITHER side is UNKNOWN — the gate is INERT (never treat the captured
     // stale generation as if it were live; the enabled-gate (a) + cutover invalidation (e) remain the
     // fail-closed layers when identity is unknown). Only a KNOWN mismatch refuses + drops the ghost.
-    const stageGen = this.pendingStageGeneration.get(input.sessionName);
     if (stageGen != null) {
       const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
       if (liveGen != null && liveGen !== stageGen) {
@@ -1143,7 +1151,9 @@ export class ClaudeCompactionEnforcer {
     if (pendingStage === "restore_prompt") {
       // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
       // global is refused if it declares a different seat) - never inject wrong-seat state.
-      const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
+      const userHome = /^~[\\/]/.test(policy.messageFilePath?.trim() ?? "") ? await this.sessionTransport.restoreUserHome?.(input.sessionName) : undefined;
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
+      const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath, userHome);
       const restore = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactRestorePrompt({
@@ -1512,17 +1522,24 @@ export class ClaudeCompactionEnforcer {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           // Reuse only our equivalent, owned regular file; never rewrite it.
           // NONBLOCK also prevents an unexpected FIFO from stalling preparation.
-          const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-          try {
-            const stat = fs.fstatSync(fd);
-            if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+          if (process.platform === "win32") {
+            if (readWindowsOwnedText(ignorePath, 2) !== "*\n") {
               throw new Error("Existing compaction ignore file is not owned and equivalent");
             }
-          } finally { fs.closeSync(fd); }
+          } else {
+            const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+            try {
+              const stat = fs.fstatSync(fd);
+              if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+                throw new Error("Existing compaction ignore file is not owned and equivalent");
+              }
+            } finally { fs.closeSync(fd); }
+          }
         }
         const parent = path.join(preparationRoot ?? path.join(root, "preparation"), sanitizeSessionKey(input.sessionName), attemptId);
         fs.mkdirSync(parent, { recursive: true });
-        fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
+        if (process.platform === "win32") checkWindowsDirectoryWriteAccess(parent);
+        else fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
         attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
       } catch {
         // An explicit location is a permission choice: never silently move it back into

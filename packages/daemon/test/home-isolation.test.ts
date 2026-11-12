@@ -16,6 +16,15 @@ function dirs() {
 }
 
 describe("homeIsolationAdvisory", () => {
+  it("accepts dotdot-prefixed children but still warns for sibling homes", () => {
+    const d = dirs();
+    const nested = path.join(d.scratch, "..seat");
+    fs.mkdirSync(nested);
+    expect(homeIsolationAdvisory({ accountHome: d.real, openrigHome: d.scratch, home: nested })).toBeUndefined();
+    expect(homeIsolationAdvisory({ accountHome: d.real, openrigHome: d.scratch, home: d.real })).toContain("HOME=");
+    expect(homeIsolationAdvisory({ accountHome: d.real, openrigHome: d.scratch, home: d.scratch, codexHome: path.join(d.scratch, "..codex") })).toBeUndefined();
+  });
+
   it("is silent for the default layout, whatever CODEX_HOME is", () => {
     const d = dirs();
     const account = { accountHome: d.real };

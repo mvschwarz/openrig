@@ -13,6 +13,7 @@ import { RequestPhaseObserver, inventoryAttemptId, inventoryDiagnosticRoute, obs
 import { trackHttpServerResponses } from "../src/daemon-shutdown.js";
 import { EventLoopMonitor } from "../src/domain/event-loop-monitor.js";
 import { rigsRoutes } from "../src/routes/rigs.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 
 const token = "11111111-1111-4111-8111-111111111111";
@@ -28,7 +29,9 @@ async function listen(app: Hono, observer: RequestPhaseObserver) {
   trackHttpServerResponses(server, observer.observeRequest);
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   cleanups.push(async () => { observer.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); });
-  return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  allowFetchTarget(url);
+  return url;
 }
 function database(file = ":memory:") {
   const db = new Database(file, { timeout: 2000 });

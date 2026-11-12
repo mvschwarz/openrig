@@ -2,6 +2,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
+import { requestWindowsDaemonStop } from "@openrig/daemon/daemon-shutdown";
 import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
@@ -96,6 +97,7 @@ export function realDeps(): LifecycleDeps {
   });
 
   return {
+    requestStop: process.platform === "win32" ? state => requestWindowsDaemonStop(OPENRIG_DIR, state) : undefined,
     processLiveness,
     acquireStartLock: () => {
       const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness });
@@ -198,6 +200,16 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .option("--wait-for-kernel-ms <ms>", "Override --wait-for-kernel timeout in milliseconds")
     .action(async (opts: { port?: string; host?: string; db?: string; allowDbConflict?: boolean; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
+        if (!depsOverride && process.platform === "win32" && process.env.OPENRIG_DAEMON_BREAKAWAY !== "1") {
+          const { runWindowsBreakawayCommand, windowsDaemonJobNeedsBreakaway } = await import("../windows-daemon-detach.js");
+          if (process.env.SSH_CONNECTION || await windowsDaemonJobNeedsBreakaway()) {
+            const result = await runWindowsBreakawayCommand(process.execPath, process.argv.slice(1));
+            process.stdout.write(result.stdout); process.stderr.write(result.stderr);
+            return;
+          }
+        }
+        // The marker belongs to this one re-exec, never the daemon or its seats.
+        delete process.env.OPENRIG_DAEMON_BREAKAWAY;
         const { ConfigStore } = await import("../config-store.js");
         const { SystemPreflight, quietPreflightExec } = await import("../system-preflight.js");
         const configStore = new ConfigStore();

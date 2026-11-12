@@ -17,3 +17,4 @@ console.log(JSON.stringify({
 }));
 // With "wait", stay alive for the test to signal: a vitest worker is ended with SIGTERM while it is running.
 if (process.argv[2] === "wait") setInterval(() => {}, 1000);
+process.on("message", message => { if (message === "exit") process.exit(0); });

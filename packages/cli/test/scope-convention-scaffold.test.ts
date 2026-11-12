@@ -276,10 +276,10 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
     const spec = fs.readFileSync(specPath, "utf8");
     expect(readFrontmatter(specPath).intent).toBe(intent);
     expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
-    expect(spec).toContain(`\n${intent}\n`);
+    expect(spec.split(/\r?\n/)).toContain(intent);
     expect(readFrontmatter(path.join(missionPath, "NOTES.md")).name).toBe(title);
-    expect(fs.readFileSync(path.join(missionPath, "NOTES.md"), "utf8")).toContain(`# Notes — ${title}\n`);
-    expect(fs.readFileSync(path.join(missionPath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+    expect(fs.readFileSync(path.join(missionPath, "NOTES.md"), "utf8").split(/\r?\n/)).toContain(`# Notes — ${title}`);
+    expect(fs.readFileSync(path.join(missionPath, "PROGRESS.md"), "utf8").split(/\r?\n/)).toContain(`# Progress — ${title}`);
   });
 
   it.each(literalValues)("preserves authored slice scaffold literals: $label", async ({ title, intent }) => {
@@ -292,9 +292,9 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
     const spec = fs.readFileSync(specPath, "utf8");
     expect(readFrontmatter(specPath).intent).toBe(intent);
     expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
-    expect(spec).toContain(`\n${intent}\n`);
+    expect(spec.split(/\r?\n/)).toContain(intent);
     expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain(title);
-    expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+    expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8").split(/\r?\n/)).toContain(`# Progress — ${title}`);
   });
 
   it("retains unknown custom notes tokens and does not interpolate tokens in the authored name", () => {
@@ -415,10 +415,10 @@ describe("release capability-delta scaffold and expiry advisory", () => {
     )).toHaveLength(0);
     fs.rmSync(successorPath, { recursive: true });
     fs.writeFileSync(successorPath, "successor\n", "utf8");
-    const access = fs.accessSync.bind(fs);
-    const inaccessible = vi.spyOn(fs, "accessSync").mockImplementation((file, mode) => {
+    const open = fs.openSync.bind(fs);
+    const inaccessible = vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
       if (file === successorPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-      return access(file, mode);
+      return open(file, flags, mode);
     });
     try {
       const deniedSuccessor = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);

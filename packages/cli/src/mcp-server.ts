@@ -178,7 +178,28 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
   try {
     statSync(folder);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // Windows also reports ENOENT when an ancestor is a file. Only a
+      // genuinely missing directory means there are no rosters.
+      let ancestor = nodePath.dirname(nodePath.resolve(folder));
+      while (true) {
+        try {
+          if (!statSync(ancestor).isDirectory()) {
+            console.error(`rig_team: the roster folder ${folder} has a non-directory ancestor`);
+            return { members: [], note: ROSTERS_INCOMPLETE };
+          }
+          return { members: [] };
+        } catch (parentError) {
+          if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") {
+            console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(parentError as Error).message}`);
+            return { members: [], note: ROSTERS_INCOMPLETE };
+          }
+        }
+        const parent = nodePath.dirname(ancestor);
+        if (parent === ancestor) return { members: [], note: ROSTERS_INCOMPLETE };
+        ancestor = parent;
+      }
+    }
     console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(error as Error).message}`);
     return { members: [], note: ROSTERS_INCOMPLETE };
   }

@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
-import path from "node:path";
+import { posix as path, win32 } from "node:path";
+import { readPlatformEnv } from "@openrig/daemon/windows-launch";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import type { OpenViewResult } from "./commands/terminal.js";
@@ -16,6 +17,18 @@ type RexCall = (method: string, params: Record<string, unknown>, timeoutMs?: num
 const BUNDLED_REX = ["Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex"];
 
 async function rexBinary(deps: WindowDeps): Promise<string | null> {
+  if (deps.platform === "win32") {
+    const directory = readPlatformEnv(deps.env, "REX_BIN_DIR", "win32");
+    const selected = directory ? win32.join(directory, "rex.exe") : undefined;
+    if (selected && deps.exists(selected)) return selected;
+    for (const entry of (readPlatformEnv(deps.env, "PATH", "win32") ?? "").split(";")) {
+      const dir = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
+      if (!win32.isAbsolute(dir)) return null;
+      const candidate = win32.join(dir, "rex.exe");
+      if (deps.exists(candidate)) return candidate;
+    }
+    return null;
+  }
   const fromDir = deps.env["REX_BIN_DIR"] ? path.join(deps.env["REX_BIN_DIR"], "rex") : null;
   if (fromDir && deps.exists(fromDir)) return fromDir;
   try {
@@ -77,6 +90,14 @@ async function showSession(call: RexCall, env: NodeJS.ProcessEnv, space: { id: s
 
 /** Open the view in the daemon's Rex server, only when it is the caller's own server, then show it in the app. */
 export async function openRexView(client: DaemonClient, view: string, deps: WindowDeps, expectedPlan?: string): Promise<OpenViewResult> {
+  if (deps.platform === "win32") {
+    const env = { ...deps.env };
+    for (const key of ["REX_SERVER", "REX_SESSION", "REX_BLOCK"]) {
+      const value = readPlatformEnv(deps.env, key, "win32");
+      if (value !== undefined) env[key] = value;
+    }
+    deps = { ...deps, env };
+  }
   let posted = false;
   const fail = (error: string, extra: Partial<OpenViewResult> = {}): OpenViewResult => ({
     provider: "rex", ok: false, opened: [], absent: [], degraded: [], pages: 0, error, code: "terminal_window_failed", windowAttempted: posted, ...extra,

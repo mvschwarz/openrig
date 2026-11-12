@@ -15,6 +15,7 @@ export async function createDaemon({ dbPath }) {
   const { EventBus } = await load('domain/event-bus');
   const { WatchdogScheduler } = await load('domain/watchdog-scheduler');
   const { SlowOpRecorder } = await load('domain/slow-op-recorder');
+  const { TmuxAdapter } = await load('adapters/tmux');
   const db = createDb(dbPath); migrate(db, ALL_MIGRATIONS);
   const store = new DaemonLifecycleStore(db);
   const epoch = `fixture-${process.pid}`; store.recordBoot(epoch, new Date().toISOString());
@@ -36,6 +37,7 @@ export async function createDaemon({ dbPath }) {
   }
   const app = new Hono(); app.get('/healthz', c => c.json({ status: 'ok' }));
   return { app, db,
+    wakeRecovery: { start() {}, async stop() {} },
     contextMonitor: { start() {} }, eventLoopMonitor: { stop() {} },
     injectWebSocket(server) {
       server.on('upgrade', (req, socket) => {
@@ -44,6 +46,7 @@ export async function createDaemon({ dbPath }) {
       });
     },
     deps: {
+      tmuxAdapter: new TmuxAdapter(async () => ''),
       rigRepo: { db }, settingsStore: { resolveOne: () => ({ value: false }) },
       psProjectionService: { setPeriodicSnapshotState() {} },
       watchdogScheduler: scheduler, slowOpRecorder: recorder,

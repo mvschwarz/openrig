@@ -120,13 +120,22 @@ export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
  * PATH entry with a spawn on the event loop. psmux ships a `tmux` alias on
  * PATH, so Windows passes the bare name to the spawn.
  */
-export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<string> => {
+export const execArgvCommand: ArgvExecFn = async (argv, options): Promise<string> => {
   const [bin, ...args] = argv;
   if (!bin) throw new Error("execArgvCommand: empty argv");
   const started = performance.now();
   // Nothing ran when no file was found: a shell also finds tmux through an entry the lookup skips, such as a literal
   // `~/bin`, and reports a missing one as the shell transport does.
-  const opts = { ...tmuxExecOptions, env: tmuxClientEnvironment() };
+  let env: NodeJS.ProcessEnv = tmuxClientEnvironment();
+  if (options?.env) {
+    env={...env};
+    for (const [key,value] of Object.entries(options.env)) {
+      if (!key || /[=\0]/.test(key) || value?.includes("\0")) throw new Error("Invalid process environment entry");
+      if (process.platform === "win32") for (const old of Object.keys(env)) if(old.toUpperCase()===key.toUpperCase())delete env[old];
+      if(value===undefined)delete env[key];else env[key]=value;
+    }
+  }
+  const opts = { ...tmuxExecOptions, ...(env ? { env } : {}) };
   const run = (file: string | null) => file ? execFileAsync(file, args, opts) : execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts);
   try {
     if (process.platform === "win32") return (await execFileAsync(bin, args, opts)).stdout;
@@ -145,6 +154,7 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
     throw withExecOutput(err);
   }
 };
+execArgvCommand.supportsEnvironment = true;
 
 /**
  * Starts a long-lived tmux client (the daemon's control client, tmux-control.ts) as execArgvCommand starts tmux: the

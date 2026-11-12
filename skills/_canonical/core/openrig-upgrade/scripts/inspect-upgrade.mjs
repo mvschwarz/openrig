@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { runRig } from "./run-rig.mjs";
 
 const rig = process.env.OPENRIG_RIG_BIN || "rig";
 
 function probe(name, args, next) {
-  const result = spawnSync(rig, args, { encoding: "utf8" });
+  const result = runRig(rig, args);
   const stdout = result.stdout?.trim() || "";
   const stderr = result.stderr?.trim() || "";
   if (result.status === 0) {

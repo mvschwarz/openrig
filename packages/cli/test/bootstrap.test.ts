@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import nodePath from "node:path";
@@ -23,23 +24,23 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-    }
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+  }
 }
 
 function runningState(port: number): DaemonState {
@@ -107,7 +108,7 @@ describe("Bootstrap CLI", () => {
         res.end(JSON.stringify({ status: "failed", errors: ["server error"] }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -228,7 +229,7 @@ describe("Bootstrap CLI", () => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "failed", stages: [], errors: ["internal error"], warnings: [] }));
     });
-    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(failServer, {});
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -276,8 +277,7 @@ describe("Bootstrap CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes", "--cwd", "relative/project"]);
     });
     const body = JSON.parse(lastReq.body);
-    expect(body.cwdOverride).toMatch(/^\//);
-    expect((body.cwdOverride as string).endsWith("relative/project")).toBe(true);
+    expect(body.cwdOverride).toBe(nodePath.resolve("relative/project"));
   });
 
   it("bootstrap apply uses a long-running daemon timeout budget", async () => {
@@ -316,7 +316,7 @@ describe("Bootstrap CLI", () => {
         errors: ["brew install failed"], warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { partialServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(partialServer, {});
     const partialPort = (partialServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -342,7 +342,7 @@ describe("Bootstrap CLI", () => {
         warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { invalidPlanServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(invalidPlanServer, {});
     const invalidPort = (invalidPlanServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -376,7 +376,7 @@ describe("Bootstrap CLI", () => {
         warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { failedApplyServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(failedApplyServer, {});
     const failedPort = (failedApplyServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -414,7 +414,7 @@ describe("Bootstrap CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { libServer.listen(0, resolve); });
+    await listenOwnedHttpFixture(libServer, {});
     const libPort = (libServer.address() as { port: number }).port;
 
     const prog = new Command();

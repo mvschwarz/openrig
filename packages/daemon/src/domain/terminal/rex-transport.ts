@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import { stopGroup } from "../codex-network-default.js";
+import { spawnWindowsJobProcess } from "../windows-job-process.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 /** A `rex` run that did not exit 0; `exitCode` is null when it never started or was ended. */
 export class RexRunError extends Error {
@@ -58,9 +60,21 @@ function executable(file: string): boolean {
 /** `$REX_BIN_DIR/rex`, then `rex` on PATH, then the binary inside the macOS app bundle. */
 export function resolveRexBinary(env: NodeJS.ProcessEnv, isExecutable: (file: string) => boolean = executable): string | null {
   const bundled = path.join(homedir(), "Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex");
-  const fromDir = env["REX_BIN_DIR"] ? path.join(env["REX_BIN_DIR"], "rex") : null;
+  const directory = readPlatformEnv(env, "REX_BIN_DIR"), search = readPlatformEnv(env, "PATH");
+  const fromDir = directory ? path.join(directory, process.platform === "win32" ? "rex.exe" : "rex") : null;
   if (fromDir && isExecutable(fromDir)) return fromDir;
-  return resolveOnPath("rex", env["PATH"]) ?? (isExecutable(bundled) ? bundled : null);
+  if (process.platform === "win32") {
+    // The shared POSIX resolver splits on ':', which splits a Windows drive.
+    // Rex control calls require a native executable, never a shell shim.
+    for (const entry of (search ?? "").split(path.delimiter)) {
+      const directory = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
+      if (!path.isAbsolute(directory)) return null;
+      const candidate = path.join(directory, "rex.exe");
+      if (executable(candidate)) return candidate;
+    }
+    return null;
+  }
+  return resolveOnPath("rex", search) ?? (isExecutable(bundled) ? bundled : null);
 }
 
 /** Runs `rex` without a shell in its own process group, ended as a group on timeout. */
@@ -68,7 +82,12 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   const [file, ...args] = argv;
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn(file!, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    // The Job helper is the spawned process on Windows. Preserve a positively
+    // observed missing resolved executable as a no-launch error, not exit 125.
+    if (process.platform === "win32" && file && path.isAbsolute(file)) accessSync(file, constants.F_OK);
+    child = process.platform === "win32"
+      ? spawnWindowsJobProcess(file!, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+      : spawn(file!, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
   } catch (err) {
     reject(new RexRunError((err as Error).message, null, "", (err as NodeJS.ErrnoException).code));
     return;
@@ -78,16 +97,31 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   let settled = false;
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
-  child.stdout!.on("data", (chunk: string) => { if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk; });
-  child.stderr!.on("data", (chunk: string) => { if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk; });
+  const stop = (message: string) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    // A lost or incomplete reply has unknown outcome; never return a truncated
+    // JSON prefix as a successful response or automatically repeat its request.
+    if (process.platform === "win32") child.kill();
+    else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+    void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(message, null, stderr)));
+  };
+  child.stdout!.on("data", (chunk: string) => {
+    const overflow = stdout.length + chunk.length > MAX_OUTPUT_CHARS;
+    stdout += chunk.slice(0, MAX_OUTPUT_CHARS - stdout.length);
+    if (overflow) stop("stdout exceeded the Rex reply limit");
+  });
+  child.stderr!.on("data", (chunk: string) => {
+    const overflow = stderr.length + chunk.length > MAX_OUTPUT_CHARS;
+    stderr += chunk.slice(0, MAX_OUTPUT_CHARS - stderr.length);
+    if (overflow) stop("stderr exceeded the Rex reply limit");
+  });
   child.stdin!.on("error", () => { /* rex may exit before reading its input; its exit status says why */ });
   child.stdin!.end(stdin);
   const timer = setTimeout(() => {
-    if (settled) return;
-    settled = true;
     // Past its deadline rex has nothing left to read, so end it now instead of after stopGroup's stdin grace.
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
-    void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null, stderr)));
+    stop(`did not answer within ${timeoutMs} ms`);
   }, timeoutMs);
   child.once("error", (err) => {
     if (settled) return;
@@ -121,7 +155,7 @@ function classify(method: string, err: unknown): RexError {
  */
 export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.ProcessEnv; binary?: () => string | null; timeoutMs?: number; probeTimeoutMs?: number } = {}): RexTransport {
   const env = { ...(opts.env ?? process.env) };
-  const server = env["REX_SERVER"]?.trim();
+  const server = readPlatformEnv(env, "REX_SERVER")?.trim();
   const run = opts.run ?? spawnRex;
   const binary = opts.binary ?? (() => resolveRexBinary(env));
   const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;

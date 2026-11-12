@@ -1,13 +1,29 @@
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as pathJoin } from "node:path";
+import { basename as pathBaseName, isAbsolute as pathIsAbsolute, join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { bindNativeSessionName, isEncodedNativeSessionName, logicalNameFromNativeBinding, nativeSessionNameMayBeLegacy, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
+import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { isWindowsPrivateEnvironmentName, psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
+import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
+import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
+import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../domain/windows-cmd-bridge.js";
+import { windowsScopedLaunch } from "./windows-scoped-launch.js";
+import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "../domain/native-runtime-switch-exchange.js";
+import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-journal.js";
+import { NativeNameTransition, type NativePhysicalObservation, type NativePhysicalSession } from "../domain/native-name-transition.js";
+import { readPlatformEnv } from "../domain/platform-env.js";
+import { tmuxFormatLiteral, tmuxSessionNameFormat } from "./tmux-format.js";
+import { observeCodexPaneProcess } from "../domain/native-process-lineage.js";
+const execFileAsync = promisify(execFile);
 import { tmuxOnDaemonServer } from "./tmux-server.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -36,7 +52,9 @@ interface TmuxShellCommandOptions {
  * Windows/psmux no POSIX quoting or `/dev/null` redirections to depend on.
  * When absent every method uses the legacy shell-string path unchanged.
  */
-export type ArgvExecFn = (argv: string[]) => Promise<string>;
+export type ArgvExecFn = ((argv: string[], options?: { env?: Readonly<Record<string,string|undefined>> }) => Promise<string>) & {
+  supportsEnvironment?: true;
+};
 
 /**
  * Injectable file/buffer operations for terminal payloads and launch environments.
@@ -44,6 +62,7 @@ export type ArgvExecFn = (argv: string[]) => Promise<string>;
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
 export interface TmuxFileOps {
+  privateConfig?(content: string): Promise<PrivateConfig>;
   writeFile(path: string, content: string, options?: { mode: number; flag: "wx" }): Promise<void>;
   unlink(path: string): Promise<void>;
   /** Unique temp-file path per call - parallel `rig up` stands up many seats. */
@@ -54,21 +73,19 @@ export interface TmuxFileOps {
 
 // One source for the staged script's name: the generator (defaultTmuxFileOps) and the matcher
 // (isStagedSendScriptPath) are both built from it.
-const SEND_SCRIPT_PREFIX = "openrig-tmux-send-";
-const SEND_SCRIPT_SUFFIX = ".txt";
-const SEND_SCRIPT_NAME = new RegExp(
-  `^${SEND_SCRIPT_PREFIX}\\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${SEND_SCRIPT_SUFFIX.replace(".", "\\.")}$`,
-);
 
 /** Whether `path` names a launch script sendShellCommand staged (an absolute path with the name
  *  defaultTmuxFileOps gives it). The script removes itself first, so this is a name check only. */
 export function isStagedSendScriptPath(path: string): boolean {
-  return path.startsWith("/") && SEND_SCRIPT_NAME.test(path.split("/").pop() ?? "");
+  return pathIsAbsolute(path) && isStagedSendName(pathBaseName(path));
 }
 
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
-    writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
+    privateConfig: writeWindowsPrivateConfig,
+    writeFile: (p, content, options) => process.platform === "win32"
+      ? createPrivateTextFileAsync(p, content)
+      : fsWriteFile(p, content, { encoding: "utf8", ...options }),
     unlink: (p) => fsUnlink(p),
     tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,
@@ -407,7 +424,7 @@ function parsePaneLine(line: string): TmuxPane | null {
 
 function parseLines<T>(output: string, parser: (line: string) => T | null): T[] {
   return output
-    .split("\n")
+    .split(/\r?\n/)
     .filter((line) => line.trim() !== "")
     .map(parser)
     .filter((result): result is T => result !== null);
@@ -431,18 +448,21 @@ export class TmuxAdapter {
    * before env -i. Generated pane metadata must come from this spawn, never daemon TMUX values.
    * Keep the configured default-command and default-shell lookup, including rc functions.
    */
-  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = []): Promise<string[] | null> {
+  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = [], staged?: (file: string, recoveryEnv?: Record<string,string>) => void): Promise<string[] | null> {
     if (!this.launchEnvironment || !seatEnv.OPENRIG_NODE_ID) return null;
     try {
       const policy = this.launchEnvironment();
       if (policy.inheritTmuxEnvironment) return null;
-      if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
       let shell = await this.getDefaultShell();
       // tmux reads these options from a running server. The first seat on a new server starts the empty server here,
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
       if (command === undefined) {
+        // Stock psmux aliases default-command to default-shell, which already
+        // carries its startup arguments. Preserve upstream tmux decoding on POSIX.
+        if (process.platform === "win32") command = "";
+        else {
         command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
         // The server, not the connecting client, formats option output. If its version is unavailable,
         // retain the readback unchanged rather than guessing about a user's command.
@@ -450,6 +470,7 @@ export class TmuxAdapter {
           const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
           command = decodeTmux34Option(command, serverVersion);
         } catch { /* unknown version: keep the original readback */ }
+        }
       }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
@@ -460,6 +481,16 @@ export class TmuxAdapter {
       // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
       const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
       addSeatRuntimeDir(selected, policy.runtimeDir);
+      if (process.platform === "win32") {
+        const file = this.fileOps.tmpName();
+        const key = `OPENRIG_LAUNCH_RECOVERY_${randomUUID().replace(/-/g, "")}`;
+        const launch = windowsScopedLaunch(shell, command ?? "", selected, file, false, key);
+        await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+        const recoveryEnv = Object.fromEntries(Object.entries(selected).filter((entry): entry is [string,string] => entry[1] !== undefined));
+        if (launch.recovery) recoveryEnv[launch.recovery.key] = launch.recovery.value;
+        staged?.(file, recoveryEnv);
+        return ["--", ...launch.argv];
+      }
       const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {
@@ -481,16 +512,25 @@ export class TmuxAdapter {
     }
   }
 
+  private async discardUnstartedScopedBootstrap(file: string | undefined, error: unknown, duplicateSession = false): Promise<void> {
+    if (!file || !(error instanceof Error)) return;
+    const notStarted = (error as NodeJS.ErrnoException).syscall?.startsWith("spawn")
+      || (duplicateSession && error.message.includes("duplicate session"));
+    // A timeout or transport failure may have launched the consumer. Retain
+    // its file; only positive no-start evidence releases this owned bootstrap.
+    if (notStarted) await this.fileOps.unlink(file).catch(() => {});
+  }
+
   private inputGuard?: SeatDeliveryGuard;
   get deliveryGuard(): SeatDeliveryGuard | undefined { return this.inputGuard; }
   set deliveryGuard(guard: SeatDeliveryGuard | undefined) {
     this.inputGuard = guard;
-    guard?.attachInputInspection(async (target, owned) => inspectComposerInput(await this.captureComposerSnapshot(target.pane ?? target.session), null, owned), async target => {
+    guard?.attachInputInspection(async (target, owned) => inspectComposerInput(await (target.pane ? this.captureComposerSnapshot(target.pane) : this.captureSessionComposerSnapshot(target.session)), null, owned), async target => {
       if (!target.pane) return true;
       const probe = await this.probeSession(target.session);
       if (probe.state === "absent") return true;
       if (probe.state !== "present") return false;
-      const panes = await this.listPanes(target.session);
+      const panes = await this.listSessionPanes(target.session);
       return panes.length === 1 && panes[0]!.id === target.pane && await this.isPaneDead(target.pane);
     });
   }
@@ -506,7 +546,12 @@ export class TmuxAdapter {
     let created: { id: string; at: string } | null;
     try {
       await this.startServerBeforeImplicitStart();
-      const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
+      const mapped = this.terminalKind === "psmux" && !!bindNativeSessionName(name).marker;
+      const formattedName = mapped ? name : tmuxSessionNameFormat(name);
+      const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", formattedName];
+      if (cwd != null) argv.push("-c", cwd);
+      const out = this.terminalKind === "psmux" && !mapped ? await this.nativeRaw(argv)
+        : await this.run(argv, `tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(formattedName)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -515,7 +560,7 @@ export class TmuxAdapter {
     let message = "New probe pane could not be established; no input written.";
     let pane: string | null = null;
     try {
-      const panes = await this.listPanes(name);
+      const panes = await this.listSessionPanes(name);
       pane = panes.length === 1 ? panes[0]!.id : null;
       // #188: a fresh tmux server reuses pane ids, so a stale seat binding can name the new pane. That
       // probe could not be cleaned up safely later, so it is not used.
@@ -537,9 +582,16 @@ export class TmuxAdapter {
   /** #188: kill the session this adapter created only while its id still names that session. tmux checks
    *  the name and creation time and kills in one command, so a later server that reuses the id is safe. */
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
-    const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(this.onServer(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`));
+      const physical = this.terminalKind === "psmux" ? await this.nativeBoundName(name) : name;
+      const same = `#{&&:#{==:#{session_name},${tmuxFormatLiteral(physical)}},#{==:#{session_created},${created.at}}}`;
+      // Native session ids are local to one server and are not psmux client
+      // selectors. Select its physical server, check the full create receipt,
+      // then kill SELF inside that conditional, as the native stop path does.
+      const out = this.terminalKind === "psmux"
+        ? await this.nativeRaw(["tmux", "-t", "=" + physical, "if-shell", "-F", `#{&&:${same},#{==:#{session_id},${created.id}}}`, "kill-session", "display-message -p kept"])
+        : await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
+          `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
@@ -553,7 +605,7 @@ export class TmuxAdapter {
     try {
       const probePane = this.freshProbes.get(target);
       if (probePane && !guard.maybeTarget(target)) {
-        const panes = await this.listPanes(target);
+        const panes = target === probePane ? await this.listPanes(target) : await this.listSessionPanes(target);
         if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
         // Awaited so a refusal inside the write (#188: the probe kill) returns as a result, not a throw.
         return await write(probePane, () => {});
@@ -564,7 +616,7 @@ export class TmuxAdapter {
         const bound = guard.target(identity);
         const fresh = created?.nodeId === bound.nodeId && guard.ownsLifecycle(bound.nodeId);
         let panes: TmuxPane[];
-        try { panes = await this.listPanes(fresh ? target : bound.session); }
+        try { panes = await this.listSessionPanes(fresh ? target : bound.session); }
         catch (error) {
           guard.checkInput(identity);
           const result = classifyWriteError(error);
@@ -618,10 +670,98 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
-    serverArgs: readonly string[] = [],
-  ) { this.serverArgs = [...serverArgs]; }
+    serverArgs: readonly string[] | "tmux" | "psmux" = [],
+    terminalKind: "tmux" | "psmux" = "tmux",
+  ) {
+    this.serverArgs = typeof serverArgs === "string" ? [] : [...serverArgs];
+    this.terminalKind = typeof serverArgs === "string" ? serverArgs : terminalKind;
+  }
 
   private readonly serverArgs: readonly string[];
+  private readonly terminalKind: "tmux" | "psmux";
+
+  /** psmux pane IDs are scoped to their session, so global pane batches are ambiguous. */
+  get supportsPaneProcessBatch(): boolean { return this.terminalKind !== "psmux"; }
+
+  private async nativeRaw(argv: string[], env?: Readonly<Record<string, string | undefined>>): Promise<string> {
+    if (!this.argvExec || (env && !this.argvExec.supportsEnvironment)) throw new Error("Native session-name mapping requires argv transport");
+    const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    return env ? this.argvExec(targeted, { env }) : this.argvExec(targeted);
+  }
+
+  /** Session-name APIs must not parse a logical colon as a window separator. */
+  private async runNamedSession(argv: string[], name: string, legacy?: string, pane = false, windowIndex?: number): Promise<string> {
+    if (this.terminalKind !== "psmux" || !name.includes(":")) return this.run(argv, legacy);
+    const flag = argv.indexOf("-t");
+    if (flag < 1) throw new Error("Named session command lacks target");
+    // Compatibility APIs also accept explicit scoped addresses. Only the
+    // actual target operand can select that path, never an option value.
+    if (/^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(argv[flag + 1] ?? "")) return this.run(argv, legacy);
+    const physical = await this.nativeBoundName(name), selected = [...argv];
+    selected[flag + 1] = `=${physical}${pane ? ":" + (windowIndex ?? "") : ""}`;
+    return this.nativeRaw(selected);
+  }
+
+  private async nativeSessionExists(physical: string): Promise<boolean> {
+    try { await this.nativeRaw(["tmux", "has-session", "-t", `=${physical}`]); return true; }
+    catch (error) {
+      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
+      if ((failure.code === 1 && failure.stdout === "" && failure.stderr === "" && !failure.signal && !failure.killed)
+        || isSessionAbsenceError(tmuxReportedError(error))) return false;
+      throw error;
+    }
+  }
+
+  private async nativePhysicalSession(physical: string, allowDead = false): Promise<NativePhysicalObservation> {
+    try {
+      if (!await this.nativeSessionExists(physical)) return {state:"absent"};
+      const values = (await this.nativeRaw(["tmux","display-message","-p","-t",`=${physical}:`,
+        `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{session_name}`])).trim().split("|");
+      if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || !(allowDead ? /^[01]$/.test(values[8]!) : values[8] === "0") || values[9] !== physical
+        || !/^[1-9]\d*$/.test(values[0]!) || !/^\$\d+$/.test(values[1]!) || !/^\d+$/.test(values[2]!)) return {state:"unknown"};
+      return {state:"present",session:{serverPid:values[0]!,sessionId:values[1]!,sessionCreated:values[2]!,nodeId:values[3]!,generation:values[4]!,marker:values[5] || undefined}};
+    } catch { return {state:"unknown"}; }
+  }
+
+  private async nativeLegacyName(logical: string): Promise<boolean> {
+    if (!nativeSessionNameMayBeLegacy(logical) || !await this.nativeSessionExists(logical)) return false;
+    return !(await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${logical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
+  }
+
+  private async nativeBoundName(logical: string): Promise<string> {
+    const binding = bindNativeSessionName(logical);
+    if (!binding.marker) return logical;
+    const present = await this.nativeSessionExists(binding.physical);
+    const marker = present ? (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${binding.physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim() : undefined;
+    const legacy = await this.nativeLegacyName(logical);
+    if (logicalNameFromNativeBinding(binding.physical, marker) === logical) {
+      if (legacy) throw new Error("Ambiguous native logical session name; legacy and mapped sessions both exist");
+      return binding.physical;
+    }
+    if (legacy) return logical;
+    if (!present) throw new Error(`can't find session: ${logical}`);
+    throw new Error("Native session name has no matching logical identity marker");
+  }
+
+  private async nativeObservedName(physical: string): Promise<string> {
+    if (this.terminalKind !== "psmux" || !isEncodedNativeSessionName(physical)) return physical;
+    const marker = (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
+    return logicalNameFromNativeBinding(physical, marker) ?? physical;
+  }
+
+  private async nativeBoundTarget(target: string): Promise<string> {
+    const scoped = /^psmux:([A-Za-z0-9_-]+):([%$@]\d+)$/.exec(target);
+    if (scoped) {
+      const logical = Buffer.from(scoped[1]!, "base64url").toString("utf8");
+      const physical = await this.nativeBoundName(logical);
+      return `psmux:${Buffer.from(physical).toString("base64url")}:${scoped[2]}`;
+    }
+    if (/^[%@$]\d+$/.test(target)) return target;
+    const exact = target.startsWith("=") ? "=" : "", body = target.slice(exact.length);
+    const separator = body.indexOf(":"), logical = separator < 0 ? body : body.slice(0, separator);
+    if (!logical) return target;
+    return exact + await this.nativeBoundName(logical) + (separator < 0 ? "" : body.slice(separator));
+  }
   /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
   private scopeSkipLogged = false;
 
@@ -629,6 +769,11 @@ export class TmuxAdapter {
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
   private onServer(command: string): string {
     return this.serverArgs.length ? `tmux ${posixJoinArgv([...this.serverArgs])}${command.slice(4)}` : command;
+  }
+
+  /** Whether pane commands run in the native Windows multiplexer. */
+  get isNativeWindows(): boolean {
+    return this.terminalKind === "psmux" && process.platform === "win32";
   }
 
   /**
@@ -640,8 +785,71 @@ export class TmuxAdapter {
    * differently (the `-F "..."` double-quoted formats); pass it ONLY to
    * preserve an exact legacy string, never to smuggle new semantics.
    */
-  private async run(argv: string[], legacy?: string): Promise<string> {
+  private async run(argv: string[], legacy?: string, bufferScope?: string, env?: Readonly<Record<string,string|undefined>>): Promise<string> {
+    let createdBinding: ReturnType<typeof bindNativeSessionName> | undefined;
+    if (this.terminalKind === "psmux") {
+      if (argv[1] === "new-session") {
+        const nameFlag = argv.indexOf("-s"), logical = argv[nameFlag + 1];
+        if (nameFlag > 1 && logical) {
+          const binding = bindNativeSessionName(logical);
+          if (binding.marker) {
+            if (await this.nativeLegacyName(logical) || await this.nativeSessionExists(binding.physical)) throw new Error("duplicate session: mapped native name is already occupied; existing session was not modified");
+            const format = argv[argv.indexOf("-F") + 1];
+            if (!argv.includes("-P") || !["#{pane_id}", "#{session_id} #{session_created}"].includes(format ?? "")) throw new Error("Mapped session creation requires an explicit creation receipt");
+            createdBinding = binding; argv = [...argv]; argv[nameFlag + 1] = binding.physical; legacy = undefined;
+          } else {
+            const formatted = tmuxSessionNameFormat(logical);
+            if (formatted !== logical) { argv = [...argv]; argv[nameFlag + 1] = formatted; legacy = undefined; }
+          }
+        }
+      }
+      // Only the command's first target operand can carry routing metadata.
+      // Option values, key payloads and child argv are literal user data even
+      // when their bytes happen to equal a scoped pane identifier.
+      const end = argv.indexOf("--");
+      const targetOption = argv[1] === "detach-client" ? "-s" : "-t";
+      const targetFlag = argv.findIndex((arg, index) => index > 1 && (end < 0 || index < end) && arg === targetOption);
+      const targetIndex = targetFlag < 0 ? -1 : targetFlag + 1;
+      if (targetIndex > 0 && argv[targetIndex]) {
+        const mapped = await this.nativeBoundTarget(argv[targetIndex]!);
+        if (mapped !== argv[targetIndex]) { argv = [...argv]; argv[targetIndex] = mapped; legacy = undefined; }
+      }
+      if (bufferScope) bufferScope = await this.nativeBoundTarget(bufferScope);
+      const scopedArg = targetIndex > 0 && /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(argv[targetIndex] ?? "") ? argv[targetIndex] : undefined;
+      const scoped = scopedArg ?? bufferScope;
+      if (scoped) {
+        const [, encoded, pane] = scoped.split(":");
+        const session = scoped.startsWith("psmux:") ? Buffer.from(encoded!, "base64url").toString("utf8") : scoped;
+        // psmux selects the server AND the initial target from the first -t.
+        // Some client commands (notably send-keys) consume the later -t and
+        // omit it from their control request. Carry the immutable pane/window
+        // in the first target too; session-only routing would hit its active pane.
+        const target = scopedArg && pane!.startsWith("%") ? `=${session}:.${pane}`
+          : scopedArg && pane!.startsWith("@") ? `=${session}:${pane}` : `=${session}`;
+        argv = [argv[0]!, "-t", target, ...argv.slice(1).map((a, index) => scopedArg && index + 1 === targetIndex ? pane! : a)];
+        legacy = undefined;
+      }
+    }
+    if (createdBinding?.marker) {
+      const output = await this.nativeRaw(argv, env), receipt = output.trim();
+      const sessionReceipt = /^(\$\d+) (\d+)$/.exec(receipt);
+      if (!/^%\d+$/.test(receipt) && !sessionReceipt) throw new Error("Mapped native session creation was not confirmed; session retained");
+      const target = `=${createdBinding.physical}:`;
+      const condition = sessionReceipt
+        ? `#{&&:#{==:#{session_id},${sessionReceipt[1]}},#{==:#{session_created},${sessionReceipt[2]}}}`
+        : `#{==:#{pane_id},${receipt}}`;
+      const refused = `openrig-name-binding-refused-${randomUUID()}`;
+      const bound = await this.nativeRaw(["tmux", "if-shell", "-F", "-t", target, condition,
+        `set-option -t ${shellQuote(target)} ${NATIVE_LOGICAL_SESSION_OPTION} ${createdBinding.marker}`, `display-message -p ${refused}`]);
+      if (bound.includes(refused)) throw new Error("Mapped native session identity changed before binding; session retained");
+      await this.nativeBoundName(createdBinding.logical);
+      return output;
+    }
     const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    if (env) {
+      if (!this.argvExec?.supportsEnvironment) throw new Error("Native process environment transport unavailable");
+      return this.argvExec(targeted,{env});
+    }
     if (this.argvExec) return this.argvExec(targeted);
     return this.exec(legacy ? this.onServer(legacy) : posixJoinArgv(targeted));
   }
@@ -650,7 +858,8 @@ export class TmuxAdapter {
    * Values stay in tmux's session environment, including for later panes. No global mutation.
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
-  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false, protectedLaunch = false): Promise<string> {
+    if (this.terminalKind === "psmux") return this.runStockPrivateEnvironmentCommand(argv, protectedLaunch);
     const body = (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n";
     const source = async (startFirst: boolean): Promise<string> => {
       const file = this.fileOps.tmpName();
@@ -677,6 +886,66 @@ export class TmuxAdapter {
     return source(true);
   }
 
+  /** Stock psmux has no file-valued -e. Supply the first child through a private
+   * bootstrap, then persist session values through its existing source-file API. */
+  private async runStockPrivateEnvironmentCommand(argv: string[], protectedLaunch: boolean): Promise<string> {
+    const entries: Record<string, string> = {}, rewritten: string[] = [];
+    let command: string[] = [];
+    for (let index = 0; index < argv.length; index++) {
+      const arg = argv[index]!;
+      if (arg === "--") { command = argv.slice(index); break; }
+      if (arg !== "-e") { rewritten.push(arg); continue; }
+      const assignment = argv[++index] ?? "", separator = assignment.indexOf("=");
+      const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
+      if (separator < 1 || !isWindowsPrivateEnvironmentName(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+      entries[key] = value;
+    }
+    if (!Object.keys(entries).length) return this.run(argv);
+    if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+    const creating = argv[1] === "new-session";
+    const targetIndex = rewritten.indexOf(creating ? "-s" : "-t");
+    const target = rewritten[targetIndex + 1];
+    if (targetIndex < 0 || !target) throw new Error("Native environment command lacks its exact target");
+    let bootstrap: string | undefined;
+    if (!protectedLaunch) {
+      // A respawn's legacy raw command is the last argument after its options.
+      let userCommand = "";
+      if (!creating && !command.length) {
+        const last = rewritten.at(-1)!;
+        const previous = rewritten.at(-2);
+        if (previous !== "-t" && previous !== "-c" && rewritten.length > 2) userCommand = rewritten.pop()!;
+      }
+      let shell = await this.getDefaultShell();
+      if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
+      if (!shell) throw new Error("Default shell unavailable for private environment launch");
+      if (command.length) throw new Error("Unrecognized native command boundary for private environment launch");
+      bootstrap = this.fileOps.tmpName();
+      const recoveryKey = `OPENRIG_LAUNCH_RECOVERY_${randomUUID().replace(/-/g, "")}`;
+      const launch = windowsScopedLaunch(shell, userCommand, entries, bootstrap, true, recoveryKey);
+      await this.fileOps.writeFile(bootstrap, launch.content, { mode: 0o600, flag: "wx" });
+      if (launch.recovery) entries[launch.recovery.key] = launch.recovery.value;
+      command = ["--", ...launch.argv];
+    }
+    const config = await this.fileOps.privateConfig(Object.entries(entries).map(([key, value]) => psmuxPrivateEnvironmentLine(key, value)).join(""));
+    try {
+      // Keep the control client's binary/config/registry selection pinned to
+      // the daemon. The private bootstrap separately supplies the child's full
+      // selected environment, including its own PATH and home settings.
+      const creationEnv = Object.fromEntries(Object.entries(entries).filter(([key]) =>
+        !/^(?:PSMUX_.*|TMUX(?:_.*)?|TERM(?:_.*)?|SHELL|PATH|PATHEXT|SYSTEMROOT|WINDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)$/i.test(key)));
+      const output = await this.run([...rewritten, ...command], undefined, undefined,
+        creating && this.argvExec?.supportsEnvironment ? creationEnv : undefined);
+      const persistArgv = ["tmux", "source-file", "-t", creating ? exactTarget(target, "session") : target, config.path];
+      if (creating) await this.runNamedSession(persistArgv, target); else await this.run(persistArgv);
+      await config.dispose().catch(() => {});
+      return output;
+    } catch (error) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, error, creating);
+      // A command may have launched. Never repeat it or expose values in argv.
+      throw error;
+    }
+  }
+
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
   async closeControlClient(): Promise<void> {
     await (this.argvExec as Partial<TmuxControlExec> | undefined)?.close?.();
@@ -694,6 +963,15 @@ export class TmuxAdapter {
       return false;
     };
     try {
+      if (this.isNativeWindows) {
+        if (await this.getDefaultShell()) return { ok: true };
+        // psmux hides its warm standby unless exit-empty is disabled there.
+        // A queued command is routed to that standby before it has a session.
+        await this.run(["tmux", "start-server", ";", "set-option", "-g", "exit-empty", "off"]);
+        return await this.getDefaultShell()
+          ? { ok: true }
+          : { ok: false, code: "tmux_unavailable", message: "The native terminal server did not become available." };
+      }
       if (await serverUp()) return { ok: true };
       // #2710: on Linux, the server (and with it every seat) goes into a transient systemd --user scope of its own,
       // so stopping or restarting the daemon's unit no longer takes the seats with it. Any failure keeps the start below.
@@ -791,7 +1069,7 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
-      return parseLines(output, parseSessionLine);
+      return await Promise.all(parseLines(output, parseSessionLine).map(async session => ({ ...session, name: await this.nativeObservedName(session.name) })));
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
@@ -809,17 +1087,49 @@ export class TmuxAdapter {
     }
   }
 
-  async listPanes(target: string, allWindows = false): Promise<TmuxPane[]> {
+  async listSessionWindows(name: string): Promise<TmuxWindow[]> {
+    const target = "=" + name;
+    const output = await this.runNamedSession(["tmux", "list-windows", "-t", target, "-F", WINDOW_FORMAT], name,
+      `tmux list-windows -t ${shellQuote(target)} -F "${WINDOW_FORMAT}"`);
+    return parseLines(output, parseWindowLine);
+  }
+
+  /** Session identity is explicit, including native names containing target punctuation. */
+  async listSessionPanes(name: string, allWindows = false, windowIndex?: number): Promise<TmuxPane[]> {
+    if (windowIndex !== undefined && (!Number.isSafeInteger(windowIndex) || windowIndex < 0)) throw new Error("Invalid window index");
+    return this.listPanes(name, allWindows, true, windowIndex);
+  }
+
+  async listPanes(target: string, allWindows = false, literalSessionName = false, windowIndex?: number): Promise<TmuxPane[]> {
     // Callers name a session (optionally with a window), or an immutable tmux
     // id. Exact session matching prevents observing a prefix neighbor's pane.
     // A bare leading '=' belongs to the literal session name. Only qualified
     // targets already carry tmux's encoded exact-match syntax.
     const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
-    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+    const exactTarget = literalSessionName ? `=${target}:${windowIndex ?? ""}` : target.startsWith("psmux:") ? target : /^[%$@]\d+$/.test(target) ? target
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", PANE_FORMAT],
-        `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
+      const format = this.terminalKind === "psmux" ? `#{session_name}|${PANE_FORMAT}` : PANE_FORMAT;
+      const argv = ["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format];
+      const legacy = `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, target, legacy, true, windowIndex) : await this.run(argv, legacy);
+      if (this.terminalKind === "psmux") {
+        const rows = parseLines(output, line => {
+          const separator = line.indexOf("|");
+          if (separator <= 0) return null;
+          const session = line.slice(0, separator);
+          const pane = parsePaneLine(line.slice(separator + 1));
+          if (!pane || !/^%\d+$/.test(pane.id)) return null;
+          // psmux has one server per session: %1 is NOT globally unique.
+          // Persist its scope with the immutable pane id, never its mutable index.
+          return { pane, session };
+        });
+        const names = new Map<string, Promise<string>>();
+        return await Promise.all(rows.map(async ({ pane, session }) => {
+          if (!names.has(session)) names.set(session, this.nativeObservedName(session));
+          return { ...pane, id: `psmux:${Buffer.from(await names.get(session)!).toString("base64url")}:${pane.id}` };
+        }));
+      }
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -843,11 +1153,16 @@ export class TmuxAdapter {
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
       const target = `=${name}`; // canonical session name, never a prefix lookup
-      await this.run(["tmux", "has-session", "-t", target],
+      await this.runNamedSession(["tmux", "has-session", "-t", target], name,
         `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
+      // psmux's has-session returns an empty exit 1 for an absent session.
+      // Spawn/permission/transport failures carry diagnostics or a different code.
+      const native = err as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
+      if (this.terminalKind === "psmux" && native.code === 1 && native.stdout === "" && native.stderr === ""
+        && !native.signal && !native.killed) return { state: "absent" };
       if (isSessionAbsenceError(error)) {
         return { state: "absent" };
       }
@@ -869,17 +1184,36 @@ export class TmuxAdapter {
     return probe.state === "present";
   }
 
+  /** An unmanaged CLI watcher: literal child argv, with a creation receipt and native name binding. */
+  async createDetachedCommandSession(name: string, command: readonly string[]): Promise<string> {
+    if (this.deliveryGuard) throw new Error("Unmanaged command launch is unavailable on a guarded runtime adapter");
+    if (!name || !command[0] || [name, ...command].some(word => word.includes("\0"))) throw new Error("Invalid terminal command argv");
+    const escape = (word: string) => word.endsWith(";") ? word.slice(0, -1) + "\\;" : word;
+    const mapped = this.terminalKind === "psmux" && !!bindNativeSessionName(name).marker;
+    const formattedName = mapped ? name : tmuxSessionNameFormat(name);
+    const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", mapped ? name : escape(formattedName),
+      ...(this.terminalKind === "psmux" ? ["--"] : []), ...command.map(escape)];
+    // Ordinary native names are already format-escaped; do not reinterpret
+    // an escape backslash as a new logical name requiring another binding.
+    const output = this.terminalKind === "psmux" && !mapped ? await this.nativeRaw(argv) : await this.run(argv);
+    const receipt = /^(\$\d+) (\d+)$/.exec(output.trim());
+    if (!receipt) throw new Error("Terminal command creation was not confirmed; any created session was retained");
+    return receipt[1]!;
+  }
+
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
-    if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
+    const launchEnv = env === undefined ? undefined : { ...env };
+    const nodeId = readPlatformEnv(launchEnv ?? {}, "OPENRIG_NODE_ID", this.isNativeWindows ? "win32" : "linux");
+    if (this.deliveryGuard && (!nodeId || !this.deliveryGuard.ownsLifecycle(nodeId))) {
       return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
     }
-    const result = await this.createSessionUnchecked(name, cwd, env);
-    if (result.ok && this.deliveryGuard && env?.OPENRIG_NODE_ID) {
+    const result = await this.createSessionUnchecked(name, cwd, launchEnv);
+    if (result.ok && this.deliveryGuard && nodeId) {
       try {
-        const panes = await this.listPanes(name);
+        const panes = await this.listSessionPanes(name);
         if (panes.length === 1) {
-          this.deliveryGuard.noteFreshLifecyclePane(env.OPENRIG_NODE_ID, panes[0]!.id);
-          this.freshManaged.set(name, {nodeId: env.OPENRIG_NODE_ID, pane: panes[0]!.id});
+          this.deliveryGuard.noteFreshLifecyclePane(nodeId, panes[0]!.id);
+          this.freshManaged.set(name, {nodeId, pane: panes[0]!.id});
         }
       } catch { /* no fresh pane proof: subsequent writes remain refused */ }
     }
@@ -888,6 +1222,172 @@ export class TmuxAdapter {
 
   /** The committed binding now owns identity; this is not filesystem cleanup. */
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
+
+  usesNativeRuntimeExchange(): boolean { return this.isNativeWindows; }
+
+  /** Move attached predecessor clients before its server can be retired. A
+   * failed/unconfirmed request is not retried here; recovery reobserves clients. */
+  async followNativeRuntimeExchangeClients(nodeId: string, identity: NativeExchangeIdentity): Promise<TmuxResult> {
+    try {
+      const backend=this.nativeRuntimeExchangeTerminal(nodeId,identity);
+      if(!backend.ownsLifecycle())throw new Error("Native client following requires its lifecycle lease");
+      const slots=await backend.observe();
+      if(slots.canonical.state!=="present" || slots.canonical.generation!==identity.successorGeneration
+        || slots.parking.state!=="absent")throw new Error("Native exchange successor identity is not established");
+      if(slots.staging.state==="absent")return {ok:true};
+      if(slots.staging.state!=="present" || slots.staging.generation!==identity.predecessorGeneration){
+        // Recovery may find the predecessor already terminated but its retained
+        // pane/server not yet removed. Its identity still must match.
+        if((await this.probeSession(identity.staging)).state!=="present"
+          || await this.getSessionEnv(identity.staging,"OPENRIG_NODE_ID")!==nodeId
+          || await this.getSessionEnv(identity.staging,"OPENRIG_OCCUPANT_GENERATION")!==identity.predecessorGeneration
+          || (await this.listSessionPanes(identity.staging)).length!==1 || (await this.listSessionWindows(identity.staging)).length!==1) {
+          throw new Error("Native exchange predecessor identity is not established");
+        }
+      }
+      const source = await this.nativeBoundName(identity.staging), destination = await this.nativeBoundName(identity.canonical);
+      const predecessor = await this.nativePhysicalSession(source,true), successor = await this.nativePhysicalSession(destination);
+      const qualified = (value: NativePhysicalObservation, logical: string, physical: string, generation: string): value is {state:"present";session:NativePhysicalSession} =>
+        value.state === "present" && value.session.nodeId === nodeId && value.session.generation === generation
+        && value.session.marker === (physical === logical ? undefined : bindNativeSessionName(logical).marker);
+      if (!qualified(predecessor,identity.staging,source,identity.predecessorGeneration)
+        || !qualified(successor,identity.canonical,destination,identity.successorGeneration)) throw new Error("Native client-follow physical identities are not qualified");
+      const same = (actual: NativePhysicalObservation, expected: NativePhysicalSession) => actual.state === "present"
+        && (Object.keys(expected) as Array<keyof NativePhysicalSession>).every(key => actual.session[key] === expected[key]);
+      const unchanged = async () => {
+        if (await this.nativeBoundName(identity.staging) !== source || await this.nativeBoundName(identity.canonical) !== destination
+          || !same(await this.nativePhysicalSession(source,true),predecessor.session)
+          || !same(await this.nativePhysicalSession(destination),successor.session)) throw new Error("Native client-follow server or occupant changed");
+      };
+      const clients=async()=>{
+        const output=await this.runNamedSession(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT], identity.staging);
+        const rows=parseLines(output,parseClientLine);
+        if(output.split(/\r?\n/).filter(line=>line.trim()!=="").length!==rows.length)throw new Error("Native attached-client listing is malformed");
+        // Client formats expose physical names. Decode only after verifying the
+        // observed session's marker, as with the normal native inventory.
+        for (const row of rows) row.session = await this.nativeObservedName(row.session);
+        const rawCount=(await this.runNamedSession(["tmux","display-message","-p","-t",`=${identity.staging}:`,"#{session_attached}"], identity.staging, undefined, true)).trim();
+        // Stock psmux reports this format as a boolean, unlike tmux's count.
+        if(!/^\d+$/.test(rawCount) || (Number(rawCount)>0)!==(rows.length>0))throw new Error("Native attached-client observation changed or is incomplete");
+        return rows;
+      };
+      const attached=await clients();
+      if(attached.some(client=>client.session!==identity.staging))throw new Error("Native client listing contains an unexpected session");
+      for(const client of attached){
+        if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost");
+        await unchanged();
+        const current = await backend.observe();
+        if (current.canonical.state !== "present" || current.canonical.generation !== identity.successorGeneration
+          || current.parking.state !== "absent") throw new Error("Native successor identity changed before client following");
+        const refused=`openrig-native-client-refused-${randomUUID()}`;
+        const fields = [["pid",predecessor.session.serverPid],["session_id",predecessor.session.sessionId],
+          ["session_created",predecessor.session.sessionCreated],["OPENRIG_NODE_ID",nodeId],
+          ["OPENRIG_OCCUPANT_GENERATION",identity.predecessorGeneration],[NATIVE_LOGICAL_SESSION_OPTION,predecessor.session.marker ?? ""],
+          ["session_windows","1"],["window_panes","1"]];
+        // The exact physical target selects the server. psmux does not implement
+        // POSIX nested-format name escaping for literal hashes/braces.
+        const condition=fields.map(([key,value])=>`#{==:#{${key}},${tmuxFormatLiteral(value!)}}`).reduce((left,right)=>`#{&&:${left},${right}}`);
+        if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost before client following");
+        const output=await this.nativeRaw(["tmux","if-shell","-F","-t",`=${source}:`,condition,
+          `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${destination}`)}`,`display-message -p ${refused}`]);
+        if(output.includes(refused))throw new Error("Native predecessor identity changed before client following");
+      }
+      // The native client reconnects asynchronously. Do not retire a server
+      // while it still owns an attached client, including a newly attached one.
+      for(let attempt=0;attempt<20;attempt++){
+        if((await clients()).length===0){
+          await unchanged();
+          const current=await backend.observe();
+          if(current.canonical.state!=="present" || current.canonical.generation!==identity.successorGeneration
+            || current.parking.state!=="absent")throw new Error("Native successor identity changed during client following");
+          if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost during client following");
+          return {ok:true};
+        }
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }
+      throw new Error("Native clients have not confirmed leaving the predecessor; its server was retained");
+    }catch(error){return {ok:false,code:"native_client_follow_pending",message:(error as Error).message};}
+  }
+
+  /** Backend for the durable native name-exchange coordinator. It does not
+   * retire servers, update bindings, or pretend that a rename preserves scope IDs. */
+  nativeRuntimeExchangeTerminal(nodeId: string, identity: NativeExchangeIdentity): NativeExchangeTerminal {
+    if (!this.isNativeWindows || !/^[A-Za-z0-9_-]{1,128}$/.test(nodeId)
+      || nextNativeRuntimeExchangeStep(identity, {
+        canonical: {state:"present",generation:identity.predecessorGeneration},
+        staging: {state:"present",generation:identity.successorGeneration}, parking:{state:"absent"},
+      }, "forward").state !== "rename") throw new Error("Invalid native runtime exchange backend or identity");
+    const ownsLifecycle = () => !this.deliveryGuard || this.deliveryGuard.ownsLifecycle(nodeId);
+    const physicalObserve = (physical: string) => this.nativePhysicalSession(physical);
+    const physicalWrite = async (physical: string, expected: NativePhysicalSession, command: string): Promise<void> => {
+      if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
+      const terms = [
+        ["pid",expected.serverPid],["session_id",expected.sessionId],["session_created",expected.sessionCreated],
+        ["OPENRIG_NODE_ID",expected.nodeId],["OPENRIG_OCCUPANT_GENERATION",expected.generation],
+        [NATIVE_LOGICAL_SESSION_OPTION,expected.marker ?? ""],["session_windows","1"],["window_panes","1"],["pane_dead","0"],
+      ].map(([key,value]) => `#{==:#{${key}},${tmuxFormatLiteral(value!)}}`);
+      const condition = terms.reduce((left,right) => `#{&&:${left},${right}}`);
+      const refused = `openrig-native-exchange-refused-${randomUUID()}`;
+      const output = await this.nativeRaw(["tmux","if-shell","-F","-t",`=${physical}:`,condition,command,`display-message -p ${refused}`]);
+      if (output.includes(refused)) throw new Error("Native exchange source occupant changed; no write was performed");
+    };
+    const transition = new NativeNameTransition(nodeId, {
+      ownsLifecycle, observe:physicalObserve,
+      rename: async (from,to,expected) => {
+        if (await this.nativeSessionExists(to)) throw new Error("Native exchange destination is not proven absent");
+        // This backend is psmux-only: rename-session stores the operand literally.
+        // POSIX tmux's name-format escaping would persist doubled hashes here.
+        await physicalWrite(from,expected,`rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(to)}`);
+      },
+      writeMarker: async (physical,marker,expected) => physicalWrite(physical,expected,marker === undefined
+        ? `set-option -u -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION}`
+        : `set-option -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION} ${shellQuote(marker)}`),
+    });
+    const observe = async (session: string): Promise<NativeExchangeSlot> => {
+      try {
+        const probe = await this.probeSession(session);
+        if (probe.state === "absent") return {state:"absent"};
+        if (probe.state !== "present") return {state:"unknown"};
+        const panes = await this.listSessionPanes(session), windows = await this.listSessionWindows(session);
+        if (panes.length !== 1 || windows.length !== 1 || await this.getSessionEnv(session,"OPENRIG_NODE_ID") !== nodeId) return {state:"unknown"};
+        const generation = await this.getSessionEnv(session,"OPENRIG_OCCUPANT_GENERATION");
+        const dead = (await this.run(["tmux","display-message","-p","-t",panes[0]!.id,"#{pane_dead}"])).trim();
+        return generation && dead === "0" ? {state:"present",generation} : {state:"unknown"};
+      } catch { return {state:"unknown"}; }
+    };
+    return {
+      ownsLifecycle,
+      prepareRename: async (from,to,generation) => {
+        const names = [identity.canonical,identity.staging,identity.parking];
+        if (!names.includes(from) || !names.includes(to)
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) {
+          throw new Error("Native exchange preparation is outside its custody");
+        }
+        return transition.prepare(from,to,generation);
+      },
+      resumeRename: async intent => {
+        const names = [identity.canonical,identity.staging,identity.parking];
+        if (!names.includes(intent.from) || !names.includes(intent.to)
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(intent.generation)) {
+          throw new Error("Native exchange recovery intent is outside its custody");
+        }
+        await transition.resume(intent);
+      },
+      observe: async () => ({canonical:await observe(identity.canonical),staging:await observe(identity.staging),parking:await observe(identity.parking)}),
+      rename: async (from,to,generation,intent) => {
+        const names=[identity.canonical,identity.staging,identity.parking];
+        if (!ownsLifecycle() || !names.includes(from) || !names.includes(to) || from===to
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) throw new Error("Native exchange rename is outside its custody");
+        if (intent) {
+          if (intent.from !== from || intent.to !== to || intent.generation !== generation) throw new Error("Native exchange rename intent differs from its command");
+          await transition.resume(intent);
+          return;
+        }
+        if ((await this.probeSession(to)).state !== "absent") throw new Error("Native exchange destination is not proven absent");
+        await transition.resume(await transition.prepare(from,to,generation));
+      },
+    };
+  }
 
   /** Runtime switch (slice 16, from #1214 by Aschenbath): exchange the staged successor's pane with the seat's bound
    *  pane, so the seat's session keeps its name and the staging session holds the predecessor. Both memberships are
@@ -901,8 +1401,8 @@ export class TmuxAdapter {
         throw new Error("A runtime switch exchange requires the seat's lifecycle lease and its own staging pane.");
       }
       if (!/^%\d+$/.test(input.canonicalPane) || !/^%\d+$/.test(input.stagedPane)) throw new Error("Exact pane ids are required.");
-      const canonical = await this.listPanes(input.canonicalSession);
-      const staged = await this.listPanes(input.stagingSession);
+      const canonical = await this.listSessionPanes(input.canonicalSession);
+      const staged = await this.listSessionPanes(input.stagingSession);
       if (canonical.length !== 1 || canonical[0]!.id !== input.canonicalPane || staged.length !== 1 || staged[0]!.id !== input.stagedPane) {
         throw new Error("The seat's or the staging session's pane changed; nothing was exchanged.");
       }
@@ -935,9 +1435,9 @@ export class TmuxAdapter {
     try {
       if (this.deliveryGuard && !this.deliveryGuard.ownsLifecycle(input.nodeId)) throw new Error("Runtime switch recovery requires the seat's lifecycle lease.");
       if (this.deliveryGuard?.maybeTarget(input.stagingSession)) throw new Error("The staging session is now another seat's; nothing was touched.");
-      const panes = await this.listPanes(input.stagingSession);
+      const panes = await this.listSessionPanes(input.stagingSession);
       const generation = await this.getSessionEnv(input.stagingSession, "OPENRIG_OCCUPANT_GENERATION");
-      if ((await this.listWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
+      if ((await this.listSessionWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
         || await this.getSessionEnv(input.stagingSession, "OPENRIG_NODE_ID") !== input.nodeId
         || !generation || !input.generations.includes(generation)) {
         throw new Error("The staging session's identity changed; nothing was touched.");
@@ -969,27 +1469,35 @@ export class TmuxAdapter {
     // An empty per-session value prevents the tmux server's inherited values
     // from pinning an old policy over config.json inside a newly launched seat.
     // Explicit seat settings remain authoritative.
-    const seatEnv = {
+    const seatEnv: Record<string,string> = {
       OPENRIG_TRANSCRIPTS_LINES: "",
       OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
       ...env,
     };
-    const argv = ["tmux", "new-session", "-d", "-s", name];
+    const warnings: string[] = [];
+    let bootstrap: string | undefined;
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, (file, recoveryEnv) => { bootstrap = file; Object.assign(seatEnv,recoveryEnv); });
+    // These assignments enter our private transport, not literal psmux -e.
+    // Identifier names use its versioned protocol; other representable Windows names
+    // use private source-file persistence and are available to later recovery.
+    const transportEnv = Object.entries(seatEnv).filter(([key]) =>
+      !(this.isNativeWindows && scopedCommand) || isWindowsPrivateEnvironmentName(key));
+    const formattedName = this.terminalKind === "psmux" ? name : tmuxSessionNameFormat(name);
+    const argv = ["tmux", "new-session", "-d", "-s", formattedName];
     if (cwd != null) argv.push("-c", cwd);
-    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of transportEnv) argv.push("-e", `${k}=${v}`);
     // The pane new-session itself made: an after-new-session hook may select another window.
     argv.push("-P", "-F", "#{pane_id}");
-    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
+    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(formattedName)];
     if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
-    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
+    for (const [k, v] of transportEnv) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
-    const warnings: string[] = [];
-    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings);
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {
-      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
+      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true, !!scopedCommand)).trim();
     } catch (err) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, err, true);
       return classifyWriteError(err);
     }
     // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
@@ -1004,9 +1512,10 @@ export class TmuxAdapter {
     // and restart the fresh pane so its shell starts without it. The session
     // exists either way, so a failure here is a warning, never a failed launch.
     try {
-      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv)) && !scopedCommand) {
+      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv), name) && !scopedCommand) {
         if (!/^%\d+$/.test(created)) throw new Error(`new-session reported no pane id ("${created}"), so no pane was restarted`);
-        const respawn = ["tmux", "respawn-pane", "-k", "-t", created];
+        const paneTarget = this.terminalKind === "psmux" ? `psmux:${Buffer.from(name).toString("base64url")}:${created}` : created;
+        const respawn = ["tmux", "respawn-pane", "-k", "-t", paneTarget];
         if (cwd != null) respawn.push("-c", cwd);
         await this.run(respawn, posixJoinArgv(respawn));
       }
@@ -1042,12 +1551,15 @@ export class TmuxAdapter {
    * values stay. Returns whether anything was marked. Throws when the global
    * environment can't be read: the caller can't tell whether the seat inherits
    * an identity, so it reports a warning (the launch still goes ahead). */
-  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
+  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = [], sessionName?: string): Promise<boolean> {
     const inherited = await this.globalEnvironment();
-    const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
+    const compare = (key: string) => process.platform === "win32" ? key.toUpperCase() : key;
+    const kept = new Set(keep.map(compare));
+    const keys = parentSessionEnvKeys(inherited).filter((key) => !kept.has(compare(key)));
     for (const key of keys) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
-      await this.run(argv, posixJoinArgv(argv));
+      if (sessionName !== undefined) await this.runNamedSession(argv, sessionName, posixJoinArgv(argv));
+      else await this.run(argv, posixJoinArgv(argv));
     }
     return keys.length > 0;
   }
@@ -1091,6 +1603,30 @@ export class TmuxAdapter {
     }, false, "text");
   }
 
+  /** Launch-only repair of a recognised terminal reply, before accepting seat work. */
+  async prepareWindowsCodexComposer(target: string): Promise<TmuxResult> {
+    if (this.terminalKind !== "psmux" || process.platform !== "win32") return { ok: true };
+    // The terminal's OSC colour replies may arrive after the first ready screen.
+    // Stay inside launch's input guard while observing this bounded startup window.
+    let responseDraft = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const content = await this.capturePaneScreen(target);
+      if (content && hasOnlyWindowsTerminalResponseDraft(content)) { responseDraft = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!responseDraft) return { ok: true };
+    const result = await this.sendKeys(target, ["C-u"]);
+    if (!result.ok) return result;
+    // ConPTY capture can precede the TUI redraw. Observe one write's result;
+    // never repeat the clearing key against a possibly changed user draft.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const after = await this.capturePaneScreen(target);
+      if (after && !hasOnlyWindowsTerminalResponseDraft(after)) return { ok: true };
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return { ok: false, code: "native_composer_unverified", message: "Native startup terminal response removal unverified." };
+  }
+
   private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true,
     policy?: { beforePaste: () => Promise<void>; afterPaste: () => Promise<void> }): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
@@ -1100,8 +1636,31 @@ export class TmuxAdapter {
     try {
       await this.fileOps.writeFile(path, text, { mode: 0o600, flag: "wx" });
       created = true;
+      const windowsCommand = this.terminalKind === "psmux" && process.platform === "win32"
+        ? (await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase() : null;
+      const windowsCodex = ["codex", "codex-code-mode-host"].includes(windowsCommand ?? "")
+        || (windowsCommand !== null && await observeCodexPaneProcess({ target, tmux: this, requireArgv: true }) !== null);
+      if (windowsCommand && bracketed && (windowsCodex || !["pwsh", "powershell"].includes(windowsCommand))) {
+        const pid = await this.getPanePid(target);
+        if (!pid) throw new Error("Windows pane process unavailable; no payload submitted");
+        if (policy) await policy.beforePaste();
+        beforeWrite();
+        // ConPTY removes bracketed-paste delimiters on its pipe. Console input
+        // records preserve the delimiters and raw LF for the receiving editor.
+        const helper = pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1");
+        const powershell = pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+        try {
+          await execFileAsync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
+            "-TargetPid", String(pid), "-PayloadFile", path, "-Mode", windowsCodex ? "codex" : "bracketed"], { windowsHide: true, timeout: 15000 });
+        } catch (error) {
+          const phase = /failed at (read|compile|attach|open|write);/.exec(String((error as { stderr?: string }).stderr ?? ""))?.[1];
+          throw new Error(`Windows console delivery failed${phase ? ` at ${phase}` : ""}; payload consumption unverified`);
+        }
+        if (policy) await policy.afterPaste();
+        return { ok: true };
+      }
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
-        `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
+        `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`, this.terminalKind === "psmux" ? target : undefined);
       bufferLoaded = true;
       if (policy) await policy.beforePaste();
       beforeWrite();
@@ -1118,7 +1677,7 @@ export class TmuxAdapter {
         // resident. Best-effort delete to avoid leaking it.
         try {
           await this.run(["tmux", "delete-buffer", "-b", buffer],
-        `tmux delete-buffer -b ${shellQuote(buffer)}`);
+        `tmux delete-buffer -b ${shellQuote(buffer)}`, this.terminalKind === "psmux" ? target : undefined);
         } catch { /* best-effort cleanup */ }
       }
       return classifyWriteError(err);
@@ -1144,14 +1703,15 @@ export class TmuxAdapter {
     // ID can also occur in detached bindings after a tmux restart; resolving it
     // again would lose the unambiguous session/node and its existing lease.
     // Each nested write still validates the lease and targets its observed pane.
-    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
+    return this.guardedInput(target, pane => this.sendShellCommandUnchecked(target, command, beforeInput, options, pane));
   }
 
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
-  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
+  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions, observedPane: string): Promise<TmuxResult> {
+    if (this.terminalKind === "psmux") return this.sendWindowsShellCommand(target, command, beforeInput, observedPane);
     const commandBytes = Buffer.byteLength(command, "utf8");
     // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
-    const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
+    const paneShell = options.sourceInPane ? (await this.getPaneCommand(observedPane) ?? "").replace(/^-/, "") : "";
     const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
     let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
@@ -1206,6 +1766,42 @@ export class TmuxAdapter {
     }
   }
 
+  private async sendWindowsShellCommand(target: string, command: string, beforeInput: (() => void) | undefined, observedPane: string): Promise<TmuxResult> {
+    const paneShell = pathBaseName(await this.getPaneCommand(observedPane) ?? "").toLowerCase().replace(/\.exe$/, "").replace(/^-/, "");
+    const posix = ["bash","sh","dash","zsh","ksh"].includes(paneShell);
+    if (!["pwsh", "powershell", "cmd"].includes(paneShell) && !posix) {
+      return { ok: false, code: "unsupported_windows_pane", message: "Native launch requires a PowerShell, cmd or supported POSIX pane shell; no command was typed." };
+    }
+    const script = this.fileOps.tmpName();
+    let invocation: string;
+    try {
+      invocation = paneShell === "cmd" ? windowsCmdBridgeInvocation(script)
+        : posix ? windowsPosixBridgeInvocation(script)
+        : `& ([scriptblock]::Create([IO.File]::ReadAllText(${powershellQuote(script)})))`;
+    } catch (error) { return { ok: false, code: "unsupported_windows_launch", message: (error as Error).message }; }
+    if (Buffer.byteLength(invocation, "utf8") > 512) {
+      return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+    }
+    let created = false;
+    try {
+      await this.fileOps.writeFile(script, `Remove-Item -LiteralPath ${powershellQuote(script)}\n${command}\n`, { mode: 0o600, flag: "wx" });
+      created = true;
+      const text = await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation,
+        () => { check(); beforeInput?.(); }, paneShell !== "cmd"));
+      if (!text.ok) return text;
+      // The actual consumer deletes the script. Successful paste alone is not consumption.
+      const enter = beforeInput
+        ? await this.guardedInput(target, pane => { beforeInput(); return this.sendKeysUnchecked(pane, ["Enter"]); })
+        : await this.sendKeys(target, ["Enter"]);
+      if (enter.ok) created = false;
+      return enter;
+    } catch (error) {
+      return classifyWriteError(error);
+    } finally {
+      if (created) { try { await this.fileOps.unlink(script); } catch { /* preserve original failure */ } }
+    }
+  }
+
   async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
@@ -1231,6 +1827,16 @@ export class TmuxAdapter {
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
     try {
+      if (this.terminalKind === "psmux" && process.platform === "win32" && keys.length === 1 && keys[0] === "C-u"
+        && ["codex", "codex-code-mode-host"].includes((await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase())) {
+        const pid = await this.getPanePid(target);
+        if (!pid) return { ok: false, code: "guard_target_unknown", message: "Native console process unavailable; no key sent." };
+        try {
+          await execFileAsync(pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1"), "-TargetPid", String(pid), "-Mode", "codex-clear"], { windowsHide: true, timeout: 15000 });
+        } catch { return { ok: false, code: "native_key_unverified", message: "Native console key delivery unverified." }; }
+        return { ok: true };
+      }
       await this.run(["tmux", "send-keys", "-t", target, ...keys],
         `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
       return { ok: true };
@@ -1330,7 +1936,9 @@ export class TmuxAdapter {
           if (unproven) return unproven;
         }
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
+          const scopedId = this.terminalKind === "psmux" && pane.startsWith("psmux:")
+            ? `${pane.slice(0, pane.lastIndexOf(":") + 1)}${sessionId}` : sessionId;
+          const result = await this.killSessionUnchecked(scopedId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -1367,8 +1975,32 @@ export class TmuxAdapter {
   }
 
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
-  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void,
-    server?: { pid: string; start: string }): Promise<TmuxResult> {
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void, server?: { pid: string; start: string }): Promise<TmuxResult> {
+    if (this.terminalKind === "psmux") {
+      let sessionName: string;
+      let id: string;
+      try {
+        const scoped = /^psmux:([A-Za-z0-9_-]+):(\$\d+)$/.exec(name);
+        sessionName = scoped ? Buffer.from(scoped[1]!, "base64url").toString("utf8") : name.replace(/^=/, "");
+        id = scoped?.[2] ?? (await this.runNamedSession(["tmux", "display-message", "-p", "-t", `=${sessionName}:`, "#{session_id}"], sessionName, undefined, true)).trim();
+        if (!/^\$\d+$/.test(id)) return { ok: false, code: "guard_target_unknown", message: "Native session identity unavailable; nothing killed." };
+      } catch (error) { return classifyWriteError(error); }
+      beforeEffect?.();
+      phase?.("kill_attempted");
+      try {
+        // psmux doesn't accept $N as a selector. Select its server once, check
+        // identity inside that connection, then kill SELF without resolving a
+        // name again. Each native session has its own server: no sibling view can switch.
+        const conditional = ["tmux", "if-shell", "-F", `#{==:#{session_id},${id}}`, "kill-session", "display-message -p kept"];
+        const out = sessionName.includes(":")
+          ? await this.nativeRaw(["tmux", "-t", "=" + await this.nativeBoundName(sessionName), ...conditional.slice(1)])
+          : await this.run(conditional, undefined, sessionName);
+        if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: "Native server identity changed; nothing killed." };
+        if ((await this.probeSession(sessionName)).state !== "absent") return { ok: false, code: "kill_unverified", message: "Native session disappearance unverified." };
+        this.freshProbes.delete(name); this.freshManaged.delete(name);
+        return { ok: true };
+      } catch (error) { return classifyWriteError(error); }
+    }
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
     // With its server, an effect runs only while this id is that session on that server: tmux checks and acts in one
@@ -1442,31 +2074,34 @@ export class TmuxAdapter {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
+    const launchEnv = {...opts?.env};
     const warnings: string[] = [];
-    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings);
+    let bootstrap: string | undefined;
+    const scopedCommand = await this.scopedLaunchCommand(launchEnv, command, warnings, (file, recoveryEnv) => { bootstrap = file; Object.assign(launchEnv,recoveryEnv); });
+    for (const [k,v] of Object.entries(launchEnv)) argv.push("-e",`${k}=${v}`);
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
-    const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
+    const quote = Object.keys(launchEnv).length ? tmuxConfigQuote : shellQuote;
     const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
+    for (const [k,v] of Object.entries(launchEnv)) legacyRespawn.push("-e",quote(`${k}=${v}`));
     if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
     else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
     try {
-      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
+      await this.excludeParentSessionEnv(exact, Object.keys(launchEnv));
     } catch (err) {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      if (Object.keys(launchEnv).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "), false, !!scopedCommand);
       else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, err);
       return classifyWriteError(err);
     }
   }
@@ -1561,11 +2196,13 @@ export class TmuxAdapter {
   }
 
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
-   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
+   *  the shell, not the runtime running under it. Uses the native host's termination command. */
   async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
     try {
-      await this.exec(`kill -${signal} ${pid}`);
+      await this.exec(this.terminalKind === "psmux" && process.platform === "win32"
+        ? `taskkill /PID ${pid} /T${signal === "KILL" ? " /F" : ""}`
+        : `kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1588,8 +2225,7 @@ export class TmuxAdapter {
   /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
    *  an unresolvable pid is a structured, non-throwing failure.
-   *  Stays on the shell-string path deliberately: this is a Unix `kill`,
-   *  not a multiplexer command (Windows needs taskkill — named follow-up). */
+   *  Termination is host-native and remains scoped to the resolved pane process. */
   async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
   }
@@ -1601,19 +2237,20 @@ export class TmuxAdapter {
     }
     try {
       beforeWrite();
-      await this.exec(`kill -${signal} ${pid}`);
-      return { ok: true };
+      return await this.signalPid(pid, signal);
     } catch (err) {
       return classifyWriteError(err);
     }
   }
 
   /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
-  async getPanePid(paneId: string): Promise<number | null> {
-    const target = exactTarget(paneId, "pane");
+  async getSessionPanePid(name: string): Promise<number | null> { return this.getPanePid(name, true); }
+
+  async getPanePid(paneId: string, literalSessionName = false): Promise<number | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
-        `tmux display-message -p -t ${shellQuote(target)} "#{pane_pid}"`);
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"], legacy = `tmux display-message -p -t ${shellQuote(target)} "#{pane_pid}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const trimmed = output.trim();
       const parsed = parseInt(trimmed, 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -1636,11 +2273,13 @@ export class TmuxAdapter {
   }
 
   /** Get the current foreground command in a pane. Returns null if unavailable. */
-  async getPaneCommand(paneId: string): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async getSessionPaneCommand(name: string): Promise<string | null> { return this.getPaneCommand(name, true); }
+
+  async getPaneCommand(paneId: string, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"],
-        `tmux display-message -p -t ${shellQuote(target)} "#{pane_current_command}"`);
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"], legacy = `tmux display-message -p -t ${shellQuote(target)} "#{pane_current_command}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const trimmed = output.trim();
       return trimmed || null;
     } catch {
@@ -1686,14 +2325,50 @@ export class TmuxAdapter {
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */
   async getSessionEnv(session: string, key: string): Promise<string | undefined> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     try {
-      const output = await this.run(["tmux", "show-environment", "-t", target, key],
-        `tmux show-environment -t ${shellQuote(target)} ${shellQuote(key)}`);
+      const delimiter = this.terminalKind === "psmux" && key.startsWith("-") ? ["--"] : [];
+      const output = await this.runNamedSession(["tmux", "show-environment", "-t", target, ...delimiter, key], session,
+        `tmux show-environment -t ${shellQuote(target)} ${delimiter.length ? "-- " : ""}${shellQuote(key)}`);
+      if (this.terminalKind === "psmux") {
+        // The protocol adds one LF; a preceding CR belongs to the value.
+        const body = output.endsWith("\n") ? output.slice(0, -1) : output;
+        if (body.includes("\n")) {
+          // Older psmux ignores the selector and returns the whole environment.
+          // A missing-key query must prove selector support before interpreting
+          // a multiline response as one value. Never log either response.
+          const probe = `OPENRIG_SELECTOR_PROBE_${randomUUID().replace(/-/g, "")}`;
+          let selective = false;
+          try { await this.runNamedSession(["tmux", "show-environment", "-t", target, probe], session); }
+          catch (error) { selective = error instanceof Error && error.message.includes(`unknown variable: ${probe}`); }
+          if (!selective) throw new Error("Native environment selectors are not qualified");
+        }
+        if (body.startsWith("-") && readPlatformEnv({ [body.slice(1)]: "removed" }, key, "win32") !== undefined) return undefined;
+        const separator = body.indexOf("=");
+        const selected = separator < 0 ? undefined : readPlatformEnv({ [body.slice(0, separator)]: body.slice(separator + 1) }, key, "win32");
+        if (selected === undefined) throw new Error("Unexpected session environment response");
+        return selected;
+      }
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
-      return output.slice(key.length + 1).replace(/\r?\n$/, "");
+      const value = output.slice(key.length + 1).replace(/\n$/, "");
+      if (!value.includes("\\")) return value;
+      // tmux's printable output uses VIS_CSTYLE|VIS_OCTAL|VIS_NOSLASH:
+      // raw literal backslashes are indistinguishable from escaped controls.
+      // Shell output escapes literal backslashes first, restoring injectivity.
+      // Parse that closed representation as data; never evaluate shell text.
+      const quoted = await this.run(["tmux", "show-environment", "-s", "-t", target, key],
+        `tmux show-environment -s -t ${shellQuote(target)} ${shellQuote(key)}`);
+      const prefix = `${key}="`, suffix = `"; export ${key};\n`;
+      if (!quoted.startsWith(prefix) || !quoted.endsWith(suffix)) throw new Error("Unexpected quoted environment response");
+      const encoded = quoted.slice(prefix.length, -suffix.length);
+      const escapes: Record<string, string> = { "\\": "\\", '"': '"', "$": "$", "`": "`", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", s: " ", t: "\t", v: "\v", "0": "\0" };
+      return encoded.replace(/\\([0-7]{3}|[\s\S])/g, (_all, escape: string) => {
+        if (/^[0-7]{3}$/.test(escape)) return String.fromCharCode(parseInt(escape, 8));
+        if (!(escape in escapes)) throw new Error("Unsupported environment escape");
+        return escapes[escape]!;
+      });
     } catch (error) {
       if (error instanceof Error && error.message.includes(`unknown variable: ${key}`)) return undefined;
       throw new Error("Cannot read the session's launch environment.");
@@ -1702,8 +2377,16 @@ export class TmuxAdapter {
 
   /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
+    if (this.terminalKind === "psmux") {
+      if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+      const config = await this.fileOps.privateConfig(psmuxPrivateEnvironmentLine(key, value));
+      // Keep the file after any uncertain call; never fall back to value argv.
+      await this.runNamedSession(["tmux", "source-file", "-t", target, config.path], session);
+      await config.dispose().catch(() => { console.warn(`Native environment config cleanup failed: ${config.path}`); });
+      return;
+    }
     await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
       `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
@@ -1713,12 +2396,15 @@ export class TmuxAdapter {
    *  identity in the server's environment (see parent-session-env) is marked removed instead, as a
    *  launch does, so the server's value does not come back. */
   async unsetSessionEnv(session: string, key: string): Promise<void> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const parentIdentity = parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
-    const flag = parentIdentity ? "-r" : "-u";
-    await this.run(["tmux", "set-environment", "-t", target, flag, key],
-      `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
+    const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key.toUpperCase() : name === key);
+    const flag = parents.length ? "-r" : "-u";
+    for (const name of new Set([key, ...parents])) {
+      const delimiter = this.terminalKind === "psmux" && name.startsWith("-") ? ["--"] : [];
+      await this.runNamedSession(["tmux", "set-environment", "-t", target, flag, ...delimiter, name], session,
+        `tmux set-environment -t ${shellQuote(target)} ${flag} ${delimiter.length ? "-- " : ""}${shellQuote(name)}`);
+    }
   }
 
   private async globalEnvironment(): Promise<Record<string, string>> {
@@ -1737,16 +2423,29 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    if (this.terminalKind === "psmux") return this.selectedEnvPresence(sessionName, varName);
     const lines = await this.sessionEnvLines(sessionName);
+    if (lines?.some(line => line.startsWith(`${varName}=`) && line.includes("\\"))) return this.selectedEnvPresence(sessionName, varName);
     return lines === null ? null : usableEnvLine(lines, varName);
   }
 
-  /** The same usable-presence reading for several variables from ONE fresh listing of the session environment.
+  /** The same usable-presence reading for several variables. POSIX shares one
+   *  listing except values needing lossless decoding; native multiline listings
+   *  are ambiguous and require exact selectors, deduplicated by requested key.
    *  Each requested name maps to true/false; every one maps to null when the environment cannot be inspected. Only
    *  the requested names are returned, and no value, listing or error text leaves this method. */
   async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
+    if (this.terminalKind === "psmux") {
+      return Object.fromEntries(await Promise.all([...new Set(varNames)].map(async name => [name, await this.selectedEnvPresence(sessionName, name)] as const)));
+    }
     const lines = await this.sessionEnvLines(sessionName);
-    return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+    return Object.fromEntries(await Promise.all(varNames.map(async name => [name, lines === null ? null
+      : lines.some(line => line.startsWith(`${name}=`) && line.includes("\\")) ? await this.selectedEnvPresence(sessionName, name) : usableEnvLine(lines, name)] as const)));
+  }
+
+  private async selectedEnvPresence(session: string, name: string): Promise<boolean | null> {
+    try { return ((await this.getSessionEnv(session, name)) ?? "").trim().length > 0; }
+    catch { return null; }
   }
 
   /** Compare transient native values with the kept session. Only differing names escape this read. */
@@ -1818,19 +2517,29 @@ export class TmuxAdapter {
    */
   async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
     const listing = this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'")
-      .then((output) => new Set(output.split(/\r?\n/).filter(Boolean)), () => null);
+      .then(async output => new Set(await Promise.all(output.split(/\r?\n/).filter(Boolean).map(name => this.nativeObservedName(name)))), () => null).catch(() => null);
     const out = new Map<string, PaneCapture>();
     let unlisted = false;
     /** Capture one chunk with a single chained tmux call into `out`; on failure, retry it without the unlisted targets
      *  or split it in half. */
     const captureChunk = async (chunk: string[]): Promise<void> => {
+      let physical = chunk;
+      if (this.terminalKind === "psmux") {
+        const bindings = await Promise.all(chunk.map(async logical => {
+          try { return { logical, physical: await this.nativeBoundName(logical) }; }
+          catch { out.set(logical, { text: null, capturedAt: now() }); return undefined; }
+        }));
+        const known = bindings.filter((binding): binding is { logical: string; physical: string } => binding !== undefined);
+        chunk = known.map(binding => binding.logical); physical = known.map(binding => binding.physical);
+        if (!chunk.length) return;
+      }
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
       // The marker line also names the pane and its process that the capture after it reads, in the same call.
       const header = (k: number) => `${mark(k)} #{pane_id} #{pane_pid}`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, header(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", `=${physical[k]}:`, header(k), ";", "capture-pane", "-p", "-t", `=${physical[k]}:`, "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
         `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(header(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
@@ -1838,7 +2547,7 @@ export class TmuxAdapter {
       let output: string;
       let capturedAt: Date;
       try {
-        output = await this.run(argv, legacy);
+        output = this.terminalKind === "psmux" ? await this.nativeRaw(argv) : await this.run(argv, legacy);
         capturedAt = now(); // when THIS chunk's panes were read, not when the sweep ends
       } catch (err) {
         const live = await listing;
@@ -1906,15 +2615,18 @@ export class TmuxAdapter {
     return unlisted && out.size === 0 ? null : out;
   }
 
-  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async captureSessionContent(name: string, lines = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> { return this.capturePaneContent(name, lines, opts, true); }
+
+  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     // `-e` keeps text styling, such as the faint rendering of a suggestion.
     const styled = opts?.escapeSequences === true;
     // Verification can recover mid-word soft wraps without erasing logical newlines.
     const joined = opts?.joinWrappedLines === true;
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), ...(joined ? ["-J"] : []), "-t", target, "-S", `-${lines}`],
-        `tmux capture-pane -p${styled ? " -e" : ""}${joined ? " -J" : ""} -t ${shellQuote(target)} -S -${lines}`);
+      const argv = ["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), ...(joined ? ["-J"] : []), "-t", target, "-S", `-${lines}`];
+      const legacy = `tmux capture-pane -p${styled ? " -e" : ""}${joined ? " -J" : ""} -t ${shellQuote(target)} -S -${lines}`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       return output || null;
     } catch {
       return null;
@@ -1927,11 +2639,13 @@ export class TmuxAdapter {
    * screen, NOT `-S -<lines>` scrollback: scrollback reintroduces the row drift
    * the absolute-paint seed exists to eliminate.
    */
-  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async captureSessionScreen(name: string, opts?: { escapeSequences?: boolean }): Promise<string | null> { return this.capturePaneScreen(name, opts, true); }
+
+  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(opts?.escapeSequences ? ["-e"] : []), "-t", target],
-        `tmux capture-pane -p${opts?.escapeSequences ? " -e" : ""} -t ${shellQuote(target)}`);
+      const argv = ["tmux", "capture-pane", "-p", ...(opts?.escapeSequences ? ["-e"] : []), "-t", target], legacy = `tmux capture-pane -p${opts?.escapeSequences ? " -e" : ""} -t ${shellQuote(target)}`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       return output || null;
     } catch {
       return null;
@@ -1939,14 +2653,18 @@ export class TmuxAdapter {
   }
 
   /** Cursor movement during capture is an unknown input, never permission to type. */
-  async captureComposerSnapshot(paneId: string): Promise<ComposerSnapshot | null> {
+  async captureSessionComposerSnapshot(name: string): Promise<ComposerSnapshot | null> { return this.captureComposerSnapshot(name, true); }
+
+  async captureComposerSnapshot(paneId: string, literalSessionName = false): Promise<ComposerSnapshot | null> {
     try {
-      const before = await this.getPaneCursorPosition(paneId);
+      const before = literalSessionName ? await this.getSessionCursorPosition(paneId) : await this.getPaneCursorPosition(paneId);
       if (!before) return null;
-      const screen = await this.capturePaneScreen(paneId, { escapeSequences: true });
+      const screen = literalSessionName ? await this.captureSessionScreen(paneId, { escapeSequences: true }) : await this.capturePaneScreen(paneId, { escapeSequences: true });
       if (screen === null) return null;
-      const mode = (await this.run(["tmux", "display-message", "-p", "-t", exactTarget(paneId, "pane"), "#{pane_in_mode}"])).trim();
-      const after = await this.getPaneCursorPosition(paneId);
+      const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"];
+      const mode = (literalSessionName ? await this.runNamedSession(argv, paneId, undefined, true) : await this.run(argv)).trim();
+      const after = literalSessionName ? await this.getSessionCursorPosition(paneId) : await this.getPaneCursorPosition(paneId);
       if (!after || JSON.stringify(before) !== JSON.stringify(after) || !/^\d+$/.test(mode)) return null;
       return { screen, cursor: after, inMode: Number(mode) !== 0 };
     } catch { return null; }
@@ -1958,13 +2676,13 @@ export class TmuxAdapter {
    * out-of-range values (x<0, y<0, width<1, height<1) so a bad read never
    * produces a garbage seed.
    */
-  async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
-    const exact = exactTarget(paneId, "pane");
+  async getSessionCursorPosition(name: string): Promise<TmuxCursorPosition | null> { return this.getPaneCursorPosition(name, true); }
+
+  async getPaneCursorPosition(paneId: string, literalSessionName = false): Promise<TmuxCursorPosition | null> {
+    const exact = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT],
-        `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`,
-      );
+      const argv = ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT], legacy = `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
       const x = Number.parseInt(xRaw ?? "", 10);
       const y = Number.parseInt(yRaw ?? "", 10);
@@ -1990,8 +2708,8 @@ export class TmuxAdapter {
     // set/show-option take a target-pane even when the option is session-scoped.
     const exact = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "set-option", "-t", exact, key, value],
-        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`);
+      await this.runNamedSession(["tmux", "set-option", "-t", exact, key, value], sessionName,
+        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`, true);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1999,12 +2717,22 @@ export class TmuxAdapter {
   }
 
   /**
-   * OPR.0.4.6.02 S1 (guard b2): set a SERVER-scoped option via
-   * `set-option -s <option> <value>` — the daemon configuring its OWN tmux
-   * server (NOT a live-flip of anyone's session). NEVER targets a session
-   * (`-t`): server scope and session scope are distinct and never crossed.
-   * Used for `set-clipboard` / `copy-command`.
+   * Native psmux server scope is selected by its owning session target;
+   * each session has a separate server. Call only for a freshly created target.
    */
+  async setNativeServerOption(sessionName: string, option: string, value: string): Promise<TmuxResult> {
+    if (this.terminalKind !== "psmux") return { ok: false, code: "unsupported", message: "Targeted native server options require psmux." };
+    // psmux has one server per session. The explicit target selects only the
+    // freshly created server; the unscoped POSIX server API must not be used.
+    const exact = exactTarget(sessionName, "pane");
+    try {
+      await this.runNamedSession(["tmux", "set-option", "-s", "-t", exact, option, value], sessionName,
+        `tmux set-option -s -t ${shellQuote(exact)} ${shellQuote(option)} ${shellQuote(value)}`, true);
+      return { ok: true };
+    } catch (err) { return classifyWriteError(err); }
+  }
+
+  /** POSIX server scope: no session target; used for clipboard defaults once per daemon. */
   async setServerOption(option: string, value: string): Promise<TmuxResult> {
     try {
       await this.run(["tmux", "set-option", "-s", option, value],
@@ -2036,8 +2764,8 @@ export class TmuxAdapter {
     // set/show-option take a target-pane even when the option is session-scoped.
     const exact = exactTarget(sessionName, "pane");
     try {
-      const output = await this.run(["tmux", "show-option", "-v", "-t", exact, key],
-        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`);
+      const output = await this.runNamedSession(["tmux", "show-option", "-v", "-t", exact, key], sessionName,
+        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`, true);
       return output.trim() || null;
     } catch {
       return null;
@@ -2073,12 +2801,13 @@ export class TmuxAdapter {
       const format = ["#{window_active}", "#{window_activity}", "#{window_width}x#{window_height}:#{pane_id}:#{pane_pid}:#{pane_width}x#{pane_height}:#{history_size}:#{history_bytes}:#{cursor_x},#{cursor_y}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
       const out = new Map<string, { activity: number; size: string }>();
-      for (const line of output.split("\n")) {
+      // Strip the transport's CRLF boundary, not whitespace in the session name.
+      for (const line of output.split(/\r?\n/)) {
         const f1 = line.indexOf(TMUX_FIELD_SEPARATOR), f2 = line.indexOf(TMUX_FIELD_SEPARATOR, f1 + 1), f3 = line.indexOf(TMUX_FIELD_SEPARATOR, f2 + 1);
         if (f1 < 0 || f2 < 0 || f3 < 0) continue;
         const activity = line.slice(f1 + 1, f2).trim(), session = line.slice(f3 + 1);
         if (!session || line.slice(0, f1) !== "1" || !/^\d+$/.test(activity) || Number(activity) <= 0) continue;
-        out.set(session, { activity: Number(activity), size: line.slice(f2 + 1, f3) });
+        out.set(await this.nativeObservedName(session), { activity: Number(activity), size: line.slice(f2 + 1, f3) });
       }
       return out;
     } catch {
@@ -2095,13 +2824,13 @@ export class TmuxAdapter {
       const format = ["#{window_active}", "#{window_activity}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
       const out = new Map<string, number>();
-      for (const line of output.split("\n")) {
+      for (const line of output.split(/\r?\n/)) {
         const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
         if (first < 0 || second < 0) continue;
         const active = line.slice(0, first), activity = line.slice(first + 1, second).trim(), session = line.slice(second + 1);
         if (!session || active !== "1" || !/^\d+$/.test(activity)) continue;
         const n = Number(activity);
-        if (Number.isFinite(n) && n > 0) out.set(session, n);
+        if (Number.isFinite(n) && n > 0) out.set(await this.nativeObservedName(session), n);
       }
       return out;
     } catch {
@@ -2113,6 +2842,9 @@ export class TmuxAdapter {
    *  its former PID/command: neither proves an executor is alive. A dead pane without a valid PID is retained with
    *  null PID; other invalid rows fall back to per-pane reads. The command stays LAST to preserve separators. */
   async readAllPaneProcesses(): Promise<Map<string, { pid: number | null; command: string | null; dead?: boolean }> | null> {
+    // Cross-session psmux listings expose duplicate local %N ids. Use scoped
+    // per-pane reads until a scoped batch projection is implemented.
+    if (this.terminalKind === "psmux") return null;
     try {
       const format = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-panes", "-a", "-F", format], `tmux list-panes -a -F '${format}'`);
@@ -2163,7 +2895,7 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-clients", "-F", CLIENT_FORMAT],
         `tmux list-clients -F "${CLIENT_FORMAT}"`);
-      return parseLines(output, parseClientLine);
+      return await Promise.all(parseLines(output, parseClientLine).map(async client => ({ ...client, session: await this.nativeObservedName(client.session) })));
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
@@ -2179,11 +2911,27 @@ export class TmuxAdapter {
   async switchClient(client: string, target: string): Promise<TmuxResult> {
     const exact = exactTarget(target, "session");
     try {
-      await this.run(["tmux", "switch-client", "-c", client, "-t", exact],
+      // Keep the actual routing operand before a literal client name that may
+      // itself be "-t". Native routing must not interpret that value as a flag.
+      await this.run(this.terminalKind === "psmux"
+        ? ["tmux", "switch-client", "-t", exact, "-c", client]
+        : ["tmux", "switch-client", "-c", client, "-t", exact],
         `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(exact)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
     }
+  }
+
+  /** Retarget an existing view with session identity separate from window syntax. */
+  async switchClientToSession(client: string, name: string, windowIndex?: number): Promise<TmuxResult> {
+    if (windowIndex !== undefined && (!Number.isSafeInteger(windowIndex) || windowIndex < 0)) return { ok: false, code: "invalid_window", message: "Invalid window index" };
+    const target = `=${name}${windowIndex === undefined ? "" : ":" + windowIndex}`;
+    try {
+      const argv = this.terminalKind === "psmux" ? ["tmux", "switch-client", "-t", target, "-c", client]
+        : ["tmux", "switch-client", "-c", client, "-t", target];
+      await this.runNamedSession(argv, name, `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`, windowIndex !== undefined, windowIndex);
+      return { ok: true };
+    } catch (error) { return classifyWriteError(error); }
   }
 }

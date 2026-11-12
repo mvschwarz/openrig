@@ -31,7 +31,7 @@ export function continuationArguments(argv: string[], help: string): { args: str
   return { args, warnings: [...new Set(warnings)] };
 }
 
-export async function captureClaudeContinuation(pid: number, executable: string, comparePane?: (env: Readonly<Record<string, string>>) => Promise<string[] | null>): Promise<ClaudeContinuationLaunch> {
+export async function captureClaudeContinuation(pid: number, executable: string, comparePane?: (env: Readonly<Record<string, string>>) => Promise<string[] | null>, script?: string): Promise<ClaudeContinuationLaunch> {
   const warnings: string[] = [];
   const launch = await readNativeProcessLaunch(pid);
   if (!launch) return { warnings: ["The running Claude argv/environment could not be read; using the seat's ordinary launch settings."] };
@@ -43,7 +43,7 @@ export async function captureClaudeContinuation(pid: number, executable: string,
       : "Only CLAUDE_CONFIG_DIR is captured; other values use ordinary pane forwarding and current credential/identity channels.");
   const configDir = launch.env.CLAUDE_CONFIG_DIR ?? null;
   try {
-    const { stdout } = await exec(executable, ["--help"], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...(configDir === null ? {} : { CLAUDE_CONFIG_DIR: configDir }) }, encoding: "utf8", timeout: 2000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await exec(executable, [...(script ? [script] : []), "--help"], { windowsHide: true, env: { PATH: process.env.PATH, HOME: process.env.HOME, ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), ...(configDir === null ? {} : { CLAUDE_CONFIG_DIR: configDir }) }, encoding: "utf8", timeout: 2000, maxBuffer: 1024 * 1024 });
     if (!stdout.includes("--settings") || !stdout.includes("--resume")) throw new Error("unmapped help");
     const mapped = continuationArguments(launch.argv, stdout);
     if (mapped.args.some(a => a === "--settings" || a.startsWith("--settings="))) warnings.push("Custom --settings is retained; its credential precedence is not verified by this switch. Check Claude /status for the active billing source.");

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // Test-A pre-drive (row 782b467a) — the WALK/PROFILE join: WALK consumes the
 // AUTHORITATIVE composed profile (rig context profile's output, per-piece
 // provenance intact) and reports delivered pieces BY IDENTITY (atomId+address),
@@ -69,7 +70,7 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number, p
       }
     });
   });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  await listenOwnedHttpFixture(server);
   const p = (server.address() as { port: number }).port;
   const deps: WalkDeps = {
     lifecycleDeps: mockLifecycle(p),

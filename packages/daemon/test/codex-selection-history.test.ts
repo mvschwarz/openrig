@@ -20,6 +20,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { findComposerInputLineIndex } from "../src/domain/composer-prompts.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 
 const quote = "• Ran a command\n  › 1. Yes, proceed (y)\n  2. No (esc)\n  Press enter to confirm or esc to cancel";
 const status = "• Working (23s • esc to interrupt)";
@@ -124,6 +125,7 @@ async function fixture(frame: Frame, hook: "none" | "running" | "permission") {
   cleanup.push(() => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }));
   await new Promise<void>(resolve => server.once("listening", resolve));
   const { port } = server.address() as AddressInfo;
+  allowFetchTarget(`http://127.0.0.1:${port}`);
   const response = await fetch(`http://127.0.0.1:${port}/api/transport/send`, {
     method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "sender@test" },
     body: JSON.stringify({ session: "worker@test", text: "ordinary status update" }),

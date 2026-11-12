@@ -14,13 +14,18 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { remoteJsonRequest } from "../src/domain/hosts/remote-daemon-http.js";
 import { DaemonClient as CliDaemonClient } from "../../cli/src/client.js";
 import { DaemonClient as TuiDaemonClient } from "../../tui/src/daemon-client.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 
 const SELF = "openrig-vm.tailnet-example.ts.net";
 type Server = ReturnType<typeof serve>;
 
 function listen(app: Hono, hostname: string): Promise<{ server: Server; port: number }> {
   return new Promise((resolve, reject) => {
-    const server = serve({ fetch: app.fetch, port: 0, hostname }, (info) => resolve({ server, port: info.port }));
+    const server = serve({ fetch: app.fetch, port: 0, hostname }, (info) => {
+      allowFetchTarget(`http://${hostname === "::1" ? "[::1]" : hostname}:${info.port}`);
+      if (hostname === "127.0.0.1") allowFetchTarget(`http://localhost:${info.port}`);
+      resolve({ server, port: info.port });
+    });
     (server as unknown as net.Server).once("error", reject);
   });
 }

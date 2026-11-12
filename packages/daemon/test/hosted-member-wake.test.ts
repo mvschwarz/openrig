@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -43,6 +44,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}/hook`;
+    allowFetchTarget(url);
   });
   afterEach(async () => {
     server.closeAllConnections();
