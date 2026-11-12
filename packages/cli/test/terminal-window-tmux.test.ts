@@ -1,11 +1,11 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DaemonClient } from "../src/client.js";
-import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
+import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 // Real isolated tmux servers; the desktop launcher alone is inert.
@@ -156,4 +156,202 @@ it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned v
     if (page.length === 2) expect(Math.abs(Number(actual[0]![2]) - Number(actual[1]![2]))).toBeLessThanOrEqual(1);
   }
   expect(snapshot()).toBe(original);
+});
+
+describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cleanup", () => {
+  function setupBulkTmux(rigs: Array<{ rig: string; seats: string[] }>) {
+    const id = randomUUID().slice(0, 10);
+    const server = `bulk-${id}`;
+    sockets.push(server);
+    for (const r of rigs) {
+      for (const s of r.seats) tmux(server, ["new-session", "-d", "-s", `${s}@${r.rig}`, "sleep 60"]);
+    }
+    const events: string[] = [];
+    const registered: unknown[] = [];
+    const retired: unknown[] = [];
+    const makeComposed = (rig: string, seats: string[]) => ({
+      id: `rig:${rig}`,
+      localTmuxServer: ["-L", server],
+      opened: seats.map(s => ({ seat: `${s}@${rig}`, label: s, paneCommand: `tmux -L ${server} -f /dev/null attach-session -t '=${s}@${rig}'` })),
+      pages: seats.length ? [seats.map(s => ({ seat: `${s}@${rig}`, label: s, paneCommand: `tmux -L ${server} -f /dev/null attach-session -t '=${s}@${rig}'` }))] : [],
+      columns: Math.max(1, seats.length),
+      absent: seats.length === 0 ? [{ seat: `dead@${rig}`, host: null, reason: "no active tmux binding: stopped or unbound" }] : [],
+      degraded: [],
+      skipped: [],
+    });
+    const client = {
+      baseUrl: "http://localhost:7433",
+      isLocalInstance: vi.fn(async () => true),
+      get: vi.fn(async (url: string) => {
+        if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", server] }, providers: [] } };
+        if (url === "/api/terminal/views") return { status: 200, data: { rigs: rigs.map(r => r.rig) } };
+        if (url.startsWith("/api/terminal/preview?")) {
+          const view = new URL(url, "http://localhost").searchParams.get("view") ?? "";
+          const rigName = view.replace(/^rig:/, "");
+          const spec = rigs.find(r => r.rig === rigName)!;
+          return { status: 200, data: { planId: `plan-${rigName}`, tmux: { mode: "isolated" }, status: {}, composed: makeComposed(rigName, spec.seats) } };
+        }
+        return { status: 404, data: {} };
+      }),
+      post: vi.fn(async (url: string, body: unknown) => {
+        if (url === "/api/terminal/rig-viewers") {
+          events.push(`register:${(body as { view: string }).view}`);
+          registered.push(body);
+        }
+        return { status: 200, data: { ok: true } };
+      }),
+      delete: vi.fn(async (url: string) => {
+        if (url.startsWith("/api/terminal/rig-viewers")) {
+          events.push("retire");
+          retired.push(url);
+        }
+        return { status: 200, data: { ok: true } };
+      }),
+    } as unknown as DaemonClient;
+    return { server, client, events, registered, retired };
+  }
+
+  it("opens one tagged session per non-empty rig, posts daemon record before launchWindow, and skips empty rigs", async () => {
+    const { server, client, events, registered } = setupBulkTmux([
+      { rig: "empty", seats: [] },
+      { rig: "beta", seats: ["op"] },
+      { rig: "alpha", seats: ["op"] },
+    ]);
+    let seq = 0;
+    const deps: WindowDeps = {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          events.push("launch");
+          return "window";
+        }
+        if (file === "tmux") return tmux(server, args);
+        throw new Error(`unexpected ${file}`);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => `b${++seq}`,
+    };
+
+    const result = await openAllTerminalWindows(client, undefined, deps);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.provider).toBe("tmux");
+    expect(result.rigs.map(r => r.rig)).toEqual(["alpha", "beta", "empty"]);
+    expect(result.rigs.find(r => r.rig === "empty")?.outcome).toBe("absent");
+    expect(events).toEqual(["register:rig:alpha", "launch", "register:rig:beta", "launch"]);
+    expect(registered).toHaveLength(2);
+    const sessTags = new Map(
+      tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => {
+        const sep = line.indexOf("|");
+        return [line.slice(0, sep), line.slice(sep + 1)] as [string, string];
+      }),
+    );
+    for (const s of ["openrig-view-b1", "openrig-view-b2"]) {
+      expect(sessTags.get(s)).toMatch(/^[0-9a-f-]{8,}$/);
+    }
+  });
+
+  it("fails cleanly before creating any session when desktop launcher preflight returns a string", async () => {
+    const { server, client, registered } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const deps: WindowDeps = {
+      herdrConfig: () => "",
+      platform: "linux",
+      env: { HOME: "/fixture" }, // no DISPLAY / unknown host terminal
+      exists: () => false,
+      exec: async (file) => file === "/bin/sh" ? "" : "",
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "never",
+    };
+    const res = await openAllTerminalWindows(client, "tmux", deps);
+    expect(res.ok).toBe(false);
+    expect(registered).toEqual([]);
+    expect(tmux(server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toEqual(["op@alpha"]);
+  });
+
+  it("cleans up an unattached intact viewer on launch failure, retains when dirty/attached or kill unverified, and halts remaining sessions on -1743", async () => {
+    // 1. Clean intact session is killed and read back absent:
+    const c1 = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const res1 = await openAllTerminalWindows(c1.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("boom");
+        if (file === "tmux") return tmux(c1.server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "cleanfail",
+    });
+    expect(res1.ok).toBe(false);
+    expect(res1.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed" });
+    expect(res1.rigs[0]?.cleanup).not.toBe("unknown");
+    expect(tmux(c1.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toEqual(["op@alpha"]);
+    expect(c1.retired).toHaveLength(1);
+
+    // 2. Extra window created before launch throws -> retains session + cleanup: "unknown" + keeps record:
+    const c2 = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const res2 = await openAllTerminalWindows(c2.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          tmux(c2.server, ["new-window", "-d", "-t", "openrig-view-dirtyfail:", "-n", "extra", "sleep 60"]);
+          throw new Error("boom");
+        }
+        if (file === "tmux") return tmux(c2.server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "dirtyfail",
+    });
+    expect(res2.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(tmux(c2.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-dirtyfail");
+    expect(c2.retired).toHaveLength(0);
+
+    // 3. -1743 on rig 2 keeps rig 1 open and skips creating rig 3 session with code automation_denied:
+    const c3 = setupBulkTmux([
+      { rig: "alpha", seats: ["op"] },
+      { rig: "beta", seats: ["op"] },
+      { rig: "gamma", seats: ["op"] },
+    ]);
+    let launchNum = 0;
+    const res3 = await openAllTerminalWindows(c3.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          launchNum++;
+          if (launchNum === 2) throw new Error("Not authorized to send Apple events (-1743)");
+          return "window";
+        }
+        if (file === "tmux") return tmux(c3.server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => `seq-${launchNum + 1}`,
+    });
+    expect(res3.ok).toBe(true);
+    expect(res3.rigs.find(r => r.rig === "alpha")?.outcome).toBe("opened");
+    expect(res3.rigs.find(r => r.rig === "beta")?.outcome).toBe("failed");
+    expect(res3.rigs.find(r => r.rig === "gamma")).toMatchObject({ outcome: "failed", code: "automation_denied" });
+    expect(c3.registered).toHaveLength(2);
+    expect(tmux(c3.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-seq-1");
+  });
 });

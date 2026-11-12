@@ -622,9 +622,9 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
+| `rig terminal open [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal close <view>` | — | `--app-home <dir>`<br>`--json` |
+| `rig terminal close [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal attach <session>` | — | `--read-only` |
 

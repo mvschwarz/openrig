@@ -22,7 +22,7 @@ import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
@@ -87,6 +87,50 @@ export interface OpenViewResult {
   reusedWorkspace?: { id: string; tabId: string; view: string };
   /** On window failures, false means no desktop launch was attempted. */
   windowAttempted?: boolean;
+}
+
+export interface OpenAllRigResult {
+  rig: string;
+  view: string;
+  outcome: "opened" | "reused" | "absent" | "skipped" | "failed";
+  opened: string[];
+  absent: { seat: string; host: string | null; reason: string }[];
+  degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
+  skipped: { seat: string; reason: string }[];
+  workspaceId?: string;
+  code?: string;
+  error?: string;
+  notes?: string[];
+  cleanup?: "closed" | "unknown";
+}
+
+export interface OpenAllResult {
+  ok: boolean;
+  provider: string;
+  session?: string;
+  rigs: OpenAllRigResult[];
+  window?: { app: string; surface: string };
+  windowAttempted?: boolean;
+  code?: string;
+  error?: string;
+  notes?: string[];
+}
+
+export interface CloseAllViewerResult {
+  view: string;
+  provider: "herdr" | "tmux";
+  target: string;
+  outcome: "closed" | "already_gone" | "kept" | "failed";
+  reason?: string;
+  code?: string;
+}
+
+export interface CloseAllResult {
+  ok: boolean;
+  viewers: CloseAllViewerResult[];
+  code?: string;
+  error?: string;
+  notes?: string[];
 }
 
 // Opening applies pages through several bounded provider round trips; it is
@@ -167,6 +211,50 @@ function printOpen(json: boolean, r: OpenViewResult, status: number, viaWindow =
   }
 }
 
+function printOpenAll(json: boolean, r: OpenAllResult, status: number): void {
+  if (json) {
+    console.log(JSON.stringify(r));
+  } else {
+    const lines: string[] = [];
+    const active = r.rigs.filter(rig => rig.outcome === "opened" || rig.outcome === "reused").length;
+    lines.push(r.error
+      ? r.error
+      : `Bulk terminal open (${r.provider}): ${active} rig(s) opened/reused out of ${r.rigs.length}.`);
+    for (const rig of r.rigs) {
+      lines.push(`  [${rig.outcome}] ${rig.view}${rig.opened.length ? ` (${rig.opened.length} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
+      for (const s of rig.skipped) lines.push(`    skipped ${s.seat}: ${s.reason}`);
+      for (const n of rig.notes ?? []) lines.push(`    note: ${n}`);
+    }
+    for (const n of r.notes ?? []) lines.push(`  note: ${n}`);
+    console.log(lines.join("\n"));
+  }
+  const hasOpenedOrReused = Array.isArray(r.rigs) && r.rigs.some(rig => rig.outcome === "opened" || rig.outcome === "reused");
+  if (status >= 400 || (!r.ok && !hasOpenedOrReused)) {
+    process.exitCode = status >= 500 ? 2 : 1;
+  }
+}
+
+function printCloseAll(json: boolean, r: CloseAllResult, status: number): void {
+  if (json) {
+    console.log(JSON.stringify(r));
+  } else {
+    const lines: string[] = [];
+    if (r.error) lines.push(r.error);
+    else if (r.viewers.length === 0) lines.push(r.notes?.[0] ?? "no OpenRig rig viewers recorded");
+    else {
+      for (const v of r.viewers) {
+        lines.push(`  [${v.outcome}] ${v.view} (${v.provider}:${v.target})${v.reason ? ` — ${v.reason}` : ""}`);
+      }
+    }
+    for (const n of r.notes ?? []) if (r.viewers.length > 0) lines.push(`  note: ${n}`);
+    console.log(lines.join("\n"));
+  }
+  const anyFailed = Array.isArray(r.viewers) && r.viewers.some(v => v.outcome === "failed");
+  if (status >= 400 || !r.ok || anyFailed) {
+    process.exitCode = status >= 500 ? 2 : 1;
+  }
+}
+
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
     "Open the OpenRig view and agent conversations in terminal tiles",
@@ -180,8 +268,9 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
 
   cmd
     .command("open")
-    .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
+    .argument("[view]", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
+    .option("--all", "Open one viewer per local rig in sorted rig-name order")
     .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted outside herdr-app); inside a herdr-app terminal --window still asks for a desktop window, and plain open reuses herdr-app")
@@ -198,13 +287,45 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
     .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
+    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
       follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
       suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
       const session = opts.session?.trim();
       const { maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } = opts;
       const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
+      if (opts.all) {
+        const failBulk = (code: string, error: string, provider = opts.provider?.trim() ?? "herdr") => {
+          printOpenAll(opts.json ?? false, { ok: false, provider, rigs: [], code, error }, 400);
+        };
+        if (view !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with a <view> argument."); return; }
+        if (opts.follow !== undefined || hasControls) { failBulk("invalid_arguments", "--all cannot be combined with --follow or following controls."); return; }
+        if (opts.expectedPlan !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --expected-plan."); return; }
+        if (opts.appHome !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --app-home."); return; }
+        const named = opts.provider?.trim();
+        if (named && ["herdr-app", "cmux", "rex"].includes(named)) {
+          failBulk("unsupported_provider", `--all supports herdr or tmux --window; ${named} is unsupported.`, named); return;
+        }
+        if (named === "tmux" && !opts.window) {
+          failBulk("tmux_requires_window", "tmux requires --window with --all.", "tmux"); return;
+        }
+        await withClient(deps, async (client) => {
+          if (opts.window || !named) {
+            const res = await openAllTerminalWindows(client, named, deps.windowDeps, session);
+            printOpenAll(opts.json ?? false, res, 200);
+            return;
+          }
+          const res = await client.post<OpenAllResult>("/api/terminal/open-all",
+            { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
+            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          printOpenAll(opts.json ?? false, res.data, res.status);
+        });
+        return;
+      }
+      if (!view) {
+        printResult(opts.json ?? false, { ok: false, code: "view_required", error: "Provide <view> or pass --all." }, 400);
+        return;
+      }
       const following: FollowControls | undefined = opts.follow !== undefined || hasControls
         ? { enabled: opts.follow !== false, maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } : undefined;
       const herdrApp = herdrAppClient(opts, deps);
@@ -295,13 +416,38 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     });
 
   cmd
-    .command("close <view>")
-    .description("Close a herdr-app Rig view (rv-…): its cells leave the layout, then only its own viewers end; seats keep running")
+    .command("close")
+    .argument("[view]", "Close a herdr-app Rig view (rv-…), or pass --all for OpenRig-owned rig viewers")
+    .description("Close a herdr-app Rig view (rv-…) or OpenRig-recorded rig viewers (--all); seats keep running")
+    .option("--all", "Close OpenRig-recorded rig viewers created by OpenRig")
+    .option("--provider <name>", "Limit --all close to herdr or tmux")
+    .option("--session <name>", "Herdr session on the daemon's host for --all close")
     .option("--app-home <dir>", "herdr-app home the view is in (default: herdr-app's own)")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { appHome?: string; json?: boolean }) => {
+    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; appHome?: string; json?: boolean }) => {
       const deps = getDeps();
       const env = deps.env ?? process.env;
+      if (opts.all) {
+        if (view !== undefined) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with a <view> argument." }, 400);
+          return;
+        }
+        if (opts.appHome !== undefined) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with --app-home." }, 400);
+          return;
+        }
+        await withClient(deps, async (client) => {
+          const res = await client.post<CloseAllResult>("/api/terminal/close-all",
+            { ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.session !== undefined ? { session: opts.session.trim() } : {}) },
+            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          printCloseAll(opts.json ?? false, res.data, res.status);
+        });
+        return;
+      }
+      if (!view) {
+        printResult(opts.json ?? false, { ok: false, code: "view_required", error: "Provide <view> or pass --all." }, 400);
+        return;
+      }
       await withClient(deps, async (client) => {
         const res = await client.post<OpenViewResult>("/api/terminal/close", { view, provider: "herdr-app",
           herdrApp: { appHome: opts.appHome ? resolve(opts.appHome) : herdrAppHome(env) } }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });

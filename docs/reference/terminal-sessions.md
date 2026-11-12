@@ -212,7 +212,10 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 ## HTTP API
 
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.
-- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>`.
+- `POST /api/terminal/open-all` (bearer auth): `{ provider?: "herdr", session?: string, viewportColumns?: number, reuseLive?: boolean }`.
+- `POST /api/terminal/close-all` (bearer auth): `{ provider?: "herdr" | "tmux", session?: string }`.
+- `POST /api/terminal/rig-viewers` and `DELETE /api/terminal/rig-viewers` (bearer auth): record and retire CLI-created plain-tmux `rig:` viewer sessions.
+- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>` (optional `&bulk=1` for `rig:<name>` bulk partitioning).
 - `GET /api/terminal/status?provider=herdr&session=<name>`.
 - The alias `POST /api/rigs/:rigId/terminal/open` accepts the same session and
   preview binding, with the rig determining the view.
@@ -223,6 +226,38 @@ session keeps the normal HTTP 200 provider result with `ok: false`, its selected
 `session`, an error code and direct-attach guidance.
 The `kernel_seats_unavailable` result also keeps the selected session, so the CLI
 reports that known failure instead of replacing it with an unconfirmed-session error.
+
+## Bulk rig viewers (--all)
+
+`rig terminal open --all` opens one viewer per non-empty local rig in sorted
+rig-name order (`rig:kernel` once as a rig view; never `openrig kernel` or
+`saved:kernel`). Supported providers are `herdr` (which uses `reuseLive` on `--all`
+to reuse an intact live workspace without rewriting an existing ownership record),
+desktop `--window` with Herdr installed (opening one Herdr window once Herdr is
+preflighted, then applying per-rig workspaces), or `--provider tmux --window`
+(opening one tagged `openrig-view-<id>` tmux session per non-empty rig with an
+`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, and `rex` return
+`unsupported_provider`; plain `tmux` without `--window` returns
+`tmux_requires_window`. Seats on remote hosts (`host != null`) are reported under
+`skipped`, and stopped/unbound/external seats become `absent`.
+
+When a `rig:<name>` (or bare `<name>`) viewer is created cleanly in Herdr with
+complete workspace, tab, and pane identity — or registered before window launch in
+the plain-tmux `--window` bulk/rig flow — OpenRig records an ownership entry per
+endpoint under `private/terminal-rig-viewers`. Saved, pod, seat, task, reused,
+incomplete-identity, and pre-existing viewers opened before or outside this
+ownership ledger have no record and are left untouched. If a CLI `tmux --window`
+launch fails after creating a rig viewer, OpenRig verifies matching nonce, window/pane
+inventory, and zero attached clients before killing and retiring the session;
+modified, attached, or unconfirmed viewers are retained and reported as `cleanup: "unknown"`.
+
+`rig terminal close --all [--provider herdr|tmux] [--session <name>]` reads the
+recorded ownership ledger per endpoint and verifies current inventory before closing.
+Unmodified `rig:` viewers are closed (`closed`) and their underlying agent tmux
+sessions continue running. Viewers with foreign or modified tabs/panes/nonce are
+kept whole (`kept`: `not_separable` for Herdr, `ownership_unconfirmed` for tmux).
+Missing or already-removed targets report `already_gone` and clear their stale
+records; unreachable providers leave records intact (`provider_unreachable`).
 
 ## Task terminal views
 

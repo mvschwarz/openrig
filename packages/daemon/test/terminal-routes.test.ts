@@ -146,3 +146,52 @@ describe("measured welcome width at the HTTP boundary", () => {
     expect(openView).toHaveBeenCalledExactlyOnceWith({ view: "saved:kernel", provider: "herdr", viewportColumns, expectedPlan: "width-plan" });
   });
 });
+
+describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () => {
+  it("delegates /open-all and maps unsupported_provider / body_invalid / 503", async () => {
+    const openAll = vi.fn(async () => ({ provider: "herdr", ok: true, rigs: [{ rig: "a", view: "rig:a", outcome: "opened", opened: ["op@a"], absent: [], degraded: [], skipped: [] }] }));
+    const { app } = makeApp({ service: { openAll } });
+    const okRes = await post(app, "/api/terminal/open-all", { provider: "herdr", reuseLive: true });
+    expect(okRes.status).toBe(200);
+    expect(openAll).toHaveBeenCalledExactlyOnceWith({ provider: "herdr", reuseLive: true });
+
+    const badJson = await app.request("/api/terminal/open-all", { method: "POST", body: "{", headers: { "content-type": "application/json" } });
+    expect(badJson.status).toBe(400);
+
+    const unsupApp = makeApp({ service: { openAll: async () => ({ provider: "cmux", ok: false, code: "unsupported_provider", error: "unsupported", rigs: [] }) } }).app;
+    expect((await post(unsupApp, "/api/terminal/open-all", { provider: "cmux" })).status).toBe(400);
+
+    const downApp = makeApp({ service: undefined }).app;
+    expect((await post(downApp, "/api/terminal/open-all", {})).status).toBe(503);
+  });
+
+  it("delegates /close-all and /rig-viewers", async () => {
+    const closeAll = vi.fn(async () => ({ ok: true, viewers: [{ view: "rig:a", provider: "herdr", target: "w1", outcome: "closed" }] }));
+    const registerRigViewer = vi.fn(async () => ({ ok: true }));
+    const retireRigViewer = vi.fn(async () => ({ ok: true }));
+    const { app } = makeApp({ service: { closeAll, registerRigViewer, retireRigViewer } });
+
+    const closeRes = await post(app, "/api/terminal/close-all", { provider: "herdr" });
+    expect(closeRes.status).toBe(200);
+    expect(closeAll).toHaveBeenCalledExactlyOnceWith({ provider: "herdr" });
+
+    const badViewer = await post(app, "/api/terminal/rig-viewers", { kind: "tmux" });
+    expect(badViewer.status).toBe(400);
+
+    const viewerPayload = {
+      kind: "tmux", view: "rig:a", sessionName: "openrig-view-1", sessionId: "$1",
+      nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], phase: "created",
+    };
+    const regRes = await post(app, "/api/terminal/rig-viewers", viewerPayload);
+    expect(regRes.status).toBe(200);
+    expect(registerRigViewer).toHaveBeenCalledExactlyOnceWith(viewerPayload);
+
+    const delRes = await app.request("/api/terminal/rig-viewers", {
+      method: "DELETE",
+      body: JSON.stringify({ kind: "tmux", sessionId: "$1", nonce: "n1" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(delRes.status).toBe(200);
+    expect(retireRigViewer).toHaveBeenCalledExactlyOnceWith({ kind: "tmux", sessionId: "$1", nonce: "n1" });
+  });
+});
