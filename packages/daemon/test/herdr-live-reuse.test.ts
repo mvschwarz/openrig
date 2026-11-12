@@ -104,14 +104,16 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
     expect(h.socket).toEqual(["tab.focus"]);
   });
 
-  it.each(["throws", "other-tab"] as const)("reports no reuse when herdr's focus %s, and creates no replacement", async (focus) => {
+  it.each(["throws", "other-tab"] as const)("opens a fresh workspace when herdr's focus %s, and names the one it kept", async (focus) => {
+    // PR 3068 review: an unconfirmed focus is one more uncertain branch, never a failed open
     const h = herdr();
     await h.adapter.openView(demoView(), { reuseLive: true });
     h.state.focus = focus;
     const second = await h.adapter.openView(demoView(), { reuseLive: true });
-    expect(second).toMatchObject({ ok: false, opened: [], pages: 0, error: "Herdr did not confirm the existing view selection; no replacement workspace was created." });
+    expect(second).toMatchObject({ ok: true, opened: SEATS, pages: 1 });
     expect(second.reusedWorkspace).toBeUndefined();
-    expect(h.workspaces.map(ws => ws.label)).toEqual(["demo"]);
+    expect(second.notes?.[0]).toMatch(/^Workspace w1 already shows this view, but herdr did not confirm focusing its tab w1:t1( \(.+\))?; it was kept\.$/);
+    expect(h.workspaces.map(ws => ws.label)).toEqual(["demo", "demo (2)"]);
   });
 
   it("opens a new, numbered workspace when the existing one's tiles aren't attached, and names the one it kept", async () => {

@@ -718,17 +718,15 @@ export class HerdrAdapter implements TerminalProvider {
     for (const id of found.unconfirmed) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known
     if (!found.live) return null;
     const { workspace_id: id, tab_id: tabId } = found.live;
-    // As --window does: the reply must name this exact tab and workspace, or the view isn't proven on screen.
+    // The reuse counts only when the reply names this exact tab and workspace; anything less is one more uncertain
+    // branch: keep that workspace, say so, and open a fresh one (headless callers need the view, not the focus).
     let focused: unknown;
     try { focused = (await this.transport.request("tab.focus", { tab_id: tabId }))["tab"]; }
     catch (err) { focused = err instanceof Error ? err.message : String(err); }
     const tab = focused && typeof focused === "object" ? focused as Record<string, unknown> : null;
     if (tab?.["tab_id"] !== tabId || tab?.["workspace_id"] !== id) {
-      notes.push(`Workspace ${id} already shows this view, but herdr did not confirm focusing its tab ${tabId}${typeof focused === "string" ? ` (${focused})` : ""}; its contents were kept and no replacement workspace was created.`);
-      return {
-        provider: this.name, ok: false, opened: [], absent: [...view.absent], degraded: [...view.degraded], pages: 0,
-        error: "Herdr did not confirm the existing view selection; no replacement workspace was created.", notes,
-      };
+      notes.push(`Workspace ${id} already shows this view, but herdr did not confirm focusing its tab ${tabId}${typeof focused === "string" ? ` (${focused})` : ""}; it was kept.`);
+      return null;
     }
     notes.push(`Workspace ${id} already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened.`);
     return {
