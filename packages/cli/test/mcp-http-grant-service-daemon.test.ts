@@ -989,6 +989,21 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(back.text).not.toContain("qitem-split-hidden");
   });
 
+  it("a scoped show of its own item never carries the answers a person returned to it; the owner's read does", async () => {
+    const served = await listen();
+    const asExternal = await connect(served.url);
+    const own = (await asExternal("rig_queue_create", { destination: "lead@team-a", body: "my task" })).structured.qitemId as string;
+    // The item asked of a person, and their answer row back to the caller: another row, from a person, linked to it.
+    db.prepare("UPDATE queue_items SET destination_session = 'human-x@external' WHERE qitem_id = ?").run(own);
+    await repo.createHumanAnswer({ sourceSession: "human-x@external", destinationSession: CALLER, body: "The person's private reasoning",
+      inboundReplyTo: own, nudge: false } as never);
+    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ answers: [{ by: "human-x@external" }] });
+    const shown = await asExternal("rig_queue_show", { qitemId: own });
+    expect(shown.isError).toBe(false);
+    expect(shown.structured.item).not.toHaveProperty("answers");
+    expect(shown.text).not.toContain("private reasoning");
+  });
+
   it("an id-reuse conflict never names another item's parties, and still names the external caller's own", async () => {
     const served = await listen();
     const asExternal = await connect(served.url);
