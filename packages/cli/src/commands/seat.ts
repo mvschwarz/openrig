@@ -536,6 +536,16 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
       }
       if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
     });
+  cmd.command("set-input-route").argument("<seat>")
+    .requiredOption("--route <route>", "typed or native")
+    .requiredOption("--reason <text>").option("--json")
+    .description("Choose this seat's managed input route; native requires a current capable runner")
+    .action(async (seat: string, opts: { route: string; reason: string; json?: boolean }) => {
+      if (!["typed", "native"].includes(opts.route) || !opts.reason.trim()) {
+        console.error("Supply --route typed|native and a reason."); process.exitCode = 1; return;
+      }
+      await guardRequest("POST", `/api/seat/set-input-route/${encodeURIComponent(seat)}`, { route: opts.route, reason: opts.reason }, opts.json);
+    });
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
     .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")
