@@ -6,6 +6,7 @@ import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-sta
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { personRegistrationOffer } from "../person-registration-offer.js";
 import {
   startDaemon,
   stopDaemon,
@@ -160,24 +161,6 @@ export function realDeps(): LifecycleDeps {
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
   };
-}
-
-/** What `daemon start` tells the agent setting OpenRig up when the person registry holds nobody: the offer, in the
- *  output it reads at that moment. Empty when a person is registered, or when the registry can't be read, since an
- *  unreadable registry isn't evidence that nobody is registered. */
-export async function personRegistrationOffer(): Promise<string[]> {
-  try {
-    const { participantsView } = await import("@openrig/daemon/gateway-human-registry");
-    const view = participantsView();
-    if (!view.ok || view.participants.some((p) => p.kind === "person")) return [];
-  } catch {
-    return [];
-  }
-  return [
-    "No person is registered yet, so OpenRig's questions to a person, such as another machine asking to pair, can't reach anyone.",
-    "If you're setting OpenRig up for someone, offer to register them now. Ask the name to use, and only on their yes run:",
-    '  rig gateway human add <id> --display-name "<name>" --delivery-class B --default',
-  ];
 }
 
 export function daemonCommand(depsOverride?: LifecycleDeps): Command {
