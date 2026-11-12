@@ -6,6 +6,7 @@ import { hydrateSnapshot } from "../src/hydrate.js";
 import { renderScreen } from "../src/render.js";
 import { createViewState } from "../src/state.js";
 import { rowStatusGlyph, statusGlyph } from "../src/topology/glyphs.js";
+import { displayTime } from "../src/time.js";
 
 // Fixtures mirror the SERVED shapes traced firsthand at 5f3b5bd4 (Phase-2
 // endpoint-shape survey): real field names, real enum values, real evidence
@@ -162,6 +163,7 @@ const FIXTURES: Record<string, unknown> = {
   "/api/queue/list?state=pending&limit=50": [],
   "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
   "/api/queue/recent-transitions?scope=rig&rig=myrig&limit=20": [],
+  "/api/queue/hosted-members": { hostId: "mm2-openrig1", members: [] },
 };
 
 function fixtureClient(
@@ -730,6 +732,41 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       "dev.pi-quiet": "idle",
       "dev.claude-quiet": "idle",
     });
+  });
+
+  it("lists connected assistants and their check-in under the seat tables, one rig's in the rig view", async () => {
+    const hosted = { hostId: "mm2-openrig1", members: [
+      { seat: "chat@myrig", rung: false, status: "check-in-overdue", lastCheckInAt: "2026-11-12T13:05:00.000Z", expectedMinutes: 60, onRequest: false, reporter: "openrig-observed" },
+      { seat: "desk@myrig", rung: false, status: "on-request", lastCheckInAt: "2026-11-12T12:00:00.000Z", expectedMinutes: null, onRequest: true, reporter: "openrig-observed" },
+      { seat: "bot@downrig", rung: false, status: "a-newer-status", lastCheckInAt: null, expectedMinutes: null, onRequest: false, reporter: "openrig-observed", reason: "not shown" },
+    ] };
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/queue/hosted-members": hosted }));
+    expect(snap.readErrors.some((error) => error.includes("hosted"))).toBe(false);
+
+    const rigView = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    rigView.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const rigLines = renderScreen(rigView.get(), snap, { cols: 220, rows: 60 }).lines.join("\n");
+    expect(rigLines).toContain("Connected assistants (outside the terminal; each checks its own queue):");
+    expect(rigLines).toContain(`chat@myrig  overdue: last check-in ${displayTime("2026-11-12T13:05:00.000Z")}, expected every 60 min; its schedule may be off or waiting for an approval`);
+    expect(rigLines).toContain(`desk@myrig  on request: it checks its queue when a person asks it; last check-in ${displayTime("2026-11-12T12:00:00.000Z")}`);
+    expect(rigLines).not.toContain("bot@downrig");
+
+    const instanceView = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    instanceView.dispatch({ type: "drill", resource: "host", name: snap.hosts[0]!.name });
+    const instanceLines = renderScreen(instanceView.get(), snap, { cols: 160, rows: 60 }).lines.join("\n");
+    expect(instanceLines).toContain("chat@myrig  overdue:");
+    // A status this TUI doesn't know reads unknown, without the newer daemon's reason.
+    expect(instanceLines).toContain("bot@downrig  unknown");
+    expect(instanceLines).not.toContain("not shown");
+  });
+
+  it("lists no connected assistants, and reports no failed read, when the daemon doesn't serve them", async () => {
+    const snap = await hydrateSnapshot(fixtureClient({ "/api/queue/hosted-members": { status: 404 } }));
+    expect(snap.hosts[0]!.connectedAssistants).toBeUndefined();
+    expect(snap.readErrors).toEqual([]);
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    expect(renderScreen(view.get(), snap, { cols: 160, rows: 60 }).lines.join("\n")).not.toContain("Connected assistants");
   });
 
   it("shows confirmed missing sessions as detached unless lifecycle still requires attention", async () => {

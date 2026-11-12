@@ -97,6 +97,15 @@ export interface HostNode {
   /** true/false only when a probe answered; null keeps missing or unknown distinct. */
   reachable: boolean | null;
   rigs: RigNode[];
+  /** Roster members outside any terminal (assistants reaching the team over MCP) and their check-in, read from this
+   *  daemon only. Absent when not read or the daemon doesn't serve them. */
+  connectedAssistants?: ConnectedAssistant[];
+}
+
+/** A connected assistant's check-in as this daemon reports it. */
+export interface ConnectedAssistant {
+  seat: string;
+  checkIn: Pick<import("@openrig/daemon/connection-contract").MemberCheckIn, "status" | "lastCheckInAt" | "expectedMinutes" | "onRequest" | "reason">;
 }
 
 export type SpecKind = "rig" | "agent" | "workflow";

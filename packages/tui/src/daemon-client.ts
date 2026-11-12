@@ -419,6 +419,11 @@ export class DaemonClient {
     const query = [item ? `item=${encodeURIComponent(item)}` : null, view ? `view=${encodeURIComponent(view)}` : null].filter(Boolean).join("&");
     return this.get(`/api/attention${query ? `?${query}` : ""}`);
   }
+  /** Connected assistants (roster members outside any terminal) and their check-in. Optional: an older daemon has no
+   *  such route. */
+  hostedMembers() {
+    return this.get("/api/queue/hosted-members", this.optionalFetchImpl);
+  }
   queueItem(qitemId: string, options: { optional?: boolean } = {}) {
     return this.get(`/api/queue/${encodeURIComponent(qitemId)}`, options.optional ? this.optionalFetchImpl : this.fetchImpl);
   }

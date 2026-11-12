@@ -138,7 +138,9 @@ anything up. It's a status only. Work addressed to a member that isn't checking 
 isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
 gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
 reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats, and `rig ps` (with or
-without `--nodes`) lists connected assistants after its table, one line each; its `--json` output is unchanged.
+without `--nodes`) lists connected assistants after its table, one line each; its `--json` output is unchanged. The TUI's
+instance and rig tables list them the same way after their seats, with times in the viewer's zone; with a daemon that
+doesn't serve them, the tables list none.
 When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
 line; when that notice is filed doesn't change.
 

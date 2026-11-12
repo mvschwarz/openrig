@@ -31,6 +31,7 @@ import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
+import { connectedAssistantLines } from "./connected-assistants.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
@@ -867,6 +868,7 @@ function instanceContentLines(
       });
     }
   }
+  lines.push(...connectedAssistantLines(host.connectedAssistants, null, state.filter, contentWidth, state.timeZone));
   lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention${attentionUnknown ? ` · ${attentionUnknown} attention unknown` : ""} · ${openCount}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
   lines.push(...recentLines(snap, scope, contentWidth, false, state.timeZone));
   return lines;
@@ -1107,6 +1109,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         zones,
       });
     }
+    if (!podFilter) lines.push(...connectedAssistantLines(host.connectedAssistants, rig.name, state.filter, contentWidth, state.timeZone));
     lines.push({ text: "" });
     const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
     const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
