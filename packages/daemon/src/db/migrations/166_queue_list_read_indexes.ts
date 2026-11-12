@@ -2,7 +2,7 @@ import type { Migration } from "../migrate.js";
 
 /** Bound queue selection by its existing order, and notification reads by their eligible history. */
 export const queueListReadIndexesSchema: Migration = {
-  name: "165_queue_list_read_indexes.sql",
+  name: "166_queue_list_read_indexes.sql",
   sql: `
     CREATE INDEX IF NOT EXISTS idx_queue_items_created
       ON queue_items(ts_created DESC);
