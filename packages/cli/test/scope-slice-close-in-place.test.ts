@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
+import { Hono } from "hono";
 import YAML from "yaml";
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
@@ -12,6 +13,17 @@ import {
   readSliceReadiness,
   recordJudgment,
 } from "../../daemon/src/domain/proof/judgments.js";
+import { createDb } from "../../daemon/src/db/connection.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { coreSchema } from "../../daemon/src/db/migrations/001_core_schema.js";
+import { eventsSchema } from "../../daemon/src/db/migrations/003_events.js";
+import { streamItemsSchema } from "../../daemon/src/db/migrations/023_stream_items.js";
+import { queueItemsSchema } from "../../daemon/src/db/migrations/024_queue_items.js";
+import { queueTransitionsSchema } from "../../daemon/src/db/migrations/025_queue_transitions.js";
+import { missionControlActionsSchema } from "../../daemon/src/db/migrations/037_mission_control_actions.js";
+import { SliceIndexer } from "../../daemon/src/domain/slices/slice-indexer.js";
+import { SliceDetailProjector } from "../../daemon/src/domain/slices/slice-detail-projector.js";
+import { slicesRoutes } from "../../daemon/src/routes/slices.js";
 
 interface CaptureResult {
   exitCode: number;
@@ -37,6 +49,34 @@ function initGitRepo(root: string): void {
 function commitAll(root: string, msg = "fixture"): void {
   execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
   execFileSync("git", ["-C", root, "commit", "-m", msg, "-q"], { stdio: "ignore" });
+}
+
+function mountSlicesApi(slicesRoot: string, workspaceRoot: string) {
+  const db = createDb();
+  migrate(db, [
+    coreSchema,
+    eventsSchema,
+    streamItemsSchema,
+    queueItemsSchema,
+    queueTransitionsSchema,
+    missionControlActionsSchema,
+  ]);
+  db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+  const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+  const projector = new SliceDetailProjector({ db, indexer });
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("settingsStore" as never, {
+      resolveOne: (key: string) => ({
+        value: key === "workspace.root" ? workspaceRoot : path.join(workspaceRoot, "workspace.yaml"),
+      }),
+    });
+    c.set("sliceIndexer" as never, indexer);
+    c.set("sliceDetailProjector" as never, projector);
+    await next();
+  });
+  app.route("/api/slices", slicesRoutes());
+  return { db, indexer, app };
 }
 
 async function runScope(args: string[], workspaceOrMissionsRoot: string): Promise<CaptureResult> {
@@ -209,7 +249,10 @@ describe("#2727 rig scope slice close --in-place", () => {
       note: "shipped in place",
       path: sliceDir,
       proofApplicability: {
-        changed: false,
+        evaluated: false,
+        changed: null,
+        pathPreserved: true,
+        receiptFilesPreserved: true,
         judgmentCount: 1,
       },
     });
@@ -330,7 +373,10 @@ describe("#2727 rig scope slice close --in-place", () => {
       status: "closed-superseded",
       inPlace: false,
       proofApplicability: {
+        evaluated: false,
         changed: true,
+        pathPreserved: false,
+        receiptFilesPreserved: true,
         judgmentCount: 1,
       },
     });
@@ -405,17 +451,41 @@ describe("#2727 rig scope slice close --in-place", () => {
     const closedSlices = JSON.parse((await runScope(["slice", "ls", "--mission", "m-mixed", "--state", "closed", "--json"], missionsRoot)).stdout).slices;
     expect(closedSlices.map((s: { name: string }) => s.name)).toEqual([deferredName, supersededName]);
 
-    // Audit: in-place non-delivery closures must not trigger missing_proof.
+    // Audit: inspect real mission.findings and slices[].findings shape (no buckets field),
+    // with a positive unproved-delivered control alongside non-delivery closures so both
+    // missing filtering and wrong-field reads fail.
+    const createdUnprovedDelivered = await runScope(["slice", "create", "m-mixed", "delivered-unproved", "--json"], missionsRoot);
+    expect(createdUnprovedDelivered.exitCode).toBe(0);
+    const unprovedDeliveredDir = JSON.parse(createdUnprovedDelivered.stdout).slice.path as string;
+    const unprovedDeliveredName = path.basename(unprovedDeliveredDir);
+    writeFile(
+      path.join(unprovedDeliveredDir, "SPEC.md"),
+      "---\nid: OPR.1.0.1.4\nstatus: active\n---\n# delivered-unproved\n\n## Intent\nDelivered without proof artifacts.\n\n## Mini-requirements\n1. Positive audit control.\n\n## Proof contract\n- [x] Unproved deliverable\n",
+    );
+    expect(
+      (await runScope(["slice", "close", unprovedDeliveredName, "--mission", "m-mixed", "--in-place", "--reason", "delivered", "--json"], missionsRoot)).exitCode,
+    ).toBe(0);
+
     const auditRes = await runScope(["audit", "--mission", "m-mixed", "--json"], missionsRoot);
     expect(auditRes.exitCode).toBe(0);
     const auditPayload = JSON.parse(auditRes.stdout);
-    const missingProofPaths = [
-      ...(auditPayload.buckets?.medium ?? []),
-      ...(auditPayload.buckets?.high ?? []),
-    ]
-      .filter((item: { findings: Array<{ kind: string }> }) => item.findings.some((f) => f.kind === "missing_proof"))
-      .map((item: { path: string }) => item.path);
-    expect(missingProofPaths).toEqual([]);
+    expect(auditPayload.ok).toBe(true);
+    expect(auditPayload.buckets).toBeUndefined();
+    expect(Array.isArray(auditPayload.mission?.findings)).toBe(true);
+    expect(Array.isArray(auditPayload.slices)).toBe(true);
+    expect(auditPayload.slices.map((s: { name: string }) => s.name)).toEqual([
+      delivered.sliceName,
+      deferredName,
+      supersededName,
+      unprovedDeliveredName,
+    ]);
+    for (const entry of auditPayload.slices) {
+      expect(Array.isArray(entry.findings)).toBe(true);
+    }
+    const slicesWithMissingProof = auditPayload.slices
+      .filter((s: { findings: Array<{ kind: string }> }) => s.findings.some((f) => f.kind === "missing_proof"))
+      .map((s: { name: string }) => s.name);
+    expect(slicesWithMissingProof).toEqual([unprovedDeliveredName]);
   });
 
   it("enforces zero-change controls on invalid combinations (--reason delivered without --in-place, unknown reason, already in closed/, missing slice)", async () => {
@@ -553,5 +623,393 @@ describe("#2727 rig scope slice close --in-place", () => {
     expect(fs.readFileSync(evidencePath, "utf8")).toBe(beforeEvidence);
     expect(fs.readFileSync(intactSpecPath, "utf8")).toBe(beforeIntactSpec);
     expect(fs.readFileSync(intactJudgmentPath, "utf8")).toBe(beforeIntactJudgment);
+  });
+
+  it("rolls back mission.yaml membership and prior slice writes on persistent node or PROGRESS.md write failure without excluding unfinished work from readiness", async () => {
+    const accepted = await seedAcceptedSlice("m-rollback", "accepted-one");
+    const createdUnfinished = await runScope(["slice", "create", "m-rollback", "unfinished-two", "--json"], missionsRoot);
+    expect(createdUnfinished.exitCode).toBe(0);
+    const unfinishedDir = JSON.parse(createdUnfinished.stdout).slice.path as string;
+    const unfinishedName = path.basename(unfinishedDir);
+    const unfinishedSpecPath = path.join(unfinishedDir, "SPEC.md");
+    const unfinishedProgressPath = path.join(unfinishedDir, "PROGRESS.md");
+    const unfinishedEvidencePath = path.join(unfinishedDir, "proof", "evidence.md");
+    const missionManifestPath = path.join(accepted.missionDir, "mission.yaml");
+    const acceptedJudgmentPath = path.join(accepted.sliceDir, "proof", "judgments", "00000001.md");
+
+    writeFile(
+      unfinishedSpecPath,
+      [
+        "---",
+        "id: OPR.1.0.1.2",
+        "status: active",
+        "---",
+        "# unfinished-two",
+        "",
+        "## Intent",
+        "Unfinished work that must stay counted in readiness if close fails.",
+        "",
+        "## Mini-requirements",
+        "1. Complete work.",
+        "",
+        "## Proof contract",
+        "- [ ] Unjudged deliverable <!-- proof-item: unjudged-item -->",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      unfinishedProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "status: active",
+        "---",
+        "# Progress",
+        "",
+        "- [ ] Still in flight.",
+        "",
+      ].join("\n"),
+    );
+    writeFile(unfinishedEvidencePath, "Unfinished evidence note.\n");
+    commitAll(projectRoot, "seed rollback mission");
+
+    expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
+
+    const beforeMissionManifest = fs.readFileSync(missionManifestPath, "utf8");
+    const beforeSpec = fs.readFileSync(unfinishedSpecPath, "utf8");
+    const beforeProgress = fs.readFileSync(unfinishedProgressPath, "utf8");
+    const beforeEvidence = fs.readFileSync(unfinishedEvidencePath, "utf8");
+    const beforeAcceptedJudgment = fs.readFileSync(acceptedJudgmentPath, "utf8");
+
+    // 1. Persistent node write failure: every writeFileSync to SPEC.md fails (both forward update and catch-block restore).
+    const origWriteFileSync = fs.writeFileSync.bind(fs);
+    let specWriteAttempts = 0;
+    const specWriteSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+      if (path.resolve(String(file)) === path.resolve(unfinishedSpecPath)) {
+        specWriteAttempts++;
+        throw Object.assign(new Error("EACCES: persistent simulated node write refusal"), { code: "EACCES" });
+      }
+      return origWriteFileSync(file, data, options as fs.WriteFileOptions);
+    }) as typeof fs.writeFileSync);
+
+    let failedNodeClose: CaptureResult;
+    try {
+      failedNodeClose = await runScope(
+        ["slice", "close", unfinishedName, "--mission", "m-rollback", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+    } finally {
+      specWriteSpy.mockRestore();
+    }
+
+    expect(failedNodeClose.exitCode).toBe(1);
+    expect(specWriteAttempts).toBeGreaterThanOrEqual(2);
+    expect(failedNodeClose.stderr).toContain("EACCES: persistent simulated node write refusal");
+    expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
+    expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
+    expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
+    expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
+    expect(fs.readFileSync(unfinishedEvidencePath, "utf8")).toBe(beforeEvidence);
+    expect(fs.readFileSync(acceptedJudgmentPath, "utf8")).toBe(beforeAcceptedJudgment);
+    expect(failedNodeClose.stderr).toContain("rollback failure");
+
+    // 2. Persistent PROGRESS.md write failure after SPEC.md write succeeded: both SPEC.md and mission.yaml roll back.
+    let progressWriteAttempts = 0;
+    let specWritesObserved = 0;
+    const progressWriteSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+      if (path.resolve(String(file)) === path.resolve(unfinishedSpecPath)) {
+        specWritesObserved++;
+      }
+      if (path.resolve(String(file)) === path.resolve(unfinishedProgressPath)) {
+        progressWriteAttempts++;
+        throw Object.assign(new Error("EACCES: persistent simulated progress write refusal"), { code: "EACCES" });
+      }
+      return origWriteFileSync(file, data, options as fs.WriteFileOptions);
+    }) as typeof fs.writeFileSync);
+
+    let failedProgressClose: CaptureResult;
+    try {
+      failedProgressClose = await runScope(
+        ["slice", "close", unfinishedName, "--mission", "m-rollback", "--in-place", "--reason", "deferred", "--json"],
+        missionsRoot,
+      );
+    } finally {
+      progressWriteSpy.mockRestore();
+    }
+
+    expect(failedProgressClose.exitCode).toBe(1);
+    expect(specWritesObserved).toBeGreaterThanOrEqual(2);
+    expect(progressWriteAttempts).toBeGreaterThanOrEqual(2);
+    expect(failedProgressClose.stderr).toContain("EACCES: persistent simulated progress write refusal");
+    expect(failedProgressClose.stderr).toContain("rollback failure");
+    expect(fs.readFileSync(missionManifestPath, "utf8")).toBe(beforeMissionManifest);
+    expect(fs.readFileSync(unfinishedSpecPath, "utf8")).toBe(beforeSpec);
+    expect(fs.readFileSync(unfinishedProgressPath, "utf8")).toBe(beforeProgress);
+    expect(readMissionReadiness(accepted.missionDir).state).toBe("not-ready");
+  });
+
+  it("reconciles preexisting PROGRESS.md frontmatter status across CLI, SliceIndexer, and GET /api/slices for delivered and non-delivery in-place closures while preserving unrelated PROGRESS content and default moving close", async () => {
+    const delivered = await seedAcceptedSlice("m-progress-sync", "active-to-delivered");
+    const deliveredProgressPath = path.join(delivered.sliceDir, "PROGRESS.md");
+    writeFile(
+      deliveredProgressPath,
+      [
+        "---",
+        "doc: slice-progress",
+        "# current cursor comment",
+        "status: active",
+        "rail-item: PL-2727",
+        "---",
+        "# Progress — active-to-delivered",
+        "",
+        "## Outcomes",
+        "- Kept author progress note.",
+        "",
+      ].join("\n"),
+    );
+
+    const createdDeferred = await runScope(["slice", "create", "m-progress-sync", "active-to-deferred", "--json"], missionsRoot);
+    const deferredDir = JSON.parse(createdDeferred.stdout).slice.path as string;
+    const deferredName = path.basename(deferredDir);
+    writeFile(path.join(deferredDir, "SPEC.md"), "---\nid: OPR.1.0.1.2\nstatus: active\n---\n# active-to-deferred\n");
+    writeFile(
+      path.join(deferredDir, "PROGRESS.md"),
+      "---\ndoc: slice-progress\nstatus: active\nowner: team-alpha\n---\n# Progress — deferred\n\n- Deferred body.\n",
+    );
+
+    const createdSuperseded = await runScope(["slice", "create", "m-progress-sync", "done-to-superseded", "--json"], missionsRoot);
+    const supersededDir = JSON.parse(createdSuperseded.stdout).slice.path as string;
+    const supersededName = path.basename(supersededDir);
+    writeFile(path.join(supersededDir, "SPEC.md"), "---\nid: OPR.1.0.1.3\nstatus: done\n---\n# done-to-superseded\n");
+    writeFile(
+      path.join(supersededDir, "PROGRESS.md"),
+      "---\ndoc: slice-progress\nstatus: shipped\nphase: a\n---\n# Progress — superseded\n\n- Previously shipped body.\n",
+    );
+
+    const createdPlainProgress = await runScope(["slice", "create", "m-progress-sync", "frontmatterless-progress", "--json"], missionsRoot);
+    const plainProgressDir = JSON.parse(createdPlainProgress.stdout).slice.path as string;
+    const plainProgressName = path.basename(plainProgressDir);
+    writeFile(path.join(plainProgressDir, "SPEC.md"), "---\nid: OPR.1.0.1.4\nstatus: active\n---\n# frontmatterless-progress\n");
+    const plainProgressPath = path.join(plainProgressDir, "PROGRESS.md");
+    const beforePlainProgress = "# Progress — plain\n\nstatus: active in body text only\n";
+    writeFile(plainProgressPath, beforePlainProgress);
+
+    const createdNoStatusFm = await runScope(["slice", "create", "m-progress-sync", "statusless-frontmatter", "--json"], missionsRoot);
+    const noStatusFmDir = JSON.parse(createdNoStatusFm.stdout).slice.path as string;
+    const noStatusFmName = path.basename(noStatusFmDir);
+    writeFile(path.join(noStatusFmDir, "SPEC.md"), "---\nid: OPR.1.0.1.5\nstatus: active\n---\n# statusless-frontmatter\n");
+    const noStatusFmProgressPath = path.join(noStatusFmDir, "PROGRESS.md");
+    const beforeNoStatusFmProgress = "---\ndoc: slice-progress\nrail-item: PL-NOSTATUS\n---\n# Progress — no status key\n";
+    writeFile(noStatusFmProgressPath, beforeNoStatusFmProgress);
+
+    const createdMoving = await runScope(["slice", "create", "m-progress-sync", "moving-default", "--json"], missionsRoot);
+    const movingDir = JSON.parse(createdMoving.stdout).slice.path as string;
+    const movingName = path.basename(movingDir);
+    writeFile(path.join(movingDir, "SPEC.md"), "---\nid: OPR.1.0.1.6\nstatus: active\n---\n# moving-default\n");
+    writeFile(path.join(movingDir, "PROGRESS.md"), "---\nstatus: active\n---\n# Progress — moving\n");
+
+    commitAll(projectRoot, "seed progress sync");
+
+    const { db, indexer, app } = mountSlicesApi(missionsRoot, projectRoot);
+    try {
+      // Pre-close API baseline confirms PROGRESS.md status overrides SPEC.md before closure.
+      const preAllRes = await app.request("/api/slices?refresh=1");
+      expect(preAllRes.status).toBe(200);
+      const preAll = (await preAllRes.json()) as { slices: Array<{ name: string; status: string; rawStatus: string }> };
+      const preByName = new Map(preAll.slices.map((s) => [s.name, s]));
+      expect(preByName.get(delivered.sliceName)?.status).toBe("active");
+      expect(preByName.get(deferredName)?.status).toBe("active");
+      expect(preByName.get(supersededName)).toMatchObject({ status: "done", rawStatus: "shipped" });
+
+      const beforeMissionManifest = fs.readFileSync(path.join(delivered.missionDir, "mission.yaml"), "utf8");
+      const beforeDeliveredJudgment = fs.readFileSync(path.join(delivered.sliceDir, "proof", "judgments", "00000001.md"), "utf8");
+
+      expect((await runScope(["slice", "close", delivered.sliceName, "--mission", "m-progress-sync", "--in-place", "--reason", "delivered", "--json"], missionsRoot)).exitCode).toBe(0);
+      expect((await runScope(["slice", "close", deferredName, "--mission", "m-progress-sync", "--in-place", "--reason", "deferred", "--json"], missionsRoot)).exitCode).toBe(0);
+      expect((await runScope(["slice", "close", supersededName, "--mission", "m-progress-sync", "--in-place", "--reason", "superseded", "--json"], missionsRoot)).exitCode).toBe(0);
+      expect((await runScope(["slice", "close", plainProgressName, "--mission", "m-progress-sync", "--in-place", "--reason", "delivered", "--json"], missionsRoot)).exitCode).toBe(0);
+      expect((await runScope(["slice", "close", noStatusFmName, "--mission", "m-progress-sync", "--in-place", "--reason", "deferred", "--json"], missionsRoot)).exitCode).toBe(0);
+      expect((await runScope(["slice", "close", movingName, "--mission", "m-progress-sync", "--reason", "wontfix", "--json"], missionsRoot)).exitCode).toBe(0);
+
+      // API + SliceIndexer consistency across active / done / closed filters:
+      const activeApi = (await (await app.request("/api/slices?filter=active&refresh=1")).json()) as {
+        slices: Array<{ name: string }>;
+      };
+      expect(activeApi.slices).toEqual([]);
+
+      const doneApi = (await (await app.request("/api/slices?filter=done&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string; railItem: string | null; readiness: { state: string } }>;
+      };
+      expect(doneApi.slices.map((s) => s.name).sort()).toEqual([delivered.sliceName, plainProgressName]);
+      const deliveredApiEntry = doneApi.slices.find((s) => s.name === delivered.sliceName)!;
+      expect(deliveredApiEntry).toMatchObject({
+        status: "done",
+        rawStatus: "done",
+        railItem: "PL-2727",
+        readiness: { state: "ready" },
+      });
+
+      const closedApi = (await (await app.request("/api/slices?filter=closed&refresh=1")).json()) as {
+        slices: Array<{ name: string; status: string; rawStatus: string }>;
+      };
+      expect(closedApi.slices.map((s) => s.name).sort()).toEqual([deferredName, supersededName, noStatusFmName]);
+      const closedByName = new Map(closedApi.slices.map((s) => [s.name, s]));
+      expect(closedByName.get(deferredName)).toMatchObject({ status: "closed", rawStatus: "closed-deferred" });
+      expect(closedByName.get(supersededName)).toMatchObject({ status: "closed", rawStatus: "closed-superseded" });
+      expect(closedByName.get(noStatusFmName)).toMatchObject({ status: "closed", rawStatus: "closed-deferred" });
+
+      expect(indexer.get(delivered.sliceName)?.status).toBe("done");
+      expect(indexer.get(supersededName)?.status).toBe("closed");
+
+      // CLI standing agrees with API/indexer, and default moving close moved 06-moving-default under closed/.
+      const cliShipped = JSON.parse((await runScope(["slice", "ls", "--mission", "m-progress-sync", "--state", "shipped", "--json"], missionsRoot)).stdout).slices;
+      expect(cliShipped.map((s: { name: string }) => s.name)).toEqual([delivered.sliceName, plainProgressName]);
+      const cliClosed = JSON.parse((await runScope(["slice", "ls", "--mission", "m-progress-sync", "--state", "closed", "--json"], missionsRoot)).stdout).slices;
+      expect(cliClosed.map((s: { name: string }) => s.name)).toEqual([deferredName, supersededName, noStatusFmName, movingName]);
+      expect(fs.existsSync(path.join(delivered.missionDir, "closed", movingName))).toBe(true);
+
+      // Unrelated PROGRESS.md fields, comments, body, frontmatter-less PROGRESS.md, status-less frontmatter PROGRESS.md,
+      // parent mission status, and accepted judgment receipt are preserved.
+      const updatedDeliveredProgress = fs.readFileSync(deliveredProgressPath, "utf8");
+      expect(readFrontmatter(deliveredProgressPath)).toMatchObject({
+        doc: "slice-progress",
+        status: "done",
+        "rail-item": "PL-2727",
+      });
+      expect(updatedDeliveredProgress).toContain("# current cursor comment");
+      expect(updatedDeliveredProgress).toContain("- Kept author progress note.");
+      expect(fs.readFileSync(plainProgressPath, "utf8")).toBe(beforePlainProgress);
+      expect(fs.readFileSync(noStatusFmProgressPath, "utf8")).toBe(beforeNoStatusFmProgress);
+      expect(YAML.parse(fs.readFileSync(path.join(delivered.missionDir, "mission.yaml"), "utf8")).metadata.status).toBe(
+        YAML.parse(beforeMissionManifest).metadata.status,
+      );
+      expect(fs.readFileSync(path.join(delivered.sliceDir, "proof", "judgments", "00000001.md"), "utf8")).toBe(beforeDeliveredJudgment);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reports proofApplicability as unevaluated and transitions readiness to unknown when accepted evidence cites SPEC.md or mission.yaml mutated by in-place close", async () => {
+    // 1. Judgment citing SPEC.md becomes unknown when delivered --in-place updates SPEC.md status/closed-on.
+    expect((await runScope(["mission", "create", "m-cited-evidence", "--json"], missionsRoot)).exitCode).toBe(0);
+    const createdCitedSpec = await runScope(["slice", "create", "m-cited-evidence", "cited-spec", "--json"], missionsRoot);
+    const citedSpecDir = JSON.parse(createdCitedSpec.stdout).slice.path as string;
+    const citedSpecName = path.basename(citedSpecDir);
+    const citedSpecId = String(readFrontmatter(path.join(citedSpecDir, "SPEC.md")).id ?? "OPR.1.0.1.1");
+    writeFile(
+      path.join(citedSpecDir, "SPEC.md"),
+      [
+        "---",
+        `id: ${citedSpecId}`,
+        "status: active",
+        "---",
+        "# cited-spec",
+        "",
+        "## Intent",
+        "Judgment cites SPEC.md directly.",
+        "",
+        "## Mini-requirements",
+        "1. Verify cited node hashing.",
+        "",
+        "## Proof contract",
+        "- [x] Verified node-cited item <!-- proof-item: cited-spec-item -->",
+        "",
+      ].join("\n"),
+    );
+
+    const preSpecReadiness = readSliceReadiness(citedSpecDir);
+    recordJudgment(
+      missionsRoot,
+      {
+        scope: `m-cited-evidence/slices/${citedSpecName}`,
+        item: preSpecReadiness.items[0]!.id,
+        verdict: "accept",
+        reason: "Verified against SPEC.md bytes",
+        evidence: ["SPEC.md"],
+        expectedRevision: preSpecReadiness.items[0]!.revision,
+        expectedPrevious: null,
+      },
+      "judge@trial",
+      "transport:v1",
+    );
+    expect(readSliceReadiness(citedSpecDir).state).toBe("ready");
+    const citedSpecReceiptPath = path.join(citedSpecDir, "proof", "judgments", "00000001.md");
+    const beforeSpecReceipt = fs.readFileSync(citedSpecReceiptPath, "utf8");
+
+    // 2. Judgment citing ../../mission.yaml becomes unknown when non-delivery --in-place updates mission.yaml active=false.
+    const createdCitedManifest = await runScope(["slice", "create", "m-cited-evidence", "cited-manifest", "--json"], missionsRoot);
+    const citedManifestDir = JSON.parse(createdCitedManifest.stdout).slice.path as string;
+    const citedManifestName = path.basename(citedManifestDir);
+    const citedManifestId = String(readFrontmatter(path.join(citedManifestDir, "SPEC.md")).id ?? "OPR.1.0.1.2");
+    writeFile(
+      path.join(citedManifestDir, "SPEC.md"),
+      [
+        "---",
+        `id: ${citedManifestId}`,
+        "status: active",
+        "---",
+        "# cited-manifest",
+        "",
+        "## Intent",
+        "Judgment cites mission.yaml.",
+        "",
+        "## Mini-requirements",
+        "1. Verify cited manifest hashing.",
+        "",
+        "## Proof contract",
+        "- [x] Verified manifest-cited item <!-- proof-item: cited-manifest-item -->",
+        "",
+      ].join("\n"),
+    );
+    const preManifestReadiness = readSliceReadiness(citedManifestDir);
+    recordJudgment(
+      missionsRoot,
+      {
+        scope: `m-cited-evidence/slices/${citedManifestName}`,
+        item: preManifestReadiness.items[0]!.id,
+        verdict: "accept",
+        reason: "Verified against mission.yaml bytes",
+        evidence: ["../../mission.yaml"],
+        expectedRevision: preManifestReadiness.items[0]!.revision,
+        expectedPrevious: null,
+      },
+      "judge@trial",
+      "transport:v1",
+    );
+    expect(readSliceReadiness(citedManifestDir).state).toBe("ready");
+    const citedManifestReceiptPath = path.join(citedManifestDir, "proof", "judgments", "00000001.md");
+    const beforeManifestReceipt = fs.readFileSync(citedManifestReceiptPath, "utf8");
+    commitAll(projectRoot, "seed cited evidence slices");
+
+    // Close cited-spec in place (delivered --json)
+    const closeSpecRes = await runScope(
+      ["slice", "close", citedSpecName, "--mission", "m-cited-evidence", "--in-place", "--reason", "delivered", "--json"],
+      missionsRoot,
+    );
+    expect(closeSpecRes.exitCode).toBe(0);
+    expect(fs.readFileSync(citedSpecReceiptPath, "utf8")).toBe(beforeSpecReceipt);
+    const afterSpecReadiness = readSliceReadiness(citedSpecDir);
+    expect(afterSpecReadiness.state).toBe("unknown");
+    expect(afterSpecReadiness.items[0]!.state).toBe("unknown");
+    const closeSpecPayload = JSON.parse(closeSpecRes.stdout);
+    expect(closeSpecPayload.closed.proofApplicability).toEqual({
+      evaluated: false,
+      changed: null,
+      pathPreserved: true,
+      receiptFilesPreserved: true,
+      judgmentCount: 1,
+    });
+
+    // Close cited-manifest in place (deferred human output)
+    const closeManifestHuman = await runScope(
+      ["slice", "close", citedManifestName, "--mission", "m-cited-evidence", "--in-place", "--reason", "deferred"],
+      missionsRoot,
+    );
+    expect(closeManifestHuman.exitCode).toBe(0);
+    expect(closeManifestHuman.stdout).toContain("applicability not evaluated");
+    expect(fs.readFileSync(citedManifestReceiptPath, "utf8")).toBe(beforeManifestReceipt);
+    const afterManifestReadiness = readSliceReadiness(citedManifestDir);
+    expect(afterManifestReadiness.state).toBe("unknown");
+    expect(afterManifestReadiness.items[0]!.state).toBe("unknown");
   });
 });
