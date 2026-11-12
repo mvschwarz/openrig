@@ -17,6 +17,7 @@ import {
   OPENRIG_DIR,
   STATE_FILE,
   resolveBindIntent,
+  statusGuardMessage,
 } from "../daemon-lifecycle.js";
 
 interface ProcessAliveDeps {
@@ -37,14 +38,16 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 
 export type SignalOutcome = "sent" | "missing" | "not-permitted";
 
-/** kill(pid, 0) as an outcome. POSIX: only ESRCH means no such process; EPERM means the process
- *  EXISTS but this shell may not signal it (another user's process, or a sandbox such as Codex's). */
+/** kill(pid, 0) as an outcome. POSIX: kill(pid, 0) fails only with ESRCH (no such process) or EPERM
+ *  (the process EXISTS but this shell may not signal it: another user's process, or a sandbox such as
+ *  Codex's). Only ESRCH is "missing"; any other error is not evidence of death, so it reads as
+ *  "not-permitted" (uninspectable), never as a dead process. */
 export function signalProbe(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill): SignalOutcome {
   try {
     kill(pid, 0);
     return "sent";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM" ? "not-permitted" : "missing";
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "not-permitted";
   }
 }
 
@@ -159,6 +162,11 @@ export function realDeps(): LifecycleDeps {
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
+    // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
+    pidNamespace: () => {
+      if (process.platform !== "linux") return "host";
+      try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
+    },
   };
 }
 
@@ -388,6 +396,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
             console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
             console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
+          } else if (status.pidUnseen) {
+            // #2860: the same words as the command guard.
+            const unseen = statusGuardMessage(status);
+            console.log(unseen.fact);
+            console.log(`  ${unseen.consequence}`);
+            console.log(`  ${unseen.action}`);
           } else if (!status.startPending) {
             // A pending start's probe was refused, not inconclusive; its line above says what is known.
             console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");

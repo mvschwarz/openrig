@@ -19,6 +19,7 @@ import {
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
 import { LEAK_GUARD_RULES_ENV, leakGuardRulesPath } from "./leak-guard-rules.mjs";
+import { packEntries } from "./npm-pack-json.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = "Genericize the content, cite its public home, or re-home it to the internal pack root.";
@@ -155,13 +156,22 @@ function derivePackageArtifacts(packageRoot) {
   if (packed.status !== 0) {
     throw new Error(`npm artifact enumeration failed:\n${packed.stderr || packed.stdout || `exit ${packed.status}`}`);
   }
-  let parsed;
+  let entries = [];
   try {
-    parsed = JSON.parse(packed.stdout);
+    // One parse, in the shared reader: a JSON string (even one holding a serialized list) is not a shape npm prints.
+    entries = packEntries(packed.stdout);
   } catch (error) {
-    throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
+    if (error instanceof SyntaxError) throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
+    // not a shape npm prints: reported below as no files array
   }
-  const rawFiles = parsed?.[0]?.files;
+  // One package is packed here; scanning only the first of several would issue a receipt for part of the artifact.
+  if (entries.length > 1) {
+    throw new Error(
+      `npm artifact enumeration listed ${entries.length} packages where one was packed; `
+      + "run the gate for one package (check --package-root and any npm workspaces setting)",
+    );
+  }
+  const rawFiles = entries[0]?.files;
   if (!Array.isArray(rawFiles)) throw new Error("npm artifact enumeration returned no files array");
   const files = rawFiles.map((entry) => entry?.path).filter((path) => typeof path === "string");
   if (files.length !== rawFiles.length || files.length === 0) {
