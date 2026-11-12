@@ -342,9 +342,16 @@ startup reconcile leaves when every kernel terminal is gone, for example after a
 reboot. It does not detect a reboot as such. It uses the same restore as
 `rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
 until the seats are ready. A kernel stopped with `rig down kernel`, including
-one whose seats were already detached, stays down on later starts. So do a kernel
-with only some seats stopped and seats you unclaimed. Start one again with
-`rig up kernel --existing`.
+one whose seats were already detached, stays down on later starts; start it again
+with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+While the kernel's other seats are running, `rig up kernel --existing` refuses
+(it restores only a kernel with no live session), so start one stopped seat with
+`rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
+kernel's latest restore-usable snapshot and resumes its saved conversation; a seat
+it can't resume is reported as waiting for a decision, not as started.
+`rig seat launch <seat> --fresh --reason "…"` instead starts a new conversation
+with no continuity source: use it only when you want a fresh occupant, since the
+seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
 empty server and probe again. It records the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux
@@ -866,6 +873,9 @@ What it costs:
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
+A terminal OpenRig didn't start, such as a seat joined with `rig attach --self`,
+is left running: `rig down` names it with the commands to stop it by hand, and
+exits 2.
 Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop;
 `rig down` also prints the rig's recorded agent sessions and their activity
 before stopping them.
@@ -895,7 +905,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | --- | --- |
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
-| A restored seat still counts as needing attention after its prompt was answered | Its restore outcome is still `attention_required`, and answering the prompt or running `rig seat continue` doesn't change it. Once the agent is up in its pane, run `rig seat clear-attention <seat>`; see [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
+| A restored seat still counts as needing attention after its prompt was answered | After a full restore of a Claude or Codex seat, the daemon clears this by itself once the seat reads running or idle and passes its check. If it still counts, check its `restoreOutcome` in `rig ps --nodes --json` (the RESTORE column): when it is `attention_required`, run `rig seat clear-attention <seat>`, which says which check failed; answering the prompt again or running `rig seat continue` doesn't change it. For a partial restore, submit any startup text left in the input box without sending it again, and wait for the agent to respond before clearing attention. See [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |

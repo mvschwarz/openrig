@@ -140,7 +140,11 @@ that gateway side too. For the pane side, read:
 
 - `lastNudgeWireResult`: the wake send's result as stored (for example
   `verified`, `delivered-ack-pending`, `indeterminate:…`, `retained:…`,
-  `failed:…`). A claim never rewrites it; a later wake replaces it.
+  `failed:…`). A claim never rewrites it; a later wake replaces it. Each stored
+  form reads as one delivery fact (`readWakeOutcome`, `connection-contract.ts`).
+  A result no reader recognises reads `unknown`, never delivered: the wake ladder
+  treats it as an unconfirmed wake, which escalates past the window without a
+  re-send.
 - `lastNudgeResult`: the result as presented. It is the stored result, except
   that a claimed row whose stored result is `delivered-ack-pending` or
   `indeterminate:…` reads `claimed` (`presentedNudgeResult`). Unclaiming shows
@@ -175,8 +179,14 @@ The standing detector in `queue-stuck-sweep.ts` creates findings through the
 queue repository, with `evidenceRef: rig queue show <source-qitem-id>` pointing
 to the underlying durable work row. Unclaimed and undelivered findings go to
 the destination's orchestrator when one is derivable, otherwise to the
-destination itself, and that seat may be dead. Overdue claims go to their
-destination. Repeated detections reuse the existing finding without changing
+destination itself, and that seat may be dead. A wake that failed (`failed:…`)
+at a recorded agent seat with no `delegates_to` parent or `escalates_to` route is
+the exception: its finding tries the row's creator, then the operator agent
+(`agents.operator_session`), skipping an unset, confirmed-missing, self or
+unaccepted address, a bound terminal seat, and OpenRig's own machinery
+(`daemon@kernel` or a `@system` actor), so the finding's own wake isn't sent to the seat that just failed to
+take one. If neither can be used, it stays with the original seat and says why.
+Overdue claims go to their destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
 Previously, falling out of a reporting query could itself close a delivery or
 unclaimed finding. An unconfirmed retry, a fresh human-notification post window,

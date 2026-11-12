@@ -1056,30 +1056,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // (repo currently empty as of 2026-05-10; vendored
   // copy is the source of truth at v0).
   try {
-    const { PluginVendorService } = await import("./domain/plugin-vendor-service.js");
+    const { PluginVendorService, nodePluginVendorFs } = await import("./domain/plugin-vendor-service.js");
     const vendoredAssetsDir = nodePath.resolve(import.meta.dirname, "../assets/plugins");
     const userPluginsDir = getDefaultOpenRigPath("plugins");
-    const realFs = {
-      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
-      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
-      copyFileExclusive: (src: string, dest: string) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
-      exists: (p: string) => fs.existsSync(p),
-      mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
-      listFiles: (dir: string) => {
-        const r: string[] = [];
-        /** Collect relative file paths recursively. */
-        function w(d: string, pre: string) {
-          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-            if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name));
-            else r.push(pre ? nodePath.join(pre, e.name) : e.name);
-          }
-        }
-        w(dir, "");
-        return r;
-      },
-      statMode: (p: string) => fs.statSync(p).mode,
-      chmod: (p: string, m: number) => fs.chmodSync(p, m),
-    };
     const httpClient = async (url: string, opts?: { timeoutMs?: number }) => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? 5000);
@@ -1093,7 +1072,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const vendorService = new PluginVendorService({
       vendoredAssetsDir,
       userPluginsDir,
-      fs: realFs,
+      fs: nodePluginVendorFs(),
       httpClient,
       logger: (...args) => console.log("[openrig]", ...args),
     });
@@ -2125,7 +2104,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.sliceIndexer = sliceIndexer;
     if (sliceIndexer.isReady()) {
       const { watchProofSources } = await import("./domain/proof/source-watch.js");
-      deps.proofSourceWatch = watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
+      deps.proofSourceWatch = await watchProofSources(sliceIndexer.slicesRoot, () => sliceIndexer.invalidate(), eventBus, () => {
         sliceIndexer.invalidate();
         eventBus.emit({ type: "scope.sources_changed", scope: sliceIndexer.slicesRoot });
       });
@@ -2558,6 +2537,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     });
     deps.watchdogPolicyEngine = watchdogPolicyEngine;
     deps.watchdogScheduler = watchdogScheduler;
+    // The outbound network connector: a pass per active `rig network` binding. With none, it makes no network call.
+    {
+      const { NetworkConnectorService } = await import("./domain/network/network-connector.js");
+      const { NetworkBindingStore } = await import("./domain/network/network-bindings.js");
+      const pollSeconds = Number(process.env.OPENRIG_NETWORK_POLL_SECONDS);
+      deps.networkConnector = new NetworkConnectorService({
+        db: queueRepoInstance.db,
+        queueRepo: queueRepoInstance,
+        bindings: new NetworkBindingStore(queueRepoInstance.db, OPENRIG_HOME),
+        home: OPENRIG_HOME,
+        log: (line) => console.log(`[network] ${line}`),
+      }, Number.isFinite(pollSeconds) && pollSeconds >= 5 ? { intervalMs: pollSeconds * 1000 } : {});
+    }
 
     // OPR.0.5.6.24 F-14 — ONE parked-owner supervisor job per rig (mini-req 1):
     // ensured idempotently on the (policy, target_session) tuple; the anchor is

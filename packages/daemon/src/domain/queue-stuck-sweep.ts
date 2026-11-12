@@ -30,10 +30,11 @@ import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } f
 import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
-import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type InboxCheckIn, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
+import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -54,6 +55,12 @@ const RECOVERY_SEAT_RULES = [
 /** How an unroutable destination's finding names the rule that chose its recipient, in the order tried. */
 const NO_WAKE_ROUTE_RULES = [
   "the operator seat (workspace.operator_seat_name), a person",
+  "the row's creator",
+  "the operator agent (agents.operator_session)",
+] as const;
+
+/** How a failed wake's finding at a seat with no declared route names the rule that chose its recipient, in the order tried. */
+const FAILED_WAKE_ROUTE_RULES = [
   "the row's creator",
   "the operator agent (agents.operator_session)",
 ] as const;
@@ -284,7 +291,9 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string, targets:
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     for (const token of note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)) {
-      const named = [token, ...token.split(",").map((t) => t.trim())].filter(Boolean);
+      const named = [token, ...token.split(",").map((t) => t.trim())]
+        .filter(Boolean)
+        .map((t) => targets.includes(t) ? t : t.replace(/[.,;:)]$/, ""));
       if (!named.some((t) => targets.includes(t))) continue;
       for (const t of named) verified.add(t);
       break;
@@ -320,6 +329,12 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
  *  Use the closing transition, including archived history; later same-state notes
  *  and delivery receipts do not transfer responsibility. A newer cancellation
  *  without closure metadata still supersedes an older closing actor. */
+/** OpenRig's own machinery (the daemon, or a `@system` actor such as this sweep): it creates and closes rows, but it isn't
+ *  a seat that can act on a finding. */
+function isMachinerySession(session: string): boolean {
+  return session === "daemon@kernel" || session.endsWith("@system");
+}
+
 function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, row: QueueItem): string {
   // Unknown identity cannot establish a new owner. The caller retains this row's
   // established destination if the registry needed for classification is unavailable.
@@ -338,7 +353,7 @@ function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, 
        ORDER BY transition_id DESC LIMIT 1`,
   ).get(row.qitemId, row.qitemId) as { actor_session: string } | undefined;
   for (const session of [closure?.actor_session, row.sourceSession]) {
-    if (!session || session === "daemon@kernel" || session.endsWith("@system")) continue;
+    if (!session || isMachinerySession(session)) continue;
     if (!queueRepo.isHumanDestination(session) && queueRepo.acceptsDestination(session)) {
       return session;
     }
@@ -458,8 +473,9 @@ function deliveryResolutionEvidence(
     if (row.claimedAt) return `source claimed at ${row.claimedAt}`;
     if (row.state === "blocked") return "source parked";
     if (kind === "undelivered-wake") {
-      if (row.lastNudgeResult === "verified") return "source wake verified";
-      if (row.lastNudgeResult?.startsWith("wake-accepted:")) return "source wake accepted by its hosted trigger";
+      const wake = readWakeOutcome(row.lastNudgeResult);
+      if (wake?.fact === "accepted" && wake.renderVerified) return "source wake verified";
+      if (wake?.fact === "accepted" && wake.route === "hosted-trigger") return "source wake accepted by its hosted trigger";
     }
   }
   if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";
@@ -605,20 +621,36 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
  *  and what to do. Its work's age runs from each row's own time, which a check-in never resets. Built from the rows' fixed
  *  facts and the member's check-in state, never a current check-in's exact time, so a pass rewrites it only when the rows
  *  or that state change. */
-function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: InboxCheckIn,
+function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes: number, checkIn: MemberCheckIn,
   now: Date): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
-  const recent = checkIn.state === "seen" && now.getTime() - Date.parse(checkIn.at) <= thresholdMinutes * 60_000;
-  const checkIns = recent
-    ? `checking in: it read its own inbox within the last ${thresholdMinutes} min`
-    : checkIn.state === "seen"
-      ? `no check-in observed since ${checkIn.at}`
-      : checkIn.state === "never" ? "no check-in observed yet" : "unknown: its check-ins couldn't be read";
+  // The member's shared check-in status, in the same words `rig roster` uses (`describeCheckIn`). Only the words follow
+  // it; when this notice is filed doesn't. Where that line would carry the time of a check-in that keeps moving (checking
+  // in, on request, unknown), the notice says instead whether the member read its inbox within the threshold, so a
+  // check-in rewrites the notice only when it changes that, never its time alone. An overdue or never-seen member's line
+  // is fixed until it checks in, so it keeps its evidence.
+  const at = checkIn.lastCheckInAt;
+  const lately = at !== null && now.getTime() - Date.parse(at) <= thresholdMinutes * 60_000;
+  const recency = at === null ? "" : lately ? `; it read its own inbox within the last ${thresholdMinutes} min` : `; no check-in since ${at}`;
+  const recent = checkIn.status === "checking-in" || ((checkIn.status === "on-request" || checkIn.status === "unknown") && lately);
+  const checkIns = ((): string => {
+    switch (checkIn.status) {
+      case "checking-in": return `checking in: its last check-in is within twice its expected ${checkIn.expectedMinutes} min`;
+      case "on-request": return `on request: it checks its queue when a person asks it${recency}`;
+      case "unknown": return `unknown (${checkIn.reason ?? "its check-in status couldn't be read"})${recency}`;
+      case "check-in-overdue":
+      case "no-check-in-yet":
+      case "disconnected":
+        return describeCheckIn(checkIn);
+    }
+  })();
   const why = recent
-    ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
-    : checkIn.state === "unknown"
-      ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
-      : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
+    ? "it's reading its own inbox, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
+    : checkIn.status === "check-in-overdue"
+      ? "nobody has claimed these rows, and it hasn't checked in as often as its setup expects. Ask its owner to check its schedule or a pending approval, or route the work to another seat"
+      : checkIn.status === "unknown" && at === null
+        ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
+        : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
     summary: `Stuck sweep: unclaimed-backlog on ${member} (${count})`,
     body:
@@ -684,7 +716,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // Every yield and every awaited write lets other code run: indexes read before it are dropped, and `othersRan`
     // tells a list read before it that its rows need a fresh read.
     let othersRan = 0;
-    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); };
+    /** Each seat's agent-seat reading (agentSeatNode, below), dropped with the indexes: another writer can declare a
+     *  seat's delegation parent while the pass yields or awaits a write. */
+    const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
+    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); agentSeats.clear(); };
     // A successor index whose build took at least half of a stretch that yielded by elapsed time is not rebuilt for
     // the rest of the pass: the yield drops it, the next stretch would pay the build again and end the same way after a
     // few rows, so the rows would pay about one build each instead of one per STUCK_SWEEP_YIELD_EVERY_ROWS. Those rows
@@ -1274,8 +1309,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       c.why += `. This finding goes to ${recipient.seat}, ${NO_WAKE_ROUTE_RULES[recipient.chosen]}`;
       c.route = recipient.seat;
     };
-    /** The two re-routes, in order, for one candidate. */
-    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); };
     for (const c of candidates) {
       if (dueToYield()) await yieldLoop();
       routeAroundMissing(c);
@@ -1299,10 +1332,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // (below). A finding per row stays for a person's address or a terminal seat, for a declared route that failed (its
     // finding names why, and a declared delegation parent with no session is one), and for a row that already has a
     // recovery.
-    const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
     /** An agent seat's node: one whose runtime isn't a terminal, with no declared delegation parent, at an address that
      *  isn't a person's. An address the human registry can't classify counts as a person's. null for anything else. Read
-     *  once per seat per pass. */
+     *  once per seat until other code may have run (agentSeats). */
     const agentSeatNode = (session: string): { logicalId: string; rig: string } | null => {
       if (agentSeats.has(session)) return agentSeats.get(session)!;
       const nodeId = resolveSessionNodeId(deps.db, session);
@@ -1319,6 +1351,30 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       agentSeats.set(session, agent);
       return agent;
     };
+    // A wake that failed at a live agent seat with no delegation parent or escalates_to made its finding that same seat's,
+    // so the finding's own wake went to the seat that had just failed to take one, onto whatever was in its input box.
+    // The row's creator can act on it (resend, reroute or ask), as the waiting and parked-owner findings already route;
+    // for a seat that sent itself the work, a row OpenRig's own machinery created, or a creator that is a bound terminal
+    // seat (nothing there can claim it, as for the no-wake rule), the operator agent can. A declared
+    // route that failed keeps its fallback, and a finding the two re-routes above moved keeps its recipient. A wake that
+    // found no route never reached the seat, so a seat launched since keeps its own finding, whose wake is the one it missed.
+    const routeAroundFailedWake = (c: Candidate): void => {
+      if (c.kind !== "undelivered-wake" || !startsWithCI(c.row.lastNudgeResult, "failed:") || c.noWake
+        || c.route !== c.row.destinationSession
+        || routeNotes.has(c.row.qitemId) || agentSeatNode(c.route) === null) return;
+      const choices = [c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !isMachinerySession(seat)
+        && !sessionMissing(seat) && deps.queueRepo.acceptsDestination(seat) && !isBoundTerminalSeat(deps.db, seat));
+      if (chosen < 0) {
+        c.why += `; ${c.route} declares no delegation parent or escalates_to, and its creator and the operator agent (agents.operator_session) are each unset, missing, this seat, OpenRig's own machinery, a terminal seat or not an address this queue takes, so this finding stays addressed to it`;
+        return;
+      }
+      c.why += `; ${c.route} declares no delegation parent or escalates_to, so this finding goes to ${choices[chosen]}, ${FAILED_WAKE_ROUTE_RULES[chosen]}`;
+      c.route = choices[chosen]!;
+    };
+    /** The three re-routes, in order, for one candidate. The third reads no earlier pass: a failed wake's finding is
+     *  routed only here, on the row as it is right before the finding is created. */
+    const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); routeAroundFailedWake(c); };
     const selfRoutedUnclaimed = (c: Candidate): boolean => c.kind === "unclaimed-obligation"
       && c.route === c.row.destinationSession && !routeNotes.has(c.row.qitemId) && agentSeatNode(c.route) !== null;
     // A hosted member that polls for its work (no wake trigger) can't hear a finding, so each unclaimed row went to a
@@ -1455,7 +1511,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // A polling member's notice says whether it's checking in; an agent seat's names the route to add instead.
       const polled = rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat);
       const backlogText = (standsFor: BacklogRow[]) => polled
-        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now)
+        ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
         : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
       // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
       // else the operator agent. With none, it stays with the member, which reads it when it next checks.

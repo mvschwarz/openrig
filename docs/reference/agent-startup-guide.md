@@ -75,20 +75,20 @@ in the rig's `attentionCount` and the TUI's attention totals.
 After a full restore of a Claude or Codex seat, answering the prompt is enough. When
 the seat's activity next turns to running or idle, or when the whole restore completes
 after the seat already reads running or idle, the daemon checks the live seat: its tmux
-session is alive, and the pane runs the agent resuming the conversation the seat
-records. When the check passes, the restore outcome becomes `operator_recovered`, so
-the restore no longer makes the seat need attention. When it fails, the restore outcome
-stays and the seat still needs attention, which is true when the pane runs another
-conversation. A check that started before a newer restore of the seat doesn't settle
-the newer outcome.
+session is alive, and the agent in its pane was started to resume the conversation the
+seat records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When the check fails, the restore
+outcome stays and the seat still needs attention. The check uses launch evidence; it
+does not prove which conversation is open now.
 
 `rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
-command says which check failed, and `--reason` doesn't bypass it. If
-the seat records the wrong conversation and you know the right one, set it with
-`rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
-`clear-attention` again. After a restore of only some seats, or a community
-harness's assisted startup, `--reason "<what you saw>"` can acknowledge the
-outcome instead.
+command says which check failed, and `--reason` doesn't bypass it. If the seat records
+the wrong conversation and the agent in its pane was started with the right one, set it
+with `rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
+`clear-attention` again; a token the running agent wasn't started with fails the same
+check. After a restore of only some seats, or a community harness's assisted startup,
+`--reason "<what you saw>"` can acknowledge the outcome instead, once any startup text
+left in the input box is submitted (not sent again) and the seat has responded.
 
 ## Two Categories of Startup
 
@@ -278,7 +278,10 @@ with an old Claude header or input frame above it and Claude already running. A 
 input frame also keeps the check pending. If the current screen or process cannot be read, or the process identity is unconfirmed, the handover keeps
 waiting within the readiness window and fails if that window expires. Old screen text or the `claude` process label
 alone cannot complete this check. A healthy agent can therefore remain unconfirmed while those observations are
-unavailable; inspect its pane before deciding how to recover.
+unavailable; inspect its pane before deciding how to recover. When the launch was already sent, the failure's
+guidance names that pane and the result carries `replacementStarted` and `successorPane`: the previous agent was
+already ended, the new one may be working there without being registered as the seat's occupant, and another
+handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
@@ -401,6 +404,11 @@ Each startup file and action specifies when it applies:
 **A block you edited by hand is never overwritten.** OpenRig records what it last wrote in each managed block, so a launch, an exact resume, a handover or a runtime switch can refresh a block whose source file changed since. The record follows the file itself, so two links to one file share it. A block you've edited since OpenRig wrote it is left as you wrote it. The start's result names it (`guidance_block_edited`), and the seat is told in one line once it's ready, or in a handover's packet. A block OpenRig has no record of writing (any block written before these records were kept) that differs from its source works like this:
 - a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
 - an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
+
+**A file keeps one copy of each block.**
+- **Touched markers:** a marker an editor or formatter rewrapped, with spaces or line breaks inside the comment, still reads as its block, and the next write puts it back in OpenRig's form.
+- **Collected copies:** they're reduced to the first. Beside a copy you edited, OpenRig's own unedited copies and exact repeats are removed, and every different edited copy stays (`guidance_block_copies_removed`).
+- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
 
 An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 

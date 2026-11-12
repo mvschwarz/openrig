@@ -7,7 +7,7 @@
     "url": "https://github.com/mvschwarz"
   },
   "homepage": "https://github.com/mvschwarz/openrig-plugins",
-  "repository": "github:mvschwarz/openrig-plugins",
+  "repository": "https://github.com/mvschwarz/openrig-plugins",
   "license": "Apache-2.0",
   "keywords": ["openrig", "agent", "topology", "rig", "continuity", "coordination", "compaction", "handoff"],
   "skills": "./skills",

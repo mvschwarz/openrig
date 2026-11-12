@@ -1395,6 +1395,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+After reading an existing remote successor, record its exact closure target, including the host:
+  rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
+The note can accompany the closing update or be appended later; a separate note is not required.
+A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
+For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
+`)
     .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")

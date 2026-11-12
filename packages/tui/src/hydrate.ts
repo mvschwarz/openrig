@@ -287,8 +287,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
             : node.activityState?.display === "idle"
               ? "idle"
               : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
-                // A community harness gives no idle signal: a quiet screen is unknown, not idle.
-                : node.communityHarness ? "unknown" : "idle"))
+                // The daemon's activity word decides when it's served (as in `rig ps`): it said unknown, so a quiet
+                // screen stays unknown. A community harness gives no idle signal either. Only an older daemon that
+                // serves no activity word keeps the screen fallback.
+                : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
@@ -688,7 +690,7 @@ export async function hydrateSnapshot(
   // answer where there is one, else the registry's probe. Only a drilled-into remote host's rigs are read, through this
   // daemon's read-only forwarding: their names and states, never their seats. A registry entry for this host is this host.
   const registered = (hostsRead?.hosts ?? []).flatMap((h) => typeof h.id === "string" && h.id && h.id !== "local"
-    ? [{ id: h.id, reachable: h.status === "reachable" }] : []);
+    ? [{ id: h.id, reachable: h.status === "reachable" ? true : h.status === "unreachable" ? false : null }] : []);
   const aggStatus = new Map(aggHosts.filter((h) => h.hostId !== "local").map((h) => [h.hostId, h.status]));
   const remoteIds = [...new Set([...aggStatus.keys(), ...registered.map((h) => h.id)])].filter((id) => id !== localHost.name);
   const drilledRemote = remoteDrill && drilledHost && remoteIds.includes(drilledHost) ? drilledHost : null;
@@ -698,7 +700,9 @@ export async function hydrateSnapshot(
   const remoteHosts: HostNode[] = remoteIds.map((id) => ({
     id,
     name: id,
-    reachable: aggStatus.has(id) ? aggStatus.get(id) === "ok" : registered.some((h) => h.id === id && h.reachable),
+    reachable: aggStatus.has(id)
+      ? aggStatus.get(id) === "ok" ? true : aggStatus.get(id) === "unreachable" ? false : null
+      : registered.find((h) => h.id === id)?.reachable ?? null,
     rigs: id === drilledRemote
       ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id })).sort(byRigName)
       : [],
