@@ -5,6 +5,10 @@ import { lastMeaningfulTransition } from "./queue-waiting.js";
 /** Common provenance on existing diagnostic queue rows, never a second ledger.
  * Both deadline and delivery detectors consult the same recovery disposition. */
 export const recoveryTag = (qitemId: string): string => `recovery-for:${qitemId}`;
+/** #2988: a per-row stuck-sweep finding the sweep folded into a delegation parent's standing unclaimed-backlog notice. It
+ *  was closed by that fold, not by anyone acting on the row, so it no longer owns the row: every recovery lookup skips
+ *  it, and the row reads as one that never had a finding of its own (the notice now stands for it). */
+export const BACKLOG_FOLDED_TAG = "stuck-sweep-folded-into-backlog";
 function failedAttempt(db: Database.Database, qitemId: string): string | null {
   // A typing-guard refusal (retained:) is newer evidence about the original
   // obligation exactly like a failed nudge: a wake WAS offered after the
@@ -14,10 +18,12 @@ function failedAttempt(db: Database.Database, qitemId: string): string | null {
   // the unclaimed baton's retry path.
   return (db.prepare("SELECT last_nudge_attempt AS at FROM queue_items WHERE qitem_id = ? AND (last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'retained:%')").get(qitemId) as { at: string | null } | undefined)?.at ?? null;
 }
-export function recoveryId(db: Database.Database, qitemId: string, overdueDeadline?: string): string {
+export function recoveryId(db: Database.Database, qitemId: string, overdueDeadline?: string, afterFolded?: string): string {
   const evidence: unknown[] = [qitemId, lastMeaningfulTransition(db, qitemId)?.id ?? null, failedAttempt(db, qitemId)];
   // Keep existing IDs byte-for-byte unless a newer deadline needs its own recovery episode.
   if (overdueDeadline !== undefined) evidence.push(["overdue-claim", overdueDeadline]);
+  // A folded finding (#2988) took this row's id without owning it: a new finding is a new episode.
+  if (afterFolded !== undefined) evidence.push(["after-folded", afterFolded]);
   return `qitem-recovery-${createHash("sha256").update(JSON.stringify(evidence)).digest("hex").slice(0, 16)}`;
 }
 /** Rows whose tag text could hold a recovery tag: valid JSON stores a string verbatim or with
@@ -70,6 +76,7 @@ export function findQueueRecovery(db: Database.Database, qitemId: string, exclud
   } else {
     row = db.prepare(`SELECT qitem_id, state, ts_updated FROM queue_items
     WHERE ${RECOVERY_TAG_ROWS} AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+    AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = '${BACKLOG_FOLDED_TAG}')
     ${excludeTag ? "AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)" : ""}
     ${RECOVERY_ORDER}`)
       .get(...(excludeTag ? [tag, excludeTag] : [tag])) as { qitem_id: string; state: string; ts_updated: string } | undefined;
@@ -77,7 +84,7 @@ export function findQueueRecovery(db: Database.Database, qitemId: string, exclud
   return settleRecovery(db, qitemId, row);
 }
 function pickFromIndex(byTag: Map<string, RecoveryRow[]>, qitemId: string, excludeTag?: string): RecoveryRow | undefined {
-  return (byTag.get(recoveryTag(qitemId)) ?? []).find((r) => !excludeTag || !r.values.has(excludeTag));
+  return (byTag.get(recoveryTag(qitemId)) ?? []).find((r) => !r.values.has(BACKLOG_FOLDED_TAG) && (!excludeTag || !r.values.has(excludeTag)));
 }
 /** The chosen recovery row still owns custody unless it is closed and the original obligation moved after it. */
 function settleRecovery(db: Database.Database, qitemId: string, row: { qitem_id: string; state: string; ts_updated: string } | undefined): { qitemId: string; state: string } | null {
