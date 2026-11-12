@@ -57,10 +57,12 @@ describe("delivery suite stand-ins: the Claude Code Messages API", () => {
     expect(stream.at(-2)!.data.delta.stop_reason).toBe("end_turn");
 
     const [logged] = standIn.requests();
-    expect(logged).toMatchObject({ seq: 1, method: "POST", path: "/v1/messages", query: "?beta=true", marker: "DLV-D01-a1b2", rule: 0, action: "say",
+    expect(logged).toMatchObject({ seq: 1, method: "POST", path: "/v1/messages", marker: "DLV-D01-a1b2", rule: 0, action: "say",
       turn: { kind: "user", text: "<system-reminder>context</system-reminder>\nplease read DLV-D01-a1b2 now" } });
     // The token is recorded as present, never kept.
     expect(logged.headers.authorization).toBe("(present)");
+    expect(logged.headers["content-type"]).toBe("application/json");
+    expect(logged.query).toEqual({ beta: "true" });
   });
 
   it("answers a request that doesn't stream with one message", async () => {
@@ -112,7 +114,7 @@ describe("delivery suite stand-ins: the Claude Code Messages API", () => {
   });
 
   it("reads the typed text and tool results out of the request's last turn", () => {
-    expect(messagesTurnOf({ messages: [{ role: "user", content: "plain" }] })).toEqual({ kind: "user", text: "plain", parts: ["plain"] });
+    expect(messagesTurnOf({ messages: [{ role: "user", content: "plain" }] })).toEqual({ kind: "user", text: "plain", parts: [{ text: "plain", source: "text" }] });
     expect(messagesTurnOf({ messages: [{ role: "assistant", content: "hi" }] })).toEqual({ kind: "other", text: "", parts: [] });
     expect(messagesTurnOf({})).toEqual({ kind: "other", text: "", parts: [] });
   });
@@ -166,7 +168,7 @@ describe("delivery suite stand-ins: the Codex Responses API", () => {
   });
 
   it("reads the last input item as the turn", () => {
-    expect(responsesTurnOf({ input: "just text" })).toEqual({ kind: "user", text: "just text", parts: ["just text"] });
+    expect(responsesTurnOf({ input: "just text" })).toEqual({ kind: "user", text: "just text", parts: [{ text: "just text", source: "text" }] });
     expect(responsesTurnOf({ input: [{ type: "reasoning", summary: [] }] })).toEqual({ kind: "other", text: "", parts: [] });
   });
 });
@@ -179,7 +181,7 @@ describe("delivery suite stand-ins: what the log keeps about each turn", () => {
     const { turn, userTurns } = standIn.requests()[0];
     expect(userTurns).toBe(1);
     expect(turn.parts).toHaveLength(2); // the program's own context block, then the delivered message
-    expect(turn.parts[1]).toEqual({ text: message, bytes: Buffer.byteLength(message, "utf8"),
+    expect(turn.parts[1]).toEqual({ text: message, source: "text", bytes: Buffer.byteLength(message, "utf8"),
       sha256: createHash("sha256").update(message, "utf8").digest("hex"), markers: ["DLV-D15-1"] });
   });
 
@@ -193,6 +195,42 @@ describe("delivery suite stand-ins: what the log keeps about each turn", () => {
     const { turn, userTurns } = standIn.requests()[0];
     expect(userTurns).toBe(2);
     expect(turn.parts.map((p: { markers: string[] }) => p.markers)).toEqual([["DLV-D09-2"], ["DLV-D09-3"]]);
+  });
+
+  it("keeps a message typed during a tool run beside the tool's result, and matches and marks it (Claude)", async () => {
+    const standIn = await start("messages", { script: { rules: [{ on: "tool_result", when: "DLV-D02", say: "saw {{marker}}" }] } });
+    const stream = events((await post(`${standIn.url}/v1/messages`, { model: "m", stream: true, messages: [
+      { role: "user", content: "start DLV-D02-0" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "tool out" }, { type: "text", text: "while busy DLV-D02-1" }] },
+    ] })).text);
+    expect(stream.filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("")).toBe("saw DLV-D02-1");
+    const { turn, marker, userTurns } = standIn.requests()[0];
+    expect(marker).toBe("DLV-D02-1");
+    expect(userTurns).toBe(2);
+    expect(turn.kind).toBe("tool_result");
+    expect(turn.parts.map((p: { source: string; text: string }) => [p.source, p.text])).toEqual([["tool_result", "tool out"], ["text", "while busy DLV-D02-1"]]);
+  });
+
+  it("keeps a message typed during a tool run after the tool's output (Codex)", async () => {
+    const standIn = await start("responses", { script: { rules: [] } });
+    await post(`${standIn.url}/v1/responses`, { ...codexTurn("x"), input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "start DLV-D02-0" }] },
+      { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+      { type: "function_call_output", call_id: "c1", output: "tool out" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "while busy DLV-D02-1" }] },
+    ] });
+    const { turn, marker } = standIn.requests()[0];
+    expect(marker).toBe("DLV-D02-1");
+    expect(turn.kind).toBe("tool_result");
+    expect(turn.parts.map((p: { source: string; text: string }) => [p.source, p.text])).toEqual([["tool_result", "tool out"], ["text", "while busy DLV-D02-1"]]);
+  });
+
+  it("keeps the request body's raw size and sha256, to tie the parsed log to the wire", async () => {
+    const standIn = await start("messages", { script: { rules: [] } });
+    const raw = JSON.stringify(userTurn("wire DLV-1"));
+    await fetch(`${standIn.url}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+    expect(standIn.requests()[0]).toMatchObject({ rawBytes: Buffer.byteLength(raw), rawSha256: createHash("sha256").update(raw).digest("hex") });
   });
 
   it("doesn't count a message of tool results as a user turn", async () => {
@@ -236,6 +274,29 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
       expect(lines.map((l) => [l.seq, l.marker])).toEqual([[1, "DLV-1"], [2, "DLV-2"]]);
       expect(lines[0].body.messages.at(-1).content.at(-1).text).toBe("one DLV-1");
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("never logs a credential sent under a custom header or query name, only that it was present", async () => {
+    const sentinel = "sk-SENTINEL-must-not-be-logged-0123456789";
+    const dir = mkdtempSync(join(tmpdir(), "stand-in-sentinel-"));
+    try {
+      const logPath = join(dir, "requests.jsonl");
+      const standIn = await start("responses", { script: { rules: [] }, logPath });
+      await post(`${standIn.url}/v1/responses?api-key=${sentinel}&beta=1`, codexTurn("DLV-x"), { "x-provider-key": sentinel, "x-custom-auth": `Bearer ${sentinel}` });
+      const served = await (await fetch(`${standIn.url}/_stand-in/requests`)).text();
+      for (const recorded of [readFileSync(logPath, "utf8"), served]) {
+        expect(recorded).not.toContain(sentinel);
+        expect(recorded).toContain("x-provider-key");
+        expect(recorded).toContain("api-key");
+      }
+      expect(standIn.requests()[0]).toMatchObject({ query: { "api-key": "(present)", beta: "1" }, headers: { "x-provider-key": "(present)", "x-custom-auth": "(present)" } });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("listens on loopback only", async () => {
+    await expect(startResponsesStandIn({ script: { rules: [] }, host: "0.0.0.0" })).rejects.toThrow(/loopback only/);
+    const standIn = await start("messages", { script: { rules: [] }, host: "localhost" });
+    expect(standIn.url).toContain("localhost");
   });
 
   it("refuses a rule with no action or two", () => {

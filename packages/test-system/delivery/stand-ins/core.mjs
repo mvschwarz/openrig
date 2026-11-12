@@ -5,6 +5,9 @@
 //
 // What a stand-in proves is narrow: which requests the program sent, in what order, with what bytes. That request log is
 // the receiver-side record a case joins to OpenRig's own delivery record. It never proves a model's behaviour.
+//
+// The log keeps each request's body exactly, so it's knowingly sensitive: point a stand-in only at synthetic fixtures.
+// It listens on loopback only, and keeps header and query values only from a short list of safe names.
 
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -75,13 +78,26 @@ export function splitChunks(text, n = 1) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const REDACTED_HEADERS = new Set(["authorization", "x-api-key", "cookie"]);
+// Header and query values the log may keep. Every other value, which may be a credential a provider is configured to
+// send under any name (Codex's http_headers, env_http_headers, query_params), is logged as "(present)".
+const SAFE_HEADER_VALUES = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta"]);
+const SAFE_QUERY_VALUES = new Set(["beta"]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+function loggedHeaders(headers) {
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name, SAFE_HEADER_VALUES.has(name) ? value : "(present)"]));
+}
+
+function loggedQuery(params) {
+  return Object.fromEntries([...params.keys()].map((name) => [name, SAFE_QUERY_VALUES.has(name) ? params.getAll(name).join(",") : "(present)"]));
+}
 
 /**
  * Start a stand-in. `protocol` supplies the program's wire format:
- *   turnOf(body) -> { kind: "user" | "tool_result" | "other", text, parts: string[] }
- *     parts are the last turn's separate text pieces exactly as sent (a typed message is one; context the program adds,
- *     or a second message merged into the same turn, is another)
+ *   turnOf(body) -> { kind: "user" | "tool_result" | "other", text, parts: { text, source: "text" | "tool_result" }[] }
+ *     parts are the last turn's separate pieces as the program sent them: each text block (typed text, context the
+ *     program adds, or a second message merged into the turn) and each tool result. A turn holding any tool result is
+ *     kind "tool_result", and its text parts are kept beside it: a message typed during a tool run can arrive there.
  *   userTurns(body) -> number   how many user turns the request's history holds, tool results aside
  *   answer(ctx) -> Promise<void>   writes the response for the chosen rule
  *   other(req, res, body) -> boolean   serves a path the protocol knows besides its main one (count_tokens, a probe)
@@ -89,6 +105,7 @@ const REDACTED_HEADERS = new Set(["authorization", "x-api-key", "cookie"]);
  * Control routes for the harness, under /_stand-in/: GET requests (the log so far), POST release/<gate>.
  */
 export async function startStandIn(protocol, { script, logPath, port = 0, host = "127.0.0.1" } = {}) {
+  if (!LOOPBACK_HOSTS.has(host)) throw new Error(`stand-in listens on loopback only (127.0.0.1, ::1 or localhost), not ${host}`);
   const loaded = loadScript(script);
   const used = new Map();
   const requests = [];
@@ -116,8 +133,10 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString("utf8");
     const url = new URL(req.url ?? "/", "http://stand-in");
-    const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, REDACTED_HEADERS.has(k) ? "(present)" : v]));
-    const entry = { seq: ++seq, at: new Date().toISOString(), method: req.method, path: url.pathname, query: url.search, headers };
+    const rawBody = Buffer.concat(chunks);
+    // The request body's bytes as received, so a case can tie the parsed body below to the wire.
+    const entry = { seq: ++seq, at: new Date().toISOString(), method: req.method, path: url.pathname, query: loggedQuery(url.searchParams),
+      headers: loggedHeaders(req.headers), rawBytes: rawBody.length, rawSha256: createHash("sha256").update(rawBody).digest("hex") };
 
     if (url.pathname === "/_stand-in/requests" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(requests));
@@ -170,12 +189,12 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
   };
 }
 
-/** A turn as the log keeps it: each part's exact text with its UTF-8 byte length and sha256, and the markers it holds, so
- *  a case can tell one intact message from a merge of two or a message split across turns. */
+/** A turn as the log keeps it: each part's decoded text exactly, with its source, UTF-8 byte length, sha256 and the
+ *  markers it holds, so a case can tell one intact message from a merge of two or a message split across turns. */
 export function describeTurn(turn, marker) {
   const global = new RegExp(marker.source, "g");
-  return { kind: turn.kind, text: turn.text, parts: (turn.parts ?? []).map((text) => ({ text, bytes: Buffer.byteLength(text, "utf8"),
-    sha256: createHash("sha256").update(text, "utf8").digest("hex"), markers: text.match(global) ?? [] })) };
+  return { kind: turn.kind, text: turn.text, parts: (turn.parts ?? []).map(({ text, source }) => ({ text, source,
+    bytes: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex"), markers: text.match(global) ?? [] })) };
 }
 
 /** Write one server-sent event. */

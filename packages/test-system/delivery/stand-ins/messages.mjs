@@ -11,15 +11,16 @@ import { fillMarker, runCli, splitChunks, sse, startStandIn } from "./core.mjs";
 export function messagesTurnOf(body) {
   const last = Array.isArray(body?.messages) ? body.messages.at(-1) : null;
   if (!last || last.role !== "user") return { kind: "other", text: "", parts: [] };
-  if (typeof last.content === "string") return { kind: "user", text: last.content, parts: [last.content] };
-  const blocks = Array.isArray(last.content) ? last.content : [];
-  if (blocks.some((block) => block?.type === "tool_result")) {
-    const parts = blocks.filter((b) => b?.type === "tool_result").map((b) => typeof b.content === "string" ? b.content
-      : (Array.isArray(b.content) ? b.content.filter((c) => c?.type === "text").map((c) => c.text).join("\n") : ""));
-    return { kind: "tool_result", text: parts.join("\n"), parts };
-  }
-  const parts = blocks.filter((block) => block?.type === "text").map((block) => block.text);
-  return { kind: "user", text: parts.join("\n"), parts };
+  if (typeof last.content === "string") return { kind: "user", text: last.content, parts: [{ text: last.content, source: "text" }] };
+  // Every piece, in order. A message typed while a tool ran can sit beside the tool_result blocks in the same turn.
+  const parts = (Array.isArray(last.content) ? last.content : []).flatMap((block) => {
+    if (block?.type === "text") return [{ text: block.text, source: "text" }];
+    if (block?.type === "tool_result") return [{ source: "tool_result", text: typeof block.content === "string" ? block.content
+      : (Array.isArray(block.content) ? block.content.filter((c) => c?.type === "text").map((c) => c.text).join("\n") : "") }];
+    return [];
+  });
+  const kind = parts.some((part) => part.source === "tool_result") ? "tool_result" : "user";
+  return { kind, text: parts.map((part) => part.text).join("\n"), parts };
 }
 
 const isToolResultOnly = (message) => Array.isArray(message.content) && message.content.length > 0

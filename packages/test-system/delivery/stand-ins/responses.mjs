@@ -33,18 +33,21 @@ export function responsesUserTurns(body) {
 }
 
 /** The request's last input item: a user message (what OpenRig typed), or a tool call's output. */
+const TOOL_OUTPUTS = new Set(["function_call_output", "custom_tool_call_output", "local_shell_call_output"]);
+const isUserMessage = (item) => (item?.type === "message" || item?.type === undefined) && item?.role === "user";
+
+/** The request's last turn: the run of tool outputs and user messages after the model's last item. A message typed
+ *  while a tool ran can follow the tool's output in that run, so both are kept, in order. */
 export function responsesTurnOf(body) {
-  const last = inputItems(body).at(-1);
-  if (!last) return { kind: "other", text: "", parts: [] };
-  if (last.type === "function_call_output" || last.type === "custom_tool_call_output" || last.type === "local_shell_call_output") {
-    const output = typeof last.output === "string" ? last.output : JSON.stringify(last.output ?? "");
-    return { kind: "tool_result", text: output, parts: [output] };
-  }
-  if ((last.type === "message" || last.type === undefined) && last.role === "user") {
-    const parts = itemParts(last);
-    return { kind: "user", text: parts.join("\n"), parts };
-  }
-  return { kind: "other", text: "", parts: [] };
+  const input = inputItems(body);
+  let start = input.length;
+  while (start > 0 && (TOOL_OUTPUTS.has(input[start - 1]?.type) || isUserMessage(input[start - 1]))) start -= 1;
+  const parts = input.slice(start).flatMap((item) => TOOL_OUTPUTS.has(item.type)
+    ? [{ text: typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? ""), source: "tool_result" }]
+    : itemParts(item).map((text) => ({ text, source: "text" })));
+  if (parts.length === 0) return { kind: "other", text: "", parts: [] };
+  const kind = parts.some((part) => part.source === "tool_result") ? "tool_result" : "user";
+  return { kind, text: parts.map((part) => part.text).join("\n"), parts };
 }
 
 let ids = 0;
