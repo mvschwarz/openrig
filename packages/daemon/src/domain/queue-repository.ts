@@ -588,8 +588,8 @@ export interface QueueClaimInput {
 }
 
 export interface QueueListOptions {
-  /** Exact tag selection before the result bound (used by diagnostic occurrences). */
-  tag?: string;
+  /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
+  tag?: string | string[];
   destinationSession?: string;
   sourceSession?: string;
   state?: QueueState | QueueState[];
@@ -607,6 +607,19 @@ export interface QueueListOptions {
   /** Pick and order rows by their latest update instead of their creation, so a bounded window of closed items holds
    *  the ones closed most recently. */
   sortByUpdated?: boolean;
+}
+
+/** Adds the exact, conjunctive tag predicates shared by the bounded list paths. */
+function pushExactTagFilters(tag: string | string[] | undefined, conditions: string[], params: unknown[]): void {
+  if (tag === undefined) return;
+  const values = [...new Set(Array.isArray(tag) ? tag : [tag])];
+  if (values.some((value) => value.trim().length === 0)) {
+    throw new TypeError("tag filters cannot be blank");
+  }
+  for (const value of values) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
+    params.push(value);
+  }
 }
 
 /** Adds the handoff-successor and updated-since filters both list paths share. */
@@ -4801,10 +4814,7 @@ export class QueueRepository {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (opts?.tag) {
-      conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
-      params.push(opts.tag);
-    }
+    pushExactTagFilters(opts?.tag, conditions, params);
 
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -4951,6 +4961,7 @@ export class QueueRepository {
   listAttention(opts?: {
     limit?: number;
     state?: QueueState | QueueState[];
+    tag?: string | string[];
     destinationSession?: string;
     sourceSession?: string;
     targetRepo?: string;
@@ -4999,6 +5010,7 @@ export class QueueRepository {
     ];
     if (this.hasHumanIntentColumn) conditions.push("COALESCE(human_intent, 'decision') <> 'update'");
     const params: unknown[] = [...states];
+    pushExactTagFilters(opts?.tag, conditions, params);
     if (opts?.destinationSession) {
       const addresses = this.resolveSessionAddresses(opts.destinationSession);
       conditions.push(`destination_session IN (${addresses.map(() => "?").join(",")})`);

@@ -1619,6 +1619,51 @@ describe("rig queue CLI", () => {
     expect(call!.path).not.toContain("rig=");
   });
 
+  it("issue2728 list sends repeated exact tags and canonical mission/slice aliases once", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs",
+      "--tag", "review", "--tag", "publish", "--tag", "mission:launch",
+      "--mission", "launch", "--slice", "docs", "--tag", "comma,separated", "--json",
+    ]);
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(["review", "publish", "mission:launch", "slice:docs", "comma,separated"]);
+    expect(params.get("limit")).toBe("100");
+  });
+
+  it("issue2728 refuses a blank tag before contacting the daemon", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "list", "--tag", " ", "--json"]);
+    expect(calls).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join("\n")).toContain('"error":"tag_invalid"');
+    expect(logs.join("\n")).toContain("tag filters cannot be blank");
+  });
+
+  it("issue2728 does not print rows when a daemon returns a row missing a requested tag", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/queue/list?tag=review&limit=100": {
+          status: 200,
+          data: [{ qitemId: "qitem-unfiltered", tags: ["other"] }],
+        },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "review", "--json"]);
+    expect(calls).toHaveLength(1);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("filter_unsupported");
+    expect(logs.join("\n")).not.toContain("qitem-unfiltered");
+  });
+
   it("list -a includes history (no activeOnly param)", async () => {
     const saved = process.env.OPENRIG_SESSION_NAME;
     process.env.OPENRIG_SESSION_NAME = "dev1@my-rig";
