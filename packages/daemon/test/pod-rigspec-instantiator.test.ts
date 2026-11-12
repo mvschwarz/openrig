@@ -138,6 +138,19 @@ describe("PodRigInstantiator", () => {
     expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
   });
 
+  it.each(["%47", null])("forwards the Core-observed launch pane %s to the harness", async pane => {
+    const { db, inst, tmux, adapter, sessionRegistry } = setup();
+    try {
+      vi.mocked(tmux.listPanes).mockResolvedValue(pane ? [{ id: pane } as Awaited<ReturnType<TmuxAdapter["listPanes"]>>[number]] : []);
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+      expect(result.ok).toBe(true);
+      const binding = vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0];
+      expect(binding).toBeDefined();
+      expect(binding!.tmuxPane).toBe(pane);
+      expect(sessionRegistry.getBindingForNode(binding!.nodeId)?.tmuxPane).toBe(pane);
+    } finally { db.close(); }
+  });
+
   // T1: valid rig instantiates pods + nodes + edges
   it("instantiates pods + nodes correctly", async () => {
     const { db, inst } = setup();

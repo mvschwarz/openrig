@@ -2696,7 +2696,7 @@ export class PodRigInstantiator {
       nodeId: input.nodeId,
       tmuxSession: launchResult.binding.tmuxSession,
       tmuxWindow: null,
-      tmuxPane: null,
+      tmuxPane: launchResult.binding.tmuxPane,
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",
