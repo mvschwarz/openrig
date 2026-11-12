@@ -1,0 +1,106 @@
+# Delivery conformance suite: expected results (owner: quality-lead@v-openrig-build)
+# Written 2026-11-12 after 07:11Z for Builder A's S2 harness (dev60-planner relay, qitem-20261112-d60p-suite-author-core-a).
+# Every expectation comes from a SHIPPED contract, cited in `contract:`. A case with no stated contract is marked
+# `contract: NONE` and is a finding for its owner, not a guess. Case IDs and procedures are the Lab's (CASES.md,
+# /Users/admin/.openrig/private/lab-connection-measurements-20261112/CASES.md); this file gives the outcome to judge.
+#
+# Judging rules for every case:
+#   - Results: PASS, FAIL or NOT RUN, with an evidence level per cell:
+#       native-standin (a real harness TUI on a local stand-in model),
+#       native-real (a real model),
+#       pty-or-container,
+#       synthetic.
+#     Never widen a claim past its level.
+#   - Oracles, all three where available:
+#       (1) the stand-in's request log, the receiver-side truth: what the model was actually sent, and how many times;
+#       (2) #2937's `transport.delivery_evidence` event for the send;
+#       (3) the raw pane log.
+#     #2937 is best effort: a MISSING event isn't proof nothing was sent. Judge delivery by (1) and (3).
+#   - Never blindly retype uncertain content. Queue isn't steer, and acceptance isn't pickup (the Lab's rules).
+#   - Pin the program versions from the installed binaries on every run: the latest and previous Claude Code and
+#     Codex, and tmux 3.3a / 3.4 / 3.6 where the case touches the terminal.
+#   - The default typing guard is OFF (`seat-delivery-guard.ts` DEFAULT_GUARD / TERMINAL_DEFAULT, mode "off").
+#     Opted-in modes are `draft-aware` and `hold`.
+
+defaults:
+  delivered_once: "the message text reaches the model exactly once (stand-in log count == 1) as one user turn/item"
+  no_loss: "no send that returned accepted/sent is missing from the stand-in log"
+  no_dup: "no message appears twice in the stand-in log, including across retries"
+
+cases:
+
+  D01:
+    title: idle seat
+    programs: [claude, codex]
+    expect: [delivered_once, no_dup]
+    also: "the wake/doorbell, if the case sends one, appears exactly once; the seat returns to idle afterwards"
+    contract: "rig send delivers into the seat's input and submits; 0.7.12 native Codex D01 PASS (dev-qa 11-11)"
+
+  D02:
+    title: busy seat (mid-turn)
+    programs: [claude, codex]
+    expect: [delivered_once, no_loss]
+    also:
+      - "the send joins the running turn: Claude Code queues typed input and takes it at its next opportunity; Codex joins the turn"
+      - "the in-flight tool call is NOT interrupted or cancelled by the delivery (tool completion must be shown, not assumed: 0.7.12 Codex D02 was PARTIAL on exactly this)"
+      - "order relative to earlier sends is preserved"
+    contract: "the 0.7.11+ send advisory: 'busy is advisory, not a block. This message joins its running turn'"
+
+  D03:
+    title: a person's unsent draft, DEFAULT guard (off)
+    programs: [claude, codex]
+    expect: [no_loss]
+    also:
+      - "the send is written into the input together with the draft: draft and message are submitted together (MERGED). Under the default this is DOCUMENTED behaviour, judged PASS when it matches; it isn't a failure"
+      - "the person's draft text is not deleted"
+    contract: "guard default off; 0.7.11 'sends now join typed drafts by default' (rig-admin 11-12); 0.7.8 known limit 'typed drafts with the typing guard off can be submitted by a wake'; 0.7.12 Codex D03 MERGED-as-documented PASS"
+
+  D04:
+    title: a person's unsent draft, draft-aware guard (opted in)
+    programs: [claude, codex]
+    expect:
+      - "the send is RETAINED: no write to the pane (raw log shows no keystrokes), result retained / not_reached / sent:false with draft_input_busy or draft_input_unknown"
+      - "the person's draft is untouched and never becomes part of a model turn (stand-in log has no draft text)"
+      - "the retained message is readable with `rig seat held-messages`, and is NOT replayed automatically"
+      - "clearing the draft does NOT by itself deliver the held message; a new explicit send delivers it once"
+      - "with an EMPTY composer an idle draft-aware seat is NOT held: a send delivers once (#2933 cursor blank, #2942 context hint; 0.7.13 adds the clipped auto-update footer, #3016/#2948)"
+    variants:
+      - "footer: none"
+      - "footer: Claude context hint ('~Nk uncached · /clear to start fresh')"
+      - "footer: Claude auto-update failure, full wording and the width-clipped form ('… npm i -g @anthropic-ai/claude-c…'), at 80x24"
+    contract: "#2933, #2942, #3016/#2948 (0.7.13); 0.7.9 #2437/#2442 nothing replayed; 0.7.12 #2515 finding: clearing a draft is not automatic delivery"
+    note: "0.7.12 S02/D3 NOT MET this exact cell with the clipped footer (dev50-qa D3-IDLE-PANE-ROWS.json 830aa6b4); 0.7.12 = baseline, 0.7.13 = expected fixed"
+
+  D08:
+    title: tmux copy mode
+    programs: [claude, codex]
+    expect:
+      - "guard off: the seat is taken out of copy mode through its own address and the message is delivered once"
+      - "draft-aware: the send is retained with no write; leaving copy mode later does NOT replay it"
+    contract: "0.7.10 #2594/#2644 (every tmux mode left through the seat's address before delivery); 0.7.12 Codex D08 PASS; S02 guard-off copy PASS"
+
+  D09:
+    title: order (back-to-back sends from one sender)
+    programs: [claude, codex]
+    expect: [no_dup, no_loss]
+    also: "N sends become N separate user turns/items in send order, each once (stand-in log order == send order)"
+    contract: "0.7.12 Codex D09 PASS (three sends, three ordered native items, single writer); S02 P2 order PASS"
+    watch: "the Lab's M1 pre-window pilot saw merged and absent Claude wakes (2 and 4 of 60): a merge of two sends into one turn is a FAIL here"
+
+  D15:
+    title: multi-line paste
+    programs: [claude, codex]
+    expect: [delivered_once]
+    also:
+      - "the model receives the exact bytes: newlines, Unicode, quotes and shell-shaped text (compare the stand-in log byte-for-byte with the payload)"
+      - "submitted once as ONE message, not one per line, and not left unsubmitted in the input"
+      - "#2800 control: with UNREADABLE input, `rig send --dangerously-interact` pastes with a warning and does NOT press Enter (expected: pasted, not submitted)"
+    contract: "0.7.9 #2436 long one-line submit; #2800 (draft-aware-delivery.test.ts at b29a70f1); 0.7.12 Codex D15 exact PASS; S02 P2 rich PASS (byte equality not asserted then: assert it now)"
+
+# Later PRs (dialogs, lifecycle, faults): expectations follow when A's S3+ plan lands. Known contracts to cite then:
+later:
+  D05_D06: "permission prompt / other dialog: an ordinary send refuses (target_needs_input / selection_prompt) before any input; nothing typed into the dialog (0.7.2+; #2947 no typing within 15 s of Stop)"
+  D10: "retry after an uncertain timeout: unconfirmed/indeterminate is never resent blind; reconcile first; no duplicate (0.7.9 #2509, #2505/#2507; 0.7.2 cross-host reconcile by id)"
+  D12: "managed /compact with a typed draft: the input box is checked first; typed/unreadable input holds the step (0.7.7 #2347; #2799 compaction draft defaults)"
+  D16: "usage/rate-limit: Claude's account usage-limit dialog is likely NOT RUN on a stand-in (A's limit); a stand-in 429/overloaded error is a separate cell, judged by: no loss, no blind resend"
+  D25: "native route off / unarmed / fallback: typing stays the default and the fallback (decision-20261111-1140, -1636 (1)); the Lab's M3 pilot (52cf2777) is the first data point for Codex's queue route"

@@ -1,0 +1,137 @@
+// What a case does to a cell, as plain verbs: send as OpenRig would, type as a person would, read what the receiver
+// got. Each action is recorded in the cell's steps before and after, and a timeout is recorded as an unknown effect,
+// never retried: a case doesn't blindly resend what may have landed.
+
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { deliveriesOf, Verdict } from "./oracle.mjs";
+import { deliveryEvents } from "./evidence.mjs";
+import { composerText, recordScreen } from "./screen.mjs";
+import { RIG, sleep } from "./world.mjs";
+
+export function caseContext(cell, { caseId, kind }) {
+  const verdict = new Verdict();
+  const screen = recordScreen(cell, join(cell.logs, "screen-frames.jsonl"));
+  const used = new Set();
+
+  const ctx = {
+    cell, kind, caseId, verdict, screen, sleep,
+
+    /** A marker no other send in this run carries, of the stand-in's default pattern: DLV-<case>-<label>-<random>. */
+    mark(label = "m") {
+      let marker;
+      do { marker = `DLV-${caseId}-${label}-${randomBytes(3).toString("hex")}`; } while (used.has(marker));
+      used.add(marker);
+      return marker;
+    },
+
+    requests: () => cell.standIn.requests(),
+    /** OpenRig's own records of what it wrote (#2937) and what the program's hook saw, for the part with this sha256. */
+    evidenceFor(partSha256) {
+      const events = deliveryEvents(join(cell.env.OPENRIG_HOME, "openrig.sqlite"));
+      return {
+        deliveryEvidence: events.filter((e) => e.type === "transport.delivery_evidence" && e.payload.wireSha256 === partSha256).map((e) => ({ seq: e.seq, written: e.payload.written, admitted: e.payload.admitted })),
+        promptObservation: events.filter((e) => e.type === "transport.prompt_observation" && e.payload.promptSha256 === partSha256).map((e) => ({ seq: e.seq, source: e.payload.source })),
+      };
+    },
+    /** What OpenRig recorded writing (#2937) since `at`: when the received bytes differ, this says on which side of
+     *  the pane they changed. */
+    writtenSince(at) {
+      return deliveryEvents(join(cell.env.OPENRIG_HOME, "openrig.sqlite"))
+        .filter((e) => e.type === "transport.delivery_evidence" && e.payload.wireSha256 && e.at >= at.replace("T", " ").replace(/Z$/, "").slice(0, 19))
+        .map((e) => ({ seq: e.seq, at: e.at, written: e.payload.written, wireBytes: e.payload.wireBytes, wireSha256: e.payload.wireSha256 }));
+    },
+    deliveries: (marker) => deliveriesOf(cell.standIn.requests(), marker),
+
+    /** `rig send` to the seat, as any sender would. Returns its parsed JSON (or its raw output), exit and timing. */
+    async send(body, flags = []) {
+      const started = new Date().toISOString();
+      cell.record({ step: "send-intent", caseId, bytes: Buffer.byteLength(body), flags });
+      const out = await cell.rig(["send", cell.session, body, "--json", ...flags], { allowFail: true, timeout: 120_000 });
+      let json = null;
+      try { json = JSON.parse(out.stdout); } catch { /* not JSON: kept raw */ }
+      const result = { started, finished: new Date().toISOString(), exit: out.exit, json, stdout: json ? undefined : out.stdout.slice(0, 2000), stderr: out.stderr.slice(0, 2000) };
+      cell.record({ step: "send-result", caseId, exit: out.exit, ok: json?.ok, sent: json?.sent, result: json?.result ?? json?.reason ?? null });
+      return result;
+    },
+
+    /** Wait until `marker` has been delivered `count` times, or the time runs out; returns the deliveries seen. */
+    async waitDelivered(marker, { count = 1, timeoutMs = 45_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      let seen = ctx.deliveries(marker);
+      while (seen.turns.length < count && Date.now() < deadline) { await sleep(250); seen = ctx.deliveries(marker); }
+      return seen;
+    },
+
+    /** Wait until the screen has stopped changing for `quietMs` (the probe oracle's readiness settle). */
+    async settle({ quietMs = 1250, timeoutMs = 60_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const last = screen.last();
+        if (last && performance.now() - last.monotonicMs >= quietMs) return true;
+        await sleep(100);
+      }
+      return false;
+    },
+
+    /** Wait until the screen shows `text`; returns the frame or null. */
+    async waitScreen(text, { timeoutMs = 30_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const last = screen.last();
+        if (last?.screen.includes(text)) return last;
+        await sleep(100);
+      }
+      return null;
+    },
+
+    composer: () => composerText(kind, screen.last()?.screen ?? ""),
+
+    /** Type as a person at the keyboard would, through the seat's tmux pane, with no Enter. */
+    async typeDraft(text) {
+      cell.record({ step: "person-types", caseId, text });
+      await cell.tmux(["send-keys", "-t", cell.session, "-l", text]);
+    },
+    /** Delete `count` characters before the cursor, as a person would. */
+    async eraseDraft(count) {
+      cell.record({ step: "person-erases", caseId, count });
+      await cell.tmux(["send-keys", "-t", cell.session, "-N", String(count), "BSpace"]);
+    },
+    async enterCopyMode() { cell.record({ step: "person-copy-mode", caseId }); await cell.tmux(["copy-mode", "-t", cell.session]); },
+    async leaveCopyMode() { cell.record({ step: "person-leaves-copy-mode", caseId }); await cell.tmux(["send-keys", "-t", cell.session, "-X", "cancel"]); },
+    async inMode() { return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{pane_in_mode}"])).trim() === "1"; },
+
+    async setGuard(mode) {
+      const out = await cell.rig(["seat", "set-typing-guard", cell.session, "--mode", mode, "--reason", `delivery suite ${caseId}`, "--json"]);
+      verdict.info(`typing guard set to ${mode}`, out.stdout.trim().slice(0, 400));
+    },
+    async setDraftDelivery(value) {
+      await cell.rig(["config", "set", "transport.draft_delivery", value]);
+      verdict.info(`transport.draft_delivery set to ${value}`, (await cell.rig(["config", "get", "transport.draft_delivery"])).stdout.trim());
+    },
+    async heldMessages() {
+      const out = await cell.rig(["seat", "held-messages", cell.session, "--json"], { allowFail: true });
+      try { return JSON.parse(out.stdout); } catch { return { raw: out.stdout, exit: out.exit }; }
+    },
+
+    /** OpenRig's tmux calls that wrote to the seat's pane at or after `sinceNs` (the logging tmux's record): keys or a
+     *  paste aimed at the pane, by its id (as OpenRig targets it) or its session's name. */
+    paneWrites(sinceNs) {
+      const path = join(cell.logs, "tmux-argv.jsonl");
+      if (!existsSync(path)) return [];
+      const targets = new Set([cell.paneId, cell.session]);
+      return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        .filter((r) => r.timeNs >= sinceNs && ["send-keys", "paste-buffer"].includes(r.argv[1])
+          && r.argv.some((a, i) => r.argv[i - 1] === "-t" && (targets.has(a) || a.startsWith(`${cell.session}:`))))
+        .map((r) => ({ timeNs: r.timeNs, argv: r.argv.slice(1) }));
+    },
+    nowNs: () => Date.now() * 1_000_000,
+
+    async seatState() {
+      const out = await cell.rig(["ps", "--nodes", "--rig", RIG, "--json"], { allowFail: true });
+      try { const rows = JSON.parse(out.stdout); return (Array.isArray(rows) ? rows : rows.entries ?? [])[0] ?? null; } catch { return null; }
+    },
+  };
+  return ctx;
+}

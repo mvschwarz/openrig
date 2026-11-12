@@ -2,7 +2,53 @@
 
 This kit proves OpenRig's typed delivery against the real Claude Code and Codex terminal programs. It covers 25 cases, from idle and busy seats to drafts, dialogs, copy mode, ordering, `/clear`, compaction and restart. Quality owns the expected result for each case. This directory holds the code that drives the cases.
 
-**Built so far:** the stand-in model servers. The case harness and the single release-run entry point come next.
+**Built so far:** the stand-in model servers, the case harness, the release-run entry point, and the first cases (D01 idle, D02 busy, D03 and D04 drafts, D08 copy mode, D09 order, D15 multi-line paste) on both programs. Dialogs and guards, lifecycle, and fault injection come next.
+
+## Running a release
+
+One command runs every case on every listed program version and writes the result:
+
+```sh
+# Pinned installs, one at a time, each in its own prefix. This needs the package registry, so run it outside a cell.
+node packages/test-system/delivery/run.mjs install --into ~/delivery-installs \
+  --claude 2.1.322,2.1.311 --codex 0.167.2,0.167.1 --openrig 0.7.12
+
+# The run: one cell at a time. --openrig is an installed version or a path to rig's dist/bin-wrapper.js.
+node packages/test-system/delivery/run.mjs run --installs ~/delivery-installs --openrig 0.7.12 \
+  --claude 2.1.322,2.1.311 --codex 0.167.2,0.167.1 --out ~/delivery-run [--cases D01,D09]
+```
+
+It writes `RESULT.json` and `RESULT.md`: every cell's PASS, FAIL or NOT RUN, its evidence level, every check with what was seen, and the pins. The pins name the exact OpenRig, Claude Code and Codex (each version as it reports itself, plus the sha256 of what ran), tmux, node, the OS, and the sha256 of `cases/expected.yaml`. A cell that can't run is NOT RUN with its reason, never left out.
+
+Every cell here is at the **native-standin** level: the real program, on a local stand-in model. A real-model sample and a PTY or container run are separate levels and aren't produced by this command.
+
+### What a cell is
+
+Each cell gets a world of its own, built from nothing and torn down after:
+
+- **A network namespace with loopback only.** The stand-in, a private OpenRig daemon, its own tmux server and the real program all run inside it, so nothing in a cell can reach a model service, an update server or telemetry. It needs no privilege: an unprivileged user namespace maps this user to root only long enough to bring `lo` up, then a nested one maps back to this user's own ids. Linux only; without it every cell is NOT RUN.
+- **A fresh home**, with its own `OPENRIG_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, tmux socket and `TMPDIR`. The environment is built from an allowlist, never inherited, so the person's own home, accounts, daemon and credentials never reach it. The only credential is a dummy token the stand-in accepts.
+- **One seat** from a minimal rig spec. Claude Code reaches its stand-in through the spec's `env:` (`ANTHROPIC_BASE_URL` and the dummy `ANTHROPIC_AUTH_TOKEN`, with updates and telemetry off). Codex reaches its stand-in through a custom provider in the cell's `config.toml`. OpenRig itself seeds Claude's onboarding and trust, and Codex's workspace trust, as it would for any seat.
+- **Ready means running.** A cell starts only when OpenRig reports the seat ready and the program's own process is found under the pane. The pane's foreground command isn't enough, since a program can run under its launch script.
+- **A normal stop at the end.** The rig, the daemon, the tmux server and the stand-in are stopped in that order. Anything still running with the cell's home is then sent SIGTERM, then SIGKILL, and the steps log records it. A cell that fails to open still stops what it started.
+
+### What a case judges by
+
+A case reads the receiver's side first: the stand-in's request log. A delivery is a **user item in the seat's own conversation** whose typed text holds the case's marker. The log is read from the history of the latest request in the seat's thread, and each item counts once however many requests repeat it. Programs repeat history all the time: each turn resends it, a retry resends a request, and Codex re-requests a running turn with a newly typed message added after it. A side request in another thread doesn't count, though Codex's task-title request quotes the typed text. A marker inside a tool's output doesn't count either. Two sends inside one item is a merge.
+
+Beside that, each delivery reports OpenRig's own records of the same bytes, matched by sha256. Those are #2937's `transport.delivery_evidence` and the prompt hook's `transport.prompt_observation`, where the hook is installed. They're best effort, so they're reported, not judged. When the received bytes differ, the cell puts what OpenRig says it wrote beside them, which shows on which side of the pane they changed.
+
+Each cell's bank keeps everything a reader needs to check the verdict without trusting the harness, each file pinned in `MANIFEST.json`:
+
+- the stand-in's request log;
+- every tmux call OpenRig made, from a logging `tmux` first on the daemon's PATH (`harness/tmux`; it needs python3, so it can replace itself with the real tmux);
+- the screen as frames, read with `capture-pane` only, since OpenRig already pipes the pane into its transcript;
+- the harness's steps;
+- the daemon's delivery tables and events, exported read only, with credential-like columns dropped;
+- the program's own transcript.
+
+Every banked file is scanned for credential-shaped text.
+
 
 ## Stand-in model servers
 

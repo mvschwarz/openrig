@@ -1,0 +1,45 @@
+#!/usr/bin/python3 -I
+"""The delivery suite's logging tmux: record each call exactly, then become the real tmux.
+
+It sits first on the private daemon's PATH, so every tmux call OpenRig makes for a case is in the log, in order, with
+its time. It records the argv only, never the environment, and adds no tmux command of its own. Ported from the S02
+harness's prepared/tmux (same record, same append-and-fsync under an exclusive lock, same exec).
+
+Needs, all absolute where they're paths:
+  DELIVERY_REAL_TMUX  the tmux binary to run
+  DELIVERY_TMUX_LOG   the JSONL log (created 0600; must be a regular file)
+  DELIVERY_ARM        the run's label, copied into each record
+"""
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+
+real = os.environ["DELIVERY_REAL_TMUX"]
+log = os.environ["DELIVERY_TMUX_LOG"]
+if not (os.path.isabs(real) and os.path.isabs(log)):
+    sys.exit("delivery tmux: DELIVERY_REAL_TMUX and DELIVERY_TMUX_LOG must be absolute")
+if os.path.realpath(real) == os.path.realpath(__file__):
+    sys.exit("delivery tmux: DELIVERY_REAL_TMUX points at this wrapper")
+record = {
+    "timeNs": time.time_ns(),
+    "monotonicNs": time.monotonic_ns(),
+    "pid": os.getpid(),
+    "arm": os.environ["DELIVERY_ARM"],
+    "cwd": os.getcwd(),
+    "argv": [real, *sys.argv[1:]],
+}
+fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit("delivery tmux: DELIVERY_TMUX_LOG isn't a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(fd)
+finally:
+    os.close(fd)
+os.execv(real, [real, *sys.argv[1:]])
