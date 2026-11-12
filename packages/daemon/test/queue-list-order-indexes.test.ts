@@ -4,8 +4,11 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, type QueueListOptions } from "../src/domain/queue-repository.js";
-import { RECOVERY_INDEX_SQL } from "../src/domain/queue-recovery.js";
+import { RECOVERY_INDEX_SQL, findQueueRecovery } from "../src/domain/queue-recovery.js";
 import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
+import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 
 describe("bounded queue lists use their ordering indexes", () => {
   let db: Database.Database;
@@ -101,5 +104,61 @@ describe("bounded queue lists use their ordering indexes", () => {
   it("keeps recovery lookup on its small partial index when listing indexes exist", () => {
     const plan = db.prepare(`EXPLAIN QUERY PLAN ${RECOVERY_INDEX_SQL}`).all() as Array<{ detail: string }>;
     expect(plan.some((row) => row.detail.includes("idx_queue_items_recovery_tags"))).toBe(true);
+  });
+
+  async function pointPlan(prefix: string, run: () => unknown | Promise<unknown>) {
+    const prepare = db.prepare.bind(db);
+    let selected: { sql: string; args: unknown[] } | undefined;
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      const statement = prepare(sql);
+      if (sql.startsWith(prefix)) {
+        const get = statement.get.bind(statement);
+        statement.get = (...args: unknown[]) => { selected = { sql, args }; return get(...args); };
+      }
+      return statement;
+    });
+    try { await run(); } finally { spy.mockRestore(); }
+    expect(selected).toBeDefined();
+    const plan = prepare(`EXPLAIN QUERY PLAN ${selected!.sql}`).all(...selected!.args) as Array<{ detail: string }>;
+    expect(plan.some((row) => row.detail.includes("idx_queue_items_recovery_tags"))).toBe(true);
+  }
+
+  it("keeps standalone recovery hits and misses on the recovery partial index", async () => {
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = 'q-0'").run(JSON.stringify(["recovery-for:subject"]));
+    for (const subject of ["subject", "no-match"]) {
+      for (const exclude of [undefined, "excluded"]) {
+        await pointPlan("SELECT qitem_id, state, ts_updated FROM queue_items", () => {
+          expect(findQueueRecovery(db, subject, exclude)?.qitemId ?? null).toBe(subject === "subject" ? "q-0" : null);
+        });
+      }
+    }
+  });
+
+  async function sweepForPlan(state: "pending" | "in-progress") {
+    db.exec("DELETE FROM queue_items");
+    repo.attachOutbox(new OutboxHandler(db));
+    if (state === "pending") {
+      const rigs = new RigRepository(db);
+      const rig = rigs.createRig("r");
+      const node = rigs.addNode(rig.id, "worker", { runtime: "claude-code" });
+      db.prepare("INSERT INTO sessions (id,node_id,session_name,status) VALUES ('plan-session',?,'worker@r','running')").run(node.id);
+    }
+    const past = new Date(Date.now() - 120 * 60_000).toISOString();
+    const insert = db.prepare(`INSERT INTO queue_items
+      (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, claimed_at, closure_required_at)
+      VALUES (?, ?, ?, 'sender@r', 'worker@r', ?, 'work', ?, ?)`);
+    for (let i = 0; i < (state === "pending" ? 3 : 1); i++) {
+      insert.run(`candidate-${i}`, past, past, state, state === "in-progress" ? past : null, state === "in-progress" ? past : null);
+    }
+    return runStuckSweep({ db, queueRepo: repo, resolveOrchestrator: () => null, resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null, isRegisteredHost: () => false, unclaimedAgeMinutes: 60, log: () => {} });
+  }
+
+  it("keeps the per-row finding lookup on the recovery partial index", async () => {
+    await pointPlan("SELECT qitem_id, source_session, state, ts_updated FROM queue_items", () => sweepForPlan("in-progress"));
+  });
+
+  it("keeps the latest backlog finding lookup on the recovery partial index", async () => {
+    await pointPlan("SELECT qitem_id, state, ts_updated, summary, body, destination_session, tags FROM queue_items", () => sweepForPlan("pending"));
   });
 });
