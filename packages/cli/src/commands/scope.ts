@@ -41,10 +41,10 @@ import {
 } from "../lib/scope/dot-id.js";
 import {
   buildMissionDependencyGraph,
+  classifyProgressStatusFrontmatter,
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
-  frontmatterHasKey,
   resolveNodeFile,
   findSlice,
   listMissions,
@@ -630,10 +630,23 @@ function buildSliceCloseCommand(): Command {
           } catch (err) {
             if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
           }
-          const shouldReconcileProgressStatus =
-            originalProgress !== null && frontmatterHasKey(originalProgress, "status");
+          const progressStatusState =
+            originalProgress !== null
+              ? classifyProgressStatusFrontmatter(originalProgress)
+              : ({ kind: "absent" } as const);
+          if (progressStatusState.kind === "ambiguous") {
+            throw new ScopeCliError({
+              fact: `Slice PROGRESS.md (${progressPath}) contains an ambiguous ${progressStatusState.detail}.`,
+              consequence:
+                "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
+              action:
+                'Use a single top-level scalar "status:" key in PROGRESS.md frontmatter (renaming or removing any nested "status:" entry), or close without --in-place, then retry.',
+            });
+          }
+          const shouldReconcileProgressStatus = progressStatusState.kind === "reconcile";
 
           applyMissionCompositionEdits(edits);
+          let attemptedProgressWrite = false;
           try {
             const updates: Record<string, unknown> = {
               status: targetStatus,
@@ -642,6 +655,7 @@ function buildSliceCloseCommand(): Command {
             if (opts.note) updates["closure-note"] = opts.note;
             updateFrontmatter(nodePath, updates);
             if (shouldReconcileProgressStatus) {
+              attemptedProgressWrite = true;
               updateFrontmatter(progressPath, { status: targetStatus });
             }
           } catch (error) {
@@ -653,7 +667,7 @@ function buildSliceCloseCommand(): Command {
                 `restore ${nodePath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
               );
             }
-            if (shouldReconcileProgressStatus && originalProgress !== null) {
+            if (attemptedProgressWrite && originalProgress !== null) {
               try {
                 fs.writeFileSync(progressPath, originalProgress, "utf8");
               } catch (rbErr) {

@@ -78,9 +78,12 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
 }
 
 /** Check whether a markdown document's YAML frontmatter defines `key` at the
- *  top level (falling back to line-based key inspection when invalid YAML
- *  prevents full mapping parse, matching `SliceIndexer.parseFrontmatter`).
- *  Returns `false` when the document has no frontmatter block. */
+ *  top level of a valid YAML mapping, falling back to line-based key inspection
+ *  only when invalid YAML prevents full mapping parse. Note: for valid YAML
+ *  with nested mappings, this checks top-level keys only and therefore differs
+ *  from line-based readers (`SliceIndexer.parseFrontmatter`) that scan keys at
+ *  any indentation; use {@link classifyProgressStatusFrontmatter} when
+ *  reconciling `PROGRESS.md` `status:` across both readers. */
 export function frontmatterHasKey(content: string, key: string): boolean {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
   if (!match) return false;
@@ -101,6 +104,100 @@ export function frontmatterHasKey(content: string, key: string): boolean {
     }
     return false;
   }
+}
+
+export type ProgressStatusFrontmatterState =
+  | { kind: "absent" }
+  | { kind: "reconcile" }
+  | { kind: "ambiguous"; detail: string };
+
+/** Classify how `PROGRESS.md` frontmatter defines `status` across structured
+ *  YAML (`readFrontmatter` / `updateFrontmatter`) and line-based slice readers
+ *  (`SliceIndexer.parseFrontmatter`, which trims every frontmatter line at any
+ *  indentation and lets the last `status:` line win). Returns `"ambiguous"`
+ *  before mutation whenever nested/indented `status:` lines or non-scalar/flow
+ *  `status` syntax would leave consumers disagreeing after top-level update. */
+export function classifyProgressStatusFrontmatter(content: string): ProgressStatusFrontmatterState {
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
+  if (!match) {
+    if (content.startsWith("---\n")) {
+      const rest = content.slice(4);
+      const endIdx = rest.indexOf("\n---");
+      if (endIdx !== -1) {
+        for (const rawLine of rest.slice(0, endIdx).split("\n")) {
+          const trimmed = rawLine.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const colonIdx = trimmed.indexOf(":");
+          if (colonIdx !== -1 && trimmed.slice(0, colonIdx).trim() === "status") {
+            return {
+              kind: "ambiguous",
+              detail: 'malformed closing "---" frontmatter delimiter with a "status:" line that line-based readers still parse',
+            };
+          }
+        }
+      }
+    }
+    return { kind: "absent" };
+  }
+
+  const block = match[1]!;
+  const unindentedStatusLines: number[] = [];
+  const indentedStatusLines: number[] = [];
+  const rawLines = block.split(/\r?\n/);
+  for (let i = 0; i < rawLines.length; i++) {
+    const rawLine = rawLines[i]!;
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+    if (trimmed.slice(0, colonIdx).trim() !== "status") continue;
+    if (/^[ \t]/.test(rawLine)) {
+      indentedStatusLines.push(i + 2);
+    } else {
+      unindentedStatusLines.push(i + 2);
+    }
+  }
+
+  if (indentedStatusLines.length > 0) {
+    const detail =
+      unindentedStatusLines.length === 0
+        ? `nested "status:" entry at line ${indentedStatusLines[0]} without a top-level status key`
+        : `nested "status:" entry at line ${indentedStatusLines[0]} alongside top-level status`;
+    return { kind: "ambiguous", detail };
+  }
+
+  let yamlValid = false;
+  let yamlMapping: Record<string, unknown> | null = null;
+  try {
+    const doc = YAML.parseDocument(block, { keepSourceTokens: true });
+    if (doc.errors.length === 0 && (doc.contents === null || YAML.isMap(doc.contents))) {
+      const js = doc.toJS() as unknown;
+      yamlValid = true;
+      if (js && typeof js === "object" && !Array.isArray(js)) {
+        yamlMapping = js as Record<string, unknown>;
+      }
+    }
+  } catch {
+    yamlValid = false;
+  }
+
+  if (yamlValid) {
+    const hasYamlStatus = yamlMapping !== null && Object.prototype.hasOwnProperty.call(yamlMapping, "status");
+    if (hasYamlStatus) {
+      const statusVal = yamlMapping!["status"];
+      if (statusVal !== null && typeof statusVal === "object") {
+        return { kind: "ambiguous", detail: 'non-scalar top-level "status" frontmatter value' };
+      }
+    }
+    if (hasYamlStatus !== (unindentedStatusLines.length > 0)) {
+      return {
+        kind: "ambiguous",
+        detail: 'quoted or flow-style "status" frontmatter entry that line-based slice readers parse differently',
+      };
+    }
+  }
+
+  return unindentedStatusLines.length > 0 ? { kind: "reconcile" } : { kind: "absent" };
 }
 
 /** Update specific keys in a markdown file's frontmatter. The writer owns only

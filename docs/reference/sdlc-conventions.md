@@ -205,13 +205,15 @@ or by hand) reopens its judged items:
 current revision. Opt-in `rig scope slice close <slice> --in-place --reason delivered`
 (or `--in-place --reason <wontfix|deferred|superseded|stale>` for non-delivery
 exits) updates status in place under `<mission>/slices/<slice>` (and reconciles
-any existing `status:` in `PROGRESS.md` frontmatter) without moving the
-folder, so recorded judgments stay applicable while the item text, policy and cited
-evidence bytes are unchanged (judgments citing files updated by closure, such as
-`SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`, reopen to `unknown`), and
-parent mission status is never automatically marked delivered. `rig scope slice close`
-and `rig scope audit` do not evaluate proof readiness, so check `rig proof show`
-for current applicability.
+any existing top-level scalar `status:` in `PROGRESS.md` frontmatter, refusing
+before modifying any file if `PROGRESS.md` frontmatter carries an ambiguous
+nested `status:` entry that line-based slice readers would treat as slice status)
+without moving the folder, so recorded judgments stay applicable while the item
+text, policy and cited evidence bytes are unchanged (judgments citing files
+updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,
+reopen to `unknown`), and parent mission status is never automatically marked
+delivered. `rig scope slice close` and `rig scope audit` do not evaluate proof
+readiness, so check `rig proof show` for current applicability.
 
 The project readiness that `rig proof show --project` reports counts only
 missions whose `mission.yaml` carries `metadata.status: active` or
