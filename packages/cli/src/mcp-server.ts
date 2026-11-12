@@ -558,7 +558,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_environment_export", routes: ["GET /api/queue/:qitemId", "POST /api/environments/:bindingId/export"], effect: "additive", access: "work" },
   { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read", access: "owner" },
   { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read", access: "work" },
-  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes", "GET /healthz"], effect: "read", access: "work" },
+  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes", "GET /healthz", "GET /api/queue/hosted-members"], effect: "read", access: "work" },
   { tool: "rig_slices", routes: ["GET /api/slices"], effect: "read", access: "workspace" },
   { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read", access: "workspace" },
   { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read", access: "workspace" },

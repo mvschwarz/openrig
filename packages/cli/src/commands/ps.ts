@@ -1173,6 +1173,8 @@ Exit codes:
         } else {
           console.log("No rigs");
         }
+        // A host can have connected assistants and no terminal rigs at all.
+        await printConnectedAssistants(client, opts.rig);
         return;
       }
 
@@ -1251,15 +1253,27 @@ Exit codes:
 }
 
 /** Connected assistants (roster members outside any terminal) and whether each is checking its queue. They're on the
- *  team but aren't nodes, so the human view lists them in their own short section; `--json` output is unchanged (read
- *  `/api/queue/hosted-members` for them). Nothing when there are none, or the daemon gives no answer. */
+ *  team but aren't nodes, so the human view lists them in their own short section, every one it's given; `--json` output
+ *  is unchanged (read `/api/queue/hosted-members` for them). The local rig and node views print it, empty or not, and so
+ *  does an HTTP host's node view; an SSH host runs its own `rig ps`. An HTTP host's rig view and the multi-host fan-out
+ *  leave it out. Nothing when there are none. A list that can't be read isn't an empty one, so it gets one line saying
+ *  check-in is unavailable, and the view's exit status stays as it was. */
 async function printConnectedAssistants(client: DaemonClient, rig?: string, requestHeaders?: Record<string, string>): Promise<void> {
   let members: Array<Record<string, unknown>>;
+  let unavailable: string | null = null;
   try {
     const res = await client.get<{ members?: unknown }>("/api/queue/hosted-members", requestHeaders ? { headers: requestHeaders } : undefined);
-    if (res.status >= 400 || !Array.isArray(res.data?.members)) return;
-    members = (res.data.members as unknown[]).filter((m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as Record<string, unknown>).seat === "string");
-  } catch {
+    if (res.status === 404) unavailable = "this daemon doesn't serve it";
+    else if (res.status >= 400) unavailable = `the read failed: HTTP ${res.status}`;
+    else if (!Array.isArray(res.data?.members)) unavailable = "the daemon's answer couldn't be read";
+    members = unavailable ? [] : (res.data.members as unknown[]).filter((m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as Record<string, unknown>).seat === "string");
+  } catch (err) {
+    unavailable = `the read failed: ${(err as Error).message}`;
+    members = [];
+  }
+  if (unavailable) {
+    console.log("");
+    console.log(`Connected assistants: check-in unavailable (${unavailable})`);
     return;
   }
   if (rig) members = members.filter((m) => (m.seat as string).endsWith(`@${rig}`));
@@ -1402,6 +1416,8 @@ async function handleNodes(
     } else {
       console.log("No nodes");
     }
+    // A rig with no terminal seats can still have connected assistants.
+    await printConnectedAssistants(client, opts.rig, requestHeaders);
     return;
   }
 
