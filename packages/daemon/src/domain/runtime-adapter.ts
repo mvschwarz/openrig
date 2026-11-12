@@ -252,6 +252,10 @@ export interface RuntimeAdapter {
    *  conversation (a restore or `rig up --existing`), which launches and can carry guidance as a fresh launch does. */
   guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
 
+  /** #3039: the guidance block ids the last launch in this tmux session sent as developer instructions, once (the record is
+   *  cleared when read, and when a later projection carries guidance). Undefined when that launch sent none or the adapter doesn't carry any. */
+  launchGuidanceSent?(tmuxSession: string): string[] | undefined;
+
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;
 

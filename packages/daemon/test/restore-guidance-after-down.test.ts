@@ -705,6 +705,25 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.rigResult).toBe("partially_restored");
   });
 
+  // A source that exists but can't be read (here a directory) stays with the restore writer, which reports it without
+  // stopping the resume, whether it's a projected block or a startup file. The readable one still goes with the launch.
+  it.each([
+    { kind: "a projected block", file: "lead.md", id: "lead-role", readable: "How work flows here." },
+    { kind: "a startup guidance file", file: "SOP.md", id: "SOP.md", readable: "You lead this team." },
+  ])("$kind whose source exists but can't be read stays a disclosed gap, and the resume goes on", async ({ file, id, readable }) => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0", () => {
+      fs.rmSync(path.join(spec, file));
+      fs.mkdirSync(path.join(spec, file));
+    });
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    expect(result.nodes[0]?.status).toBe("resumed");
+    expect(instructionsIn(launch)).toContain(readable);
+    expect(result.nodes[0]?.guidanceGaps).toEqual([id]);
+    expect(result.rigResult).toBe("partially_restored");
+  });
+
   it("decides by cleanup's own effect: refuses every hazard shape, allows ordinary files", () => {
     const add = [{ blockId: "lead-role", content: "You lead this team." }];
     const legacyBegin = "<!-- BEGIN RIGGED MANAGED BLOCK: old -->";

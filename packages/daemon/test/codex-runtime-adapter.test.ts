@@ -2896,7 +2896,8 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
       sleep: async () => {}, resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }) });
     const binding = { ...makeBinding(), guidanceFile: null, guidanceLaunchInstructions: true } as NodeBinding;
     await adapter.project(plan([]), binding);
-    await adapter.deliverStartup([{ ...startupFile("SOP.md", "/spec/SOP.md"), appliesOn: ["restore"] }], binding);
+    await adapter.deliverStartup([{ ...startupFile("SOP.md", "/spec/SOP.md"), appliesOn: ["restore"] },
+      { ...startupFile("gone.md", "/spec/gone.md"), required: false }], binding);
     expect(fs._store["/project/AGENTS.md"]).toBe(own);
     expect((await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" })).ok).toBe(true);
     const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1] as string).find((call) => call.includes("sess-456"))!;
@@ -2906,6 +2907,9 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(sent.indexOf(" resume 'sess-456'")).toBeLessThan(sent.indexOf("developer_instructions="));
     expect(instructionsIn(sent)).toContain("How work flows here.");
     expect(fs._store["/project/AGENTS.md"]).toBe(own);
+    // #3039: its record names what the launch sent, once; an optional file it couldn't read isn't in it.
+    expect(adapter.launchGuidanceSent("r01-qa")).toEqual(["SOP.md"]);
+    expect(adapter.launchGuidanceSent("r01-qa")).toBeUndefined();
   });
 
   it("a launch without the choice (a resume, a restore, an older Codex) sends no developer instructions and merges into AGENTS.md as before", async () => {

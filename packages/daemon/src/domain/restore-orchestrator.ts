@@ -1857,7 +1857,7 @@ export class RestoreOrchestrator {
       launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, session?.communityHarness),
         { ...launchResult.binding, guidanceFile: null, cwd: launchCwd, codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined });
     }
-    let launchGuidance: { entries: import("./types.js").NodeStartupSnapshot["projectionEntries"]; files: import("./runtime-adapter.js").ResolvedStartupFile[] } | null = null;
+    let launchGuidance: import("./runtime-adapter.js").ResolvedStartupFile[] | null = null;
 
     // A narrow exception to the replay containment below: before either native resume path
     // starts the harness, put back only the MISSING managed guidance blocks from the saved
@@ -1894,27 +1894,21 @@ export class RestoreOrchestrator {
         guidance = null;
       }
       if (guidance && guidance.items.length > 0 && launchCarriesGuidance && startupCtx) {
-        // #3039: a block the file doesn't hold at all goes with the launch instead of being put back, when its source is on
-        // disk now. Everything else stays with the writer below, as before: a block already there (refreshed or kept and
-        // named), a partial one, an unreadable or gone source (gaps), and the seat-skills line (the person's yes was for
-        // that file). So the launch's own placement writes nothing here: each block it gets is absent from the file.
+        // #3039: a block the file doesn't hold at all goes with the launch instead of being put back, when its source reads
+        // now (the writer's own read). Everything else stays with the writer below, as before: a block already there
+        // (refreshed or kept and named), a partial one, a source that's gone or can't be read (gaps), and the seat-skills
+        // line (the person's yes was for that file). So the launch's own placement writes nothing here: each block it gets is
+        // absent from the file. Each goes as an optional startup file, so a read that fails at the launch skips it rather
+        // than stopping the resume, and the check after the launch looks only past the blocks the launch reports it sent.
         let absent = new Set<string>();
         try { absent = new Set(absentGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })); }
         catch { /* unreadable: the writer below reports it */ }
-        const carried = new Set(guidance.items.filter((item) => absent.has(item.blockId) && !item.unresolved
-          && item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && existsSync(item.sourcePath)).map((item) => item.blockId));
-        launchGuidance = {
-          entries: startupCtx.projectionEntries
-            .filter((e) => e.category === "guidance" && e.mergeStrategy === "managed_block")
-            .map((e) => reanchorShippedProjectionEntry(e, undefined, existsSync))
-            .filter((e) => carried.has(e.effectiveId) && existsSync(e.absolutePath)),
-          // seatGuidance already classified each one as guidance, whatever its appliesOn: it was merged at the last launch.
-          files: withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsSync)))
-            .filter((f) => carried.has(f.path) && existsSync(f.absolutePath))
-            .map((f) => ({ ...f, deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] })),
-        };
-        this.launchGuidanceBlocks.set(node.id, new Set([...launchGuidance.entries.map((e) => e.effectiveId), ...launchGuidance.files.map((f) => f.path)]));
-        guidance = { ...guidance, items: guidance.items.filter((item) => !carried.has(item.blockId)) };
+        const reads = (path: string): boolean => { try { readFileSync(path, "utf-8"); return true; } catch { return false; } };
+        const carried = guidance.items.filter((item) => absent.has(item.blockId) && !item.unresolved
+          && item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && reads(item.sourcePath));
+        launchGuidance = carried.map((item) => ({ path: item.blockId, absolutePath: item.sourcePath, ownerRoot: dirname(item.sourcePath),
+          deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
+        guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
@@ -2046,7 +2040,7 @@ export class RestoreOrchestrator {
     // One narrow exception: MISSING managed guidance blocks are put back before the harness
     // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
     // nothing else is replayed. #3039: when the resumed launch carries the guidance instead, only that
-    // saved guidance passes (launchGuidance): no action, skill or other resource.
+    // saved guidance passes, as optional startup files (launchGuidance): no action, skill or other resource.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
@@ -2118,9 +2112,9 @@ export class RestoreOrchestrator {
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained && !restoreEnvironmentContext ? launchGuidance?.entries ?? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
+          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance?.files ?? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
@@ -2235,6 +2229,11 @@ export class RestoreOrchestrator {
               ...(selected ? { beforeNativeLaunch: () => selected.beforeNative(launchResult.session.id, launchResult.binding.id) } : {}),
             });
             warnings?.push(...(startupResult.warnings ?? []));
+            // #3039: the blocks the resumed launch actually sent, by the adapter's own record, are the ones the check after the
+            // launch doesn't look for in the repository file.
+            const carriedIds = new Set((launchGuidance ?? []).map((f) => f.path));
+            const sentGuidance = carriedIds.size > 0 && launchResult.binding.tmuxSession ? adapter.launchGuidanceSent?.(launchResult.binding.tmuxSession) : undefined;
+            if (sentGuidance?.length) this.launchGuidanceBlocks.set(node.id, new Set(sentGuidance.filter((id) => carriedIds.has(id))));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested

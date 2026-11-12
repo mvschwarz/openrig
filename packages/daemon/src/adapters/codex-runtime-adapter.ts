@@ -206,6 +206,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private codexSystemConfigDir: string;
   /** #875: the managed guidance blocks a fresh launch's startup queued for its developer instructions, per tmux session. */
   private launchInstructions = new Map<string, Map<string, string>>();
+  /** #3039: per tmux session, the block ids its last launch's developer instructions held. */
+  private sentLaunchGuidance = new Map<string, string[]>();
   /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
   private managedBlockRecords: ManagedBlockRecords | undefined;
 
@@ -809,7 +811,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
-    if (binding.guidanceLaunchInstructions && binding.tmuxSession) this.launchInstructions.set(binding.tmuxSession, new Map());
+    if (binding.guidanceLaunchInstructions && binding.tmuxSession) {
+      this.launchInstructions.set(binding.tmuxSession, new Map());
+      this.sentLaunchGuidance.delete(binding.tmuxSession);
+    }
     const projected: string[] = [];
     const warnings: string[] = [];
     const skipped: string[] = [];
@@ -1597,8 +1602,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const blocks = this.launchInstructions.get(tmuxSession);
     this.launchInstructions.delete(tmuxSession);
     if (!blocks || blocks.size === 0) return "";
+    this.sentLaunchGuidance.set(tmuxSession, [...blocks.keys()]);
     const text = [LAUNCH_INSTRUCTIONS_PREAMBLE, ...[...blocks].map(([id, content]) => managedBlockText(id, content))].join("\n\n");
     return ` -c ${shellQuote(`developer_instructions=${JSON.stringify(text).replace(/\u007f/g, "\\u007F")}`)}`;
+  }
+
+  launchGuidanceSent(tmuxSession: string): string[] | undefined {
+    const sent = this.sentLaunchGuidance.get(tmuxSession);
+    this.sentLaunchGuidance.delete(tmuxSession);
+    return sent;
   }
 
   /** #875: whether a fresh launch can carry this seat's managed guidance as developer instructions instead of writing the

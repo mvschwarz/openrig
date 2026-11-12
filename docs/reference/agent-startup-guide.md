@@ -621,8 +621,11 @@ A resume of the seat's own conversation, on a snapshot restore or `rig up --exis
 does: on Codex 0.164.0 or later with none configured, the guidance blocks the repository `AGENTS.md` doesn't hold go
 with the resume as `-c developer_instructions=…` instead of being put back in that file, and the guidance file its
 launch recorded isn't changed. A file that already holds blocks keeps them: a block OpenRig wrote whose source has
-changed is refreshed, and one edited by hand, or with no record of OpenRig writing it, is left as it is and named. Whether Codex keeps the earlier session's
-developer instructions as well isn't documented by Codex; the text sent with the resume is the current one.
+changed is refreshed, and one edited by hand, or with no record of OpenRig writing it, is left as it is and named. A
+block whose source is gone or can't be read isn't sent, and the restore reports it as missing. A seat in a rig without
+pods starts its resumed conversation before its startup runs, so its missing blocks are still put back in the
+repository `AGENTS.md`. Whether Codex keeps the earlier session's developer instructions as well isn't documented
+by Codex; the text sent with the resume is the current one.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.
