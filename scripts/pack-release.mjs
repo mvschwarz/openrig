@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packEntry } from './npm-pack-json.mjs';
-import { checkPackagedPluginVersions, snapshotPlugins } from './check-packaged-plugin-versions.mjs';
+import { checkPackagedPluginVersions } from './check-packaged-plugin-versions.mjs';
 
 const LISTING = ['packages/acp/registry/agent.json', 'packages/acp/registry/icon.svg'];
 const readJson = (root, rel) => JSON.parse(readFileSync(join(root, rel), 'utf8'));
@@ -29,7 +29,8 @@ export function launcherMismatches(root) {
 }
 
 const BASELINE = 'scripts/fixtures/packaged-plugins-last-release.json';
-const OPENRIG_PLUGIN = 'packages/daemon/assets/plugins/openrig';
+// The openrig plugin in source, and as the assembled CLI packs it.
+const OPENRIG_PLUGIN_DIRS = ['packages/daemon/assets/plugins/openrig', 'packages/cli/daemon/assets/plugins/openrig'];
 const OPENRIG_MANIFESTS = ['plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.cursor-plugin/plugin.json'];
 const parts = version => version.split('.').map(Number);
 const earlier = (a, b) => { const [x, y] = [parts(a), parts(b)]; const i = x.findIndex((n, k) => n !== y[k]); return i >= 0 && x[i] < y[i]; };
@@ -49,11 +50,21 @@ export function releaseBaseline(root, version) {
   return baseline;
 }
 
-/** The openrig plugin ships inside the CLI, so its manifests carry the CLI's release version; openrig-core keeps its own. */
+/** The openrig plugin ships inside the CLI, so all four of its manifests, in source and in the assembled CLI, carry the
+ *  CLI's release version; openrig-core keeps its own, and other plugins' optional manifests stay optional. */
 export function openrigPluginMismatches(root, version) {
-  return OPENRIG_MANIFESTS.filter(rel => existsSync(join(root, OPENRIG_PLUGIN, rel)))
-    .map(rel => [`${OPENRIG_PLUGIN}/${rel} "version"`, readJson(root, `${OPENRIG_PLUGIN}/${rel}`).version])
-    .filter(([, actual]) => actual !== version).map(([where, actual]) => `${where} is ${JSON.stringify(actual)}, not ${JSON.stringify(version)}`);
+  return OPENRIG_PLUGIN_DIRS.flatMap(dir => OPENRIG_MANIFESTS.map(rel => `${dir}/${rel}`)).flatMap(path => {
+    if (!existsSync(join(root, path))) return [`${path} is missing`];
+    const actual = readJson(root, path).version;
+    return actual === version ? [] : [`${path} "version" is ${JSON.stringify(actual)}, not ${JSON.stringify(version)}`];
+  });
+}
+
+/** What a successful pack says about its baseline: the checks read the baseline's own fields, so whether it's the
+ *  registry's latest @openrig/cli is for the person releasing to confirm. */
+export function baselineNotice(manifest) {
+  const { release, archiveSha256 } = manifest.plugins.baseline;
+  return `Plugins checked against ${release} (archive sha256 ${archiveSha256}); confirm that's the registry's latest @openrig/cli before publishing.`;
 }
 
 export function packRelease(root, dest) {
@@ -63,10 +74,8 @@ export function packRelease(root, dest) {
   // This catches a build that never ran, not a partial one: a successful build:package is the precondition.
   if (!existsSync(join(root, 'packages/cli/daemon/dist'))) throw new Error('packages/cli has no daemon/dist, so build:package hasn\'t run: run npm run build:package first');
   const stamp = openrigPluginMismatches(root, version);
-  if (stamp.length > 0) throw new Error(`The openrig plugin's manifests must carry @openrig/cli ${version}; set them in the release preparation, then run build:package again:\n- ${stamp.join('\n- ')}`);
+  if (stamp.length > 0) throw new Error(`The openrig plugin's four manifests must carry @openrig/cli ${version}, in source and in the assembled CLI; set them in the release preparation, then run npm run build:package again:\n- ${stamp.join('\n- ')}`);
   // The assembled CLI's plugins are what's packed: changed plugin bytes need a greater version than the last release's.
-  const assembled = snapshotPlugins(join(root, 'packages/cli')).openrig;
-  if (assembled && assembled.version !== version) throw new Error(`The assembled CLI's openrig plugin is ${assembled.version}, not ${version}: run npm run build:package again`);
   const baseline = releaseBaseline(root, version);
   const plugins = checkPackagedPluginVersions(join(root, 'packages/cli'), baseline);
   mkdirSync(dest, { recursive: true });
@@ -96,6 +105,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const manifest = packRelease(resolve(fileURLToPath(import.meta.url), '../..'), resolve(dest));
     for (const a of manifest.artifacts) console.log(`${a.name}@${a.version}  ${a.path}  sha256 ${a.sha256}  ${a.size} B`);
     for (const l of manifest.listing) console.log(`listing  ${l.path}  sha256 ${l.sha256}`);
+    console.log(baselineNotice(manifest));
     console.log(`Wrote ${join(resolve(dest), 'RELEASE-ARTIFACTS.json')}. Publish these archive files themselves, by path, in this order: ${manifest.publishOrder.join(', then ')}.`);
     console.log('Publishing from the packages/cli folder instead runs its prepublishOnly, which rebuilds, so the bytes published could differ from these.');
   } catch (error) {

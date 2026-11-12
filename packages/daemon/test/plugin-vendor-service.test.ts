@@ -212,6 +212,17 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     await service(devSource).ensureVendored("openrig");
     expect(devSource._store[installedSkill]).toBe("# released 0.7.13");
     expect(devSource._store[installedManifest]).toBe(manifest("0.7.13"));
+
+    // An openrig install with no version manifest was put there another way: left as it is, with no version invented.
+    const unversioned = mockFs({ ...bundled("0.7.13", "# released 0.7.13"), [installedSkill]: "# a person's own openrig copy" });
+    const before = { ...unversioned._store };
+    const logger = vi.fn();
+    await new PluginVendorService({ vendoredAssetsDir: "/asset-root", userPluginsDir: "/fixture/home/.openrig/plugins", fs: unversioned,
+      httpClient: vi.fn(), logger }).ensureVendored("openrig");
+    expect(unversioned._store).toEqual(before);
+    expect(unversioned.exists(installedManifest)).toBe(false);
+    expect(unversioned.exists("/fixture/home/.openrig/plugins/openrig/.codex-plugin/plugin.json")).toBe(false);
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/existing plugin 'openrig' has no version authority .*leaving it unchanged/));
   });
 
   it("the shipped core upgrades 0.1.5 installs to daemon-publication instructions", async () => {

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { launcherMismatches, openrigPluginMismatches, packRelease, releaseBaseline } from './pack-release.mjs';
+import { baselineNotice, launcherMismatches, openrigPluginMismatches, packRelease, releaseBaseline } from './pack-release.mjs';
 import { snapshotPlugins } from './check-packaged-plugin-versions.mjs';
 
 const sha256 = file => createHash('sha256').update(readFileSync(file)).digest('hex');
@@ -89,14 +89,25 @@ test('packs both packages at the one version, with exact paths and hashes, and t
 });
 
 test("the openrig plugin's four manifests must carry the CLI version, in source and in the assembled CLI", t => {
+  const SOURCE = 'packages/daemon/assets/plugins/openrig', ASSEMBLED = 'packages/cli/daemon/assets/plugins/openrig';
   const root = fixture(t, '0.7.13', {}, { plugin: { source: '0.1.0' } });
-  assert.deepEqual(openrigPluginMismatches(root, '0.7.13'), MANIFESTS.map(rel =>
-    `packages/daemon/assets/plugins/openrig/${rel} "version" is "0.1.0", not "0.7.13"`));
+  assert.deepEqual(openrigPluginMismatches(root, '0.7.13'), [SOURCE, ASSEMBLED].flatMap(dir => MANIFESTS.map(rel =>
+    `${dir}/${rel} "version" is "0.1.0", not "0.7.13"`)));
   const dest = join(root, 'out');
-  assert.throws(() => packRelease(root, dest), /The openrig plugin's manifests must carry @openrig\/cli 0\.7\.13/);
+  assert.throws(() => packRelease(root, dest), /The openrig plugin's four manifests must carry @openrig\/cli 0\.7\.13, in source and in the assembled CLI/);
   assert.equal(existsSync(dest), false);
+  // A stale assembly is named file by file, with the rebuild step.
   const stale = fixture(t, '0.7.13', {}, { plugin: { source: '0.7.13', assembled: '0.1.0' } });
-  assert.throws(() => packRelease(stale, join(stale, 'out')), /assembled CLI's openrig plugin is 0\.1\.0, not 0\.7\.13: run npm run build:package again/);
+  assert.deepEqual(openrigPluginMismatches(stale, '0.7.13'), MANIFESTS.map(rel => `${ASSEMBLED}/${rel} "version" is "0.1.0", not "0.7.13"`));
+  assert.throws(() => packRelease(stale, join(stale, 'out')), /run npm run build:package again/);
+  // Each of the four is required in both places, even when the others carry the version.
+  for (const dir of [SOURCE, ASSEMBLED]) {
+    const missing = fixture(t, '0.7.13');
+    rmSync(join(missing, dir, '.cursor-plugin/plugin.json'));
+    assert.deepEqual(openrigPluginMismatches(missing, '0.7.13'), [`${dir}/.cursor-plugin/plugin.json is missing`]);
+    assert.throws(() => packRelease(missing, join(missing, 'out')), /\.cursor-plugin\/plugin\.json is missing/);
+    assert.equal(existsSync(join(missing, 'out')), false);
+  }
   assert.deepEqual(openrigPluginMismatches(fixture(t, '0.7.13'), '0.7.13'), []);
 });
 
@@ -121,6 +132,7 @@ test('the release manifest records the baseline it was checked against and each 
   const root = fixture(t, '0.7.13', {}, { baseline: { release: '0.7.12', archiveSha256: 'b'.repeat(64) } });
   const manifest = packRelease(root, join(root, 'out'));
   assert.deepEqual(manifest.plugins, { baseline: { release: '0.7.12', archiveSha256: 'b'.repeat(64) }, packed: { openrig: '0.7.13', 'openrig-core': '0.1.28' } });
+  assert.equal(baselineNotice(manifest), `Plugins checked against 0.7.12 (archive sha256 ${'b'.repeat(64)}); confirm that's the registry's latest @openrig/cli before publishing.`);
 });
 
 test('the pack step never publishes', () => {
