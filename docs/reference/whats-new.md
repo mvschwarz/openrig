@@ -18,15 +18,14 @@ version. Without a running daemon, read the packaged
 - **Back up the database, then restart the daemon.** Three migrations run on the
   daemon's first start: 160 and 161 (network bindings and receipts, for the
   experimental hub connector) and 162 (indexes for current-session reads). If
-  `$OPENRIG_DB` isn't backed up yet, copy that file (`rig config get db.path`
-  shows it) with the daemon stopped, then `rig daemon start`. Going back to
-  0.7.12 after these migrations isn't established.
+  `$OPENRIG_DB` isn't backed up yet: `rig daemon stop` (seats keep running, so
+  don't use `rig down`), copy that file (`rig config get db.path` shows it),
+  then `rig daemon start`. Going back to 0.7.12 after these migrations isn't
+  established.
 - **The plugins:** openrig-core moves from 0.1.28 to 0.1.29 (its activity relay
   and refocus hooks changed). The `openrig` plugin's manifests now carry the
   CLI's version, 0.7.13. A Codex session kept running across the upgrade can ask
   for hook approval until it's relaunched.
-- **The daemon depends on the MCP SDK** for the hub connector; it installs with
-  the package.
 
 ## Answers, setup and seats
 
@@ -41,19 +40,24 @@ version. Without a running daemon, read the packaged
   typed at this machine's terminal or TUI means (recorded as `human@host`): act
   on a clear one with the request's own decision command, and don't ask them to
   confirm. When it's unclear, ask them back with a new ask to them
-  (`rig queue create --destination <person> …`), never to `human@host`. Closing a
-  runner's request without deciding permits nothing.
+  (`rig queue create --destination <person> …`), never to `human@host`. When the
+  default receiving agent asks back, the question reaches the person's Feed and
+  their reply decides. Closing a runner's request without deciding permits nothing.
   ([#3030](https://github.com/mvschwarz/openrig/pull/3030))
 - **Setup:** when the person registry can be read and holds nobody,
   `rig daemon start` ends by telling the setup agent to offer to register the
-  person, with the command to run only on their yes. `rig up`, `rig start` and
-  `rig context` start the daemon without printing it. A person who talks to the
+  person, with the command to run only on their yes; pass it on. Asking to be
+  reachable registers the person as the default directly. In fresh-install
+  tests the setup agent passed the offer on in 5 of 6 installs, and a no
+  registered nothing. `rig up`, `rig start` and `rig context` start the daemon
+  without printing it. A person who talks to the
   kernel operator first isn't offered registration in this release: offer
   `rig gateway human add` yourself. ([#3028](https://github.com/mvschwarz/openrig/pull/3028))
-- **A first team's permissions:** before launch, the kernel operator names the
-  commands the team will ask for, reuses a choice the person made, or makes one
-  project-scoped offer, applied on their yes. Chained commands and OpenRig's own
-  lifecycle commands still ask on Claude seats. ([#3029](https://github.com/mvschwarz/openrig/pull/3029))
+- **A first team's permissions:** in the change's own tests, before launch, the
+  kernel operator names the commands the team will ask for, reuses a choice the
+  person made, or makes one project-scoped offer, applied on their yes. Don't
+  tell the person it means fewer asks: that hasn't been shown. Chained commands
+  and OpenRig's own lifecycle commands still ask on Claude seats. ([#3029](https://github.com/mvschwarz/openrig/pull/3029))
 - **A usage-limited Claude seat** whose limit message states a reset time parks
   its pending work until then. Don't release it on a timer.
   ([#2917](https://github.com/mvschwarz/openrig/pull/2917))
@@ -91,10 +95,10 @@ version. Without a running daemon, read the packaged
   list, explorer and agent-detail status rows show unknown. Screen motion still
   shows active, a daemon that serves no activity keeps the screen fallback, and
   the topology graph is unchanged. Feed times use `ui.timezone`. ([#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022))
-- **Experimental, at the person's own risk:** `rig network connect <seat> --hub
-  <url> --as <participant> --token-file <path>` joins one local seat to a
-  participant on a hub they already have (`status`, `disconnect`). Plain http
-  needs `--allow-http`. The daemon starts the connector even with no binding.
+- **Experimental, at the person's own risk:** `rig network` connects one local
+  seat to a hub they already have. The connector uses the MCP SDK, which the
+  installed package already included in 0.7.12. The daemon starts it even with
+  no binding.
   ([#2993](https://github.com/mvschwarz/openrig/pull/2993))
 
 ## Limits to keep in view
@@ -102,31 +106,56 @@ version. Without a running daemon, read the packaged
 - **Not in this release:** a Codex snapshot restore or `rig up --existing` can
   write OpenRig's managed guidance into a tracked `AGENTS.md`, leaving the
   worktree modified; check `git status` after either operation.
-- **Not in this release:** the kernel operator's own registration offer, as above.
-  While nobody is registered, `rig daemon start` repeats its offer even after a
-  no; nothing is registered without a yes.
+- **Not in this release:** the kernel operator's own registration offer, as above
+  ([#3041](https://github.com/mvschwarz/openrig/pull/3041)). While nobody is registered, `rig daemon start` repeats its offer
+  even after a no; nothing is registered without a yes.
+- **Speed and memory:** On one performance host, whole `rig queue create`
+  invocations had a median about 10.4% slower than 0.7.12 (about +29 ms). Send
+  latency stayed within the comparison's unchanged range. The cause remains
+  unidentified. The standard idle-memory comparison was inconclusive. A post-hoc
+  analysis of the same six runs found 7.9–8.6 MiB (4.2–5.3%) higher daemon RSS
+  across three matched idle windows, using the median of three arm medians per
+  version. The cause and steady-state behavior remain unestablished.
+- **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic OpenRig notice can be left beside a
+  draft started during delivery. This also concerns notices admitted by
+  openrig-urgent and urgent-only modes. In the reproduced 0.7.12 Claude Code and
+  Codex cases, the person's draft remained intact and no Enter was sent, but
+  OpenRig's text stayed in the input. The guard and paste path are unchanged in
+  this cut; a native 0.7.13 reproduction has not run.
+- **Native model pickers:** with a /model picker open, an ordinary send can act
+  on the picker instead of delivering the message. In 0.7.12 tests it confirmed
+  Claude Code's already-selected default and advanced Codex's model selection;
+  neither message reached the model. Close or deliberately resolve the picker
+  before ordinary delivery. The native 0.7.13 case has not run.
+- **Codex hook review after an upgrade:** in one test whose Codex home already
+  held earlier hook approvals, `rig up --existing` stopped for hook review in
+  each Codex pane; approving the hooks resumed all three conversations. A
+  separate test of the same upgrade on a fresh Codex home, on another host,
+  restored without review. The cause of the difference is not established.
+- **A first team with Codex installed but signed out:** a Claude person's starter
+  team includes a Codex reviewer that waits for a Codex sign-in, and the person
+  isn't told beforehand. If Codex is installed, have them sign in first.
 - **The hub connector isn't inert:** it starts, sweeps leftover credential
   folders and schedules local rounds even with no binding; only the hub pass is
   absent. Don't describe it as off. ([#2993](https://github.com/mvschwarz/openrig/pull/2993))
 - **The recorder:** a queued begin record can be lost before the durable append,
   and a stalled worker has no acknowledgement timeout. ([#3019](https://github.com/mvschwarz/openrig/pull/3019))
-- **Proof reads** yield between missions to stay responsive. That isn't less
-  total reading, a hard latency bound or an atomic snapshot. ([#2970](https://github.com/mvschwarz/openrig/pull/2970))
+- **Proof reads** are much more responsive, but still pause briefly, and a whole
+  read takes slightly longer. It isn't a hard latency bound or an atomic snapshot. ([#2970](https://github.com/mvschwarz/openrig/pull/2970))
 - **Usage-limit parking** was tested with `claude -p`'s message; if an
   interactive seat's report lacks it, the seat is retried as before. ([#2917](https://github.com/mvschwarz/openrig/pull/2917))
 - **Handover:** a context delivery failure, and a Codex launch failure after an
   undismissed update prompt, can still say "retry" while a successor runs.
   ([#3003](https://github.com/mvschwarz/openrig/pull/3003))
-- **Answers:** a pairing requester's description is quoted for the receiving
-  agent but not yet in the request's summary or notices. Whether a receiving
-  agent acts on a clear terminal answer in a real run is still to be shown.
+- **Answers:** an ask-back can stop at Claude Code's own permission prompt,
+  which the person doesn't see. A receiving agent the person chose can still
+  decline to act on a clear answer. A pairing requester's description is quoted
+  for the receiving agent but not yet in the request's summary or notices.
   ([#3030](https://github.com/mvschwarz/openrig/pull/3030))
 - **0.7.12's limits below** still apply, except that [#2970](https://github.com/mvschwarz/openrig/pull/2970) and [#2948](https://github.com/mvschwarz/openrig/pull/2948)
-  are now in this release, runner confirmations are written ([#3001](https://github.com/mvschwarz/openrig/pull/3001)), and
-  `rig seat stop` no longer suggests `rig down` for an adopted session
-  ([#3006](https://github.com/mvschwarz/openrig/pull/3006)). 0.7.12's not-run list was for that release.
-
-<!-- QUALITY-PENDING-0713: the not-run list; #3041's Eval qualification for the operator-direct registration limit; any measured #2970 figure. Filled in by the notes-only recut after Quality's verdict. -->
+  are now in this release, runner answers are confirmed and reach a waiting
+  runner at once ([#3001](https://github.com/mvschwarz/openrig/pull/3001)), and `rig seat stop` no longer suggests `rig down`
+  for an adopted session ([#3006](https://github.com/mvschwarz/openrig/pull/3006)). 0.7.12's not-run list was for that release.
 
 ## What changed in OpenRig 0.7.12
 
