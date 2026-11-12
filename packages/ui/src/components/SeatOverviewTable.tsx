@@ -141,7 +141,8 @@ export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOv
     { key: "spec", label: "spec", value: specCell, mono: true },
     { key: "activity", label: "activity", value: activityValue },
     { key: "context-percent", label: "context %", value: contextPercentage, mono: true },
-    { key: "total-tokens", label: "tokens", value: tokenLabel, mono: true },
+    { key: "total-tokens", label: "tokens", value: tokenLabel && data.contextUsage?.source === "runner_reported"
+      ? `${tokenLabel} (runner-reported)` : tokenLabel, mono: true },
   ];
 
   const lastIdx = columnFields.length - 1;

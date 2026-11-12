@@ -143,6 +143,18 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect((await screen.findByTestId("detail-context-usage")).textContent).toContain("runner-reported");
   });
 
+  it("labels counts-only runner facts without inventing a context percentage", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, contextUsage: { availability: "unknown", reason: "window_capacity_unknown", source: "runner_reported",
+      usedPercentage: null, remainingPercentage: null, contextWindowSize: null, totalInputTokens: 1000, totalOutputTokens: 100, fresh: true } });
+    renderDetails();
+    const tokens = await screen.findByTestId("seat-overview-cell-total-tokens");
+    expect(tokens.textContent).toContain("1.1k");
+    expect(tokens.textContent).toContain("runner-reported");
+    expect(screen.getByTestId("seat-overview-cell-context-percent").textContent).not.toContain("%");
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    expect((await screen.findByTestId("detail-context-usage")).textContent).toContain("unknown (window_capacity_unknown)");
+  });
+
   // HG-1 — default tab is Overview.
   it("HG-1: default tab is Overview on landing", async () => {
     mockNodeDetail(NODE_DETAIL);

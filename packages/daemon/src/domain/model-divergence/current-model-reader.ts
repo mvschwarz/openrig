@@ -187,7 +187,12 @@ export class CurrentModelReader {
    * The final query starts AFTER all record selections/reads, including cache hits. */
   async observeInventory(nodes: InventoryNode[]): Promise<ModelObservation[]> {
     const listProcesses = this.processCensus.cycleLister();
-    if (!this.deps.readAllPaneProcesses) return Promise.all(nodes.map(n => this.observe(n, listProcesses)));
+    if (!this.deps.readAllPaneProcesses) {
+      // Native readers keep their existing per-seat checks; report callbacks finish after every peer's await.
+      const observations = await Promise.all(nodes.map(n => ["claude-code", "codex", "pi"].includes(n.runtime ?? "")
+        ? this.observe(n, listProcesses) : this.prepare(n, { ...this.deps.native, listProcesses })));
+      return observations.map(p => "finish" in p ? p.finish(null) : p);
+    }
     let before: ReturnType<NonNullable<Deps["readAllPaneProcesses"]>> | undefined;
     const native = { ...this.deps.native, listProcesses, getPanePid: async (pane: string) => {
       before ??= this.deps.readAllPaneProcesses!();
