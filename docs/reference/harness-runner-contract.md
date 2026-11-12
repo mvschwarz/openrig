@@ -173,6 +173,8 @@ uses accepted events, rechecking run/binding, sequence and the existing ten-minu
 revives a runner sample from the context cache. Community model reads use the same current-report boundary.
 Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
 readers retain their evidence paths and labels. Omitted components retain their own sample times.
+An unreadable binding or report is unknown (`binding_unverified`), not evidence of replacement. The grant and
+existing receipt remain intact; retrying after verification recovers the same accepted receipt.
 
 A fresh current session component can fill an absent resume reference through the existing report-only
 persistence path, with `hook` meaning origin only. It emits the existing session-identity event once after

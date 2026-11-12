@@ -46,7 +46,7 @@ export type RunnerObservationReceipt = Pick<RunnerObservation, "runId" | "family
 export type RecordRunnerObservationResult = { ok: true; observation: RunnerObservationReceipt }
   | { ok: false; code: "invalid_runner_observation" | "runner_observation_conflict" | "runner_observation_unavailable"; error: string };
 export type RunnerObservationRead = { report: RunnerObservation | null;
-  reason: null | "no_data" | "binding_changed" | "stale" | "sample_time_invalid" | "session_mismatch" };
+  reason: null | "no_data" | "binding_changed" | "binding_unverified" | "stale" | "sample_time_invalid" | "session_mismatch" };
 
 interface AgentActivityStoreDeps {
   db: Database.Database;
@@ -259,7 +259,9 @@ export class AgentActivityStore {
       const grants = new ActivityGrantStore(this.db), active = grants.activeForNode(nodeId);
       if (!active?.runId) return unknown("no_data");
       if (policy.runtime !== undefined && active.binding?.runtime !== policy.runtime) return unknown("binding_changed");
-      if (grants.standing(active.grantId) !== "current") return unknown("binding_changed");
+      const standing = grants.standing(active.grantId);
+      if (standing === "unverified") return unknown("binding_unverified");
+      if (standing !== "current") return unknown("binding_changed");
       const latest = (key: keyof RunnerObservations): RunnerObservation | null => {
         const row = this.db.prepare(`SELECT payload FROM events WHERE node_id=? AND type='agent.runner_observation'
           AND json_extract(payload,'$.runId')=? AND json_extract(payload,'$.family')='observation'
@@ -284,7 +286,7 @@ export class AgentActivityStore {
       const nativeRefs = [report.observations.session?.nativeRef, latest("session")?.observations.session?.nativeRef];
       if (session?.resume_token && nativeRefs.some(ref => ref && session.resume_token !== ref)) return unknown("session_mismatch");
       return { report, reason: null };
-    } catch { return unknown("binding_changed"); }
+    } catch { return unknown("binding_unverified"); }
   }
 
   getLatestForNode(input: {

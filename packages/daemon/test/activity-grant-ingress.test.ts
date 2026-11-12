@@ -394,6 +394,36 @@ describe("credential-bound observation-only reports", () => {
     return { ...f, grant, row, report, reports };
   }
 
+  it.each(["binding", "report read"])("keeps an unreadable %s unknown without claiming replacement or consuming a receipt", async kind => {
+    const f = runner();
+    const body = f.report(1, { model: { id: "reported-model" }, context: { usedTokens: 10, windowTokens: 100 } });
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    const prepare = f.db.prepare.bind(f.db);
+    const fault = kind === "binding"
+      ? vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("binding unavailable"); })
+      : vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+        if (sql.includes("SELECT payload FROM events")) throw new Error("report read unavailable");
+        return prepare(sql);
+      }) as typeof f.db.prepare);
+    try {
+      for (const component of ["model", "context"] as const) {
+        expect(f.store.getRunnerObservation(f.guest.id, component, { freshnessMs: 600_000 }))
+          .toEqual({ report: null, reason: "binding_unverified" });
+      }
+      if (kind === "binding") {
+        expect(await f.post(f.grant.token, body))
+          .toMatchObject({ status: 409, body: { code: "activity_grant_unverified", retryable: true } });
+      }
+      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+      expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.runner_observation'").get()).toEqual({ n: 1 });
+    } finally { fault.mockRestore(); }
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 }))
+      .toMatchObject({ report: { sequence: 1, observations: { model: { id: "reported-model" } } }, reason: null });
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(f.reports()).toHaveLength(1);
+  });
+
   it("retains one authenticated report with a stable receipt and no fabricated activity or identity", async () => {
     const f = runner();
     const body = f.report(1, { model: { id: "provider/model" }, context: { usedTokens: 10 } });
@@ -453,7 +483,7 @@ describe("credential-bound observation-only reports", () => {
 
   it("rejects mixed activity/identity envelopes without partial side effects", async () => {
     const f = runner();
-    for (const extra of [{ hookEvent: "Stop" }, { eventFamily: "session_identity", sessionId: "reported" }]) {
+    for (const extra of [{ hookEvent: "Stop" }, { runtime: "synth", eventFamily: "session_identity", sessionId: "reported" }]) {
       expect((await f.post(f.grant.token, { ...f.report(1, { model: { id: "model" } }), ...extra })).status).toBe(400);
     }
     expect(f.reports()).toHaveLength(0); expect(f.recorded()).toBe(0);
