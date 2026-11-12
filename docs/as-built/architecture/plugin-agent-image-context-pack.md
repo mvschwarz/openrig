@@ -225,11 +225,12 @@ plugin that isn't installed, and refreshes an installed one only when the bundle
 version is strictly newer, backing up what it replaces. At an equal version it leaves the
 installed content unchanged, though it may reconcile file modes on byte-identical files; a newer
 installed version is left as it is. That describes this start-time path only, not every way a
-plugin can be installed or updated. The `openrig` plugin ships inside the CLI, so its four
-manifests carry the CLI's release version, set in release preparation; `openrig-core` keeps its
-own `0.1.x` line. So each release refreshes an older installed `openrig` plugin, while a daemon
-run from development source, whose `openrig` manifests stay at `0.1.0`, leaves a newer released
-install as it is rather than downgrading it. `npm run pack:release` refuses a missing `openrig`
+plugin can be installed or updated, and daemon start vendors only `openrig-core`
+(`ensureLatest("openrig-core")` in `startup.ts`). `openrig-core` keeps its own `0.1.x` line, so a
+change to its packaged files needs a greater version for an installed copy to refresh. The
+`openrig` plugin ships inside the CLI, and an app installs it from the package; its four manifests
+carry the CLI's release version, set in release preparation, while development source keeps them
+at `0.1.0`. `npm run pack:release` refuses a missing `openrig`
 manifest, or one that doesn't carry the CLI's version, in source or in the assembled CLI. It also
 refuses a baseline (`scripts/fixtures/packaged-plugins-last-release.json`) whose release isn't
 earlier than the CLI's, or that has no archive hash or plugins, and changed plugin bytes without a
