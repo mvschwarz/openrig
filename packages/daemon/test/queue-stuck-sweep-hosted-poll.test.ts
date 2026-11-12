@@ -458,9 +458,33 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
       const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
       db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
     }
+    const pass = await sweep({ ...noPerson, unclaimedAgeMinutes: 120 });
+    expect(pass.outcome).not.toBe("failed");
+    // The creator's row still waits, and an open notice's rebuilt list stands for it.
+    expect(repo.getById(first.qitemId)!.state).toBe("pending");
+    const open = notices().filter((n) => ["pending", "in-progress", "blocked"].includes(n.state));
+    expect(open.some((n) => repo.getById(n.qitemId)!.body.split("\n")
+      .some((l) => l.startsWith("Every row this notice stands for: ") && l.includes(first.qitemId)))).toBe(true);
+  });
+
+  // Review of #3049: a notice with two creator marks (tags passed by hand on a handoff or create) names no creator, so
+  // with its list unreadable it is rebuilt from every unresolved row, never from the first mark's rows alone.
+  it("a notice with two creator marks and an unreadable list stands for every unresolved row", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 90 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator:lead@hub");
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 90 });
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ?, tags = json_insert(tags, '$[#]', ?) WHERE qitem_id = ?")
+      .run(body, "stuck-sweep-backlog-to-creator:orch@hub", toLead!.qitemId);
     await sweep({ ...noPerson, unclaimedAgeMinutes: 120 });
     const open = notices().filter((n) => ["pending", "in-progress", "blocked"].includes(n.state));
-    expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(first.qitemId))).toBe(true);
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
   });
 
   it("a member's notice to the one creator of its rows is marked even when that creator is also the recovery agent", async () => {
