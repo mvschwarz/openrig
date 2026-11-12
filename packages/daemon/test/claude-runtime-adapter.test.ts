@@ -6,6 +6,7 @@ import nodePath from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import { isAttentionRequiredReadinessCode } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
@@ -1101,7 +1102,7 @@ describe("Claude Code runtime adapter", () => {
       });
 
       describe("with provider-prompt auto-driving on, a trust prompt in the longer wait", () => {
-        const trust = "Accessing workspace:\n/fixture\n1. Yes, I trust this folder\n2. No, exit";
+        const trust = "Accessing workspace:\n/fixture\n❯ 1. Yes, I trust this folder\n  2. No, exit";
 
         it.each([["a Codex", codex], ["another conversation's Claude", otherClaude]])(
           "from %s that took the pane is not answered: main's result, no Enter", async (_label, arrival) => {
@@ -1121,6 +1122,16 @@ describe("Claude Code runtime adapter", () => {
           const { result, tmux } = await run({ autoDrive: true, screen: (read) => (read < 20 ? "" : read < 23 ? trust : tui) });
           expect(result).toMatchObject({ ok: true });
           expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+        });
+
+        it("with no key to send (a prompt drawn without a cursor) ends the longer wait as it does without the auto-drive", async () => {
+          const cursorless = "Accessing workspace:\n/fixture\n1. Yes, I trust this folder\n2. No, exit";
+          const screen = (read: number) => (read < 20 ? "" : cursorless);
+          const driven = await run({ autoDrive: true, screen });
+          const plain = await run({ screen });
+          expect(driven.result).toEqual(plain.result);
+          expect(driven.reads).toBe(plain.reads);
+          expect(driven.tmux.sendKeys).toHaveBeenCalledTimes(1);
         });
 
         it("in the quick window is answered as before, whoever holds the pane", async () => {
@@ -1458,4 +1469,118 @@ describe("Claude Code runtime adapter", () => {
   // (c) pre-existing user-authored hooks PRESERVED untouched; (d) source
   // grep confirms provisionActivityHooks/upsertCommandHook/etc. removed
   // from adapter source.
+});
+
+// #2820 item 2: with recovery.auto_drive_provider_prompts on, the plain workspace trust prompt is answered with Enter,
+// but Claude Code's "gated grants" backstop never is: its default choice declines the folder's pre-approved tool
+// permissions (or exits), and approving them is the person's call. The launch stops as attention_required, with the
+// screen as evidence, and no key goes to the pane after the launch command.
+describe("Claude gated grants backstop is never auto-driven (#2820 item 2)", () => {
+  const capture = JSON.parse(fs.readFileSync(new URL("./fixtures/claude-trust-git-root/trust-checks.json", import.meta.url), "utf8")) as { gatedGrantsScreen: string[] };
+  const backstop = capture.gatedGrantsScreen.join("\n");
+
+  async function launch(screens: string[], cwd = "/project") {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+    const capturePane = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    for (const screen of screens.slice(0, -1)) capturePane.mockResolvedValueOnce(screen);
+    capturePane.mockResolvedValue(screens.at(-1));
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: true });
+    const result = await adapter.launchHarness(makeBinding(cwd), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+    return { tmux, result };
+  }
+
+  it("stops as attention_required and sends nothing after the launch command", async () => {
+    const { tmux, result } = await launch([backstop]);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    // The launch command is the only call (it ends with its own Enter); the plain trust prompt takes a 2nd one.
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing when the seat's git root is the home folder", async () => {
+    const { tmux, result } = await launch([backstop.replace("<lab>/repo/cadeiras/rig/seat", "/home/agent")], "/home/agent");
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing while the backstop is still being drawn, nor once it is complete", async () => {
+    const partial = capture.gatedGrantsScreen.slice(0, -3).join("\n");
+    const { tmux, result } = await launch([partial, partial, backstop]);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  // Claude Code 2.1.322's plain trust prompt (no pre-approved permissions) opens with the focus on "No, exit": an
+  // Enter there quits Claude. The auto-drive moves the selection down once and presses Enter only once the focused row
+  // reads "Yes, I trust this folder".
+  const plainCapture = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+    .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+  const plainNo = plainCapture;
+  const plainYes = plainCapture.replace("❯ No, exit", "  No, exit").replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+  const ready = ["Claude Code v2.1.322", "❯ Ready"].join("\n");
+  const keys = (tmux: TmuxAdapter) => (tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.map(call => (call[1] as string[]).join(" "));
+
+  it("moves the plain trust prompt's focus from 'No, exit' to 'Yes' before pressing Enter (2.1.322)", async () => {
+    const { tmux, result } = await launch([plainNo, plainYes, ready]);
+    expect(result).toMatchObject({ ok: true });
+    expect(keys(tmux)).toEqual(["Enter", "Down", "Enter"]);
+  });
+
+  it("never presses Enter on 'No, exit', and moves it only once: a 2nd Down would wrap back to 'No, exit'", async () => {
+    const { tmux, result } = await launch([plainNo]);
+    expect(result).toMatchObject({ ok: false });
+    expect(keys(tmux)).toEqual(["Enter", "Down"]);
+  });
+
+  // A Claude-like select: Down moves the focus and wraps after the last option, and each key is drawn only some reads
+  // later (stale frames). Enter on "No, exit" quits Claude; Enter on "Yes" goes on to the session.
+  it("with stale frames and a wrapping select, sends one Down and presses Enter on 'Yes' only", async () => {
+    const tmux = mockTmux();
+    let calls = 0, focusYes = false, entered: "yes" | "no" | null = null, staleReads = 0, last = "";
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      if (staleReads > 0 && last) { staleReads -= 1; return last; }
+      last = entered === "yes" ? ready : entered === "no" ? "" : focusYes ? plainYes : plainNo;
+      return last;
+    });
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => (entered === "no" ? "zsh" : "claude"));
+    (tmux.sendKeys as ReturnType<typeof vi.fn>).mockImplementation(async (_session: string, keysSent: string[]) => {
+      calls += 1;
+      if (calls === 1) return { ok: true as const }; // the launch command's own Enter
+      if (keysSent.join(" ") === "Down") { focusYes = !focusYes; staleReads = 3; }
+      if (keysSent.join(" ") === "Enter" && entered === null) { entered = focusYes ? "yes" : "no"; staleReads = 2; }
+      return { ok: true as const };
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: true });
+    const result = await adapter.launchHarness(makeBinding("/project"), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+    expect(entered).toBe("yes");
+    expect(keys(tmux).slice(1)).toEqual(["Down", "Enter"]);
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("drives a plain prompt drawn below an earlier session that quoted the backstop's words", async () => {
+    const earlier = ["⏺ The folder's backstop reads \"This folder pre-approves 2 tool permissions\" and focuses",
+      "  \"No, continue without these permissions\".", "", "────────────────", "❯ ", "────────────────", ""].join("\n");
+    const { tmux, result } = await launch([earlier + plainNo, earlier + plainYes, ready]);
+    expect(result).toMatchObject({ ok: true });
+    expect(keys(tmux)).toEqual(["Enter", "Down", "Enter"]);
+  });
+
+  it("sends nothing to a trust prompt drawn without a cursor: the label cannot be checked", async () => {
+    const cursorless = plainCapture.replace("❯ No, exit", "  No, exit");
+    const { tmux, result } = await launch([cursorless]);
+    expect(result).toMatchObject({ ok: false });
+    expect(keys(tmux)).toEqual(["Enter"]);
+  });
+
+  it("sends nothing to the backstop in a 40-column pane, whose rows wrap and cut its marks (real capture)", async () => {
+    const narrow = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const { tmux, result } = await launch([narrow]);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(keys(tmux)).toEqual(["Enter"]);
+  });
+
+  it("is a readiness code that stops startup waiting for attention", () => {
+    expect(isAttentionRequiredReadinessCode("claude_gated_grants_gate")).toBe(true);
+  });
 });

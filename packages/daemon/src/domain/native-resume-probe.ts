@@ -136,6 +136,24 @@ export function assessNativeResumeProbe(
         detail: "Claude is at a resume-selection prompt; an operator must choose the conversation to continue.",
       };
     }
+    // #2820 item 2: the gated-grants backstop is never answered by OpenRig (not even with
+    // recovery.auto_drive_provider_prompts): its default choice declines the folder's pre-approved tool permissions or
+    // exits, and approving them is the person's call. Checked before the plain trust prompt, whose texts it shares.
+    const gatedGrants = claudeGatedGrantsPrompt(paneContent);
+    if (gatedGrants === "live") {
+      return {
+        status: "attention_required",
+        code: "claude_gated_grants_gate",
+        detail: "Claude is at its workspace trust check that warns \"This folder pre-approves N tool permissions\" (from the folder's .claude/settings.json), and the highlighted choice declines them or exits. Review and choose in the seat's pane. OpenRig does not approve or bypass this review. No input was sent.",
+      };
+    }
+    if (gatedGrants === "partial") {
+      return {
+        status: "inconclusive",
+        code: "awaiting_runtime",
+        detail: "Claude is still drawing its workspace trust check for the folder's pre-approved tool permissions.",
+      };
+    }
     if (looksLikeClaudeTrustPrompt(paneContent)) {
       return {
         status: "inconclusive",
@@ -343,9 +361,72 @@ function looksLikeClaudeBypassConsentPrompt(paneContent: string): boolean {
   return /\b(?:in|running in) Bypass Permissions mode\./.test(lines.slice(0, -3).join(" ").replace(/\s+/g, " "));
 }
 
+// Claude Code's "gated grants" backstop (2.1.319+, #2820 item 2). Its marks, which the plain workspace trust prompt
+// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, and the option that
+// declines them. Its default choice declines them ("No, continue without these permissions") or exits ("No, exit").
+// The marks are read on the whitespace-joined screen too, so a row that a narrow pane wraps still counts.
+const CLAUDE_GATED_GRANTS_MARK = /This folder pre-approves \d+ tool permissions?\b|No, continue without these permissions/;
+// One row of the backstop's marks, or of a part of one that a narrow pane wrapped.
+const CLAUDE_GATED_GRANTS_MARK_ROW = /This folder pre-approves\b|No, continue without\b|without these permissions\b/;
+const CLAUDE_TRUST_FOOTER = "Enter to confirm · Esc to cancel";
+const CLAUDE_TRUST_YES = "Yes, I trust this folder";
+const CLAUDE_TRUST_EXIT = "No, exit";
+// An option row of Claude's select: an optional cursor (❯ or ›), an optional "1." and a "Yes, …" or "No, …" label.
+const CLAUDE_TRUST_OPTION_ROW = /^\s*([❯›]\s*)?(?:\d+\.\s+)?((?:Yes|No), .*?)\s*$/;
+
+/** The gated-grants backstop on Claude's current screen (claudeCurrentRows): "live" when it is complete ("Enter to
+ *  confirm · Esc to cancel" is the last drawn row, with "Yes, I trust this folder" above it); "partial" while it is
+ *  still being drawn; null when the current screen has none. A backstop left in the scrollback above a session that
+ *  started is not current. The "Accessing workspace:" heading is not required: a long permission list can push it
+ *  out of the capture. */
+function claudeGatedGrantsPrompt(paneContent: string): "live" | "partial" | null {
+  const rows = claudeCurrentRows(paneContent);
+  if (!hasClaudeGatedGrantsMark(rows)) return null;
+  const mark = rows.map(row => CLAUDE_GATED_GRANTS_MARK_ROW.test(row)).lastIndexOf(true);
+  const drawn = rows.slice(Math.max(mark, 0)).filter(row => row.trim()).map(row => row.trim());
+  if (drawn.at(-1) !== CLAUDE_TRUST_FOOTER) return "partial";
+  return drawn.some(row => CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES) ? "live" : "partial";
+}
+
+/** A mark of the gated-grants backstop in these rows, read on their whitespace-joined text so a row that a narrow pane
+ *  wrapped still counts. */
+function hasClaudeGatedGrantsMark(rows: string[]): boolean {
+  return CLAUDE_GATED_GRANTS_MARK.test(rows.join(" ").replace(/\s+/g, " "));
+}
+
+/** The rows Claude drew after its last own element (input frame, header or reply): the screen a prompt is on now.
+ *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current. */
+function claudeCurrentRows(paneContent: string): string[] {
+  const rows = paneContent.trimEnd().split(/\r?\n/);
+  for (let at = rows.length - 1; at >= 0; at--) {
+    if (claudeDrawnAfter(rows.slice(at))) return rows.slice(at + 1);
+  }
+  return rows;
+}
+
+/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from its last 12 drawn rows. An allowlist:
+ *  "yes" or "no" only when the prompt's options are exactly "No, exit" and "Yes, I trust this folder" (in either
+ *  order, numbered or not) and one of them carries the cursor (❯ or ›): "yes" on "Yes, I trust this folder", "no" on
+ *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": another option set (the
+ *  gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
+export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unknown" {
+  const rows = paneContent.trimEnd().split(/\r?\n/).filter(row => row.trim()).slice(-12);
+  const options = rows.map(row => CLAUDE_TRUST_OPTION_ROW.exec(row)).filter(match => match !== null);
+  const labels = options.map(match => match[2]);
+  if (labels.length !== 2 || !labels.includes(CLAUDE_TRUST_YES) || !labels.includes(CLAUDE_TRUST_EXIT)) return "unknown";
+  const focused = options.filter(match => match[1]);
+  if (focused.length !== 1) return "unknown";
+  return focused[0]![2] === CLAUDE_TRUST_YES ? "yes" : "no";
+}
+
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
-  return paneContent.includes("Accessing workspace:")
-    && paneContent.includes("Yes, I trust this folder");
+  // #2820 item 2: read on Claude's current screen only, and a screen with the backstop's marks is never the plain
+  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit.
+  const current = claudeCurrentRows(paneContent);
+  const text = current.join("\n");
+  return text.includes("Accessing workspace:")
+    && text.includes("Yes, I trust this folder")
+    && !hasClaudeGatedGrantsMark(current);
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple

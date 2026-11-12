@@ -115,6 +115,8 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "login_required",
   "mcp_gate",
   "bypass_consent_gate",
+  // Claude's gated-grants backstop (#2820 item 2): approving the folder's pre-approved tool permissions is the person's call.
+  "claude_gated_grants_gate",
   // Claude's resume chooser or picker waits for a person to choose a conversation; startup stops waiting and says so.
   "claude_resume_selection_prompt",
   // Codex auth refusal (stored OAuth token can no longer be refreshed).
