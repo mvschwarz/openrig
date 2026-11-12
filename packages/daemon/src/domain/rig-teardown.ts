@@ -342,6 +342,14 @@ export class RigTeardownOrchestrator {
     const eligible = this.db.prepare(`
       SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
+        AND (s.intentionally_stopped = 0 OR EXISTS (
+          SELECT 1 FROM events e WHERE e.node_id = s.node_id AND e.type = 'session.stopped'
+            AND json_extract(e.payload, '$.sessionId') = s.id
+            AND json_extract(e.payload, '$.operator') = 'daemon:seat-reaper'
+            AND json_extract(e.payload, '$.reason') = 'idle_reap'
+            AND e.seq = (SELECT MAX(last.seq) FROM events last
+              WHERE last.node_id = s.node_id AND last.type = 'session.stopped')
+        ))
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `);

@@ -173,7 +173,7 @@ describe("RigTeardownOrchestrator", () => {
   it("attributes down to the exact session generation even after a reaper stop", async () => {
     const { rigId, nodeId, sessionId } = seedRig();
     sessionRegistry.markIntentionallyStopped(sessionId);
-    eventBus.emit({ type: "session.stopped", rigId, nodeId, sessionName: "r01-dev",
+    eventBus.emit({ type: "session.stopped", rigId, nodeId, sessionId, sessionName: "r01-dev",
       reason: "idle_reap", operator: "daemon:seat-reaper" });
     const tmux = mockTmux();
     tmux.probeSession = async () => ({ state: "absent" });
