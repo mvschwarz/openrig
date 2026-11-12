@@ -152,7 +152,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   and the stop wasn't exercised. For an adopted session, such as a seat joined
   with `rig attach --self`, `rig seat stop` still suggests `rig down`, which
   leaves that terminal running too. Release it with `rig unclaim <session>`
-  (that leaves its process running), then close it in its own terminal. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
+  (that leaves its process running), then end that process. If it runs in tmux,
+  also end the underlying tmux session, including any remaining shell; closing
+  only its viewing window leaves that session running. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
 - **Codex working counter:** a capture that doesn't name its pane keeps the old
   comparison, a restart that keeps both the pane and its process id isn't seen,
   and a leftover live frame can count once until it expires. ([#2980](https://github.com/mvschwarz/openrig/pull/2980))
