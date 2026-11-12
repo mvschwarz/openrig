@@ -1671,4 +1671,159 @@ describe("MCP host routing", () => {
     const send = box.calls.find((call) => call.path === "/api/transport/send");
     expect(send?.headers["X-OpenRig-Session"]).toBeUndefined();
   });
+
+  /** The eight tools that take a `host`, with arguments each accepts. */
+  const hostToolCalls = (host: string): Array<[string, Record<string, unknown>]> => [
+    ["rig_ps", { host }],
+    ["rig_send", { host, session: "qa@team", text: "Build is green." }],
+    ["rig_capture", { host, session: "qa@team" }],
+    ["rig_queue_create", { host, destination: "qa@team", body: "Review the diff." }],
+    ["rig_queue_show", { host, qitemId: "qitem-1" }],
+    ["rig_queue_list", { host }],
+    ["rig_queue_update", { host, qitemId: "qitem-1", state: "done", closureReason: "no-follow-on" }],
+    ["rig_queue_handoff", { host, qitemId: "qitem-1", to: "qa@team" }],
+  ];
+  const httpHost = { id: "unipc", transport: "http" as const, url: "http://127.0.0.1:17433" };
+
+  // How access is decided (mcp-http.ts): stdio and unauthenticated loopback build no access (a local owner),
+  // an HTTP token's grant builds one, and only `owner: true` marks it the daemon's owner. `host` needs that owner.
+  it("a non-owner grant can't name a host on any of the eight host-aware tools", async () => {
+    const nonOwner: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+    const calls = hostToolCalls("unipc");
+    expect(calls).toHaveLength(8);
+    for (const [tool, args] of calls) {
+      const local = mockClient();
+      const result = await run(local, {
+        access: nonOwner,
+        clientFactory: () => remoteMock(),
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect((result.structuredContent as { code?: string } | undefined)?.code, tool).toBe("host_not_available");
+      expect(local.get, tool).not.toHaveBeenCalled();
+      expect(local.post, tool).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an HTTP owner token's caller reaches the named host on all eight", async () => {
+    const owner: McpAccess = { principal: "owner", owner: true, rigs: [], roots: [], workspace: false };
+    for (const [tool, args] of hostToolCalls("unipc")) {
+      const remote = remoteMock();
+      await run(mockClient(), {
+        access: owner,
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(vi.mocked(remote.get).mock.calls.length + vi.mocked(remote.post).mock.calls.length, tool).toBeGreaterThan(0);
+    }
+  });
+
+  it("a loopback caller with no auth (the stdio owner) reaches the named host on all eight", async () => {
+    for (const [tool, args] of hostToolCalls("unipc")) {
+      const remote = remoteMock();
+      await run(mockClient(), {
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(vi.mocked(remote.get).mock.calls.length + vi.mocked(remote.post).mock.calls.length, tool).toBeGreaterThan(0);
+    }
+  });
+
+  it("a learned binding routes a host token only when eligibleQueueBindings admits it", async () => {
+    const stale: HostBindingsFile = { version: 1, bindings: {
+      unipc: { hostId: "self-abc", firstObservedAt: "", lastObservedAt: "", observedUrl: "http://127.0.0.1:9999" },
+    } };
+    const local = mockClient();
+    const refused = await run(local, {
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => stale,
+    }, "rig_ps", { host: "self-abc" });
+    expect(refused.isError).toBe(true);
+    expect((refused.structuredContent as { code?: string } | undefined)?.code).toBe("unknown_host");
+    expect((refused.content as Array<{ text: string }>)[0]?.text).toContain("isn't used");
+    expect(local.get).not.toHaveBeenCalled();
+
+    const eligible: HostBindingsFile = { version: 1, bindings: {
+      unipc: { hostId: "self-abc", firstObservedAt: "", lastObservedAt: "", observedUrl: "http://127.0.0.1:17433" },
+    } };
+    const remote = remoteMock();
+    const ok = await run(mockClient(), {
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => eligible,
+    }, "rig_ps", { host: "self-abc" });
+    expect(ok.isError).toBeFalsy();
+    expect(remote.get).toHaveBeenCalled();
+  });
+
+  it("a host-targeted queue_show reads every follow-up row through that host's bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-show";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const remote = new DaemonClient("http://127.0.0.1:17433", {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        calls.push({ path: pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        const data = pathname.endsWith("/transitions") ? []
+          : pathname === "/api/queue/list" ? [{ qitemId: "qitem-2", destinationSession: "qa@team", state: "pending" }]
+            : { qitemId: "qitem-1", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" };
+        return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ ...httpHost, bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_show", { host: "unipc", qitemId: "qitem-1" });
+
+    expect(result.isError).toBeFalsy();
+    expect(calls.map((call) => call.path)).toEqual(["/api/queue/qitem-1", "/api/queue/qitem-1/transitions", "/api/queue/list"]);
+    for (const call of calls) {
+      expect(call.headers.Authorization, call.path).toBe("Bearer tok-show");
+      expect(call.headers["X-OpenRig-Session"], call.path).toMatch(/^impl@team(@.+)?$/);
+    }
+  });
+
+  it("a host-targeted create reads its revises original through that host's bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-create";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const remote = new DaemonClient("http://127.0.0.1:17433", {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        calls.push({ path: pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        return new Response(JSON.stringify({ qitemId: "qitem-orig", chainOfRecord: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ ...httpHost, bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Also cover the README.", revises: "qitem-orig" });
+
+    expect(result.isError).toBeFalsy();
+    const original = calls.find((call) => call.path === "/api/queue/qitem-orig");
+    expect(original?.headers.Authorization).toBe("Bearer tok-create");
+    expect(original?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("the unknown-outcome recovery hint names the host it acted on", async () => {
+    for (const [tool, args] of [["rig_queue_create", { host: "unipc", destination: "qa@team", body: "x" }],
+      ["rig_queue_handoff", { host: "unipc", qitemId: "qitem-1", to: "qa@team" }]] as Array<[string, Record<string, unknown>]>) {
+      const remote = remoteMock();
+      remote.post = vi.fn(async () => { throw new Error("connection reset"); });
+      const result = await run(mockClient(), {
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect((result.content as Array<{ text: string }>)[0]?.text, tool).toContain("and host unipc");
+    }
+  });
 });

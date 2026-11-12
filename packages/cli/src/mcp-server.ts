@@ -7,6 +7,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
 import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
+import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
@@ -68,14 +69,14 @@ function structured(data: unknown): Record<string, unknown> {
 /** Where a handed-on item went. A cross-host handoff records the remote item as qitem-…@<host> in closureTarget (named, not
  *  fetched); a local successor is the item whose handedOffFrom is this one, the newest when there are several. null when
  *  none is found; { unknown: true, code } when the lookup failed or the daemon can't filter by handedOffFrom. */
-async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown,
+async function successorOf(get: (path: string) => Promise<DaemonResponse<unknown>>, qitemId: string, closureTarget: unknown,
   /** For an external caller: which successor rows it may see; a cross-host successor's parties are unknown here, so it
    *  can't. */
   visible?: (row: unknown) => boolean): Promise<Record<string, unknown> | null> {
   const remote = typeof closureTarget === "string" ? /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget) : null;
   if (remote) return visible ? { unknown: true, code: "out_of_scope" } : { qitemId: remote[1], host: remote[2] };
   try {
-    const res = await client.get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
+    const res = await get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
     if (res.status >= 400) return { unknown: true, code: (mapResult(res).structuredContent as { code: string }).code };
     if (!Array.isArray(res.data)) return { unknown: true, code: "unexpected_response" };
     if (ignoredFilter(res.data, { handedOffFrom: qitemId })) return { unknown: true, code: "filter_unsupported" };
@@ -767,7 +768,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
    *  The remote client is bound to this server's seat, so a write it makes there names the calling agent as its sender
    *  (principal headers stay local: only this host's daemon trusts them). */
-  const hostTarget = (host: string | undefined): { client: DaemonClient; headers: Record<string, string>; remote: boolean } | TextResult => {
+  const hostTarget = (host: string | undefined): { client: DaemonClient; headers: Record<string, string>; remote: boolean; name?: string } | TextResult => {
     const name = host?.trim();
     if (host !== undefined && !name) {
       const message = "A host name can't be blank: omit host to act on this daemon, or name a registered host (rig host list shows them).";
@@ -783,9 +784,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       const message = `Host ${name} can't be reached: this CLI's host registry can't be read (${registry.error}).`;
       return errorResult(message, "host_registry_unreadable", message);
     }
-    const match = resolveHost(registry.registry, name, hostBindingsLoader().bindings);
+    const learned = hostBindingsLoader();
+    // Queue forwarding's one policy: a learned self-id routes only through a binding admitted by
+    // `eligibleQueueBindings`, so a stale, conflicted or SSH-declared binding never sends this call elsewhere.
+    const match = resolveHost(registry.registry, name, eligibleQueueBindings(registry.registry, learned));
     if (!match.ok) {
-      const message = `Host ${name} isn't in this CLI's host registry. rig host list shows the registered hosts.`;
+      const unused = ineligibleBindingDetail(registry.registry, learned, name);
+      const message = `Host ${name} isn't in this CLI's host registry. rig host list shows the registered hosts.${unused ? ` ${unused}` : ""}`;
       return errorResult(message, "unknown_host", message);
     }
     if (match.host.transport !== "http") {
@@ -794,7 +799,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     }
     const bearer = resolveRemoteBearer(match.host);
     if (!bearer.ok) return errorResult(bearer.error, "host_bearer_unavailable", bearer.error);
-    return { client: remoteDaemonClient(clientFactory, match.host.url, undefined, seatOf()), headers: bearerAuthHeaders(bearer.token), remote: true };
+    return { client: remoteDaemonClient(clientFactory, match.host.url, undefined, seatOf()), headers: bearerAuthHeaders(bearer.token), remote: true, name: match.host.id };
   };
   /** Request options for a host target: a remote call carries that host's bearer; a local one keeps the terminal token. */
   const hostOptions = (target: { headers: Record<string, string>; remote: boolean }, timeout?: { timeoutMs: number }) =>
@@ -1449,7 +1454,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {
         try {
-          const original = await target.client.get(`/api/queue/${encodeURIComponent(revises)}`);
+          const original = await hostGet(target, `/api/queue/${encodeURIComponent(revises)}`);
           if (original.status >= 400) return mapResult(original);
           if (scope && !scope.item(original.data)) return outOfScope(`Item ${revises}`);
           const prior = (original.data ?? {}) as { qitemId?: unknown; chainOfRecord?: unknown };
@@ -1486,7 +1491,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
-        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying, and retry only with that same qitemId.`;
         return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown" } };
       }
     },
@@ -1508,15 +1513,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const target = hostTarget(host);
         if ("content" in target) return target;
         const id = encodeURIComponent(qitemId);
-        const item = await target.client.get(`/api/queue/${id}`);
+        const item = await hostGet(target, `/api/queue/${id}`);
         if (item.status >= 400) return mapResult(item);
         if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
-        const transitions = await target.client.get(`/api/queue/${id}/transitions`);
+        const transitions = await hostGet(target, `/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
         const view = externalView(scope);
-        let successor = handedOn ? await successorOf(target.client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
+        let successor = handedOn ? await successorOf((path) => hostGet(target, path), qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
         const shownItem = scope ? withoutDaemonSuccessors(item.data) : item.data;
         const data = view
@@ -2304,7 +2309,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
-        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
         return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown" } };
       }
     },
