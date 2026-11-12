@@ -310,7 +310,7 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
       const states: unknown = Reflect.get(hooks, "state");
       if (!states || typeof states !== "object") throw new Error("missing trust table");
       expect(Object.keys(states).sort()).toEqual(["permission_request", "session_start", "stop", "user_prompt_submit"]
-        .map(event => `${home}/${json ? "hooks.json" : "config.toml"}:${event}:0:0`).sort());
+        .map(event => `${nodePath.join(nodeFs.realpathSync.native(home), json ? "hooks.json" : "config.toml")}:${event}:0:0`).sort());
       expect(nodeFs.lstatSync(nodePath.join(home, "config.toml")).isSymbolicLink()).toBe(true);
     } finally { nodeFs.rmSync(root,{recursive:true,force:true}); }
   });
