@@ -33,6 +33,7 @@ import type { NodeStartupSnapshot } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { getNodeDetail } from "../src/domain/node-inventory.js";
 
@@ -590,6 +591,118 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.rigResult).toBe("partially_restored");
     await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
     expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes below it.");
+  });
+
+  // #3039: a pod-aware Codex seat through the real Codex adapter. On Codex 0.164.0 or later its fresh launch carried its guidance
+  // as developer instructions, so the person's tracked AGENTS.md holds none, and rig down takes nothing out. The exact resume
+  // carries the saved guidance in its own launch instead of putting it in that file; an older Codex keeps the put-back.
+  const CODEX_TOKEN = "00000000-0000-7000-8000-00000000c0de";
+  const TRACKED = "# Our repository\n\nRun the tests with make test.\n";
+  const instructionsIn = (command: string | undefined): string | undefined => {
+    const arg = command ? /-c 'developer_instructions=([^']*)'/.exec(command)?.[1] : undefined;
+    return arg === undefined ? undefined : JSON.parse(arg) as string;
+  };
+
+  async function downThenUpExistingCodex(rigId: string, guidanceFile: string, codexVersion: string, betweenDownAndUp?: () => void) {
+    db.prepare("UPDATE sessions SET resume_token = ? WHERE resume_token = ?").run(CODEX_TOKEN, TOKEN);
+    const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus })
+      .teardown(rigId);
+    expect(down.snapshotId).toBeTruthy();
+    betweenDownAndUp?.();
+    const beforeUp = fs.readFileSync(guidanceFile, "utf-8");
+    let started = false;
+    const screen = "OpenAI Codex (v0.164.0)\n\u203a Ask Codex to do anything";
+    const tmux = {
+      ...mockTmux(),
+      createSession: vi.fn(async () => { started = true; return { ok: true as const }; }),
+      hasSession: vi.fn(async () => started),
+      sendShellCommand: vi.fn(async () => ({ ok: true as const })),
+      getPanePid: vi.fn(async () => 3001),
+      getPaneCommand: vi.fn(async () => "bash"),
+      capturePaneScreen: vi.fn(async () => screen),
+      capturePaneContent: vi.fn(async () => screen),
+    } as unknown as TmuxAdapter;
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const listProcesses = async () => [
+      { pid: 3001, ppid: 1, pgid: 3001, tpgid: 3002, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 3002, ppid: 3001, pgid: 3002, tpgid: 3002, executableName: "codex", command: `/opt/native/codex resume ${CODEX_TOKEN}`,
+        argv: ["/opt/native/codex", "resume", CODEX_TOKEN], startedAt },
+    ];
+    const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => {}, codexHome: path.join(tmp, "codex-home"),
+      codexSystemConfigDir: path.join(tmp, "etc-codex"), fsOps: { ...nodeFs, homedir: tmp },
+      readResumeEvidence: () => ({ threadId: CODEX_TOKEN }), resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion }) });
+    const restore = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
+      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }), tmuxAdapter: tmux,
+      claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+      codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+      listProcesses,
+    });
+    const up = await restore.restore(down.snapshotId!, { adapters: { codex: adapter } });
+    expect(up.ok).toBe(true);
+    if (!up.ok) throw new Error("restore did not run");
+    const sent = [...(tmux.sendShellCommand as ReturnType<typeof vi.fn>).mock.calls, ...(tmux.sendText as ReturnType<typeof vi.fn>).mock.calls]
+      .map((call) => String(call[1] ?? ""));
+    const token = (db.prepare("SELECT resume_token FROM sessions WHERE status = 'running' ORDER BY id DESC LIMIT 1").get() as { resume_token: string | null } | undefined)?.resume_token;
+    return { result: up.result, sent, launch: sent.find((command) => command.includes(CODEX_TOKEN)), beforeUp, token };
+  }
+
+  it("a Codex 0.164 seat's exact resume carries its guidance in the launch and leaves the tracked AGENTS.md byte-identical", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex", autoSkillFile: true });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { result, sent, launch, token } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0");
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    // The same conversation, resumed, with the saved guidance from its current sources as developer instructions.
+    expect(launch).toMatch(new RegExp(` resume '?${CODEX_TOKEN}'?`));
+    expect(token).toBe(CODEX_TOKEN);
+    const text = instructionsIn(launch);
+    expect(text).toContain("You lead this team.");
+    expect(text).toContain("How work flows here.");
+    // Still contained: no startup action, no skill, no other file.
+    expect(sent.join("\n")).not.toContain("STARTUP-PROMPT-MUST-NOT-REPLAY");
+    expect(text).not.toContain("A skill, never merged into guidance.");
+    expect(fs.existsSync(path.join(cwd, ".agents"))).toBe(false);
+    for (const other of ["CLAUDE.md", "CLAUDE.local.md"]) expect(fs.existsSync(path.join(cwd, other)), other).toBe(false);
+    expect(result.nodes[0]?.status).toBe("resumed");
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+    expect(result.rigResult).toBe("fully_restored");
+  });
+
+  it("an older Codex keeps the put-back: the blocks return to AGENTS.md beside the person's text, and the launch carries none", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch } = await downThenUpExistingCodex(rigId, guidanceFile, "0.163.9");
+    const content = fs.readFileSync(guidanceFile, "utf-8");
+    expect(content).toContain(TRACKED.trim());
+    expect(content).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(content).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(launch).toBeDefined();
+    expect(launch).not.toContain("developer_instructions");
+  });
+
+  // A file that already holds a block keeps it as it is (the restore writer's own rule; #2456 refreshes only one OpenRig
+  // wrote), and only the block the file lacks goes with the launch.
+  it("a block already in the tracked AGENTS.md stays as it is, and only the absent one goes with the launch", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, beforeUp, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0",
+      () => mergeManagedBlock(nodeFs, guidanceFile, "lead-role", "The person's own version of the role."));
+    expect(beforeUp).toContain("The person's own version of the role.");
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(beforeUp);
+    const text = instructionsIn(launch);
+    expect(text).toContain("How work flows here.");
+    expect(text).not.toContain("You lead this team.");
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+  });
+
+  it("a block whose source is gone isn't carried and stays a disclosed gap", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0", () => fs.rmSync(path.join(spec, "SOP.md")));
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    expect(instructionsIn(launch)).toContain("You lead this team.");
+    expect(result.nodes[0]?.guidanceGaps).toEqual(["SOP.md"]);
+    expect(result.rigResult).toBe("partially_restored");
   });
 
   it("decides by cleanup's own effect: refuses every hazard shape, allows ordinary files", () => {

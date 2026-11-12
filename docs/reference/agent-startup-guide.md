@@ -618,9 +618,11 @@ The guidance still goes to the repository `AGENTS.md`, as before, when:
 - Codex is older than 0.164.0, or its version is unknown.
 
 A resume of the seat's own conversation, on a snapshot restore or `rig up --existing`, chooses as a fresh launch
-does: on Codex 0.164.0 or later with none configured, its guidance goes with the resume as `-c developer_instructions=…`,
-and the guidance file its launch recorded isn't changed. Whether Codex keeps the earlier session's developer
-instructions as well isn't documented by Codex; the text sent with the resume is the current one.
+does: on Codex 0.164.0 or later with none configured, the guidance blocks the repository `AGENTS.md` doesn't hold go
+with the resume as `-c developer_instructions=…` instead of being put back in that file, and the guidance file its
+launch recorded isn't changed. A file that already holds blocks keeps them: a block OpenRig wrote whose source has
+changed is refreshed, and one edited by hand, or with no record of OpenRig writing it, is left as it is and named. Whether Codex keeps the earlier session's
+developer instructions as well isn't documented by Codex; the text sent with the resume is the current one.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.
