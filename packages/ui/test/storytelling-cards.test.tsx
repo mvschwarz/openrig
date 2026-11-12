@@ -14,6 +14,7 @@ import {
   ApprovalCard,
   ConceptCard,
   StorytellingFeed,
+  buildStorytellingFeedItems,
   type FeedCardItem,
 } from "../src/components/feed/cards/storytelling-cards.js";
 
@@ -206,5 +207,26 @@ describe("StorytellingFeed — composition", () => {
     const { container } = render(<StorytellingFeed items={items} />);
     expect(container.querySelectorAll("[data-testid^='feed-card-']").length).toBeGreaterThanOrEqual(5);
     expect(container.querySelector("[data-testid='feed-card-concept-c1']")).toBeTruthy();
+  });
+
+  it("renders ClosedCard with Closed kind pill and slice drill-in distinct from ShippedCard and IncidentCard", () => {
+    const items = buildStorytellingFeedItems(
+      [],
+      [
+        { name: "ship-1", displayName: "Shipped slice", status: "done" },
+        { name: "close-1", displayName: "Deferred slice", status: "closed" },
+        { name: "inc-1", displayName: "Blocked slice", status: "blocked" },
+      ],
+    );
+    const { getByTestId, container } = render(<StorytellingFeed items={items} />);
+    const closedCard = getByTestId("feed-card-closed-close-1");
+    expect(closedCard.getAttribute("data-card-kind")).toBe("closed");
+    expect(getByTestId("feed-card-closed-close-1-pill").textContent).toContain("Closed");
+    expect(getByTestId("feed-card-shipped-ship-1-pill").textContent).toContain("Shipped");
+    expect(container.querySelector("[data-testid='feed-card-incident-close-1']")).toBeNull();
+    expect(container.querySelector("[data-testid='feed-card-shipped-close-1']")).toBeNull();
+    fireEvent.click(getByTestId("feed-card-closed-close-1-toggle"));
+    expect(getByTestId("feed-card-closed-close-1-expanded").textContent).toContain("Slice in closed state");
+    expect(getByTestId("feed-card-closed-close-1-drill-in").getAttribute("href")).toBe("/project/slice/close-1");
   });
 });

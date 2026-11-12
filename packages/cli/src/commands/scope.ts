@@ -623,6 +623,17 @@ function buildSliceCloseCommand(): Command {
           const edits = compositionEdit ? [compositionEdit] : [];
           const nodePath = slice.readmePath;
           const originalNode = fs.readFileSync(nodePath, "utf8");
+          const nodeStatusState = classifyProgressStatusFrontmatter(originalNode);
+          if (nodeStatusState.kind === "ambiguous") {
+            const nodeLabel = path.basename(nodePath);
+            throw new ScopeCliError({
+              fact: `Slice ${nodeLabel} (${nodePath}) contains an ambiguous ${nodeStatusState.detail}.`,
+              consequence:
+                "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
+              action:
+                `Use a single top-level scalar "status:" key without an inline "#" comment in ${nodeLabel} frontmatter (moving any inline comment onto its own "#" line and removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.`,
+            });
+          }
           const progressPath = path.join(slice.absPath, "PROGRESS.md");
           let originalProgress: string | null = null;
           try {
@@ -640,7 +651,7 @@ function buildSliceCloseCommand(): Command {
               consequence:
                 "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
               action:
-                'Use a single top-level scalar "status:" key in PROGRESS.md frontmatter (removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.',
+                'Use a single top-level scalar "status:" key without an inline "#" comment in PROGRESS.md frontmatter (moving any inline comment onto its own "#" line and removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.',
             });
           }
           const shouldReconcileProgressStatus = progressStatusState.kind === "reconcile";

@@ -1809,7 +1809,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       description: "List the work tree's slices, most recently active first: name, mission, status, description and how many queue items name it. Paths and readiness detail are left out.",
       inputSchema: z.object({
         missionId: z.string().optional().describe("Only this mission's slices"),
-        filter: z.enum(["all", "active", "done", "blocked"]).optional().describe("Only slices with this status (default all)"),
+        filter: z.enum(["all", "active", "done", "closed", "blocked"]).optional().describe("Only slices with this status (default all)"),
         limit: z.number().int().positive().max(200).optional().describe("Most slices to return (default 50)"),
       }),
       annotations: READ_ONLY,

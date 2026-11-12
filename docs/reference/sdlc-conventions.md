@@ -205,10 +205,11 @@ or by hand) reopens its judged items:
 current revision. Opt-in `rig scope slice close <slice> --in-place --reason delivered`
 (or `--in-place --reason <wontfix|deferred|superseded|stale>` for non-delivery
 exits) updates status in place under `<mission>/slices/<slice>` (and reconciles
-any existing top-level scalar `status:` in `PROGRESS.md` frontmatter, refusing
-before modifying any file if `PROGRESS.md` frontmatter carries an ambiguous
-duplicate or nested `status:` entry that line-based slice readers would treat as
-slice status)
+any existing uncommented top-level scalar `status:` in `PROGRESS.md` frontmatter,
+refusing before modifying any file if either the slice node file or `PROGRESS.md`
+frontmatter carries an inline `#` comment on `status:` or an ambiguous
+duplicate, nested or malformed-delimiter `status:` entry that line-based slice
+readers would parse differently)
 without moving the folder, so recorded judgments stay applicable while the item
 text, policy and cited evidence bytes are unchanged (judgments citing files
 updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,

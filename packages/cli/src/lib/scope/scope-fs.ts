@@ -77,52 +77,26 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
-/** Check whether a markdown document's YAML frontmatter defines `key` at the
- *  top level of a valid YAML mapping, falling back to line-based key inspection
- *  only when invalid YAML prevents full mapping parse. Note: for valid YAML
- *  with nested mappings, this checks top-level keys only and therefore differs
- *  from line-based readers (`SliceIndexer.parseFrontmatter`) that scan keys at
- *  any indentation; use {@link classifyProgressStatusFrontmatter} when
- *  reconciling `PROGRESS.md` `status:` across both readers. */
-export function frontmatterHasKey(content: string, key: string): boolean {
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
-  if (!match) return false;
-  const block = match[1]!;
-  try {
-    const parsed = YAML.parse(block);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return Object.prototype.hasOwnProperty.call(parsed, key);
-    }
-    return false;
-  } catch {
-    for (const line of block.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const colonIdx = trimmed.indexOf(":");
-      if (colonIdx === -1) continue;
-      if (trimmed.slice(0, colonIdx).trim() === key) return true;
-    }
-    return false;
-  }
-}
-
 export type ProgressStatusFrontmatterState =
   | { kind: "absent" }
   | { kind: "reconcile" }
   | { kind: "ambiguous"; detail: string };
 
-/** Classify how `PROGRESS.md` frontmatter defines `status` across structured
- *  YAML (`readFrontmatter` / `updateFrontmatter`) and line-based slice readers
+/** Classify how a slice node file (`SPEC.md` / `README.md`) or `PROGRESS.md`
+ *  frontmatter defines `status` across structured YAML (`readFrontmatter` /
+ *  `updateFrontmatter`) and line-based slice readers
  *  (`SliceIndexer.parseFrontmatter`, which trims every frontmatter line at any
- *  indentation and lets the last `status:` line win). Returns `"ambiguous"`
- *  before mutation whenever duplicate top-level `status:` lines, nested/indented
- *  `status:` lines, or non-scalar/flow `status` syntax would leave consumers
- *  disagreeing after top-level update. */
+ *  indentation, keeps inline `#` comments in raw values, and lets the last
+ *  `status:` line win). Returns `"ambiguous"` before mutation whenever
+ *  malformed frontmatter delimiters, duplicate top-level `status:` lines,
+ *  nested/indented `status:` lines, inline `#` comments on top-level `status:`,
+ *  or non-scalar/flow `status` syntax would leave consumers disagreeing or
+ *  discard comments on update. */
 export function classifyProgressStatusFrontmatter(content: string): ProgressStatusFrontmatterState {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
   if (!match) {
-    if (content.startsWith("---\n")) {
-      const rest = content.slice(4);
+    if (content.startsWith("---")) {
+      const rest = content.slice(3);
       const endIdx = rest.indexOf("\n---");
       if (endIdx !== -1) {
         for (const rawLine of rest.slice(0, endIdx).split("\n")) {
@@ -132,7 +106,7 @@ export function classifyProgressStatusFrontmatter(content: string): ProgressStat
           if (colonIdx !== -1 && trimmed.slice(0, colonIdx).trim() === "status") {
             return {
               kind: "ambiguous",
-              detail: 'malformed closing "---" frontmatter delimiter with a "status:" line that line-based readers still parse',
+              detail: 'malformed "---" frontmatter delimiter with a "status:" line that line-based readers still parse',
             };
           }
         }
@@ -176,6 +150,7 @@ export function classifyProgressStatusFrontmatter(content: string): ProgressStat
 
   let yamlValid = false;
   let yamlMapping: Record<string, unknown> | null = null;
+  let statusHasInlineComment = false;
   try {
     const doc = YAML.parseDocument(block, { keepSourceTokens: true });
     if (doc.errors.length === 0 && (doc.contents === null || YAML.isMap(doc.contents))) {
@@ -183,6 +158,19 @@ export function classifyProgressStatusFrontmatter(content: string): ProgressStat
       yamlValid = true;
       if (js && typeof js === "object" && !Array.isArray(js)) {
         yamlMapping = js as Record<string, unknown>;
+      }
+      if (YAML.isMap(doc.contents)) {
+        const statusPair = doc.contents.items.find(
+          (pair) => YAML.isScalar(pair.key) && pair.key.value === "status",
+        );
+        const statusValueNode =
+          statusPair && YAML.isNode(statusPair.value) ? statusPair.value : null;
+        if (
+          statusValueNode &&
+          (statusValueNode.comment != null || statusValueNode.commentBefore != null)
+        ) {
+          statusHasInlineComment = true;
+        }
       }
     }
   } catch {
@@ -201,6 +189,12 @@ export function classifyProgressStatusFrontmatter(content: string): ProgressStat
       return {
         kind: "ambiguous",
         detail: 'quoted or flow-style "status" frontmatter entry that line-based slice readers parse differently',
+      };
+    }
+    if (statusHasInlineComment) {
+      return {
+        kind: "ambiguous",
+        detail: `top-level "status:" entry with an inline "#" comment at line ${unindentedStatusLines[0]}`,
       };
     }
   }

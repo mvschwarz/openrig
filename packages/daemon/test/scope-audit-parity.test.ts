@@ -416,7 +416,7 @@ describeDf("PM dogfood #1 — twin verdict parity: authored README vs pristine P
   });
 });
 
-describeDf("#2727 in-place closure audit parity & dependency graph", () => {
+describeDf("#2727 in-place closure missing_proof audit parity", () => {
   const AUTHORED_SPEC = "# S\n## Intent\nauthored intent\n## Mini-requirements\n1. first requirement\n## Proof contract\n- [ ] promised deliverable\n";
 
   itDf("both twins exempt non-delivery in-place closures from missing_proof while still flagging unproved done slices", async () => {
@@ -433,7 +433,10 @@ describeDf("#2727 in-place closure audit parity & dependency graph", () => {
         isActiveRelease: true,
         level: "slice",
         readmeContent: AUTHORED_SPEC,
-        proofArtifactCount: 0,
+        proofFileExists: false,
+        proofDirExists: false,
+        proofDirHasEntries: false,
+        hasProofPacket: false,
       };
       const cliRes = cliClassify(input);
       const daemonRes = daemonClassifier(input);
@@ -450,7 +453,10 @@ describeDf("#2727 in-place closure audit parity & dependency graph", () => {
       isActiveRelease: true,
       level: "slice",
       readmeContent: AUTHORED_SPEC,
-      proofArtifactCount: 0,
+      proofFileExists: false,
+      proofDirExists: false,
+      proofDirHasEntries: false,
+      hasProofPacket: false,
     };
     expectDf(daemonClassifier(doneUnproved).findings.map((f) => f.kind)).toContain("missing_proof");
   });
