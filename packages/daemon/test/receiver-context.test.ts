@@ -10,7 +10,7 @@ describe("what a receiving agent reads to act on a person's answer", () => {
 
   it("with no registered person to ask back: says so once, keeps the request and the answer waiting, and names the ways through", () => {
     const route = askBackRoute(null, "human@host", "request q-1");
-    expect(route).toContain("OpenRig can't ask them back: the person request q-1 went to isn't registered.");
+    expect(route).toContain("OpenRig can't resolve a registered person to ask back about request q-1.");
     expect(route).toContain("Say so once, in this conversation, and keep the request and their answer waiting.");
     expect(route).toContain("registering a person (rig gateway human add) or the request's own decision command");
     expect(route).not.toContain("rig queue create");
