@@ -1521,6 +1521,44 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(probe(drawing)).toMatchObject({ status: "resumed" });
   });
 
+  // A draft's text never moves the cut: Claude draws its frame's rules from column 0 and a draft's continuation rows
+  // indented under the ❯, so a rule, a reply or a header pasted into a draft is the draft's, not Claude's.
+  const header = " ▐▛███▜▌   Claude Code v2.1.322";
+  const rule = "────────────────────────────────";
+  it.each([
+    ["a pasted rule", "  ────────"],
+    ["a pasted reply", "⏺ Earlier output"],
+    ["a pasted header", "  Claude Code v2.1.322"],
+  ])("a multi-line draft with %s above the backstop's words is never the gate", (_case, pasted) => {
+    const draft = ["❯ Review this example:", pasted, "  No, continue without the tests"];
+    const closed = [header, "", "⏺ Done.", "", rule, ...draft, rule, "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+    expect(probe(closed)).toMatchObject({ status: "resumed" });
+    const drawing = [header, "", "⏺ Done.", "", rule, ...draft].join("\n");
+    expect(probe(drawing)).toMatchObject({ status: "resumed" });
+  });
+
+  it("a draft that mentions a Claude Code version reads resumed, closed or still open (maintainer's case)", () => {
+    const draft = ["Claude Code v2.1.322", rule, "❯ Explain this Claude Code v2.1.322 message:", "  No, continue without the tests"];
+    expect(probe([...draft, rule, "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n"))).toMatchObject({ status: "resumed" });
+    expect(probe(draft.join("\n"))).toMatchObject({ status: "resumed" });
+  });
+
+  it("a draft that starts with a pasted header is never the gate either", () => {
+    const started = [header, "", "⏺ Done.", "", rule, "❯ Claude Code v2.1.322 asks:", "  No, continue without the tests", rule].join("\n");
+    expect(probe(started)).toMatchObject({ status: "resumed" });
+  });
+
+  it("is the same gate below an old reply that quotes an input frame, with no input frame after it", () => {
+    // a quoted frame is indented like the reply: it is no frame of Claude's, so it never blanks the rows below it
+    const quoted = [header, "", "⏺ The screen looked like:", "  ────────", "  ❯ hi", "  ────────", "", "$ claude --resume x", ""].join("\n");
+    expect(probe(`${quoted}\n${capture.gatedGrantsScreen.join("\n")}`)).toMatchObject(gate);
+  });
+
+  it("is the same gate below an old session whose input frame holds a draft (N1)", () => {
+    const earlier = [header, "", "⏺ Done.", "", rule, "❯ Review this example:", "  ────────", "  more text", rule, ""].join("\n");
+    expect(probe(`${earlier}\n${screen}`)).toMatchObject(gate);
+  });
+
   it("names the focused choice in the gate's detail", () => {
     expect(probe(screen).detail).toContain("\"No, continue without these permissions\"");
     const yes = screen.replace("❯ No, continue without these permissions", "  No, continue without these permissions")

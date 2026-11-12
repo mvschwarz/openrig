@@ -400,7 +400,7 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current,
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
-  const rows = paneContent.trimEnd().split(/\r?\n/);
+  const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
   let current = rows;
   for (let at = rows.length - 1; at >= 0; at--) {
     if (!claudeDrawnAfter(rows.slice(at))) continue;
@@ -412,6 +412,24 @@ function claudeCurrentRows(paneContent: string): string[] {
   // An input frame still being drawn (its opening rule and the ❯ row, no closing rule yet) holds a draft, not a dialog.
   const opening = current.findIndex((row, index) => CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(current[index + 1] ?? ""));
   return opening >= 0 ? current.slice(0, opening) : current;
+}
+
+/** These rows with the text of every draft in Claude's input frames blanked (the ❯ kept), so a rule, a reply or a
+ *  header pasted into a draft never reads as Claude's own UI. Claude draws the frame's rules from column 0 and a
+ *  draft's continuation rows indented under the ❯, so a frame opens at a column-0 rule over the ❯ row and the first
+ *  column-0 rule after it closes the frame; a frame with no closing rule yet holds a draft to the end. A frame quoted
+ *  in a reply is indented like the reply: it blanks nothing. */
+function claudeWithoutDrafts(rows: string[]): string[] {
+  const shown = [...rows];
+  for (let at = 0; at < rows.length; at++) {
+    if (!CLAUDE_FRAME_RULE.test(rows[at]!) || !/^\s*❯/.test(rows[at + 1] ?? "")) continue;
+    const closing = rows.findIndex((row, index) => index > at + 1 && CLAUDE_FRAME_RULE.test(row));
+    const end = closing >= 0 ? closing : rows.length;
+    shown[at + 1] = rows[at + 1]!.replace(/❯.*$/, "❯");
+    for (let index = at + 2; index < end; index++) shown[index] = "";
+    at = end - 1;
+  }
+  return shown;
 }
 
 /** ", with \"<label>\" highlighted" for the detail of the gated-grants gate, or nothing when no option is focused. */
@@ -531,6 +549,8 @@ function claudeDrawnAfter(rows: string[]): boolean {
 
 // On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
 const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;
+// The same rule drawn from column 0, as Claude draws its frame: a rule indented like a draft's row is the draft's.
+const CLAUDE_FRAME_RULE = /^─{3,}(?:\s.*)?$/;
 
 /** Claude's input frame: a rule, the ❯ row directly under it, and another rule below. A composer holding a draft that
  *  starts with "1." looks like a numbered option row; the frame is what tells them apart. */
