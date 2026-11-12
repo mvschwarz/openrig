@@ -5,7 +5,9 @@
 // must see a later table than the first). This pass lets agents share a listing only when each agent still gets
 // what its own call sequence needs:
 //   - ORDER: an agent's next listing must START after the listing it last received had FINISHED, so its two
-//     samples are two observations, never one table read twice.
+//     samples are two observations, never one table read twice. A later agent may start from a listing an earlier
+//     agent already took, but its next listing must START after its own first check began: tables taken before
+//     that point cannot show a change that happened since.
 //   - FRESHNESS: a listing older than `freshnessMs` is never reused (the same limit ProcessCensus uses).
 //   - HONEST FAILURE: a failed listing is never reused and never counts as success. Each agent that was
 //     waiting on it falls back to its own read, and that read's failure is the agent's failure. "Failed" means
@@ -43,13 +45,16 @@ export class ObservationPass {
   }
 
   /** A lister for ONE agent's checks in this pass. Create one per agent, never share it between agents: it
-   *  remembers when that agent's last listing finished. `base` is the shared listing and must reject when it fails;
+   *  remembers when its first check began and when its last listing finished. `base` is the shared listing and must reject when it fails;
    *  `fallback` is the agent's own read after a failed shared listing (default: `base`), so an agent keeps the
    *  failure behavior it has without a pass. */
   lister<Row>(base: Lister<Row>, fallback: Lister<Row> = base): Lister<Row> {
     let lastDoneSeq = 0;
+    let firstCallSeq: number | null = null;
     return async () => {
-      const listing = this.listingFor(base, lastDoneSeq);
+      const afterSeq = firstCallSeq === null ? 0 : Math.max(lastDoneSeq, firstCallSeq);
+      firstCallSeq ??= ++this.seq;
+      const listing = this.listingFor(base, afterSeq);
       try {
         const rows = await listing.rows;
         lastDoneSeq = Math.max(lastDoneSeq, listing.doneSeq ?? ++this.seq);
@@ -68,7 +73,7 @@ export class ObservationPass {
   private listingFor<Row>(base: Lister<Row>, afterSeq: number): Listing<Row> {
     const all = (this.listings.get(base as Lister<never>) ?? []) as Listing<Row>[];
     const now = this.now();
-    const usable = all.find((l) => !l.failed && l.startedSeq > afterSeq && now - l.startedAt <= this.freshnessMs);
+    const usable = [...all].reverse().find((l) => !l.failed && l.startedSeq > afterSeq && now - l.startedAt <= this.freshnessMs);
     if (usable) return usable;
     const listing: Listing<Row> = {
       startedSeq: ++this.seq,

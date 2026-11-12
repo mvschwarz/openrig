@@ -259,7 +259,7 @@ describe("Codex runtime adapter", () => {
     expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "returned_to_shell" });
   });
 
-  it("checkReady called for several seats in one observation pass reads the process table once per step, not once per seat (#161)", async () => {
+  it("checkReady called for several seats in one observation pass reads the process table fewer times than seat by seat (#161)", async () => {
     const paneContent = fs.readFileSync(new URL("./fixtures/codex-api-key-login-no-daemon.txt", import.meta.url), "utf8");
     const startedAt = "Sat Jan  1 12:00:00 2000";
     // Seats 1 and 3 sit in an idle shell; seat 2 has a command in the foreground between the idle-shell samples.
@@ -288,7 +288,7 @@ describe("Codex runtime adapter", () => {
     expect(together.results).toEqual(alone.results);
     expect(together.results.map((r) => ("code" in r ? r.code : "ready"))).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
     expect(alone.listings).toBe(9);
-    expect(together.listings).toBe(3);
+    expect(together.listings).toBe(6);
   });
 
   it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {

@@ -62,8 +62,9 @@ describe("the shared pass at the production process listing (#161)", () => {
   it("a legitimately empty table is a success: it is shared, not retried", async () => {
     osTable.read.mockResolvedValue([]);
     const outcomes = await pollThreeSeats();
-    // Two steps of the idle-shell proof shared by three seats: two reads, however many the seats are.
-    expect(osTable.read).toHaveBeenCalledTimes(2);
+    // The idle-shell proof's two steps shared by three seats in turn: each later seat starts from the latest table
+    // and takes one new read after its own first check began, so one read more than seats.
+    expect(osTable.read).toHaveBeenCalledTimes(4);
     expect(outcomes).toHaveLength(3);
   });
 
@@ -81,8 +82,8 @@ describe("the shared pass at the production process listing (#161)", () => {
       return idleTable();
     });
     expect(await pollThreeSeats()).toEqual(healthy);
-    // The failed read was retried by a seat that waited on it, so more than the healthy two reads happened.
-    expect(reads).toBeGreaterThan(2);
+    // The failed read was retried by a seat that waited on it, so more than the healthy four reads happened.
+    expect(reads).toBeGreaterThan(4);
   });
 
   it("a failing OS table is never read as an idle shell or a ready seat, for any seat", async () => {

@@ -8,7 +8,7 @@ type Row = { pid: number };
 const table = (n: number): Row[] => [{ pid: n }];
 
 describe("ObservationPass", () => {
-  it("serves two agents' two-step checks from two listings, and gives each agent two different tables", async () => {
+  it("shares a listing between agents one after another, and gives each agent two different tables, the second taken after its first check began", async () => {
     let n = 0;
     const base = vi.fn(async () => table(++n));
     const pass = new ObservationPass({ now: () => 0 });
@@ -16,9 +16,10 @@ describe("ObservationPass", () => {
     const b = pass.lister(base);
     const seenA = [await a(), await a()];
     const seenB = [await b(), await b()];
-    expect(base).toHaveBeenCalledTimes(2);
+    expect(base).toHaveBeenCalledTimes(3);
     expect(seenA).toEqual([[{ pid: 1 }], [{ pid: 2 }]]);
-    expect(seenB).toEqual(seenA);
+    // B starts from A's latest table and takes its second observation after its own first check began.
+    expect(seenB).toEqual([[{ pid: 2 }], [{ pid: 3 }]]);
   });
 
   it("agents checked at the same time share one in-flight listing per step", async () => {
@@ -124,13 +125,14 @@ describe("agent checks through a pass match the same checks read agent by agent"
     return { results, listings: base.mock.calls.length };
   };
 
-  it("gives the same per-agent results with a third of the listings, and refuses the replaced process", async () => {
+  it("gives the same per-agent results with fewer listings (one more than agents), and refuses the replaced process", async () => {
     const perAgent = await run(false);
     const shared = await run(true);
     expect(shared.results).toEqual(perAgent.results);
     expect(shared.results).toEqual([13, 23, null]);
     expect(perAgent.listings).toBe(6);
-    expect(shared.listings).toBe(2);
+    // Each later agent starts from the latest table and takes one new listing after its first check began.
+    expect(shared.listings).toBe(4);
   });
 
   it("an idle-shell proof needs two different listings even when other agents share them", async () => {
@@ -149,6 +151,26 @@ describe("agent checks through a pass match the same checks read agent by agent"
     }
     expect(results).toEqual([true, false]);
     expect(base).toHaveBeenCalledTimes(2);
+  });
+
+  it("a later agent's second observation is taken after its first, even when earlier agents cached two tables", async () => {
+    // Agents 1 and 2 both have a shell with a Codex child. Agent 1's two checks make the first two listings,
+    // which include agent 2's Codex. Then agent 2's Codex exits (same shell pid) and agent 2 is checked inside
+    // the freshness window: it must not pass on the two cached tables, it must see the idle shell.
+    let calls = 0;
+    const codexGone = (call: number) => call > 2;
+    const tableAt = (call: number): NativeProcessRow[] => [
+      ...agentRows(1),
+      ...agentRows(2).filter((row) => !(codexGone(call) && row.executableName === "codex")),
+    ];
+    const base = vi.fn(async () => tableAt(++calls));
+    const pass = new ObservationPass({ now: () => 0 });
+    const check = (i: number) => verifyCodexPaneProcess({ target: `%${i}`, tmux: { getPanePid: async () => 10 * i },
+      listProcesses: pass.lister(base), expectedToken: token(i), requireResume: true });
+    expect((await check(1))?.process.pid).toBe(13);
+    expect(await check(2)).toBeNull();
+    // Agent 1's two listings, then one new listing for agent 2's second observation; agent 2's first reuses agent 1's latest.
+    expect(base).toHaveBeenCalledTimes(3);
   });
 
   it("a failed listing is not read as an idle shell or as a gone process", async () => {
