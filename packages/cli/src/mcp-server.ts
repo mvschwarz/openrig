@@ -649,24 +649,34 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
-/** A configured default must identify exactly one existing local node. No topology relationship, name convention
- *  for a lead, caller identity or task history supplies a missing receiver. Resolve again on each omitted destination. */
-async function taskDestinationExists(client: DaemonClient, destination: string): Promise<boolean> {
-  const rigName = destination.split("@")[1]!;
+/** The seats of `rigName` that `name` names, each as its actual session: its node's canonical session, or the
+ *  pod-member form while the node has no session yet. A name matches a seat's pod-member form (logical id `pod.member`
+ *  written `pod-member`), its session's own name before `@`, or that name's slug, so a seat attached under its own name
+ *  is found by the name its team shows. No topology relationship, name convention for a lead, caller identity or task
+ *  history supplies a seat. Throws when the rig isn't one active rig here or its node list can't be read. */
+async function namedSeats(client: DaemonClient, rigName: string, name: string): Promise<string[]> {
   const rig = await resolveRigHandle(client, rigName, { strict: true });
-  if (rig.kind !== "resolved") return false;
+  if (rig.kind !== "resolved") throw new Error(`rig ${rigName} isn't one active rig here`);
   const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
-  if (nodes.status !== 200 || !Array.isArray(nodes.data)) return false;
-  let matches = 0;
+  if (nodes.status !== 200 || !Array.isArray(nodes.data)) throw new Error(`the node list for ${rigName} answered HTTP ${nodes.status}`);
+  const wanted = seatSlug(name);
+  const found = new Set<string>();
   for (const entry of nodes.data as unknown[]) {
-    const { logicalId, rigName: name } = (entry ?? {}) as Record<string, unknown>;
-    if (typeof logicalId !== "string" || name !== rigName) return false;
+    const { logicalId, rigName: inRig, canonicalSessionName } = (entry ?? {}) as Record<string, unknown>;
+    if (typeof logicalId !== "string" || inRig !== rigName) throw new Error(`the node list for ${rigName} has a malformed entry`);
     const dot = logicalId.indexOf(".");
-    if (dot <= 0 || dot === logicalId.length - 1) return false;
-    if (`${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}@${name}` === destination) matches++;
+    if (dot <= 0 || dot === logicalId.length - 1) throw new Error(`the node list for ${rigName} has a malformed entry`);
+    const podMember = `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
+    const session = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
+      && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : `${podMember}@${rigName}`;
+    const own = session.slice(0, -(rigName.length + 1));
+    if (name === podMember || name === own || (wanted !== "" && wanted === seatSlug(own))) found.add(session);
   }
-  return matches === 1;
+  return [...found];
 }
+
+/** A seat name as a slug: lowercase, with each run of other characters a single hyphen. */
+const seatSlug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -1341,7 +1351,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
       inputSchema: z.object({
         destination: access?.external
-          ? z.string().optional().describe("Destination seat: member@rig, or its name alone (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
+          ? z.string().optional().describe("Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
           : z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
         body: z.string().describe("The task: what to do and what to return"),
         summary: z.string().optional().describe("One-line summary"),
@@ -1368,22 +1378,42 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // Check scope before looking up the configured receiver: configuration never expands a grant or reveals
         // another rig's destination. An explicit destination continues through the existing path below.
         if (!scope?.destination(destination)) return outOfScope("Configured task destination");
-        try {
-          if (!await taskDestinationExists(client, destination)) return unavailable();
-        } catch { return unavailable(); }
+        // The receiver is exactly one seat, and the item goes to that seat's actual session.
+        const at = destination.lastIndexOf("@");
+        let seats: string[];
+        try { seats = await namedSeats(client, destination.slice(at + 1), destination.slice(0, at)); } catch { return unavailable(); }
+        if (seats.length !== 1) return unavailable();
+        destination = seats[0]!;
       } else if (destination !== undefined && access?.external && !destination.includes("@")) {
-        // A person names their lead as their team shows it ("workshop-lead"), and the assistant passes that on. A name
-        // alone is the receiver this connection reaches when it is that seat's name, else a seat of this connection's one
-        // rig; never another rig's. It must be in scope and exist, or nothing is written.
+        // A person names a seat as their team shows it ("workshop-lead"), and the assistant passes that on. A name alone
+        // looks in the rig of the receiver this connection reaches when it is that receiver's name, else in this
+        // connection's one rig; never another rig's. It reaches one seat the connection may address, stored under that
+        // seat's actual session, or nothing is written.
         const named = destination;
-        const resolved = receiver?.split("@")[0] === named ? receiver
-          : access.rigs.length === 1 ? `${named}@${access.rigs[0]}` : undefined;
-        let exists = false;
-        if (resolved && scope?.destination(resolved)) {
-          try { exists = await taskDestinationExists(client, resolved); } catch { /* not resolved */ }
+        const receiverAt = receiver?.lastIndexOf("@") ?? -1;
+        const rigName = receiver && receiver.slice(0, receiverAt) === named ? receiver.slice(receiverAt + 1)
+          : access.rigs.length === 1 ? access.rigs[0] : undefined;
+        if (!rigName) return outOfScope(`Destination ${named}`, omitHint);
+        let seats: string[];
+        try {
+          seats = named === "" ? [] : await namedSeats(client, rigName, named);
+        } catch {
+          const message = "This connection's team couldn't be read just now, so nothing was written. Try again.";
+          return errorResult(message, "destination_unchecked", message);
         }
-        if (!exists) return outOfScope(`Destination ${named}`, omitHint);
-        destination = resolved!;
+        const reachable = seats.filter((seat) => scope?.destination(seat));
+        if (reachable.length > 1) {
+          const message = `'${named}' names ${reachable.length} seats here. Nothing was written; pass one of these: ${reachable.join(", ")}.`;
+          return errorResult(JSON.stringify({ ok: false, code: "destination_ambiguous", message, candidates: reachable }),
+            "destination_ambiguous", message, { candidates: reachable });
+        }
+        if (reachable.length === 0 && seats.length > 0) return outOfScope(`Destination ${named}`, omitHint);
+        if (reachable.length === 0) {
+          const where = offered("rig_team") ? " rig_team lists the seats you can reach and their names." : " Check the name the person gave.";
+          const message = `No seat here is named '${named}', so nothing was written.${where}${omitHint ? ` ${omitHint}` : ""}`;
+          return errorResult(message, "destination_not_found", message);
+        }
+        destination = reachable[0]!;
       }
       if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`, access?.external ? omitHint : undefined);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
