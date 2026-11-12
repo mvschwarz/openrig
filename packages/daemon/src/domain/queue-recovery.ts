@@ -26,6 +26,17 @@ export function recoveryId(db: Database.Database, qitemId: string, overdueDeadli
   if (afterFolded !== undefined) evidence.push(["after-folded", afterFolded]);
   return `qitem-recovery-${createHash("sha256").update(JSON.stringify(evidence)).digest("hex").slice(0, 16)}`;
 }
+/** The id a new recovery for this row's current episode takes: recoveryId, past every finding the stuck sweep folded into a
+ *  backlog notice (#2988). A fold holds its id without owning the row, and the same episode can be folded more than once
+ *  (the route to the parent comes and goes), so each folded id chains one level further until an id is free. Every level
+ *  exists only as a row that was created and folded, so the chain ends. */
+export function freshRecoveryId(db: Database.Database, qitemId: string, overdueDeadline?: string): string {
+  const folded = db.prepare(`SELECT 1 FROM queue_items WHERE qitem_id = ? AND json_valid(tags)
+    AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`);
+  let id = recoveryId(db, qitemId, overdueDeadline);
+  while (folded.get(id, BACKLOG_FOLDED_TAG)) id = recoveryId(db, qitemId, overdueDeadline, id);
+  return id;
+}
 /** Rows whose tag text could hold a recovery tag: valid JSON stores a string verbatim or with
  * backslash escapes, so this superset loses no exact match. It repeats the first group of
  * idx_queue_items_recovery_tags' WHERE clause (migration 099) byte for byte, which is what lets the

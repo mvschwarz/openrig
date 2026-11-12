@@ -322,6 +322,192 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     expect(queue.getById(own!.qitemId)).toMatchObject({ state: "done" });
   });
 
+  /** Moves dev1's one declared delegation parent from one lead node to another. */
+  const moveParent = (rigId: string, kid: string, from: string, to: string) => {
+    db.prepare("DELETE FROM edges WHERE source_id = ? AND target_id = ? AND kind = 'delegates_to'").run(from, kid);
+    rigs.addEdge(rigId, to, kid, "delegates_to");
+  };
+
+  it("a row folded twice still gets a finding of its own when its route leaves the parent again, never silence", async () => {
+    // dev1 escalates to owner@lane; owner@lane's delegates_to over dev1 comes and goes (a pool seat's lead, re-declared).
+    const owner = seat("lane", "coord.owner", "owner@lane");
+    const dev1 = seat("lane", "pool.dev1", "dev1@lane");
+    rigs.addEdge(dev1.rig.id, dev1.node.id, "owner@lane", "escalates_to");
+    const delegate = (on: boolean) => on
+      ? rigs.addEdge(owner.rig.id, owner.node.id, dev1.node.id, "delegates_to")
+      : db.prepare("DELETE FROM edges WHERE source_id = ? AND target_id = ? AND kind = 'delegates_to'").run(owner.node.id, dev1.node.id);
+    const row = await work("dev1@lane");
+    await sweep(); // a finding per row, by escalates_to
+    delegate(true);
+    await sweep(); // folded into the parent's notice
+    delegate(false);
+    await sweep(); // a finding of its own again
+    delegate(true);
+    await sweep();
+    await work("dev1@lane");
+    await sweep(); // a new notice for both rows folds that second finding too
+    const folded = queue.list({ limit: 1000 }).filter((i) => (i.tags ?? []).includes("stuck-sweep-folded-into-backlog")
+      && (i.tags ?? []).includes(findingDedupTag("unclaimed-obligation", row.qitemId)));
+    expect(folded).toHaveLength(2);
+    delegate(false);
+    const result = await sweep();
+    await sweep();
+    const open = openFor(row);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.tags).toContain(findingDedupTag("unclaimed-obligation", row.qitemId));
+    expect(folded.map((f) => f.qitemId)).not.toContain(open[0]!.qitemId);
+    expect(result.findings.filter((f) => f.qitemId === row.qitemId && f.action === "created").map((f) => f.findingQitemId)).toEqual([open[0]!.qitemId]);
+  });
+
+  it("a row whose parent goes away under a detection filter stays in the old notice until where it goes now takes it", async () => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    await sweep();
+    const [notice] = findingsTo("owner@lane");
+    db.prepare("DELETE FROM edges WHERE source_id = ? AND target_id = ? AND kind = 'delegates_to'").run(parent.node.id, kids[0]!.node.id);
+    // A raised threshold stops detection, which isn't resolution: the old notice keeps standing for the row.
+    await sweep(120);
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+    expect(queue.getById(notice!.qitemId)!.body).toContain("note: dev1@lane's rows no longer go to owner@lane.");
+    expect(openFor(row).map((f) => f.qitemId)).toEqual([notice!.qitemId]);
+    // Detected again, it goes to the seat's own notice, and the old one lets go of it.
+    await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["dev1@lane"]);
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+  });
+
+  it("a row whose parent changes under a detection filter stays in the old parent's notice until the new one takes it", async () => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    await sweep();
+    const [notice] = findingsTo("owner@lane");
+    const second = seat("lane", "coord.second", "second@lane");
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    await sweep(120);
+    expect(openFor(row).map((f) => f.qitemId)).toEqual([notice!.qitemId]);
+    await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["second@lane"]);
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+  });
+
+  it("a row a seat's own notice let go of for a finding of its own reaches a notice again once that finding is folded", async () => {
+    const owner = seat("lane", "coord.owner", "owner@lane");
+    const dev1 = seat("lane", "pool.dev1", "dev1@lane");
+    const row = await work("dev1@lane");
+    await sweep(); // the seat's own notice
+    const [own] = findingsTo("dev1@lane");
+    rigs.addEdge(dev1.rig.id, dev1.node.id, "owner@lane", "escalates_to");
+    await sweep(); // a finding of its own at owner@lane; the seat's notice closes
+    expect(queue.getById(own!.qitemId)).toMatchObject({ state: "done" });
+    rigs.addEdge(owner.rig.id, owner.node.id, dev1.node.id, "delegates_to");
+    await sweep(); // that finding folds into the parent's notice
+    db.prepare("DELETE FROM edges WHERE kind IN ('delegates_to', 'escalates_to')").run();
+    for (let i = 0; i < 3; i++) await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["dev1@lane"]);
+  });
+
+  it("an old parent's notice keeps a row whose new parent's notice couldn't be written, and lets go of it once that one is", async () => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    await sweep();
+    const [old] = findingsTo("owner@lane");
+    const second = seat("lane", "coord.second", "second@lane");
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    db.exec("CREATE TRIGGER fail_second BEFORE INSERT ON queue_items WHEN NEW.destination_session = 'second@lane' BEGIN SELECT RAISE(ABORT, 'notice write failed'); END");
+    const failed = await sweep();
+    expect(failed).toMatchObject({ outcome: "failed", error: expect.stringContaining("notice write failed") });
+    expect(openFor(row).map((f) => f.qitemId)).toEqual([old!.qitemId]);
+    db.exec("DROP TRIGGER fail_second");
+    await sweep();
+    await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["second@lane"]);
+    expect(queue.getById(old!.qitemId)).toMatchObject({ state: "done" });
+  });
+
+  it("a notice the current parent dismissed holds the row back for an earlier parent's notice too, which closes", async () => {
+    const { parent, kids } = lane("dev1");
+    const second = seat("lane", "coord.second", "second@lane");
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    const row = await work("dev1@lane", 240);
+    await sweep();
+    const [dismissed] = findingsTo("second@lane");
+    queue.update({ qitemId: dismissed!.qitemId, actorSession: "second@lane", state: "done", closureReason: "no-follow-on", transitionNote: "seen" });
+    age(dismissed!.qitemId, 200);
+    moveParent(parent.rig.id, kids[0]!.node.id, second.node.id, parent.node.id);
+    await sweep();
+    const [earlier] = findingsTo("owner@lane");
+    expect(earlier).toMatchObject({ state: "pending" });
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    await sweep();
+    await sweep();
+    expect(queue.getById(earlier!.qitemId)).toMatchObject({ state: "done" });
+    expect(openFor(row)).toHaveLength(0);
+    // New evidence after the dismissal files a new notice at the current parent.
+    const newer = await work("dev1@lane", 120);
+    await sweep();
+    const reopened = findingsTo("second@lane").filter(isOpen);
+    expect(reopened).toHaveLength(1);
+    expect(reopened[0]!.body).toContain(row.qitemId);
+    expect(reopened[0]!.body).toContain(newer.qitemId);
+  });
+
+  it("an old parent's notice whose list is unreadable stays while a row of the seat has no signal elsewhere (a detection filter, a failed create)", async () => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    await sweep();
+    const [old] = findingsTo("owner@lane");
+    breakRowList(old!.qitemId, "malformed");
+    const second = seat("lane", "coord.second", "second@lane");
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    await sweep(120);
+    expect(queue.getById(old!.qitemId)).toMatchObject({ state: "pending" });
+    db.exec("CREATE TRIGGER fail_second BEFORE INSERT ON queue_items WHEN NEW.destination_session = 'second@lane' BEGIN SELECT RAISE(ABORT, 'notice write failed'); END");
+    expect(await sweep()).toMatchObject({ outcome: "failed" });
+    expect(queue.getById(old!.qitemId)).toMatchObject({ state: "pending" });
+    db.exec("DROP TRIGGER fail_second");
+    await sweep();
+    await sweep();
+    expect(queue.getById(old!.qitemId)).toMatchObject({ state: "done" });
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["second@lane"]);
+  });
+
+  it("an old parent's notice whose list is unreadable closes once the seat's parent changes, holding nothing back", async () => {
+    const { parent, kids } = lane("dev1");
+    const row = await work("dev1@lane");
+    await sweep();
+    const [old] = findingsTo("owner@lane");
+    breakRowList(old!.qitemId, "missing");
+    const second = seat("lane", "coord.second", "second@lane");
+    moveParent(parent.rig.id, kids[0]!.node.id, parent.node.id, second.node.id);
+    await sweep();
+    await sweep();
+    expect(queue.getById(old!.qitemId)).toMatchObject({ state: "done" });
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["second@lane"]);
+    // Back to the first parent: the closed notice holds the row back from nobody.
+    moveParent(parent.rig.id, kids[0]!.node.id, second.node.id, parent.node.id);
+    await sweep();
+    await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["owner@lane"]);
+  });
+
+  it("a polling hosted member that gains a delegation parent hands its rows from its own notice to the parent's, not both", async () => {
+    // helper@lane has no terminal and no wake trigger: it reads its own inbox, and its rows share one polled notice.
+    queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      isHostedMember: (d) => d === "helper@lane", hostedWake: () => null });
+    const owner = seat("lane", "coord.owner", "owner@lane");
+    const helper = seat("lane", "pool.helper", "helper@lane");
+    expect(queue.classifyDestinationOf("helper@lane").class).toBe("unroutable");
+    const row = await work("helper@lane");
+    await sweep();
+    const [own] = openFor(row);
+    expect(own!.tags).toContain("stuck-sweep:unclaimed-backlog:helper@lane");
+    rigs.addEdge(owner.rig.id, owner.node.id, helper.node.id, "delegates_to");
+    await sweep();
+    await sweep();
+    expect(openFor(row).map((f) => f.destinationSession)).toEqual(["owner@lane"]);
+    expect(queue.getById(own!.qitemId)).toMatchObject({ state: "done" });
+  });
+
   it.each(["in-progress", "blocked"] as const)("doesn't fold a per-row finding the parent has taken up (%s)", async (state) => {
     lane("dev1");
     const row = await work("dev1@lane");

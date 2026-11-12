@@ -1,6 +1,6 @@
 import { currentParkedOwnerNoInputFailure } from "./policies/parked-owner-consumer.js";
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
-import { BACKLOG_FOLDED_TAG, createRecoveryLookup, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { BACKLOG_FOLDED_TAG, createRecoveryLookup, freshRecoveryId, recoveryTag } from "./queue-recovery.js";
 export { BACKLOG_FOLDED_TAG };
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
@@ -635,7 +635,7 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
 /** #2988: the standing notice a delegation parent gets for one child seat's unclaimed rows. It tells the parent about the
  *  child's backlog; it claims, moves and completes none of it. Built from the rows' fixed facts, as the seat's own notice
  *  is, so a pass rewrites it only when the rows change. */
-function parentBacklogText(child: string, parent: string, rows: BacklogRow[], thresholdMinutes: number): { summary: string; body: string } {
+function parentBacklogText(child: string, parent: string, rows: BacklogRow[], thresholdMinutes: number, routedHere: boolean): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
   return {
     summary: `Stuck sweep: unclaimed-backlog on ${child}, for its delegation parent ${parent} (${count})`,
@@ -649,6 +649,8 @@ function parentBacklogText(child: string, parent: string, rows: BacklogRow[], th
       `${parent} is told about them in this one notice instead of a finding per row. It follows the rows as they come and ` +
       `go, and is rewritten in place without a new wake. This notice doesn't claim, move or complete any of them: they ` +
       `stay with ${child} until someone claims, reroutes or closes them.\n` +
+      (routedHere ? "" : `note: ${child}'s rows no longer go to ${parent}. This notice keeps standing for them until the sweep ` +
+        `finds them stuck again and they go where ${child}'s rows go now.\n`) +
       `List them: rig queue list --destination ${child} --state pending\n` +
       `The sweep closes this notice itself once every row it stands for is claimed, parked or closed, or no longer goes ` +
       `to ${parent}.\n` +
@@ -1525,13 +1527,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const now_ = freshCandidate(c.kind, c.row.qitemId, c.jobId);
         if (!now_) continue;
         routeCandidate(now_); // its destination, reason and targets as they are now
-        const deadline = renewedDeadline ? c.row.closureRequiredAt! : undefined;
-        const baseId = recoveryId(deps.db, c.row.qitemId, deadline);
-        // A finding folded into a parent's notice (#2988) holds this id without owning the row: a new episode gets its own.
-        const folded = deps.db.prepare(`SELECT 1 FROM queue_items WHERE qitem_id = ? AND json_valid(tags)
-          AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`).get(baseId, BACKLOG_FOLDED_TAG);
         const input = {
-          qitemId: folded ? recoveryId(deps.db, c.row.qitemId, deadline, baseId) : baseId,
+          // A finding folded into a parent's notice (#2988) holds its id without owning the row: a new one gets its own.
+          qitemId: freshRecoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
@@ -1550,6 +1548,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         try {
           const created = await deps.queueRepo.create(input);
           othersMayHaveRun();
+          // An existing row with this id, same source and destination, comes back as an idempotent retry: a closed one is
+          // no finding for the row now, so it's reported, never counted as created.
+          if (!["pending", "in-progress", "blocked"].includes(created.state)) {
+            throw new Error(`${created.qitemId} already exists and is ${created.state}`);
+          }
           findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
         } catch (err) {
           const message = `${c.kind} finding for ${c.row.qitemId} to ${now_.route} not created: ${err instanceof Error ? err.message : String(err)}`;
@@ -1585,16 +1588,33 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
       return parentsNow.get(seat)!;
     };
-    /** #2988: an open notice to this seat's delegation parent lists the row (one actually written: a create that failed
-     *  leaves the row with the seat's own notice). */
-    const parentNoticeStandsFor = (seat: string, id: string): boolean => {
-      const parent = parentNow(seat);
-      if (!parent) return false;
-      const tag = parentBacklogTag(parent, seat);
+    /** #2988: the open notice with this key lists the row (one actually written: a create that failed leaves the row
+     *  where it was). */
+    const openNoticeLists = (tag: string, id: string): boolean => {
       const open = deps.db.prepare(`SELECT body FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
           AND (tags LIKE '%"stuck-sweep:%') AND tags LIKE ? ESCAPE '\\' LIMIT 1`)
         .get(`%"${tag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}"%`) as { body: string } | undefined;
       return open ? backlogRowsOf(open.body)?.has(id) === true : false;
+    };
+    /** #2988: an open notice to this seat's delegation parent lists the row. */
+    const parentNoticeStandsFor = (seat: string, id: string): boolean => {
+      const parent = parentNow(seat);
+      return parent ? openNoticeLists(parentBacklogTag(parent, seat), id) : false;
+    };
+    /** #2988: a row a parent's notice stands for no longer goes to that parent (another parent, none, or a used hop). The
+     *  notice lets go of it only once something written stands for it where it goes now: the open notice it goes to lists
+     *  it, or a closed one there holds it back this pass (a finding of its own lets go of it before this). Under a detection
+     *  filter (a raised threshold, the wake ladder), or while that notice can't be written, nothing does, and the old notice
+     *  keeps standing for it: a detection filter never reads as done. A pass files a seat's rows before it reads the notices no row goes to, so a
+     *  row usually moves in one pass; at worst it is in both notices for one more. */
+    /** #2988: per notice key, the rows a closed notice held back this pass (below), so a notice a row leaves can tell. */
+    const heldBack = new Map<string, Set<string>>();
+    const coveredElsewhere = (seat: string, id: string): boolean => {
+      if (hasConsumedEscalationHop(deps.db, id)) return false;
+      const next = parentNow(seat);
+      const tag = next ? parentBacklogTag(next, seat) : unclaimedBacklogTag(seat);
+      // A closed notice there that holds the row back (dismissed by where it goes now) stands for it too.
+      return openNoticeLists(tag, id) || heldBack.get(tag)?.has(id) === true;
     };
     /** Closes the per-row findings a parent's notice now stands for (#2988's transition), once that notice is written. */
     const foldInto = async (noticeId: string, parent: string, rowIds: string[]): Promise<void> => {
@@ -1638,7 +1658,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // parent's says whose backlog it is.
       const polled = !parent && (rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat));
       const backlogText = (standsFor: BacklogRow[]) => parent
-        ? parentBacklogText(seat, parent, standsFor, ageMinutes)
+        ? parentBacklogText(seat, parent, standsFor, ageMinutes, parentNow(seat) === parent)
         : polled
           ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
           : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
@@ -1690,32 +1710,48 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
         const listedNow = new Set(rows.map((c) => c.row.qitemId));
         const stoodFor = backlogRowsOf(last.body);
-        // #2988: rows this notice lets go of only because they go somewhere else now (another parent, none, a used hop, or
-        // a parent's notice that already stands for them). Nothing resolved them, so a notice the sweep closes doesn't
-        // hold them back: they leave its list before it closes.
+        // #2988: rows this notice lets go of only because something else stands for them now (a finding of their own,
+        // another parent's or the seat's own notice, or this pass's route for them). Nothing resolved them, so a notice the
+        // sweep closes doesn't hold them back: they leave its list before it closes.
         const routedAway = new Set<string>();
         const still = [...(stoodFor ?? [])].filter((id) => !listedNow.has(id)).flatMap((id): BacklogRow[] => {
           const row = indexed(() => deps.queueRepo.getById(id, { waiting: false }));
-          // Gone, someone else's now, resolved at its source, or held by a finding or recovery of its own: one actually
-          // written, so a create that failed this pass leaves the row here.
-          if (!row || row.destinationSession !== seat || recoveries.find(id)
-            || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) return [];
+          // Gone, someone else's now, or resolved at its source.
+          if (!row || row.destinationSession !== seat || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) return [];
+          // Held by a finding or recovery of its own (one actually written, so a create that failed this pass leaves the row
+          // here): that finding holds it back from now on, a dismissed one too. The notice lets go of it rather than also
+          // holding it once closed: a fold into a parent's notice (#2988) can release that finding's custody, and the row
+          // must then be able to reach a notice again.
+          if (recoveries.find(id)) {
+            routedAway.add(id);
+            return [];
+          }
           // A parent's notice lets go of a row whose seat's delegation parent is now another seat (or none), or whose one
           // escalation hop is used; a seat's own notice, of a row its new parent's notice already stands for (#2988).
-          if (parent ? parentNow(seat) !== parent || hasConsumedEscalationHop(deps.db, id) : !polled && parentNoticeStandsFor(seat, id)) {
+          if (parent
+            ? (parentNow(seat) !== parent || hasConsumedEscalationHop(deps.db, id)) && coveredElsewhere(seat, id)
+            : parentNoticeStandsFor(seat, id)) {
             routedAway.add(id);
             return [];
           }
           return [{ qitemId: id, since: pendingSince(deps.db, id) ?? row.tsCreated, from: row.sourceSession, summary: row.summary }];
         });
         const standsFor = [...rows.map(backlogRow), ...still];
-        // With its list unreadable, the notice may still stand for rows: it's left as it is, never closed.
-        if (standsFor.length === 0 && !stoodFor) {
+        // With its list unreadable, the notice may still stand for rows: it's left as it is, never closed. A parent's notice
+        // whose seat no longer goes to that parent is the exception (#2988), once nothing it could stand for is left without
+        // a signal: every unclaimed row waiting at the seat (all it could have listed, and more) is resolved at its source,
+        // has a finding of its own, or something written stands for it where it goes now. Then it closes, holding nothing
+        // back; until then it stays, as unknown membership is not resolution.
+        const releasable = !stoodFor && parent !== null && parentNow(seat) !== parent
+          && (deps.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND state = 'pending' AND claimed_at IS NULL")
+            .all(seat) as Array<{ qitem_id: string }>).every(({ qitem_id: id }) => !!recoveries.find(id)
+              || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now) || coveredElsewhere(seat, id));
+        if (standsFor.length === 0 && !stoodFor && !releasable) {
           findings.push({ kind: "unclaimed-backlog", qitemId: key, findingQitemId: last.qitem_id, action: "refreshed" });
           continue;
         }
         if (standsFor.length === 0) {
-          if (routedAway.size > 0) {
+          if (routedAway.size > 0 || !stoodFor) {
             // Only the rows something resolved stay in the list the closed notice holds back.
             const kept = [...(stoodFor ?? [])].filter((id) => !routedAway.has(id));
             const body = last.body.split("\n").filter((l) => !l.startsWith(BACKLOG_ROWS_PREFIX)).join("\n")
@@ -1781,7 +1817,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (current.length === 0) continue;
       // A closed notice whose list is unreadable holds back every row, each until it has newer evidence than the close.
       const covered = last ? backlogRowsOf(last.body) : null;
-      if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
+      if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) {
+        heldBack.set(tag, new Set(current.map((c) => c.row.qitemId)));
+        continue;
+      }
       const filed = await fileNotice(backlogText(current.map(backlogRow)), recipientFor(current.map((c) => c.row.sourceSession)));
       if (filed && parent) await foldInto(filed, parent, current.map((c) => c.row.qitemId));
     }
