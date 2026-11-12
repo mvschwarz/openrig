@@ -209,7 +209,10 @@ and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
 reason and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. The reasons are:
+retry is scheduled. `rig send` to several seats and `rig broadcast` print a held
+recipient as `retained, not delivered; inspect with rig seat held-messages`, never
+as sent, and their summary adds the held count (`1/3 delivered, 1 held`). A held
+recipient alone doesn't make the command fail. The reasons are:
 
 - `typing_guard_enabled`: the seat's mode holds this send (`hold`, or a level that
   holds this kind of message).
@@ -225,6 +228,18 @@ retry is scheduled. The reasons are:
   `tmux_unavailable`. Each explicit draft-aware request is a new attempt, including
 one with a reused `deliveryId`; the result warns older callers that this field no
 longer deduplicates input. The CLI does not generate a deduplication key.
+
+The last recorded managed-compaction input refusal appears as `inputReadFailure` in the attempt
+record and `rig compact --state`: the preparation or compact stage, `composer`
+(the explicit composer hold) or `draft-aware` check, reader status, confidence,
+a fixed read-failure reason and cursor flags. An owed restore step reports it in
+`owedRestore.lastDelivery`. These fields contain no input text, suggestions,
+terminal frames or exception messages. Confidence and timeout fields are `null`
+when that reader does not supply them; a known composer read timeout reports
+`timedOut: true`. A generic `capture_unavailable` does not identify the failed
+capture operation. Older records lack this diagnostic. It neither changes the
+refusal nor retries an attempt; missing metadata cannot establish which check
+caused a historical refusal.
 
 Clearing a draft, changing modes or restarting does not flush saved messages or
 callbacks. To try again, send a current request: it rechecks the recipient and input.

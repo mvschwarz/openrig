@@ -62,7 +62,9 @@ person needs in their project or home folder and name that path.
   start" in https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md#before-you-start. Setup
   checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen harness (with npm) if
   either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`), and adds an OpenRig
-  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
+  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`. A login it reports
+  missing isn't harmless: say which one, and that a team may need it (`starter` runs its reviewer on Codex). Pass it on
+  in the handoff so the operator fits the team before anything starts.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -72,7 +74,8 @@ person needs in their project or home folder and name that path.
 
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
-  Keep it.
+  Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on
+  the person's yes ("Who answers OpenRig's questions" below).
 - **If the person uses Codex:** now that OpenRig is running, make the one-time offer under "Codex: one offer, once,
   after OpenRig starts" at the end of this step.
 - **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
@@ -166,7 +169,8 @@ person needs in their project or home folder and name that path.
   (never the logical ID or a guessed name) and send:
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
   If the person stays here, replace "The person will answer in your pane" with "The person stays with me; send me your questions and
-  results to relay." Carry their constraints and any declined permission choices in either handoff.
+  results to relay." Carry their constraints, which logins they have (an installed provider that isn't signed in
+  doesn't count), and any permission choice they made, chosen or declined, in either handoff.
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
@@ -190,7 +194,7 @@ person needs in their project or home folder and name that path.
   (`--dry-run` first). If it isn't, or you can't tell, say so and offer their choices: sign in to Claude Code, or give the
   seat a model their account can run with `rig seat set-model`, then start it again with
   `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. Either way the operator starts a
-  new conversation without your handoff, so send it again: the goal, folder, branch, constraints and declined choices.
+  new conversation without your handoff, so send it again: the goal, folder, branch, constraints and permission choices.
 - **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.
@@ -207,6 +211,9 @@ person needs in their project or home folder and name that path.
   whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
   not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
   their project doesn't show what the action touches. Their instruction changes no permission setting.
+  Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
+  team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
+  that keep asking, for their project only (`applying-a-permission-policy`); tell it what they chose.
   Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
 - **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with

@@ -109,8 +109,43 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 - **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
   - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
     `<OPENRIG_HOME>/mcp-http-presence.json`, beside the token file;
-  - `lastWake`: its latest ring and the result, among its 50 most recent rows.
+  - `lastWake`: its latest ring and the result, among its 50 most recent rows;
+  - `checkIn`: its check-in status, last check-in and stated cadence, as described in [Check-in status](#check-in-status)
+    (unknown, with the reason, when the daemon gives none).
 - `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
+
+### Check-in status
+
+A connected assistant (a roster member marked `hosted: true`) checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
+when it lists the member's own work). Other calls it makes don't count yet. Its status compares its last check-in with
+what its roster entry states: a cadence (`check_in_minutes`), or that it checks in when a person asks it
+(`check_in_on_request: true`):
+
+| Status | Meaning |
+|---|---|
+| `checking-in` | its last check-in is no older than twice its stated cadence |
+| `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
+| `no-check-in-yet` | no check-in recorded for it on this daemon, whatever its entry states |
+| `on-request` | its entry says it checks in when a person asks it |
+| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so a revoked assistant reads overdue (or unknown, with no cadence) |
+| `unknown` | its entry states neither, its statement can't be used, or its check-ins couldn't be read; the reason says which, and its last check-in is shown. OpenRig assumes no cadence, so this never reads idle or overdue |
+
+Each place it's shown gives the evidence with it, for example `overdue: last check-in 2026-11-12T13:05:00Z, expected
+every 60 min; its schedule may be off or waiting for an approval`.
+
+A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
+anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
+isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
+gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
+reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats, and `rig ps` (with or
+without `--nodes`, and when it has no rigs or nodes to show) lists every connected assistant after its table, one line
+each. That's on this host, and in the node view of an HTTP host; an SSH host's `rig ps` prints its own. An HTTP host's
+rig view and the multi-host fan-out leave the section out. When the list can't be read, for example from an older
+daemon, it says check-in is unavailable instead. Its `--json` output is unchanged. The TUI's
+instance and rig tables list them the same way after their seats, with times in the viewer's zone; when the list can't be read,
+they say check-in is unavailable, as `rig ps` does.
+When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
+line; when that notice is filed doesn't change.
 
 ## Revoke
 

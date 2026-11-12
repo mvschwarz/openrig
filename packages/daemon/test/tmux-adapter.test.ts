@@ -29,6 +29,28 @@ function mockExec(responses: Record<string, { stdout?: string; error?: Error }>)
   };
 }
 
+describe("TmuxAdapter.listSessionClientTerminals", () => {
+  it("lists each attached client's terminal and its reported type", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { stdout: "/dev/ttys011|rex 0.0.1793890641-gaf0c20\n/dev/ttys012|\n" } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toEqual([
+      { tty: "/dev/ttys011", termtype: "rex 0.0.1793890641-gaf0c20" },
+      { tty: "/dev/ttys012", termtype: "" },
+    ]);
+  });
+
+  it("is empty when the session or the server is gone, so the caller can stop looking", async () => {
+    for (const error of [new Error("can't find session: op@kernel"), NO_SERVER_ERROR,
+      new Error("error connecting to /private/tmp/tmux-501/x (No such file or directory)")]) {
+      expect(await adapterFor(mockExec({ "list-clients": { error } })).listSessionClientTerminals("op@kernel")).toEqual([]);
+    }
+  });
+
+  it("is null when tmux fails for another reason", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { error: new Error("command timed out") } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toBeNull();
+  });
+});
+
 describe("TmuxAdapter", () => {
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;

@@ -5,10 +5,16 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { ConfigStore } from "../config-store.js";
 import { mcpPresenceFilePath, readPresence } from "../mcp-presence.js";
+import { CHECK_IN_DISPLAY } from "@openrig/daemon/connection-contract";
+import { formatCheckIn } from "../lib/check-in.js";
+import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { DaemonClient } from "../client.js";
+import { realDeps } from "./daemon.js";
 import { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
 
 // One roster parser, shared with the daemon (a hosted member's wake route reads the same files).
 export { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake };
+export { formatCheckIn };
 
 type Row = Record<string, unknown>;
 export interface RosterInventory {
@@ -17,6 +23,23 @@ export interface RosterInventory {
   sources: Row[];
   /** This host's id, from the local daemon's own nodes; null when it has none to read it from. */
   localHostId?: string | null;
+  /** The local daemon's hosted members with their check-in status, and that daemon's own host id (the host whose
+   *  check-ins these are); null when it couldn't be read. */
+  checkIns?: { hostId: string | null; members: Row[] } | null;
+}
+
+/** Each hosted member's check-in status, from the local daemon. Null when the daemon isn't running or doesn't answer
+ *  (an older daemon has no such read): every hosted member's status then reads unknown. */
+export async function readHostedCheckIns(): Promise<RosterInventory["checkIns"]> {
+  try {
+    const status = await getDaemonStatus(realDeps());
+    if (status.state !== "running") return null;
+    const res = await new DaemonClient(getDaemonUrl(status)).get<unknown>("/api/queue/hosted-members");
+    return res.status < 400 && object(res.data) && Array.isArray(res.data.members)
+      ? { hostId: text(res.data.hostId), members: res.data.members.filter(object) } : null;
+  } catch {
+    return null;
+  }
 }
 const object = (v: unknown): v is Row => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): string | null => typeof v === "string" && v.trim() ? v : null;
@@ -49,7 +72,18 @@ export async function readRosterInventory(): Promise<RosterInventory> {
       sources.push({ scope, status: "unavailable", error: result.stderr.trim() || (error as Error).message });
     }
   }
-  return { readAt: new Date().toISOString(), nodes, sources, localHostId };
+  return { readAt: new Date().toISOString(), nodes, sources, localHostId, checkIns: await readHostedCheckIns() };
+}
+
+function hostedCheckIn(member: RosterMember, inventory: RosterInventory): Row {
+  const unknown = (reason: string) => ({ status: "unknown", lastCheckInAt: null, expectedMinutes: member.check_in_minutes ?? null,
+    onRequest: member.check_in_on_request === true, reason });
+  // The daemon names its own host with its check-ins, so a team with no terminal seat still matches its members.
+  if (!inventory.checkIns) return unknown("this host's daemon gave no check-in status");
+  if (!inventory.checkIns.hostId || member.host !== inventory.checkIns.hostId) return unknown("it's listed on another host, whose check-ins this host doesn't hold");
+  const row = inventory.checkIns.members.find((m) => m.seat === member.seat);
+  return row && typeof row.status === "string" && row.status in CHECK_IN_DISPLAY ? row
+    : unknown("this host's daemon gave no status for it");
 }
 
 export function enrichRosterMember(member: RosterMember, inventory: RosterInventory) {
@@ -93,6 +127,9 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     // is in rig_team.
     ...(member.hosted ? { lastCallAt: inventory.localHostId && member.host === inventory.localHostId
       ? readPresence(mcpPresenceFilePath())[member.seat]?.lastCallAt ?? null : null } : {}),
+    // Whether it's checking its queue, for a member on this host; another host's member, or a status this daemon
+    // couldn't give, reads unknown.
+    ...(member.hosted ? { checkIn: hostedCheckIn(member, inventory) } : {}),
   } };
 }
 
@@ -134,7 +171,7 @@ export function rosterCommand(deps: Deps = {}): Command {
         else {
           const members = (verb === "show" ? (result.roster as Row).members : result.matches) as Array<ReturnType<typeof enrichRosterMember> & { roster?: { id: string } }>;
           if (verb === "show") { const r = result.roster as Roster; console.log(`${r.name} — ${r.purpose}\nCurator: ${r.curator.seat} (${r.curator.host})`); }
-          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}${m.hosted ? `\n  Last call: ${m.live.lastCallAt ?? "unknown"}` : ""}\n  ${m.live.reason}`);
+          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}${m.hosted ? `\n  Last call: ${m.live.lastCallAt ?? "unknown"}\n  Check-in: ${formatCheckIn(m.live.checkIn ?? {})}` : ""}\n  ${m.live.reason}`);
           if (!members.length) console.log("No matching members.");
           const obs = result.observations as { sources: Row[] };
           for (const source of obs.sources) if (source.status !== "ok") console.error(`Observation gap (${source.scope}): ${source.warning ?? source.error ?? source.status}`);

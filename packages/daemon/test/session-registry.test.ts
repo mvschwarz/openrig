@@ -370,6 +370,23 @@ describe("SessionRegistry", () => {
     expect(names).toContain("r01-dev1-qa");
   });
 
+  it("getSessionsForRig preserves insertion order for timestamp ties with the session indexes installed", () => {
+    const indexes = db.prepare("PRAGMA index_list(sessions)").all() as { name: string }[];
+    expect(indexes.map((index) => index.name)).toContain("idx_sessions_node_latest_id");
+    const insert = db.prepare("INSERT INTO sessions(id, node_id, session_name, created_at) VALUES (?, ?, ?, ?)");
+    // Non-monotonic ids distinguish insertion order from either id ordering.
+    insert.run("m-first", "node-1", "first@rig", "2026-01-02");
+    insert.run("z-second", "node-1", "second@rig", "2026-01-02");
+    insert.run("a-third", "node-1", "third@rig", "2026-01-02");
+    insert.run("n-fourth", "node-2", "fourth@rig", "2026-01-02");
+    // Timestamp remains the primary order even when this row was inserted last.
+    insert.run("earlier", "node-2", "earlier@rig", "2026-01-01");
+
+    expect(registry.getSessionsForRig("rig-1").map((session) => session.id)).toEqual([
+      "earlier", "m-first", "z-second", "a-third", "n-fourth",
+    ]);
+  });
+
   it("getBindingForNode returns null when unbound", () => {
     const binding = registry.getBindingForNode("node-1");
     expect(binding).toBeNull();

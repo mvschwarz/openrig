@@ -110,7 +110,7 @@ function printResult(json: boolean, body: unknown, status: number): void {
 }
 
 /** Human-format the honest-partial open result (opened/absent/degraded, each named). */
-function humanOpen(r: OpenViewResult): string {
+function humanOpen(r: OpenViewResult, viaWindow: boolean): string {
   const lines: string[] = [];
   const tiled = r.opened.length;
   const target = r.session === undefined ? r.provider : `${r.provider} session ${JSON.stringify(r.session)}`;
@@ -118,7 +118,7 @@ function humanOpen(r: OpenViewResult): string {
     r.code === "terminal_window_failed" && r.error
       ? r.error
       : r.ok && r.reusedWorkspace
-        ? `Terminal window requested. Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
+        ? `${viaWindow ? "Terminal window requested. " : ""}Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
         : tiled > 0
           ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${target}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
           : `No tiles ${r.degraded.some(d => d.code === "pane_unconfirmed") ? "confirmed" : "opened"} in ${target}.`,
@@ -156,11 +156,11 @@ async function withHeldSeats(client: DaemonClient, r: OpenViewResult): Promise<O
 }
 
 /** A successful existing-workspace selection also needs no new panes. */
-function printOpen(json: boolean, r: OpenViewResult, status: number): void {
+function printOpen(json: boolean, r: OpenViewResult, status: number, viaWindow = false): void {
   if (json) {
     console.log(JSON.stringify(r));
   } else {
-    console.log(humanOpen(r));
+    console.log(humanOpen(r, viaWindow));
   }
   if (status >= 400 || (r.following ? !r.ok : r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
     process.exitCode = status >= 500 ? 2 : 1;
@@ -182,7 +182,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one), and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted outside herdr-app); inside a herdr-app terminal --window still asks for a desktop window, and plain open reuses herdr-app")
     .option("--app-home <dir>", "herdr-app: the client to open in (default: herdr-app's own home, from HERDR_APP_HOME or ~/.config/herdr-app)")
@@ -251,7 +251,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           const windowProvider = opts.provider?.trim() === "herdr-app" ? undefined : opts.provider;
           const result = await openTerminalWindow(client, view, windowProvider, deps.windowDeps, opts.expectedPlan, session, following);
           const out = ambientFallbackNote ? { ...result, notes: [...(result.notes ?? []), ambientFallbackNote] } : result;
-          printOpen(opts.json ?? false, await withHeldSeats(client, out), 200);
+          printOpen(opts.json ?? false, await withHeldSeats(client, out), 200, true);
           return;
         }
         let expectedPlan = opts.expectedPlan;
@@ -265,7 +265,9 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           }
           expectedPlan = preview.data.planId;
         }
-        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(session !== undefined ? { session } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}) };
+        // Herdr focuses a workspace that still shows this view live instead of adding a copy (#3052).
+        const reuseLive = !following && opts.provider?.trim() === "herdr";
+        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(session !== undefined ? { session } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(reuseLive ? { reuseLive } : {}) };
         const res = await client.post<OpenViewResult>(following ? "/api/terminal/follow" : "/api/terminal/open",
           { ...body, ...following }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, ...(following ? { headers: terminalAuthHeaders() } : {}) });
         if (session !== undefined && res.status < 400 && res.data?.session !== session) {

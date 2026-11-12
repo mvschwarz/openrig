@@ -82,6 +82,13 @@ All of them are server-sent events (`text/event-stream`):
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
   Live events that arrive during the replay follow it, without duplicates.
+  When a person clicks an answer on an ask with questions (in Steering, the Feed, Slack or an MCP client), the stream
+  carries `queue.answer_recorded`: `{ qitemId, actorSession, questionId, answered, questions, complete, summary }`.
+  `complete: false` means the set is still partial: the ask stays open, and its answers haven't gone back yet. The
+  event carries ids and counts, not the choice; read the ask for its `humanAnswers`. A click that changes nothing (the
+  same option again) has no event, and neither does a typed reply, which settles the ask through its own
+  `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
+  client that re-reads the ask after a gap still sees it.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
@@ -150,6 +157,40 @@ The queue and outbox lists are bounded snapshots, not subscriptions. A full queu
 An outbox entry's `deliveryState` reports the send attempt; only `delivered` confirms delivery. A queue transition,
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
+
+### What needs a person, and how their answers link back (`team-operations.v1`)
+
+`GET /api/team-operations/capabilities` says which team-operations jobs this daemon supports, separately from its
+build:
+
+```json
+{ "contract": "team-operations.v1",
+  "capabilities": { "needs-me.read": "supported", "needs-me.answer": "not-supported", "needs-me.follow": "not-supported" },
+  "build": { "semver": "…", "commit": "…" } }
+```
+
+A capability reads `supported`, `not-supported` or `unknown`, and a missing key means `unknown`. A daemon without the
+route (HTTP 404) predates the contract: keep reading what it already returns. In a source run, `build` is
+`{ semver: null, commit: null }`.
+
+With `needs-me.read` supported:
+
+- **What needs the person:** `GET /api/attention?view=<person-id>` (the same read as the Feed). Each queue item adds
+  `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
+  `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
+  read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
+  about the open rows blocked on it (at most 100; empty when none are recorded).
+- **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
+  `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
+  already reflected in it. Recording one answer of several emits no event yet, so re-read the snapshot (or the row)
+  rather than relying on events alone for partial answers.
+- **The answers returned to a request:** `GET /api/queue/<qitemId>` adds `answers`, oldest first, each
+  `{ qitemId, by, at, text, episode, recordedIdentity }`. They are found by the answer row's link to the request, not
+  by its text, so don't parse the `In reply to:` line in an answer's body. `text` is the person's answer without that
+  footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
+  recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
+  set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
+  or a host pairing request is answered in place, with no answer row.
 
 ## Route details
 
