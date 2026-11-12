@@ -2917,8 +2917,9 @@ export class SessionTransport {
     // Preferences select new requests. Retained IDs keep their recorded route; a legacy unmarked held row is typed.
     const checkRetainedRoutes = (selected: "typed" | "native", selectedIds: readonly string[]) => {
       for (const id of selectedIds) {
-        const entry = history.getById(id);
-        const saved = history.inputRoute(id) ?? (entry && ["retained", "retired"].includes(entry.deliveryState) ? "typed" : null);
+        const recorded = history.inputRoute(id);
+        const entry = recorded === null && selected === "native" ? history.getById(id) : null;
+        const saved = recorded ?? (entry && ["retained", "retired"].includes(entry.deliveryState) ? "typed" : null);
         if (saved && saved !== selected) throw new DeliveryGuardError("delivery_identity_conflict",
           `This delivery ID selects ${saved} input; use a new request ID to select ${selected} input.`);
       }

@@ -33,6 +33,9 @@ export class DraftAwareDelivery {
     if (!row?.guard_delivery) return null;
     const receipt = JSON.parse(row.guard_delivery) as Receipt;
     const entry = this.outbox.getById(id)!;
+    // Route/identity retention alone is not an attempt. A held attempt has a result;
+    // unfinished attempts keep their sending/indeterminate phase, including native custody.
+    if (!receipt.result && !receipt.watchdog?.nextAction && ["pending", "retained", "retired"].includes(entry.deliveryState)) return null;
     const state = entry.deliveryState === "retained" || entry.deliveryState === "retired" ? "held"
       : entry.deliveryState === "delivered" ? "complete" : entry.deliveryState === "sending" ? "sending" : entry.deliveryState === "failed" ? "failed" : "indeterminate";
     const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason ?? receipt.watchdog?.nextAction

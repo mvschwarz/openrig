@@ -741,8 +741,11 @@ describe("current draft-aware delivery through the real transport", () => {
     const first = fixture(); await first.enable(); first.bodies.a = "draft"; await first.send("crash");
     first.db.exec("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=json_remove(guard_delivery,'$.result');");
     const resumed = fixture(first.db.serialize());
+    const interrupted = resumed.outbox.listForSender("human@test")[0]!.outboxId;
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
     if (genericFirst) resumed.outbox.reconcileAbandonedSending("crash");
     resumed.guarded.recover();
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
     expect(await resumed.send("crash")).toMatchObject({ ok: true, sent: true });
     expect(resumed.submissions).toEqual(["incoming message"]);
     expect(resumed.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='indeterminate'").get()).toEqual({ n: 1 });
@@ -994,6 +997,36 @@ describe("supported seat and queue integration", () => {
     expect(f.writes).toEqual([]); // Retirement itself did not type anything.
     f.bodies.a = ""; expect(await f.send("http", "http message")).toMatchObject({ ok: true, sent: true });
     expect(f.submissions).toEqual(["http message"]);
+  });
+
+  it.each(["typed", "native"])("%s route retention alone does not project a delivery attempt through HTTP", async route => {
+    const f = fixture();
+    await f.guard.set("a", { mode: "hold" }, "human@test", "quiet seat");
+    f.db.prepare("UPDATE nodes SET input_route=? WHERE id='a'").run(route);
+    const result = await f.send("route-only", "held by level");
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "typing_guard_enabled" });
+    const id = result.outboxIds![0]!;
+    expect(f.outbox.getById(id)).toMatchObject({ deliveryState: "retained", body: "held by level" });
+    expect(f.outbox.inputRoute(id)).toBe(route);
+    expect(f.guarded.lookup(id)).toBeNull();
+    const page = await (await f.app.request("/api/seat/held-messages/worker@test")).json();
+    expect(page.items[0].delivery).toBeUndefined();
+    const detail = await (await f.app.request(`/api/seat/held-messages/worker@test?id=${id}`)).json();
+    expect(detail.delivery).toBeUndefined();
+    expect(f.writes).toEqual([]);
+  });
+
+  it("native admission and lost receiver ownership remain visible in delivery history", () => {
+    const f = fixture();
+    const input = { outboxId: "native-attempt", senderSession: "human@test", destinationSession: "worker@test", body: "native input" };
+    f.outbox.retain(input, f.guard.target("worker@test"));
+    f.outbox.admitRunner({ ...input, nodeId: "a", runId: "projection-run", kind: "input", inputRoute: "native", payload: { text: input.body } });
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
+    f.outbox.updateRunner("a", "projection-run", input.outboxId, 1, "offered");
+    f.outbox.forgetRunnerMap("a", "projection-run");
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
+    expect(f.outbox.runnerReceipt(input.outboxId)).toMatchObject({ reconciliation: "receiver_state_lost" });
+    expect(f.writes).toEqual([]);
   });
 
   it("attempts each explicit HTTP request despite a reused caller ID", async () => {

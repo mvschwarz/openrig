@@ -341,6 +341,8 @@ A wake waits for the current execution to finish and then gets its own native pr
 
 Consumer fixtures exercise Pi RPC shapes from the installed Pi 1.5.0 SDK and dsh's ACP implementation at 0.2.1-rc.2. Stand-in native backends prove the runner/Core plumbing, not actual program or provider qualification. Separate opt-in tests execute installed Pi 1.5.0 and dsh 0.2.1-rc.2 against a loopback fake Anthropic provider with scratch homes and dummy keys. They exercise actual idle/busy input and dedicated wake sequencing, not a real vendor backend, named cancellation or other versions/forks; no program default is promoted. Set `OPENRIG_NATIVE_PROGRAM_PROOF=1`, `OPENRIG_NATIVE_PI_BIN` and `OPENRIG_NATIVE_DSH_BIN` to explicit installed executables, then run the existing `runner-conformance-real-routes.test.ts` in a private network namespace with loopback enabled.
 
+The existing `tmux-server-isolation-daemon.test.ts` also launches managed Pi and a declared dsh preset through the built CLI and daemon with offline native backends. It kills only its scratch daemon with SIGKILL during a wake and restarts it through the normal daemon startup. It checks retained run authority, receiver/native-child and pane process lineage, the recovered answer, duplicate-ID retry and a subsequent wake without repeated native prompts. This covers daemon OS-process recovery with a live receiver map; it does not establish receiver-map persistence after the runner itself dies or combine the crash with the installed-program provider test.
+
 ## 6. Cancel: requested isn't the same as done
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
