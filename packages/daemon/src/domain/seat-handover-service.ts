@@ -647,6 +647,8 @@ export class SeatHandoverService {
           failedStep: launch.step, failureCode: launch.code }) : false;
         // The conversation start a committed handover records before its commit, recorded for the successor that may run.
         if (recorded && failedToken) recordPrompt(failedToken.token);
+        // #3003's text, unchanged (no "retry"): with the attempt recorded it only gains the --recover line in front.
+        const unadoptedNote = `The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.`;
         return {
           ok: false,
           code: "successor_create_failed",
@@ -654,8 +656,8 @@ export class SeatHandoverService {
           replacementStarted: true,
           ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
           guidance: recorded
-            ? `${this.recoverLine(quoted)} The handover was not committed: OpenRig has not registered the successor launched in pane "${pane}" of ${session} as the seat's occupant; it may still be starting there or already working (look first: rig capture ${quoted}); do not retry the handover, nor run rig seat launch ${quoted} --fresh --stop: either ends the running successor.`
-            : `The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.`,
+            ? `${this.recoverLine(quoted)} ${unadoptedNote}`
+            : unadoptedNote,
         };
       }
       return {
@@ -800,7 +802,7 @@ export class SeatHandoverService {
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
           guidance: recorded
-            ? `${this.recoverLine(shellQuote(latestSession.session_name))} The discovery candidate was marked vanished and the seat's binding is unchanged. The successor may still process the priming packet; ${NO_RETRY}`
+            ? `${this.recoverLine(shellQuote(latestSession.session_name))} The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; ${NO_RETRY}`
             : "The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; retry only after tmux delivery is healthy.",
         };
       }

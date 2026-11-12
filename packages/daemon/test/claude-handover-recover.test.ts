@@ -353,8 +353,10 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     const result = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
     if (result.ok) throw new Error("expected failure");
     expect(result.guidance).toMatch(new RegExp(`^If the successor is running there, adopt it .*rig seat handover '${SEAT}' --recover --reason`));
-    expect(result.guidance).toContain("do not retry the handover");
-    expect(result.guidance!.replace("do not retry the handover", "")).not.toMatch(/retr/i);
+    // The rest is #3003's readiness text, unchanged (claude-handover-readiness.test.ts): it warns that another handover
+    // or a fresh launch with --stop ends the successor, and never says "retry".
+    expect(result.guidance).toContain(`Another handover, or rig seat launch '${SEAT}' --fresh --stop --reason "<why>", ends that successor if it goes ahead`);
+    expect(result.guidance).not.toMatch(/\bretry\b/i);
   });
   // Should S3 of the review of #3044: the commit transaction checks again that the attempt still replaces the seat's
   // occupant, after the proof. Something that takes the seat between the proof and the transaction (the presence probe
