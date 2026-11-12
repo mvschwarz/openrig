@@ -2383,8 +2383,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
-      // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
-      resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+      // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts. Read by the
+      // seat the name addresses, not the newest row with that name: an archived generation of the same
+      // seat can hold a newer one, and a context watchdog would then read that node's telemetry.
+      resolveTargetGeneration: (s) => resolveGuardTarget(db, s)?.occupant ?? null,
       // Issue #1180 — sampled context use for token/percent context watchdogs,
       // generation-guarded against a predecessor's frozen telemetry.
       resolveContextUsage: (s, occupantGeneration) =>
