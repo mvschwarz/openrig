@@ -221,3 +221,199 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(await waitFor(() => d.latest()?.reason === "generation_mismatch" && d.latest())).toMatchObject({ state: "unknown" });
   }, 60_000);
 });
+
+
+describe("run-bound native channel custody", () => {
+  async function fixture(enabled = true) {
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
+    const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanups.push(() => db.close());
+    const rigs = new RigRepository(db), rig = rigs.createRig("channel");
+    const node = rigs.addNode(rig.id, "dev", { runtime: "pi" });
+    const registry = new SessionRegistry(db); registry.registerSession(node.id, "dev@channel");
+    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('binding',?,'dev@channel','%1')").run(node.id);
+    const grants = new ActivityGrantStore(db);
+    const grant = grants.issue({ nodeId: node.id, generation: registry.currentOccupantTenure(node.id)!.generationUuid, issuedBy: "launch",
+      run: { runId: "run-one", binding: { runtime: "pi", runner: 2, pane: "%1", panePid: 101 } } });
+    expect(grants.activate(grant.grantId)).toBe(true);
+    const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+    const outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox, enabled ? new Set(["pi"]) : new Set());
+    const { SeatDeliveryGuard, resolveGuardTarget } = await import("../src/domain/seat-delivery-guard.js");
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const { seatRoutes } = await import("../src/routes/seat.js");
+    const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+    const tmux = { deliveryGuard: guard };
+    const transport = new SessionTransport({ db, rigRepo: rigs, sessionRegistry: registry, tmuxAdapter: tmux as never, runnerChannel: channel });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("runnerChannel" as never, channel); c.set("rigRepo" as never, rigs);
+      c.set("tmuxAdapter" as never, tmux); c.set("sessionTransport" as never, transport); await next();
+    });
+    app.route("/api/activity", activityRoutes); app.route("/api/seat", seatRoutes);
+    const hello = { type: "hello", version: 1, runId: "run-one", retained: true, capabilities: { input: true, wake: true, cancel: true } };
+    const admit = (id: string) => channel.admit(grant.nodeId, { outboxId: id, senderSession: "sender", destinationSession: "dev@channel", body: id,
+      kind: "input", inputRoute: "native", payload: { text: id } });
+    return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport };
+  }
+  it("pending and replacement grants cannot subscribe to or settle the retiring run's receipts", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("old");
+    f.channel.frames(f.grant.token, 0);
+    const next = f.grants.issue({ nodeId: f.node.id, generation: f.grant.generation, issuedBy: "replacement",
+      run: { runId: "run-two", binding: f.grant.binding! } });
+    expect(() => f.channel.post(next.token, { ...f.hello, runId: "run-two" })).toThrow(/pending/);
+    expect(f.grants.activate(next.grantId)).toBe(true);
+    expect(() => f.channel.frames(f.grant.token, 0)).toThrow(/revoked/);
+    expect(f.channel.post(next.token, { ...f.hello, runId: "run-two" })).toMatchObject({ receipts: [] });
+    expect(f.channel.frames(next.token, 0)).toEqual([]);
+    expect(() => f.channel.post(next.token, { type: "ack", runId: "run-two", requestId: "old", sequence: 1, state: "accepted" })).toThrow(/mismatch/);
+    expect(f.outbox.runnerReceipt("old")?.stage).toBe("offered");
+  });
+  it("erasure removes channel payload visibility and rejects late acknowledgements/results without a native effect", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("erase-me");
+    expect(f.outbox.eraseRunner("erase-me", new Date().toISOString())).toBe(true);
+    expect(f.channel.frames(f.grant.token, 0)).toEqual([]);
+    for (const type of ["ack", "submitted", "result"])
+      expect(() => f.channel.post(f.grant.token, { type, runId: "run-one", requestId: "erase-me", sequence: 1, state: "accepted", result: { answer: "revived text" } })).toThrow(/erased/);
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ receipts: [expect.objectContaining({ payload: {}, erasedAt: expect.any(String) })], unresolved: [] });
+    expect(JSON.stringify(f.outbox.runnerReceipt("erase-me"))).not.toContain("revived text");
+  });
+  it("queue recovery never retypes a native wake intent after offer/uncertainty", async () => {
+    const f = await fixture();
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+    repo.attachOutbox(f.outbox);
+    const item = await repo.create({ sourceSession: "lead@channel", destinationSession: "dev@channel", body: "durable work" });
+    const id = `wake-intent-${item.qitemId}`, entry = f.outbox.getById(id)!;
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.channel.admit(f.node.id, { outboxId: id, senderSession: entry.senderSession, destinationSession: entry.destinationSession,
+      body: entry.body, auditPointer: entry.auditPointer ?? undefined, kind: "input", inputRoute: "native", payload: { text: entry.body } });
+    expect(f.outbox.finalizeDelivery(id, "indeterminate").deliveryState).toBe("sending");
+    f.channel.frames(f.grant.token, 0);
+    f.outbox.forgetRunnerMap(f.node.id, "run-one");
+    let effects = 0; repo.attachTransport({ send: async () => { effects++; return { ok: true, verified: true }; } });
+    await repo.drainPendingWakeIntents();
+    expect(effects).toBe(0);
+    expect(f.outbox.getById(id)?.deliveryState).toBe("indeterminate");
+  });
+  it("seat route choice requires a live capability, and wake submission/lookup use that exact request", async () => {
+    const f = await fixture();
+    const post = (path: string, body: unknown) => f.app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).status).toBe(409);
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    expect((await post("/api/seat/command/dev%40channel", { type: "wake", requestId: "question", question: "why" })).status).toBe(409);
+    expect((await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).status).toBe(200);
+    const response = await post("/api/seat/command/dev%40channel", { type: "wake", requestId: "question", question: "why" });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ runnerReceipt: { kind: "wake", requestId: "question", payload: { question: "why" } } });
+    const lookup = await f.app.request("/api/seat/command/dev%40channel?requestId=question");
+    expect(await lookup.json()).toMatchObject({ receipt: { requestId: "question", stage: "pending" } });
+    expect((await post("/api/seat/command/dev%40channel", { type: "wake", requestId: "question", question: "different" })).status).toBe(409);
+  });
+  it("the SSE route emits only the current run's offer and closes after grant revocation", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.admit("one"); f.admit("two");
+    const response = await f.app.request("/api/activity/runner-channel", { headers: { authorization: `Bearer ${f.grant.token}` } });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader(); cleanups.push(() => reader.cancel());
+    const read = async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { return await Promise.race([reader.read(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("channel read timed out")), 2000); })]); }
+      finally { if (timer) clearTimeout(timer); }
+    };
+    expect(new TextDecoder().decode((await read()).value)).toContain('"requestId":"one"');
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "one", sequence: 1, state: "accepted" });
+    expect(new TextDecoder().decode((await read()).value)).toContain('"requestId":"two"');
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect((await read()).done).toBe(true);
+  });
+  it("a composed wake group stays one native operation while preserving its original member histories", async () => {
+    const f = await fixture();
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const { SeatDeliveryGuard, resolveGuardTarget } = await import("../src/domain/seat-delivery-guard.js");
+    const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), tmuxAdapter: { deliveryGuard: guard } as never, runnerChannel: f.channel });
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    for (const [id, body] of [["member-one", "original one"], ["member-two", "original two"]])
+      f.outbox.record({ outboxId: id!, senderSession: "system", destinationSession: "dev@channel", body: body!, auditPointer: id });
+    const options = { committedOutboxIds: ["member-one", "member-two"], actorSession: "system", queueWake: true };
+    const sent = await transport.send("dev@channel", "exact composed prompt", options);
+    expect(sent).toMatchObject({ ok: true, outboxIds: options.committedOutboxIds, runnerReceipt: { requestId: "member-one", memberIds: options.committedOutboxIds, sequence: 1 } });
+    expect(f.channel.frames(f.grant.token, 0)).toHaveLength(1);
+    expect(f.outbox.getById("member-one")?.body).toBe("original one");
+    expect(f.outbox.getById("member-two")?.body).toBe("original two");
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "member-one", sequence: 1, state: "accepted" });
+    f.channel.post(f.grant.token, { type: "submitted", runId: "run-one", requestId: "member-one", sequence: 1 });
+    expect(f.outbox.getById("member-two")?.deliveryState).toBe("delivered");
+    expect((await transport.send("dev@channel", "different composition", options)).ok).toBe(false);
+    expect(f.outbox.runnerReceipts(f.node.id, "run-one")).toHaveLength(1);
+  });
+  it("ordinary transport applies the same held policy before native admission and never types on native refusal", async () => {
+    const f = await fixture();
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const { SeatDeliveryGuard, resolveGuardTarget } = await import("../src/domain/seat-delivery-guard.js");
+    const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
+    const tmux = { deliveryGuard: guard, sendText: () => { throw new Error("unexpected typed fallback"); } };
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), tmuxAdapter: tmux as never, runnerChannel: f.channel });
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    await guard.set(f.node.id, { mode: "hold" }, "person", "quiet");
+    const held = await transport.send("dev@channel", "hello", { deliveryId: "held-native", actorSession: "sender" });
+    expect(held).toMatchObject({ outcome: "retained", sent: false });
+    expect(f.outbox.runnerReceipt("held-native")).toBeNull();
+    await guard.set(f.node.id, { mode: "off" }, "person", "resume");
+    const sent = await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" });
+    expect(sent).toMatchObject({ ok: true, verified: false, runnerReceipt: { stage: "pending", sequence: 1 } });
+    expect((await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" })).runnerReceipt?.sequence).toBe(1);
+    f.db.prepare("UPDATE nodes SET input_route='typed' WHERE id=?").run(f.node.id);
+    expect((await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" })).runnerReceipt?.sequence).toBe(1);
+    expect((await transport.send("dev@channel", "different", { deliveryId: "native-send", actorSession: "sender" })).ok).toBe(false);
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect(await transport.send("dev@channel", "hello", { deliveryId: "refused", actorSession: "sender" })).toMatchObject({ ok: false, sent: false });
+  });
+  it("the actual channel route requires a current bound grant and validates strict cursors", async () => {
+    const f = await fixture();
+    const request = (token: string, body: unknown) => f.app.request("/api/activity/runner-channel", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await request(INSTALL, f.hello)).status).toBe(401);
+    expect((await request(f.grant.token, f.hello)).status).toBe(200);
+    for (const cursor of ["1x", "-1", "1.5", "9007199254740992"])
+      expect((await f.app.request("/api/activity/runner-channel", { headers: { authorization: `Bearer ${f.grant.token}`, "Last-Event-ID": cursor } })).status).toBe(400);
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect((await request(f.grant.token, f.hello)).status).toBe(401);
+  });
+  it("keeps capabilities disabled until complete consumers exist, and never grants cancellation", async () => {
+    const f = await fixture(false);
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ capabilities: { input: false, wake: false, cancel: false } });
+    expect(() => f.admit("one")).toThrow(/capable/);
+    const live = await fixture();
+    expect(live.channel.post(live.grant.token, live.hello)).toMatchObject({ capabilities: { input: true, wake: true, cancel: false } });
+  });
+  it("offers in order with one unacknowledged effect and retains accepted reconciliation beyond the cursor", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.admit("one"); f.admit("two");
+    expect(f.channel.frames(f.grant.token, 0).map(frame => frame.requestId)).toEqual(["one"]);
+    expect(f.channel.frames(f.grant.token, 1).map(frame => frame.requestId)).toEqual(["one"]);
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "one", sequence: 1, state: "accepted" });
+    expect(f.channel.frames(f.grant.token, 1).map(frame => frame.requestId)).toEqual(["two"]);
+    expect(f.channel.post(f.grant.token, f.hello)).toMatchObject({ unresolved: [expect.objectContaining({ requestId: "one", stage: "accepted" }), expect.anything()] });
+    const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+    const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
+    const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+    const restarted = new RunnerChannel(new ActivityGrantStore(f.db), new OutboxHandler(f.db), new Set(["pi"]));
+    expect(restarted.post(f.grant.token, f.hello)).toMatchObject({ unresolved: [expect.objectContaining({ requestId: "one", stage: "accepted" }), expect.anything()] });
+    expect(restarted.frames(f.grant.token, 1).map(frame => frame.requestId)).toEqual(["two"]);
+    expect(() => f.channel.frames(f.grant.token, 3)).toThrow(/cursor/);
+    expect(() => f.channel.post(f.grant.token, { type: "ack", runId: "other", requestId: "two", sequence: 2, state: "accepted" })).toThrow(/run/);
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect(() => f.channel.frames(f.grant.token, 0)).toThrow(/revoked/);
+    expect(() => f.channel.post(f.grant.token, f.hello)).toThrow(/revoked/);
+    expect(() => f.channel.post(INSTALL, f.hello)).toThrow(/bound/);
+  });
+  it("a receiver losing its map cannot reexecute an offered input even with an advanced cursor", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("one"); f.admit("two");
+    f.channel.frames(f.grant.token, 0);
+    expect(f.channel.post(f.grant.token, { ...f.hello, retained: false })).toMatchObject({ unresolved: [expect.objectContaining({ reconciliation: "receiver_state_lost" }), expect.objectContaining({ stage: "pending" })] });
+    expect(f.channel.frames(f.grant.token, 1)).toEqual([]);
+    expect(f.outbox.getById("one")?.deliveryState).toBe("indeterminate");
+  });
+});

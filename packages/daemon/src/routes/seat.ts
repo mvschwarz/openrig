@@ -1,3 +1,4 @@
+import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
@@ -38,6 +39,60 @@ seatRoutes.use("*", async (c, next) => {
   const refusal = rigRepo ? runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
   if (refusal) return c.json(refusal.body, refusal.status);
   return next();
+});
+
+seatRoutes.post("/set-input-route/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || !["typed", "native"].includes(String(body.route)) || typeof body.reason !== "string" || !body.reason.trim())
+    return c.json({ error: "Supply typed or native route and a reason." }, 400);
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  const repo = c.get("rigRepo" as never) as RigRepository;
+  const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    await guard.custody([target.nodeId], async () => {
+      if (body.route === "native" && !channel?.capable(target.nodeId, "input"))
+        throw new RunnerChannelError("runner_unavailable", "No current capable native runner; route unchanged.");
+      const node = repo.db.prepare("SELECT rig_id,input_route FROM nodes WHERE id=?").get(target.nodeId) as { rig_id: string; input_route: "typed" | "native" };
+      if (node.input_route === body.route) return;
+      const events = c.get("eventBus" as never) as EventBus | undefined;
+      const event = repo.db.transaction(() => {
+        repo.setNodeInputRoute(target.nodeId, body.route as "typed" | "native");
+        return events?.persistWithinTransaction({ type: "node.input_route_changed", rigId: node.rig_id, nodeId: target.nodeId,
+          from: node.input_route, to: body.route as "typed" | "native", reason: (body.reason as string).trim(), actor: transportSenderSession(c) ?? null });
+      })();
+      if (event) events!.notifySubscribers(event);
+    });
+    return c.json({ nodeId: target.nodeId, inputRoute: body.route, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.post("/command/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
+    || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
+    return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
+  const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+  if (!transport?.deliveryGuard) return c.json({ error: "Native transport unavailable." }, 503);
+  try {
+    const target = transport.deliveryGuard.target(c.req.param("seatRef"));
+    const result = await transport.sendNativeWake(target.session, body.question, body.requestId, transportSenderSession(c) ?? "unknown");
+    return c.json(result, result.ok ? result.runnerReceipt?.stage === "completed" ? 200 : 202 : 409);
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.get("/command/:seatRef", c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    const id = c.req.query("requestId");
+    if (!id) return c.json({ error: "requestId required." }, 400);
+    const receipt = new OutboxHandler(guard.db).runnerReceipt(id);
+    if (!receipt || receipt.nodeId !== target.nodeId) return c.json({ error: "Request unavailable." }, 404);
+    return c.json({ receipt });
+  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
 // S09 is an independent delivery preference, never a lifecycle or permission change.

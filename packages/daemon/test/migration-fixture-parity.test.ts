@@ -108,3 +108,18 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 });
+
+
+it("upgrades existing nodes to typed input and constrains explicit native selection", () => {
+  const db = new Database(":memory:");
+  try {
+    migrate(db, ALL_MIGRATIONS.filter(m => !m.name.startsWith("164_")));
+    const repo = new RigRepository(db), rig = repo.createRig("input-route");
+    const node = repo.addNode(rig.id, "dev", { runtime: "pi" });
+    migrate(db, ALL_MIGRATIONS);
+    expect(repo.getRig(rig.id)?.nodes.find(n => n.id === node.id)?.inputRoute).toBe("typed");
+    expect(repo.setNodeInputRoute(node.id, "native")).toBe(true);
+    expect(repo.getRig(rig.id)?.nodes.find(n => n.id === node.id)?.inputRoute).toBe("native");
+    expect(() => db.prepare("UPDATE nodes SET input_route='auto' WHERE id=?").run(node.id)).toThrow();
+  } finally { db.close(); }
+});

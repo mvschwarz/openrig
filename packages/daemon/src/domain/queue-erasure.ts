@@ -1,3 +1,4 @@
+import { OutboxHandler } from "./outbox-handler.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
@@ -10,7 +11,9 @@ import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
  *   (`content_erased_at` set). The create path's retry identity still finds it, so a retried create makes no new work.
  *   A later note, summary or reclose makes it eligible again.
  * - delete: the row and everything linked to it go. Only its id is kept, in `queue_erased_ids` (no endpoints, no
- *   content), and the create path refuses that id (`qitem_erased`).
+ *   content), and the create path refuses that id (`qitem_erased`). Native delivery receipts additionally retain
+ *   opaque custody tombstones (IDs, run order, binding hash and erased marker), with no native payload or result:
+ *   their deletion would permit blind replay or sequence reuse. Legacy outbox deletion stays physical.
  * The row's own copies follow it: its transitions, live and archived; events whose payload names it; its
  * mission-control audit rows. Copies another party holds (outbox and inbox entries, stream reader actions and
  * dispositions) go only when they're the owner's: both endpoints the account's (members scope) or the row's own
@@ -227,9 +230,16 @@ const COPY_KEY: Record<CopyTable, string> = {
   outbox_entries: "outbox_id", inbox_entries: "inbox_id", stream_reader_actions: "action_id", stream_dispositions: "stream_item_id",
 };
 
-function eraseCopies(st: Statements, copies: Copy[], action: EraseAction): void {
+function eraseCopies(st: Statements, copies: Copy[], action: EraseAction, outbox: OutboxHandler, at: string): void {
   for (const table of Object.keys(COPY_KEY) as CopyTable[]) {
-    const keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    let keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    if (table === "outbox_entries") {
+      const native = keys.filter(id => outbox.eraseRunner(id, at));
+      // Native-only opaque custody survives physical deletion. Original content is removed at the requested scope;
+      // composed group content/results were scrubbed atomically above, including copies owned by another member.
+      for (const id of native) st.get("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL WHERE outbox_id=?").run(id);
+      keys = keys.filter(id => !native.includes(id));
+    }
     if (keys.length === 0) continue;
     const params = { keys: JSON.stringify(keys) };
     const where = `${COPY_KEY[table]} IN (SELECT value FROM json_each(@keys))`;
@@ -931,8 +941,8 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))], batch);
         for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
         for (const seq of planned.events.remove) removeEvent.run(seq);
-        eraseCopies(st, planned.owned.scrub, "scrub");
-        eraseCopies(st, planned.owned.delete, "delete");
+        eraseCopies(st, planned.owned.scrub, "scrub", new OutboxHandler(db), opts.nowIso);
+        eraseCopies(st, planned.owned.delete, "delete", new OutboxHandler(db), opts.nowIso);
         const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
         const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
         if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);

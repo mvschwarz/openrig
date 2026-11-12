@@ -1,4 +1,5 @@
 import { inputReadDiagnostic, type InputReadDiagnostic } from "./input-read-diagnostic.js";
+import { RunnerChannel, RunnerChannelError } from "./runner-channel.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -1993,6 +1994,8 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
+  /** Internal dedicated native wake, never accepted by the transport HTTP route. */
+  nativeWake?: true;
   expectedIdentity?: ExpectedConversation;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
@@ -2149,6 +2152,7 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  runnerReceipt?: import("./outbox-handler.js").RunnerReceipt;
   /** #2429: this delivery first submitted a paste OpenRig had left unsubmitted in the seat's input. */
   ownPasteSubmitted?: true;
   checkedIdentity?: ExpectedConversation;
@@ -2262,6 +2266,7 @@ export interface TransportReadinessChecker {
 }
 
 interface SessionTransportDeps {
+  runnerChannel?: RunnerChannel;
   contextUsageStore?: ContextUsageStore;
   db: Database.Database;
   rigRepo: RigRepository;
@@ -2322,6 +2327,7 @@ interface SessionReconciliationSnapshot {
 }
 
 export class SessionTransport {
+  private readonly runnerChannel?: RunnerChannel;
   private contextUsageStore?: ContextUsageStore;
   readonly db: Database.Database;
   readonly guardedDelivery?: DraftAwareDelivery;
@@ -2344,6 +2350,7 @@ export class SessionTransport {
   private deliverOverDraft?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
+    this.runnerChannel = deps.runnerChannel;
     this.contextUsageStore = deps.contextUsageStore;
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
@@ -2861,8 +2868,56 @@ export class SessionTransport {
     }
   }
 
+  sendNativeWake(sessionName: string, question: string, requestId: string, actorSession: string): Promise<SendResult> {
+    return this.send(sessionName, question, { nativeWake: true, deliveryId: requestId, actorSession });
+  }
+
+  private inputRoute(nodeId: string): "typed" | "native" {
+    if (!(this.db.prepare("PRAGMA table_info(nodes)").all() as { name: string }[]).some(column => column.name === "input_route")) return "typed";
+    return (this.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(nodeId) as { input_route: "typed" | "native" } | undefined)?.input_route ?? "typed";
+  }
+
+  private nativeResult(sessionName: string, receipt: import("./outbox-handler.js").RunnerReceipt): SendResult {
+    const rejected = receipt.stage === "rejected";
+    return { ok: !rejected, sessionName, verified: false, outboxIds: receipt.memberIds ?? [receipt.requestId], runnerReceipt: receipt,
+      ...(receipt.stage === "submitted" || receipt.stage === "completed" ? { sent: true } : rejected ? { sent: false } : {}),
+      reason: receipt.reconciliation ?? `native_${receipt.stage}` };
+  }
+
+  private admitNative(sessionName: string, text: string, opts: SendOpts | undefined, ids: string[]): SendResult {
+    const target = this.tmuxAdapter.deliveryGuard!.target(sessionName);
+    if (!this.runnerChannel) throw new RunnerChannelError("runner_unavailable", "Native channel unavailable; no input offered.");
+    const primary = new OutboxHandler(this.db).getById(ids[0]!);
+    if (primary?.guardBinding && JSON.stringify(primary.guardBinding) !== JSON.stringify(target))
+      throw new DeliveryGuardError("guard_target_changed", "The retained native input belongs to another occupant; no input offered.");
+    opts?.beforeWrite?.();
+    const receipt = this.runnerChannel.admit(target.nodeId, { outboxId: ids[0]!, senderSession: opts?.committedOutboxIds ? primary?.senderSession ?? "unknown" : opts?.actorSession ?? "unknown",
+      destinationSession: sessionName, body: opts?.committedOutboxIds ? primary?.body ?? text : text, kind: opts?.nativeWake ? "wake" : "input", inputRoute: "native", payload: opts?.nativeWake ? { question: text } : { text },
+      ...(ids.length > 1 ? { memberIds: ids } : {}),
+      auditPointer: opts?.auditPointer, identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal });
+    return this.nativeResult(sessionName, receipt);
+  }
+
   private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    const history = new OutboxHandler(this.db);
+    const inputId = opts?.committedOutboxIds?.[0] ?? opts?.deliveryId;
+    const primaryId = inputId ? history.runnerPrimary(inputId) : null;
+    const previous = primaryId ? history.runnerReceipt(primaryId) : null;
+    if (primaryId && !previous) return { ok: false, sessionName, reason: "native_receipt_unavailable", error: "Native operation evidence unavailable; no input offered." };
+    if (previous?.erasedAt) return { ok: false, sessionName, reason: "runner_receipt_erased", error: "Native request content was erased; no input offered." };
+    if (previous) {
+      const entry = history.getById(previous.requestId)!;
+      if (entry.destinationSession !== sessionName || !opts?.committedOutboxIds && entry.senderSession !== (opts?.actorSession ?? "unknown")
+        || (previous.payload.text ?? previous.payload.question) !== text || (opts?.nativeWake ? "wake" : "input") !== previous.kind || opts?.committedOutboxIds && JSON.stringify(previous.memberIds ?? [previous.requestId]) !== JSON.stringify(opts.committedOutboxIds))
+        return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict", error: "This request ID names different input or target." };
+      return this.nativeResult(sessionName, previous);
+    }
     const guard = this.tmuxAdapter.deliveryGuard;
+    const targetNode = guard?.maybeTarget(sessionName)?.nodeId;
+    if (opts?.nativeWake && (!targetNode || this.inputRoute(targetNode) !== "native"))
+      return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
+    if (!guard && this.getSessionMeta(sessionName).nodeId && this.inputRoute(this.getSessionMeta(sessionName).nodeId!) === "native")
+      return { ok: false, sessionName, sent: false, reason: "guard_unavailable", error: "Native admission requires the delivery guard." };
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
@@ -2899,7 +2954,7 @@ export class SessionTransport {
       // write. A null return means go through guard.operation exactly as on
       // main (guard held, target unresolvable, or a quick refusal).
       let sendOpts = opts;
-      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle) {
+      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle && this.inputRoute(guard.target(sessionName).nodeId) !== "native") {
         const pre = await this.preWaitForIdle(sessionName, opts, guard);
         if (pre === null) {
           // Fall through with today's path (in-lease wait / retain / throw).
@@ -2930,6 +2985,9 @@ export class SessionTransport {
         const members = recheck(false);
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
+        const currentIds = memberOpts?.committedOutboxIds ?? ids;
+        const route = this.inputRoute(guard.target(sessionName).nodeId);
+        if (route === "native") return this.admitNative(sessionName, memberText, memberOpts, currentIds);
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
@@ -2950,6 +3008,8 @@ export class SessionTransport {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
               identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds, { sameSend: ids });
+            outbox.bindInputRoute({ outboxId: id, senderSession: prior?.senderSession ?? opts?.actorSession ?? "unknown",
+              destinationSession: sessionName, body: prior?.body ?? text }, this.inputRoute(target.nodeId));
           }
         })();
         // P2: observed only after the retention above committed; a submit-only

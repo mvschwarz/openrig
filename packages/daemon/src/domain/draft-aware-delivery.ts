@@ -10,7 +10,7 @@ export interface GuardedDeliverySummary {
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
-interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation;
+interface Receipt { inputRoute?: "typed"; ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation;
   watchdog?: { nextAction?: string } }
 type Deliver = (session: string, text: string, opts: SendOpts) => Promise<SendResult>;
 /** Applicability needs the intended queue row and recipient, not a saved delivery receipt. */
@@ -43,7 +43,7 @@ export class DraftAwareDelivery {
   /** The existing per-seat lease serializes requests. Each current request gets an attempt, not an old result. */
   async send(session: string, text: string, opts: SendOpts, ids: string[]): Promise<SendResult> {
     if (!ids.length || new Set(ids).size !== ids.length) throw new DeliveryGuardError("invalid_delivery_ids", "Distinct delivery IDs are required.");
-    const pending = this.attempt(session, text, opts, { ids, ...(opts.expectedIdentity ? { expectedIdentity: opts.expectedIdentity } : {}) });
+    const pending = this.attempt(session, text, opts, { ids, inputRoute: "typed", ...(opts.expectedIdentity ? { expectedIdentity: opts.expectedIdentity } : {}) });
     this.sends.add(pending);
     try { return await pending; }
     finally { this.sends.delete(pending); }

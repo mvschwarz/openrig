@@ -1057,3 +1057,36 @@ describe("OpenRig's own wakes and notices", () => {
     expect(everything()).not.toContain("secret-t-");
   });
 });
+
+describe("native receipt content erasure", () => {
+  it.each(["scrub", "delete"] as const)("%s removes a group's composed payload/results, retains ordering tombstones and fences late replies", async action => {
+    await row("native-one", A, B, [{ state: "done", daysAgo: 3 }]);
+    await row("native-two", A, B, [{ state: "done", daysAgo: 3 }]);
+    const outbox = new OutboxHandler(db), first = "wake-intent-native-one", second = "wake-intent-native-two";
+    const original = outbox.getById(first)!;
+    const input = { outboxId: first, senderSession: original.senderSession, destinationSession: original.destinationSession, body: original.body,
+      nodeId: "seat", runId: "run", kind: "input" as const, inputRoute: "native" as const,
+      memberIds: [first, second], payload: { text: "secret-native-one composed secret-native-two" } };
+    outbox.admitRunner(input);
+    outbox.updateRunner("seat", "run", first, 1, "offered");
+    outbox.updateRunner("seat", "run", first, 1, "accepted");
+    outbox.updateRunner("seat", "run", first, 1, "submitted");
+    outbox.updateRunner("seat", "run", first, 1, "completed", { result: { answer: "secret-native-one answer" } });
+    await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "native-one", action }] }, apply: true, nowIso: NOW });
+    const restarted = new OutboxHandler(db);
+    expect(restarted.runnerReceipt(first)).toMatchObject({ sequence: 1, erasedAt: NOW, payload: {}, bindingHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(restarted.runnerReceipt(second)?.erasedAt).toBe(NOW);
+    expect(everything()).not.toContain("secret-native-one");
+    expect(restarted.getById(second)?.body).toContain("secret-native-two");
+    expect(() => restarted.updateRunner("seat", "run", first, 1, "completed", { result: { answer: "secret-native-one revived" } })).toThrow(/erased/);
+    expect(() => restarted.admitRunner(input)).toThrow(/erased/);
+    expect(restarted.claimForDelivery(second)).toBe(false);
+    const next = restarted.admitRunner({ outboxId: "fresh", senderSession: A, destinationSession: B, body: "fresh", nodeId: "seat", runId: "run",
+      kind: "input", inputRoute: "native", payload: { text: "fresh" } });
+    expect(next.sequence).toBe(2);
+    await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "native-two", action: "delete" }] }, apply: true, nowIso: NOW });
+    expect(restarted.runnerReceipt(first)?.sequence).toBe(1);
+    expect(restarted.runnerReceipt(second)?.erasedAt).toBe(NOW);
+    expect(everything()).not.toContain("secret-native-two");
+  });
+});
