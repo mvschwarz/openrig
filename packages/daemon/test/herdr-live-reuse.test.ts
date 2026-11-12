@@ -34,7 +34,7 @@ function herdr() {
   const panes: Pane[] = [];
   const socket: string[] = [];
   const cli: string[][] = [];
-  const state = { attached: true };
+  const state: { attached: boolean; focus: "ok" | "throws" | "other-tab" } = { attached: true, focus: "ok" };
   const transport: HerdrTransport = {
     probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }),
     request: async (method, raw): Promise<HerdrResult> => {
@@ -56,6 +56,12 @@ function herdr() {
       }
       if (method === "pane.list") return { type: "pane_list", panes: panes.filter(pane => pane.workspace_id === params["workspace_id"]) };
       if (method === "tab.close") tabs.splice(tabs.findIndex(tab => tab.tab_id === params["tab_id"]), 1);
+      if (method === "tab.focus") {
+        if (state.focus === "throws") throw new Error("tab not found");
+        const tab = tabs.find(t => t.tab_id === params["tab_id"]);
+        const other = state.focus === "other-tab" ? tabs.find(t => t.tab_id !== params["tab_id"]) : tab;
+        return { type: "tab_focused", tab: { tab_id: other?.tab_id, workspace_id: other?.workspace_id } };
+      }
       return { type: "ok" };
     },
   };
@@ -96,6 +102,16 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
     expect(second.notes).toEqual(["Workspace w1 already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened."]);
     expect(h.workspaces.map(ws => ws.label)).toEqual(["demo"]);
     expect(h.socket).toEqual(["tab.focus"]);
+  });
+
+  it.each(["throws", "other-tab"] as const)("reports no reuse when herdr's focus %s, and creates no replacement", async (focus) => {
+    const h = herdr();
+    await h.adapter.openView(demoView(), { reuseLive: true });
+    h.state.focus = focus;
+    const second = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(second).toMatchObject({ ok: false, opened: [], pages: 0, error: "Herdr did not confirm the existing view selection; no replacement workspace was created." });
+    expect(second.reusedWorkspace).toBeUndefined();
+    expect(h.workspaces.map(ws => ws.label)).toEqual(["demo"]);
   });
 
   it("opens a new, numbered workspace when the existing one's tiles aren't attached, and names the one it kept", async () => {
