@@ -42,13 +42,15 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
       INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running'),('sb','b','sibling@test','running');
       INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh'),('gb','b',1,'g2','fresh');`);
   }
-  const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+  const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void>;
+    settle?: (ms: number) => void | Promise<void> } = {};
+  // The guard's own waits (its re-reads) go to `settle`, kept apart from the transport's `sleep`; none is real time.
+  const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name), async ms => { await hooks.settle?.(ms); });
   guard.recoverActivation();
   const bodies: Record<string, string | null> = { a: "", b: "" };
   const history: Record<string, string> = { a: "", b: "" };
   const writes: string[] = [], submissions: string[] = [];
   const observations: unknown[] = [];
-  const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void> } = {};
   let staged = "";
   // A terminal pane shows a submitted line as typed; an agent pane echoes a sent message under its prompt, as Claude does.
   const echo = (node: string, body: string) => (db.prepare("SELECT runtime FROM nodes WHERE id=?").get(node) as { runtime: string }).runtime === "terminal"
@@ -1154,5 +1156,109 @@ describe("draft-aware at a full held quota (#2430)", () => {
     expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
     expect(f.outbox.coalescedInto(held.outboxIds![0]!)).toEqual(["older"]);
     expect(f.outbox.retentionUsage("a").count).toBe(100);
+  });
+});
+
+
+describe("#3076: a draft typed between the guard's read and the paste", () => {
+  const draft = "Please send it to the team. Also";
+  const notice = "[OpenRig watchdog scheduler · policy: periodic-reminder · job: j]\nWake timer fired.";
+  const pasted = (f: ReturnType<typeof fixture>) => f.writes.filter(w => w.startsWith("paste:"));
+  const setActivity = (f: ReturnType<typeof fixture>, at: () => number | null) => {
+    vi.spyOn(f.tmux, "lastClientActivity").mockImplementation(async () => at());
+  };
+
+  it("is seen by the re-read after the settle wait: the notice is held and nothing is pasted into the person's input", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    const waits: number[] = [];
+    // The person starts typing during the guard's wait right before the paste (the first read saw an empty input).
+    f.hooks.settle = ms => { waits.push(ms); if (!pasted(f).length) f.bodies.a = draft; };
+    const result = await f.send("watchdog-wake", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(waits[0]).toBe(300);
+    expect(pasted(f)).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+  });
+
+  it("holds while a tmux client had a key in the last seconds, also when the key comes during the wait, and delivers once quiet", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    let last: number | null = Date.now() - 1000;
+    setActivity(f, () => last);
+    const busy = await f.send("wake-1", "Wake timer fired.", { openrigNotice: true, verify: false });
+    expect(busy).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+
+    last = Date.now() - 60_000;
+    f.hooks.settle = () => { last = Date.now(); };   // a key during the settle wait, nothing drawn yet
+    f.advance();
+    const during = await f.send("wake-2", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(during).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+
+    last = Date.now() - 60_000;
+    f.hooks.settle = undefined;
+    f.advance();
+    const sent = await f.send("wake-3", "Wake timer fired a third time.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+    expect(f.submissions).toHaveLength(1);
+  });
+
+  it("counts the quiet window from the end of the whole second tmux reports: 3.5 s ago still holds, 4.5 s ago delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    let last = Date.now() - 3500;   // a key at N.999 s reads as N: it may have been 2.5 s ago
+    setActivity(f, () => last);
+    const held = await f.send("whole-second", "Wake timer fired.", { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    last = Date.now() - 4500;
+    f.advance();
+    const sent = await f.send("whole-second-later", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("holds as unreadable when tmux can't say when the seat last had a key; with no client attached it delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
+    const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    expect(pasted(f)).toEqual([]);
+    setActivity(f, () => null);
+    f.advance();
+    const sent = await f.send("no-client", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("holds as unreadable when the input can't be read after the wait", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = null; };
+    const result = await f.send("unreadable", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    expect(pasted(f)).toEqual([]);
+  });
+
+  it("runs the send's own waiting checks before the guard's last read, so a draft typed while they wait is seen", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    // A conditional send's checks await (a conversation lookup); the person types meanwhile. The adapter returns the
+    // guard's refusal as its result.
+    const result = await f.guard.operation("worker@test", () =>
+      f.tmux.sendText("worker@test", notice, undefined, { beforePaste: async () => { f.bodies.a = draft; } }));
+    expect(result).toMatchObject({ ok: false, code: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+  });
+
+  it("applies to every automatic input under draft-aware, a deliberate send included, as the empty check already did", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    await f.enable();
+    f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = draft; };
+    const result = await f.send("deliberate", "a message from another seat", { verify: false });
+    expect(result).toMatchObject({ sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
   });
 });
