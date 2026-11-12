@@ -1835,8 +1835,9 @@ const SEAT_IDLE_SHAPES: {
     },
   },
   codex: {
-    // The hint row under the status line of an empty box (product-path-idle.J, idle).
-    hints: [/^\? for shortcuts$/, /^\? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/],
+    // Empty-box hints: 0.160 product-path-idle.J/idle, and the captured 0.167 completed frame.
+    hints: [/^\? for shortcuts$/, /^\? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/,
+      /^← for agents · \? for shortcuts\s+⚠ \d+ warnings? · f2 to view$/],
     // The last non-blank row above the empty box: the completion row Codex adds when a turn completes
     // (after-enter-15s.J; its grammar is CODEX_COMPLETION_ROW above), or the greeting under the session header
     // before any turn (idle, product-path-idle.J, cleared-without-enter.J). A running or streaming turn draws rows
@@ -1909,7 +1910,7 @@ const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
 };
 
 /** Whether a frame visibly names a client version other than the recorded one (see RECORDED_CLIENT_VERSION). */
-function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
+export function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
   return VISIBLE_CLIENT_VERSION[runtime].some((pattern) =>
     [...pane.matchAll(pattern)].some((match) => match[1] !== RECORDED_CLIENT_VERSION[runtime]));
 }
