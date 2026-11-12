@@ -199,7 +199,11 @@ function runCell({ cellId, out, caseId, kind, version, programEntry, openrigEntr
           if (existsSync(identityPath)) {
             const { reapByIdentity } = await import("./harness/world.mjs");
             const reaped = await reapByIdentity(JSON.parse(readFileSync(identityPath, "utf8")));
-            if (reaped.length) outcome.parentReaped = reaped;
+            if (reaped.steps.length) outcome.parentReaped = reaped.steps;
+            if (reaped.unresolved.length) {
+              outcome = { ...outcome, resultBeforeDowngrade: outcome.result, result: "NOT RUN", cleanupUncertain: true, unresolved: reaped.unresolved,
+                reason: `${outcome.reason ? `${outcome.reason}; ` : ""}the cell's processes couldn't all be stopped` };
+            }
           }
         } catch (error) {
           outcome = { ...outcome, resultBeforeDowngrade: outcome.result, result: "NOT RUN", cleanupUncertain: true,
@@ -273,6 +277,7 @@ async function cellMain(specPath) {
       if (!manifest.credentialScan.clean) notRun("credential-shaped text found in the bank; read MANIFEST.json before sharing it");
     } catch (error) { outcome.bankError = String(error.message ?? error); notRun("the cell's evidence wasn't banked"); }
     try { await closeCell(cell); } catch (error) { outcome.closeError = String(error.message ?? error); }
+    if (cell.unresolved?.length) outcome = { ...outcome, closeUnresolved: cell.unresolved };
   }
   if (!stopping) write(outcome);
 }

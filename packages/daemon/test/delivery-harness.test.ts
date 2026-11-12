@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { arrivedAs, conversation, deliveriesOf, markersIn, orderAndMerge, partWith, seatThread, sha256, Verdict } from "../../test-system/delivery/harness/oracle.mjs";
 import { containedArgv } from "../../test-system/delivery/harness/contain.mjs";
 import { composerText } from "../../test-system/delivery/harness/screen.mjs";
-import { ownsEnviron, parseStat } from "../../test-system/delivery/harness/world.mjs";
+import { ownsEnviron, parseStat, reapByIdentity } from "../../test-system/delivery/harness/world.mjs";
 import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
 import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
@@ -221,6 +221,54 @@ describe("delivery harness: the cell's surroundings", () => {
       await expect(ctx.observe({ timeoutMs: 300 })).rejects.toMatchObject({ notRun: true });
       await expect(ctx.settle({ quietMs: 50, timeoutMs: 300 })).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/no screen observation/) });
     } finally { await ctx.screen.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("credits a capture with its start, so one begun before an action never counts as after it, however late it finishes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delivery-capture-order-"));
+    let screen = "● ok\n────────\n❯ PRE\n────────";
+    let actionAt: number | null = null;
+    let armed = false;
+    const cell = { session: "s", logs: dir, record: () => {}, standIn: { requests: () => [] },
+      tmux: async (args: string[]) => {
+        if (args[0] === "capture-pane") {
+          const content = screen;
+          // The action happens while this capture is in flight: after its content was read, before its state read.
+          if (armed && actionAt === null) { actionAt = performance.now(); screen = "● ok\n────────\n❯ POST\n────────"; }
+          return content;
+        }
+        await new Promise((r) => setTimeout(r, 300)); // a slow display-message
+        return "0\t80x24";
+      } };
+    const ctx = caseContext(cell, { caseId: "T", kind: "claude", version: "x" });
+    try {
+      expect(await ctx.readComposer()).toBe("PRE");
+      armed = true;
+      while (actionAt === null) await new Promise((r) => setTimeout(r, 10));
+      expect(await ctx.readComposer({ after: actionAt, timeoutMs: 3000 })).toBe("POST");
+    } finally { await ctx.screen.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("reports a cell's processes that survive SIGKILL or refuse a signal, and keeps the socket dir while any survive", async () => {
+    const sockets = mkdtempSync("/tmp/dlv-test-reap-");
+    const signals: string[] = [];
+    const quick = { pause: async () => {} };
+    try {
+      // One survives everything, one refuses signals, one is already gone (ESRCH isn't a failure).
+      const survivor = await reapByIdentity({ home: "/x", sockets }, { ...quick, list: () => [{ pid: 11, comm: "tmux: server" }],
+        kill: (pid: number, sig: string) => { signals.push(`${pid}:${sig}`); } });
+      expect(signals).toEqual(["11:SIGTERM", "11:SIGKILL"]);
+      expect(survivor.unresolved).toEqual([{ pid: 11, comm: "tmux: server" }]);
+      expect(existsSync(sockets)).toBe(true);
+      let calls = 0;
+      const refused = await reapByIdentity({ home: "/x", sockets }, { ...quick, list: () => (calls++ < 1 ? [{ pid: 12, comm: "node" }] : []),
+        kill: () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); } });
+      expect(refused.unresolved).toEqual([{ pid: 12, comm: "node", error: "SIGTERM: EPERM" }]);
+      let gone = 0;
+      const clean = await reapByIdentity({ home: "/x", sockets }, { ...quick, list: () => (gone++ < 1 ? [{ pid: 13, comm: "claude" }] : []),
+        kill: () => { throw Object.assign(new Error("no such process"), { code: "ESRCH" }); } });
+      expect(clean.unresolved).toEqual([]);
+      expect(existsSync(sockets)).toBe(false);
+    } finally { rmSync(sockets, { recursive: true, force: true }); }
   });
 
   it("takes only the contract's refusal at a dialog as a refusal", () => {

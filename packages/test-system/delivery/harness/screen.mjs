@@ -9,7 +9,9 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** Record frames of `target` into `path` every `everyMs` until `stop()`. Returns { stop, frames, last, okAt, failures }.
  *  `last()` is the screen as it is now: null while the newest capture failed, so a reader never takes an old screen for
- *  the current one. `okAt()` is when a capture last succeeded (performance.now()), changed or not. */
+ *  the current one. A capture is credited with the time it STARTED (performance.now() just before capture-pane), not
+ *  when its reads finished: its content can be no newer than that. `okAt()` is the start of the newest successful
+ *  capture, changed or not, so `okAt() > t` proves a capture began after t. A frame keeps both times. */
 export function recordScreen(cell, path, { everyMs = 250, target = cell.session } = {}) {
   const frames = [];
   let running = true;
@@ -19,22 +21,25 @@ export function recordScreen(cell, path, { everyMs = 250, target = cell.session 
   let failures = 0;
   const loop = (async () => {
     while (running) {
+      const startedAt = performance.now();
+      const at = new Date().toISOString();
       try {
         const screen = await cell.tmux(["capture-pane", "-p", "-t", target]);
         const state = (await cell.tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}\t#{window_width}x#{window_height}"])).trim().split("\t");
+        const completedAt = performance.now();
         const sha256 = createHash("sha256").update(screen).digest("hex");
-        lastOk = performance.now();
+        lastOk = startedAt;
         latestFailed = false;
         if (sha256 !== previous) {
           previous = sha256;
-          const frame = { at: new Date().toISOString(), monotonicMs: performance.now(), inMode: state[0] === "1", size: state[1], sha256, screen };
+          const frame = { at, monotonicMs: startedAt, completedMs: completedAt, inMode: state[0] === "1", size: state[1], sha256, screen };
           frames.push(frame);
           appendFileSync(path, `${JSON.stringify(frame)}\n`);
         }
       } catch (error) {
         latestFailed = true;
         failures += 1;
-        const frame = { at: new Date().toISOString(), monotonicMs: performance.now(), error: String(error.message ?? error) };
+        const frame = { at, monotonicMs: startedAt, completedMs: performance.now(), error: String(error.message ?? error) };
         frames.push(frame);
         appendFileSync(path, `${JSON.stringify(frame)}\n`);
       }

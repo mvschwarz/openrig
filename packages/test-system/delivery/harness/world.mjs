@@ -309,22 +309,36 @@ export function processesOf(identity) {
 
 export const cellProcesses = (cell) => processesOf({ home: cell.home, sockets: cell.sockets });
 
-/** SIGTERM whatever of the cell's is still running, then SIGKILL what's left; returns what was signalled. Usable from
- *  inside the cell and, by the cell's identity file, from the parent after the cell's own process is gone. */
-export async function reapByIdentity(identity) {
-  const reaped = [];
-  let left = processesOf(identity);
+/** SIGTERM whatever of the cell's is still running, then SIGKILL what's left, then look again: returns { steps,
+ *  unresolved }. `steps` is what was signalled; `unresolved` is every process still running after a bounded re-scan,
+ *  plus every signal that failed for a reason other than the process being gone (ESRCH). Usable from inside the cell
+ *  and, by its identity file, from the parent after the cell's own process is gone. The socket directory is removed only
+ *  when nothing is unresolved, so a surviving tmux server keeps its socket for inspection. `deps` replace the process
+ *  table and the signal call in tests. */
+export async function reapByIdentity(identity, { list = processesOf, kill = (pid, signal) => process.kill(pid, signal), pause = sleep } = {}) {
+  const steps = [];
+  const failed = new Map();
+  const signal = (procs, name) => {
+    for (const p of procs) {
+      try { kill(p.pid, name); } catch (error) {
+        if (error?.code !== "ESRCH") failed.set(p.pid, { pid: p.pid, comm: p.comm, error: `${name}: ${error?.code ?? error?.message ?? error}` });
+      }
+    }
+  };
+  let left = list(identity);
   if (left.length) {
-    reaped.push({ signal: "SIGTERM", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
-    for (const p of left) { try { process.kill(p.pid, "SIGTERM"); } catch { /* gone */ } }
-    for (let i = 0; i < 20 && left.length; i++) { await sleep(250); left = processesOf(identity); }
+    steps.push({ signal: "SIGTERM", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
+    signal(left, "SIGTERM");
+    for (let i = 0; i < 20 && left.length; i++) { await pause(250); left = list(identity); }
     if (left.length) {
-      reaped.push({ signal: "SIGKILL", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
-      for (const p of left) { try { process.kill(p.pid, "SIGKILL"); } catch { /* gone */ } }
+      steps.push({ signal: "SIGKILL", processes: left.map(({ pid, comm }) => ({ pid, comm })) });
+      signal(left, "SIGKILL");
+      for (let i = 0; i < 8 && left.length; i++) { await pause(250); left = list(identity); }
     }
   }
-  if (identity.sockets?.startsWith("/tmp/dlv-")) rmSync(identity.sockets, { recursive: true, force: true });
-  return reaped;
+  const unresolved = [...left.map(({ pid, comm }) => failed.get(pid) ?? { pid, comm }), ...[...failed.values()].filter((f) => !left.some((p) => p.pid === f.pid))];
+  if (!unresolved.length && identity.sockets?.startsWith("/tmp/dlv-")) rmSync(identity.sockets, { recursive: true, force: true });
+  return { steps, unresolved };
 }
 
 /** Stop the cell normally: the rig, then the daemon, then its private tmux server, then the stand-in. Whatever of the
@@ -336,7 +350,10 @@ export async function closeCell(cell) {
   }
   try { await cell.tmux(["kill-server"]); } catch { /* already gone */ }
   await cell.standIn.close();
-  for (const step of await reapByIdentity({ home: cell.home, sockets: cell.sockets })) cell.record({ step: "reap", ...step });
+  const reaped = await reapByIdentity({ home: cell.home, sockets: cell.sockets });
+  for (const step of reaped.steps) cell.record({ step: "reap", ...step });
+  if (reaped.unresolved.length) cell.record({ step: "reap-unresolved", unresolved: reaped.unresolved });
+  cell.unresolved = reaped.unresolved;
   cell.record({ step: "closed" });
 }
 
