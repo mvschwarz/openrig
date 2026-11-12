@@ -6,7 +6,8 @@
 // What a stand-in proves is narrow: which requests the program sent, in what order, with what bytes. That request log is
 // the receiver-side record a case joins to OpenRig's own delivery record. It never proves a model's behaviour.
 //
-// The log keeps each request's body exactly, so it's knowingly sensitive: point a stand-in only at synthetic fixtures.
+// The log keeps each request's parsed body and the raw body's size and sha256, so it's knowingly sensitive: point a
+// stand-in only at synthetic fixtures.
 // It listens on loopback only, and keeps header and query values only from a short list of safe names.
 
 import { createHash } from "node:crypto";
@@ -179,7 +180,8 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
 
   await new Promise((resolve) => server.listen(port, host, resolve));
   const address = server.address();
-  const url = `http://${host}:${address.port}`;
+  // An IPv6 host is bracketed in a URL.
+  const url = `http://${host.includes(":") ? `[${host}]` : host}:${address.port}`;
   return {
     url,
     port: address.port,

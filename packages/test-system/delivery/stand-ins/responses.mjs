@@ -33,6 +33,13 @@ export function responsesUserTurns(body) {
 }
 
 /** The request's last input item: a user message (what OpenRig typed), or a tool call's output. */
+/** A tool output is a string or, in current Codex, a list of input_text items; each item stays its own part. */
+function toolOutputParts(output) {
+  if (typeof output === "string") return [output];
+  if (Array.isArray(output)) return output.filter((part) => typeof part?.text === "string").map((part) => part.text);
+  return [JSON.stringify(output ?? "")];
+}
+
 const TOOL_OUTPUTS = new Set(["function_call_output", "custom_tool_call_output", "local_shell_call_output"]);
 const isUserMessage = (item) => (item?.type === "message" || item?.type === undefined) && item?.role === "user";
 
@@ -43,7 +50,7 @@ export function responsesTurnOf(body) {
   let start = input.length;
   while (start > 0 && (TOOL_OUTPUTS.has(input[start - 1]?.type) || isUserMessage(input[start - 1]))) start -= 1;
   const parts = input.slice(start).flatMap((item) => TOOL_OUTPUTS.has(item.type)
-    ? [{ text: typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? ""), source: "tool_result" }]
+    ? toolOutputParts(item.output).map((text) => ({ text, source: "tool_result" }))
     : itemParts(item).map((text) => ({ text, source: "text" })));
   if (parts.length === 0) return { kind: "other", text: "", parts: [] };
   const kind = parts.some((part) => part.source === "tool_result") ? "tool_result" : "user";

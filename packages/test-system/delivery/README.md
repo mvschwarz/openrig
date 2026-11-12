@@ -13,7 +13,7 @@ A stand-in answers a real program the way its model service would, following a s
 | `stand-ins/messages.mjs` | Claude Code | `ANTHROPIC_BASE_URL=<url>` with `ANTHROPIC_AUTH_TOKEN=<any value>`. Use the token, not `ANTHROPIC_API_KEY`, which asks for approval in an interactive session. |
 | `stand-ins/responses.mjs` | Codex | A custom provider: `model_provider = "standin"` and `[model_providers.standin]` with `base_url = "<url>/v1"`, `wire_api = "responses"` and `requires_openai_auth = false`. Codex then skips its login screen. |
 
-A stand-in listens on loopback only (`127.0.0.1`, `::1` or `localhost`). Its log keeps each request's body exactly, so it's knowingly sensitive: point it only at synthetic fixtures, never at real work.
+A stand-in listens on loopback only (`127.0.0.1`, `::1` or `localhost`; an IPv6 address is bracketed in its URL). Its log keeps each request's parsed body, plus the raw body's size and sha256, so it's knowingly sensitive: point it only at synthetic fixtures, never at real work.
 
 Start one from the command line. It prints `READY <url>` once it's listening:
 
@@ -60,7 +60,7 @@ Each request is one JSON line in the log, also available at `GET /_stand-in/requ
 - the method and path.
 - every header name and every query name. A value is kept only for a short list of safe names: the headers `content-type`, `accept`, `user-agent`, `anthropic-version`, `anthropic-beta` and `openai-beta`, and the query `beta`. Every other value is recorded as `(present)`, since a provider can be set up to send a credential under any name.
 - the body as parsed, plus `rawBytes` and `rawSha256` of the body as received.
-- the turn: its `kind` and its `parts`, the separate pieces of the last turn. Each part has its `source` (`text` or `tool_result`), its decoded text exactly, its UTF-8 `bytes`, its `sha256` and the markers it holds.
+- the turn: its `kind` and its `parts`, the separate pieces of the last turn. A tool result whose content is a list of text blocks gives one part per block. Each part has its `source` (`text` or `tool_result`), its decoded text exactly, its UTF-8 `bytes`, its `sha256` and the markers it holds.
 - `userTurns`: how many user turns the request's history holds.
 - the rule that answered.
 

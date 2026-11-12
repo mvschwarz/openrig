@@ -15,8 +15,9 @@ export function messagesTurnOf(body) {
   // Every piece, in order. A message typed while a tool ran can sit beside the tool_result blocks in the same turn.
   const parts = (Array.isArray(last.content) ? last.content : []).flatMap((block) => {
     if (block?.type === "text") return [{ text: block.text, source: "text" }];
-    if (block?.type === "tool_result") return [{ source: "tool_result", text: typeof block.content === "string" ? block.content
-      : (Array.isArray(block.content) ? block.content.filter((c) => c?.type === "text").map((c) => c.text).join("\n") : "") }];
+    // A tool result's content is a string or a list of blocks; each text block stays its own part.
+    if (block?.type === "tool_result") return typeof block.content === "string" ? [{ text: block.content, source: "tool_result" }]
+      : (Array.isArray(block.content) ? block.content : []).filter((c) => c?.type === "text").map((c) => ({ text: c.text, source: "tool_result" }));
     return [];
   });
   const kind = parts.some((part) => part.source === "tool_result") ? "tool_result" : "user";

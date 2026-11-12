@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { request } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -226,6 +227,27 @@ describe("delivery suite stand-ins: what the log keeps about each turn", () => {
     expect(turn.parts.map((p: { source: string; text: string }) => [p.source, p.text])).toEqual([["tool_result", "tool out"], ["text", "while busy DLV-D02-1"]]);
   });
 
+  it("keeps each text block of a tool result as its own part, not joined (Claude and Codex)", async () => {
+    const claude = await start("messages", { script: { rules: [] } });
+    await post(`${claude.url}/v1/messages`, { model: "m", stream: true, messages: [
+      { role: "user", content: "go DLV-1" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "first block" }, { type: "text", text: "second block" }] }] },
+    ] });
+    expect(claude.requests()[0].turn.parts.map((p: { source: string; text: string; bytes: number }) => [p.source, p.text, p.bytes]))
+      .toEqual([["tool_result", "first block", 11], ["tool_result", "second block", 12]]);
+
+    const codex = await start("responses", { script: { rules: [] } });
+    await post(`${codex.url}/v1/responses`, { ...codexTurn("x"), input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "go DLV-1" }] },
+      { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+      // Current Codex sends a tool's output as a list of input_text items.
+      { type: "function_call_output", call_id: "c1", output: [{ type: "input_text", text: "first block" }, { type: "input_text", text: "second block" }] },
+    ] });
+    expect(codex.requests()[0].turn.parts.map((p: { source: string; text: string }) => [p.source, p.text]))
+      .toEqual([["tool_result", "first block"], ["tool_result", "second block"]]);
+  });
+
   it("keeps the request body's raw size and sha256, to tie the parsed log to the wire", async () => {
     const standIn = await start("messages", { script: { rules: [] } });
     const raw = JSON.stringify(userTurn("wire DLV-1"));
@@ -297,6 +319,19 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     await expect(startResponsesStandIn({ script: { rules: [] }, host: "0.0.0.0" })).rejects.toThrow(/loopback only/);
     const standIn = await start("messages", { script: { rules: [] }, host: "localhost" });
     expect(standIn.url).toContain("localhost");
+  });
+
+  it("brackets an IPv6 loopback address in its URL, and is reachable there", async () => {
+    const standIn = await start("responses", { script: { rules: [] }, host: "::1" });
+    expect(standIn.url).toBe(`http://[::1]:${standIn.port}`);
+    // The test setup's fetch guard doesn't count [::1] as loopback, so this reaches it with node:http, still on this box.
+    const raw = await new Promise<string>((resolveBody, reject) => {
+      const req = request({ host: "::1", port: standIn.port, path: "/v1/responses", method: "POST", headers: { "content-type": "application/json" } }, (res) => {
+        let body = ""; res.setEncoding("utf8"); res.on("data", (d) => { body += d; }); res.on("end", () => resolveBody(body));
+      });
+      req.on("error", reject); req.end(JSON.stringify(codexTurn("DLV-v6")));
+    });
+    expect(events(raw).at(-1)!.event).toBe("response.completed");
   });
 
   it("refuses a rule with no action or two", () => {
