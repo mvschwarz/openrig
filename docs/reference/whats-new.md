@@ -4,7 +4,7 @@ This note is for an agent on an install that was just upgraded to 0.7.13.
 OpenRig 0.7.13 writes a person a note after they answer a runner's permission
 request and wakes the waiting runner on the decision. It tells a receiving agent
 what an answer typed at the machine means and how to ask the person back.
-`rig daemon start` offers to register the person when nobody is registered,
+`rig daemon start` tells the setup agent to offer to register the person when nobody is registered,
 and a usage-limited Claude seat waits for the reset its message states. It adds
 three database migrations. If you upgraded from 0.7.11 or earlier, also read
 "What changed in OpenRig 0.7.12" below, and so on back. For the full capability
@@ -78,7 +78,7 @@ version. Without a running daemon, read the packaged
   the marker by hand. ([#3020](https://github.com/mvschwarz/openrig/pull/3020))
 - **Delivery reads truer:** Claude's auto-update failure footers (one clipped form
   too) no longer hold a send, an unrecognised wake result reads unknown, and a
-  one-time park wake stays owed until delivered. ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038))
+  parked item's one-time wake is kept until it's delivered. ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038))
 - **The TUI** shows a seat the daemon reads as unknown as unknown, not idle, and
   Feed times use `ui.timezone`. ([#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022))
 - **Experimental, at the person's own risk:** `rig network connect <seat> --hub
@@ -115,6 +115,8 @@ version. Without a running daemon, read the packaged
   are now in this release, runner confirmations are written ([#3001](https://github.com/mvschwarz/openrig/pull/3001)), and
   `rig seat stop` no longer suggests `rig down` for an adopted session
   ([#3006](https://github.com/mvschwarz/openrig/pull/3006)). 0.7.12's not-run list was for that release.
+
+<!-- QUALITY-PENDING-0713: the not-run list; #3041's Eval qualification for the operator-direct registration limit; any measured #2970 figure. Filled in by the notes-only recut after Quality's verdict. -->
 
 ## What changed in OpenRig 0.7.12
 

@@ -14,9 +14,10 @@ OpenRig 0.7.13 is a patch for people running their own agent teams, cut from
 main `ed00b6f7`. When you answer a runner's permission request, you now get a
 note back saying who decides it, and the runner wakes on the decision. The
 agent that reads your answers is told what an answer typed at your machine
-means and how to ask you back. `rig daemon start` offers to register you when
-nobody is registered yet, and a Claude seat that hits its usage limit waits for
-the reset it states instead of being retried. There are fixes across delivery,
+means and how to ask you back. `rig daemon start` tells the agent setting
+OpenRig up to offer to register you when nobody is registered yet, and a Claude
+seat whose usage-limit message states a reset time waits for it instead of being
+retried. There are fixes across delivery,
 handover and recovery, the TUI and speed, many contributed by people using
 OpenRig. Two repairs aren't in this release: see Known limits.
 
@@ -72,16 +73,17 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   process and its tmux session, and `rig seat stop`'s help matches. A fresh
   launch after `rig unclaim` ended the server's last session reopens the server.
   ([#2996](https://github.com/mvschwarz/openrig/pull/2996), [#3006](https://github.com/mvschwarz/openrig/pull/3006), [#3014](https://github.com/mvschwarz/openrig/pull/3014), [#3009](https://github.com/mvschwarz/openrig/pull/3009))
-- Pane claims left by removed or archived owners are reclaimed, and a failed
-  wake's finding at a seat with no declared route goes to the row's creator,
+- Pane claims left by removed or archived owners are reclaimed, and when a seat
+  with no declared route can't be woken, the finding goes to the item's creator,
   skipping a creator that is a terminal seat. ([#2869](https://github.com/mvschwarz/openrig/pull/2869), [#2987](https://github.com/mvschwarz/openrig/pull/2987), [#2995](https://github.com/mvschwarz/openrig/pull/2995))
 
 ### Fixes
 
 - **Delivery:** Claude's auto-update failure footers, including one clipped form,
   no longer hold a send to an idle Claude seat; an unrecognised wake result reads unknown, not
-  delivered; a one-time park wake stays owed across retries; punctuation after a
-  verified custody target is accepted; the Pi runner pane keeps the operator's
+  delivered; a parked item's one-time wake is kept until it's delivered, across
+  failed attempts; a `custody-verified:` note whose target is followed by a
+  period, comma or other closing punctuation now verifies it; the Pi runner pane keeps the operator's
   draft out of the stream. ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038), [#3004](https://github.com/mvschwarz/openrig/pull/3004), [#2842](https://github.com/mvschwarz/openrig/pull/2842))
 - **Codex and Claude:** completed Codex 0.167 turns read idle, and unsupported
   versions stay unknown; a usage-limit banner with a curly apostrophe is
@@ -93,7 +95,7 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   sandbox), and says not to start another; ssh options are separated from the
   target, and the generated attach command quotes the session name. ([#2857](https://github.com/mvschwarz/openrig/pull/2857), [#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022), [#2913](https://github.com/mvschwarz/openrig/pull/2913), [#2973](https://github.com/mvschwarz/openrig/pull/2973), [#2971](https://github.com/mvschwarz/openrig/pull/2971))
 - **Scope and workflows:** qualified slice reads and proof discovery are scoped
-  by mission; workflow spec read observations are kept; the spec library skips
+  by mission; workflow spec reads are recorded across restarts; the spec library skips
   synthetic alias entries. ([#2960](https://github.com/mvschwarz/openrig/pull/2960), [#2986](https://github.com/mvschwarz/openrig/pull/2986), [#2999](https://github.com/mvschwarz/openrig/pull/2999))
 - **Guidance and plugins:** a repository's `AGENTS.md` or `CLAUDE.md` keeps one
   copy of each OpenRig-managed block, even when an editor rewrapped a marker,
@@ -203,6 +205,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   ([#3001](https://github.com/mvschwarz/openrig/pull/3001)), and `rig seat stop` no longer suggests `rig down` for an adopted session
   ([#3006](https://github.com/mvschwarz/openrig/pull/3006)). 0.7.12's not-run list was for that release. They weren't re-checked
   for this release unless named here.
+
+<!-- QUALITY-PENDING-0713: the not-run list; #3041's Eval qualification for the operator-direct registration limit; any measured #2970 figure. Filled in by the notes-only recut after Quality's verdict. -->
 
 ### Credits
 
