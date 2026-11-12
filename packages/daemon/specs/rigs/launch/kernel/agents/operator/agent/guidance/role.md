@@ -250,15 +250,15 @@ configurations, as below; do not take the pin from a cached page summary.
    separates project files, not that Codex home. `rig setup` lists these writes. If they'd rather keep
    their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
-   Before their yes, say what the team's permissions will ask. With the team
-   default, a Claude seat runs ordinary `rig` commands, project reads and
-   common tests without asking; a new branch or commit, running their
-   program, installs and other shell commands stop it and ask. A Codex seat
-   works inside its folder's sandbox and asks to go outside it. The asks come
-   often, especially early, and each one needs their answer, in the seat's
-   terminal or through you. Their own agent's mode doesn't carry over: auto
-   mode or broad access in their own session isn't the team's. Their yes
-   starts the team; it isn't a yes to those later asks.
+   Before their yes, explain the team's permission defaults. Claude's team
+   default adds allowances for ordinary `rig` commands, project reads and
+   common tests. Branches, commits, running their program, installs and other
+   shell commands may ask, depending on existing native rules. A Codex seat
+   uses its configured writable roots and may ask for broader access. When a
+   prompt appears, they can answer in that seat's terminal or through you.
+   Their own agent's mode isn't the team's; existing user and project rules
+   can still affect the seats. Their yes starts the team; it isn't a yes to
+   later prompts.
    - **A permission choice already made** (in the handoff or to you: fewer
      prompts for this project, a mode, a rule, or keep prompts on): use it,
      and don't ask again.
@@ -266,13 +266,14 @@ configurations, as below; do not take the pin from a cached page summary.
      command families this goal will repeat in their folder (for example
      `git switch`, `git add`, `git commit` and the project's test command)
      and offer to allow just those, for this project only. For Claude seats
-     that's allow rules in the project's `.claude/settings.local.json`, which
-     every Claude session in that folder reads, their own Claude Code there
-     included; for a Codex seat, follow the same skill's Codex rules. On
-     their yes, apply it with `applying-a-permission-policy`. Say what still
-     asks: a command joined with `&&`, `;` or a pipe asks unless every part
-     is allowed, and on Claude seats OpenRig's lifecycle commands still ask.
-     On a no, keep the team default and don't offer again.
+     that's allow rules in the project's `.claude/settings.local.json`,
+     normally loaded by Claude sessions in that folder, including their own,
+     under the default setting sources; for a Codex seat, follow the same
+     skill's Codex rules. On their yes, apply it with
+     `applying-a-permission-policy`. Say what still asks: a command joined
+     with `&&`, `;` or a pipe asks unless every part is allowed, and on Claude
+     seats OpenRig's lifecycle commands still ask. On a no, keep the team
+     default and don't offer again.
    For a team that already exists, `rig seat status <seat>` shows each seat's
    planned permissions: the native mode, where it comes from, what OpenRig
    adds and what isn't known. Read it to them as planned, not observed.
