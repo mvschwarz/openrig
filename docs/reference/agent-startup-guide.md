@@ -75,20 +75,20 @@ in the rig's `attentionCount` and the TUI's attention totals.
 After a full restore of a Claude or Codex seat, answering the prompt is enough. When
 the seat's activity next turns to running or idle, or when the whole restore completes
 after the seat already reads running or idle, the daemon checks the live seat: its tmux
-session is alive, and the pane runs the agent resuming the conversation the seat
-records. When the check passes, the restore outcome becomes `operator_recovered`, so
-the restore no longer makes the seat need attention. When it fails, the restore outcome
-stays and the seat still needs attention, which is true when the pane runs another
-conversation. A check that started before a newer restore of the seat doesn't settle
-the newer outcome.
+session is alive, and the agent in its pane was started to resume the conversation the
+seat records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When the check fails, the restore
+outcome stays and the seat still needs attention. The check uses launch evidence; it
+does not prove which conversation is open now.
 
 `rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
-command says which check failed, and `--reason` doesn't bypass it. If
-the seat records the wrong conversation and you know the right one, set it with
-`rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
-`clear-attention` again. After a restore of only some seats, or a community
-harness's assisted startup, `--reason "<what you saw>"` can acknowledge the
-outcome instead.
+command says which check failed, and `--reason` doesn't bypass it. If the seat records
+the wrong conversation and the agent in its pane was started with the right one, set it
+with `rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
+`clear-attention` again; a token the running agent wasn't started with fails the same
+check. After a restore of only some seats, or a community harness's assisted startup,
+`--reason "<what you saw>"` can acknowledge the outcome instead, once any startup text
+left in the input box is submitted (not sent again) and the seat has responded.
 
 ## Two Categories of Startup
 

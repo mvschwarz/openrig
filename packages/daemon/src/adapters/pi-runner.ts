@@ -21,7 +21,8 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
+import stringWidth from "string-width";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -71,14 +72,306 @@ export function preparePiAccount(agentDir: string, accountHome: string | undefin
 // Use Node's line editor in raw mode, with only paste framing handled here.
 export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 
+// ── The compose region's physical layout ──────────────────────────────────────────
+// One layout model for painting, erasing and the caret: cells fill terminal rows
+// greedily, a wide character that no longer fits wraps whole to the next row, and
+// an explicit newline starts one. Every row the compositor paints or erases, and
+// the caret it places, derives from here — measured with the daemon's string-width.
+
+/** Where a compose region sits on screen, and where its caret lands. */
+export interface ComposeLayout { rows: number; caretRow: number; caretColumn: number; }
+
+const SEGMENTER = (() => {
+  try {
+    return new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  } catch {
+    return null;
+  }
+})();
+
+/** Grapheme clusters: what a terminal lays out. A ZWJ family emoji is one cluster
+ *  taking two cells where its code points would sum to six; a combining mark adds none. */
+export function* graphemesOf(text: string): Generator<string> {
+  if (SEGMENTER) {
+    for (const part of SEGMENTER.segment(text)) yield part.segment;
+  } else {
+    for (const character of text) yield character;
+  }
+}
+
+const TAB_WIDTH = 8;
+
+export function composeLayout(text: string, width: number, caret = text.length): ComposeLayout {
+  if (!text) return { rows: 0, caretRow: 0, caretColumn: 0 };
+  if (width <= 0) return { rows: text.split("\n").length, caretRow: 0, caretColumn: 0 };
+  let row = 0;
+  let column = 0;
+  let caretRow = 0;
+  let caretColumn = 0;
+  let index = 0;
+  const place = () => { caretRow = row; caretColumn = column; };
+  for (const segment of graphemesOf(text)) {
+    if (index === caret) place();
+    if (segment === "\n") {
+      row += 1;
+      column = 0;
+    } else if (segment === "\t") {
+      // A tab advances to the next ordinary tab stop, clamped to the last column.
+      column = Math.min((Math.floor(column / TAB_WIDTH) + 1) * TAB_WIDTH, width - 1);
+    } else {
+      const cells = Math.max(0, stringWidth(segment));
+      if (column + cells > width) {
+        row += 1;
+        column = 0;
+      }
+      column += cells;
+    }
+    index += segment.length;
+  }
+  if (index === caret) place();
+  return { rows: row + 1, caretRow, caretColumn };
+}
+
+// ── Pane live region (compose + status) ────────────────────────────────────────
+// A seat pane is a plain terminal: one bottom live region holds the operator's draft
+// and the runner's status line, and is erased and repainted around every transcript
+// write. Nothing else may write at the cursor, or a draft freezes into scrollback and
+// streamed text fuses with it mid-word. When the terminal's width is unknown the
+// compositor places nothing — the pane falls back to plain output, and the draft,
+// though still editable, is not drawn.
+
+/** The live region a pane host repaints around transcript writes. */
+export interface PaneCompositor {
+  /** Bind the line editor the compose line renders from, and where its cursor sits. */
+  attach(read: () => string, redraw: () => void, caretUp?: () => number, readCursor?: () => number): void;
+  /** Unbind the editor; any held streamed tail is flushed and the live region is dropped. */
+  detach(): void;
+  /** A keystroke changed the draft: repaint the live region from readline's state. A
+   *  draft that just went away flushes a held streamed tail first, as plain output would. */
+  refresh(): void;
+  /** Streamed model text: verbatim while no live region exists; once a draft or a
+   *  status line is on the bottom, complete lines go above the region and an
+   *  unfinished line is held, so no live line is split or frozen into scrollback. */
+  transcript(text: string): void;
+  /** One complete line of transcript. */
+  line(text: string): void;
+  /** A keypress is about to echo: close an open transcript line first, or the echo
+   *  and the next streamed deltas would land on top of it. */
+  beforeInput(): void;
+  /** Pin the latest diagnostic on the status line. The transcript copy is the caller's;
+   *  this pin is never the only copy. */
+  diagnostic(text: string): void;
+  /** Drop a pinned status line. */
+  clearStatus(): void;
+  /** Before the submit commits: drop the draft line so no partial copy scrolls, and
+   *  finish any held streamed line; the durable copy is the commit line below. */
+  beforeSubmit(): void;
+  /** Repaint the live region in place. */
+  repaint(): void;
+}
+
+export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
+  let status: string | null = null;
+  /** The status text actually on screen: clipped when it was painted. A resize must
+   *  size the region from this, not from the longer text it was pinned with. */
+  let paintedStatus: string | null = null;
+  let readInput: (() => string) | null = null;
+  let redrawLine: (() => void) | null = null;
+  let held = "";
+  let openLine = false;
+  let screenRows = 0;
+  let readCaretUp: (() => number) | null = null;
+  let readCaretIndex: (() => number) | null = null;
+  const widthKnown = () => typeof out.columns === "number" && out.columns > 0;
+  const composeText = () => (readInput && redrawLine ? readInput() : "");
+  const composeRows = () => {
+    const text = composeText();
+    return text && widthKnown() ? composeLayout(text, out.columns).rows : 0;
+  };
+  const clip = (text: string) => {
+    const flat = text.replace(/[\r\n\t]+/g, " ").trimEnd();
+    if (!widthKnown() || stringWidth(flat) < out.columns) return flat;
+    let used = 0;
+    let clipped = "";
+    for (const segment of graphemesOf(flat)) {
+      const cells = Math.max(0, stringWidth(segment));
+      if (used + cells > out.columns - 1) break;
+      clipped += segment;
+      used += cells;
+    }
+    return `${clipped}\u2026`;
+  };
+  const eraseLines = (lines: number) => {
+    let sequence = "";
+    for (let index = 0; index < lines; index += 1) sequence += index === 0 ? "\r\u001b[2K" : "\u001b[1A\r\u001b[2K";
+    if (sequence) out.write(sequence);
+  };
+  /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
+   *  to the terminal, so nothing else can change these rows behind the compositor's back —
+   *  except a reflow, which the resize handler owns. */
+  const paint = () => {
+    paintedStatus = status !== null ? clip(status) : null;
+    if (paintedStatus !== null) {
+      out.write(paintedStatus);
+      out.write("\n");
+    }
+    const rows = composeRows();
+    if (rows) redrawLine?.();
+    screenRows = (status !== null ? 1 : 0) + (rows || (status !== null ? 1 : 0));
+    // Only a painted region closes an open transcript line. With nothing painted the
+    // cursor still sits on the line a flush left open, and the next keystroke belongs
+    // to that line's context, not to a fresh one.
+    if (screenRows > 0) openLine = false;
+  };
+  const eraseScreen = () => {
+    // Nothing painted: there is no region to erase, and stepping down from a stale
+    // caret count would move the cursor off the transcript line it is still on.
+    if (screenRows === 0) return;
+    const down = readCaretUp ? readCaretUp() : 0;
+    if (down > 0) out.write(`\u001b[${down}B`);
+    eraseLines(screenRows);
+    screenRows = 0;
+  };
+  const flushHeld = () => {
+    if (!held) return;
+    out.write(held.endsWith("\n") ? held : `${held}\n`);
+    held = "";
+    openLine = false;
+  };
+  const writeVerbatim = (text: string) => {
+    out.write(text);
+    openLine = !text.endsWith("\n");
+  };
+  const writeAbove = (text: string) => {
+    eraseScreen();
+    out.write(text.endsWith("\n") ? text : `${text}\n`);
+    paint();
+  };
+  // A tile attaching or detaching reflows the pane, and the terminal keeps the cursor on
+  // its character. So the old paint now occupies exactly what the new width says it does:
+  // the pinned status wraps to ceil(cells/columns) rows, the draft to its layout rows.
+  // Move down to the region's last row — past the lines below the caret — erase exactly
+  // that many rows, and repaint at the new width. No max(): under-erasing leaves a stale
+  // copy of a wrapped status, over-erasing drops a transcript line off the screen.
+  const onResize = () => {
+    if (!widthKnown()) {
+      screenRows = 0;
+      return;
+    }
+    const draft = composeText();
+    const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
+    const draftRows = layout ? layout.rows : 0;
+    const statusLines = paintedStatus !== null ? Math.max(1, Math.ceil(stringWidth(paintedStatus) / out.columns)) : 0;
+    const down = layout ? layout.rows - 1 - layout.caretRow : 0;
+    if (down > 0) out.write(`\u001b[${down}B`);
+    // A pinned status without a draft also owns the blank row its trailing newline
+    // left the cursor on — the same row paint() counts into screenRows.
+    eraseLines(statusLines + (draftRows || (status !== null ? 1 : 0)));
+    screenRows = 0;
+    paint();
+  };
+  out.on("resize", onResize);
+  const pane: PaneCompositor = {
+    attach(read, redraw, caretUp, readCursor) {
+      readInput = read;
+      redrawLine = redraw;
+      readCaretUp = caretUp ?? null;
+      readCaretIndex = readCursor ?? null;
+    },
+    detach() {
+      eraseScreen();
+      flushHeld();
+      readInput = null;
+      redrawLine = null;
+      readCaretUp = null;
+      readCaretIndex = null;
+      openLine = false;
+      screenRows = 0;
+    },
+    refresh() {
+      eraseScreen();
+      // With no region left, an unfinished streamed line goes out verbatim so the
+      // next delta continues it on the same row instead of splitting mid-word.
+      if (held && status === null && !composeText()) {
+        writeVerbatim(held);
+        held = "";
+      }
+      paint();
+    },
+    transcript(text) {
+      if (!text) return;
+      if (status === null && composeRows() === 0 && screenRows === 0) {
+        if (held) {
+          writeVerbatim(held);
+          held = "";
+        }
+        writeVerbatim(text);
+        return;
+      }
+      held += text;
+      let newline = held.indexOf("\n");
+      while (newline >= 0) {
+        const line = held.slice(0, newline + 1);
+        held = held.slice(newline + 1);
+        writeAbove(line);
+        newline = held.indexOf("\n");
+      }
+    },
+    line(text) {
+      pane.transcript(`${text}\n`);
+    },
+    beforeInput() {
+      if (!openLine) return;
+      out.write("\n");
+      openLine = false;
+    },
+    diagnostic(text) {
+      // Without a known width there is no region to pin into. Callers already wrote
+      // the transcript copy; printing here would duplicate it.
+      if (!widthKnown()) return;
+      if (openLine) {
+        out.write("\n");
+        openLine = false;
+      }
+      eraseScreen();
+      status = clip(text);
+      paint();
+    },
+    clearStatus() {
+      if (status === null) return;
+      eraseScreen();
+      status = null;
+      paint();
+    },
+    beforeSubmit() {
+      eraseScreen();
+      openLine = false;
+      flushHeld();
+    },
+    repaint() {
+      paint();
+    },
+  };
+  return pane;
+}
+
 export function createRunnerInput(
   input: NodeJS.ReadableStream & { readonly isTTY?: boolean; readonly isRaw?: boolean; setRawMode: (raw: boolean) => unknown },
   output: NodeJS.WritableStream & { readonly isTTY?: boolean },
   onSubmit: (block: string) => void,
+  pane?: PaneCompositor,
 ): readline.Interface {
-  const reject = () => output.write(
-    "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.\n",
-  );
+  const say = (text: string) => {
+    if (pane) {
+      pane.line(text);
+      pane.diagnostic(text);
+    } else {
+      output.write(`${text}\n`);
+    }
+  };
+  const reject = () => {
+    say("[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.");
+  };
   const submit = (block: string) => {
     if (Buffer.byteLength(block) > MAX_PI_INPUT_BYTES) reject();
     else if (block.trim()) onSubmit(block);
@@ -94,14 +387,37 @@ export function createRunnerInput(
     || (major === 25 && (minor === 0 || (minor === 1 && patch === 0)));
   const keys = new PassThrough();
   const editorInput = batchText ? new PassThrough() : keys;
+  // Readline edits against a discard sink: it must never draw on the terminal, because
+  // _refreshLine does moveCursor(0, -prevRows) + clearScreenDown(), which erases whatever the
+  // compositor put above the draft. The compositor owns every terminal byte instead.
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  // Readline wraps its edit against output.columns; carry the terminal's geometry onto the sink.
+  Object.assign(sink, { columns: output.columns, rows: output.rows });
+  let caretUp = 0;
+  const renderCompose = () => {
+    const text = `${editor.line ?? ""}`;
+    if (!text) return;
+    const width = typeof output.columns === "number" && output.columns > 0 ? output.columns : 0;
+    output.write(text);
+    if (!width) return;
+    const cursor = Math.max(0, Math.min(Number(editor.cursor) || 0, text.length));
+    const layout = composeLayout(text, width, cursor);
+    caretUp = layout.rows - 1 - layout.caretRow;
+    if (caretUp > 0) output.write(`\u001b[${caretUp}A`);
+    output.write("\r");
+    if (layout.caretColumn > 0) output.write(`\u001b[${layout.caretColumn}C`);
+  };
+  pane?.attach(() => `${editor.line ?? ""}`, renderCompose, () => caretUp, () => Math.max(0, Math.min(Number(editor.cursor) || 0, `${editor.line ?? ""}`.length)));
+
   const editor = readline.createInterface({
-    input: editorInput, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+    input: editorInput, output: sink, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
   });
   // Node forces dumb-terminal mode without editing if TERM=dumb. When terminal: true
   // was requested, remove the dumb-mode override so VT100 line editing is preserved.
   if (Object.prototype.hasOwnProperty.call(editor, "_ttyWrite")) {
     delete (editor as any)._ttyWrite;
   }
+
   const decoder = new StringDecoder("utf8");
   let pending = "";
   let paste: string | null = null;
@@ -111,7 +427,7 @@ export function createRunnerInput(
     // Node documents changing rl.line together with rl.cursor. The installed
     // typings mark them readonly, so assign this pair through one explicit seam.
     Object.assign(editor, { line, cursor });
-    editor.prompt(true);
+    pane?.refresh();
   };
   const clear = () => setLine("", 0);
   // Node 22.21–22.22.0 (also some 24/25 releases) appends batched text after
@@ -137,6 +453,7 @@ export function createRunnerInput(
   }
   const consume = (text: string) => {
     if (paste === null) {
+      pane?.beforeInput();
       keys.write(text);
       if (batchText) flushTyped();
     } else if (!discarded) {
@@ -170,7 +487,7 @@ export function createRunnerInput(
         paste = null;
         discarded = false;
         clear();
-        output.write("\n[pi-runner] input cleared\n");
+        say("[pi-runner] input cleared");
         onSubmit("/abort");
       } else if (paste === null) {
         paste = "";
@@ -189,6 +506,7 @@ export function createRunnerInput(
         paste = null;
       }
     }
+    pane?.refresh();
   };
   const wasRaw = input.isRaw ?? false;
   const end = () => editor.close();
@@ -196,7 +514,10 @@ export function createRunnerInput(
   output.write("\u001b[?2004h");
   input.on("data", receive);
   input.once("end", end);
-  editor.on("line", submit);
+  editor.on("line", (line) => {
+    pane?.beforeSubmit();
+    submit(line);
+  });
   editor.once("close", () => {
     input.removeListener("data", receive);
     input.removeListener("end", end);
@@ -204,6 +525,7 @@ export function createRunnerInput(
     input.pause();
     keys.removeListener("keypress", keypress);
     keys.destroy();
+    pane?.detach();
     if (editorInput !== keys) editorInput.destroy();
     output.write("\u001b[?2004l");
   });
@@ -360,6 +682,11 @@ export interface RunnerIo {
   mirrorLine(line: string): void;
   /** Append raw text to the current pane line (streamed deltas). */
   mirrorAppend(text: string): void;
+  /** Pin a copy of a diagnostic on the pane's status line, when the pane provides one.
+   *  The transcript copy is written by the caller; this pin is never the only copy. */
+  diagnostic?(text: string): void;
+  /** Drop a pinned status line at the start of a new agent turn. */
+  clearStatus?(): void;
   /** POST to the daemon activity endpoint. May resolve to the parsed JSON
    *  response (null on transport failure) so identity delivery can retry. */
   postActivity(payload: Record<string, unknown>): void | Promise<Record<string, unknown> | null>;
@@ -611,7 +938,7 @@ export class RunnerCore {
 
   /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
   private reportDroppedFrame(reason: string | null | undefined): void {
-    if (reason) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (reason) this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
   }
 
   private get runtime(): string { return this.opts.runtime ?? "pi"; }
@@ -631,7 +958,7 @@ export class RunnerCore {
     }
     if (block === "/abort") {
       this.io.sendRpc({ type: "abort" });
-      this.io.mirrorLine("[pi-runner] abort sent");
+      this.diag("[pi-runner] abort sent");
       return;
     }
     if (block.startsWith("/followup ")) {
@@ -676,7 +1003,7 @@ export class RunnerCore {
       } else {
         // Advertised but refused: v1 as before, so a reply over 1 MiB still fails, visibly.
         const detail = typeof record.error === "string" ? record.error : "refused";
-        this.io.mirrorLine(`[omp-runner] RPC protocol v2 not negotiated (${detail}); replies over 1 MiB will fail`);
+        this.diag(`[omp-runner] RPC protocol v2 not negotiated (${detail}); replies over 1 MiB will fail`);
       }
       return;
     }
@@ -704,7 +1031,7 @@ export class RunnerCore {
       if (record.id === GET_STATE_ID) {
         this.ready = false;
         this.writeSidecar({});
-        this.io.mirrorLine(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
+        this.diag(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
         // OMP cannot provide a resume token without get_state; stop it so the
         // launch fails now instead of waiting out readiness.
         if (this.runtime === "omp") this.io.stopChild?.();
@@ -713,11 +1040,11 @@ export class RunnerCore {
       if (record.id === CATCH_UP_ID && this.runtime === "pi") {
         // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
         // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.io.mirrorLine(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
+        this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
         this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
         return;
       }
-      this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+      this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
       if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
@@ -735,13 +1062,13 @@ export class RunnerCore {
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
         if (this.runtime === "omp") {
-          this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
+          this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
           this.io.stopChild?.();
           return;
         }
         // For custom protocol: pi-rpc community harnesses, reporting no session file
         // reads as needing attention rather than stopping the child process.
-        this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
+        this.diag(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
         this.raiseAttention("runtime_error");
         return;
       }
@@ -904,6 +1231,13 @@ export class RunnerCore {
     this.attentionIsLatest = false;
   }
 
+  /** A diagnostic stays in the transcript — the readiness probe and the operator both read
+   *  it there; a pane with a status line pins the latest one as a convenience copy. */
+  private diag(text: string): void {
+    this.io.mirrorLine(text);
+    this.io.diagnostic?.(text);
+  }
+
   private handleEvent(event: Record<string, unknown>): void {
     if (this.runtime === "pi" && (event.type === "compaction_start" || event.type === "compaction_end")) {
       const identity = {
@@ -949,7 +1283,7 @@ export class RunnerCore {
       const detail = [event.title, event.message].filter((text): text is string => typeof text === "string")
         .map(stripVTControlCharacters).join(" — ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").slice(0, 400);
       if (this.runtime !== "omp" && !dialog) {
-        if (method === "notify") this.io.mirrorLine(`[${this.runtime}-runner] ${detail}`);
+        if (method === "notify") this.diag(`[${this.runtime}-runner] ${detail}`);
         return; // Pi notifications and other fire-and-forget UI requests expect no answer.
       }
       // RPC does not mount an interactive UI. Reply at once; otherwise the
@@ -958,7 +1292,7 @@ export class RunnerCore {
         this.io.sendRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
       }
       if (dialog) {
-        this.io.mirrorLine(this.runtime !== "omp"
+        this.diag(this.runtime !== "omp"
           ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
         this.raiseAttention("permission_prompt");
@@ -978,7 +1312,10 @@ export class RunnerCore {
       this.writeSidecar({});
     }
 
-    if (event.type === "agent_start") this.clearAttention();
+    if (event.type === "agent_start") {
+      this.clearAttention();
+      this.io.clearStatus?.();
+    }
     if (this.runtime === "omp") {
       if (event.type === "agent_start" || event.type === "turn_start"
         || (event.type === "message_start" && message?.role === "assistant")
@@ -1022,7 +1359,7 @@ export class RunnerCore {
       // the repeat lacks it, then reset at the next assistant message/agent
       // turn, not at agent_end.
       if (event.type === "message_end" || !this.assistantErrorShown) {
-        this.io.mirrorLine(mapped.errorNotice);
+        this.diag(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
       // Only typed, explicitly transient HTTP failures may release the send
@@ -1546,6 +1883,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // The child may close its pipe before the first RPC write completes.
   child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
+  const pane = createPaneCompositor(process.stdout);
+  // Diagnostics stay in the transcript — the pane's readiness probe greps it, and people
+  // and agents read the history there; the status line only pins the latest copy.
+  const paneDiag = (text: string) => {
+    pane.line(text);
+    pane.diagnostic(text);
+  };
+
   const chargeLookup = new OpenRouterChargeLookup({
     fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
     postCharges: async (piSessionId, charges) => {
@@ -1564,7 +1909,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       }, () => false as const).finally(() => clearTimeout(timeout));
     },
     schedule: (fn, ms) => { setTimeout(fn, ms).unref(); },
-    notice: (line) => { process.stdout.write(`${line}\n`); },
+    notice: (line) => { paneDiag(line); },
   });
 
   // One activity post at a time: the daemon reads its newest record by arrival, so a beat still in flight when a turn
@@ -1587,8 +1932,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
-    mirrorLine: (line) => process.stdout.write(`${line}\n`),
-    mirrorAppend: (text) => process.stdout.write(text),
+    mirrorLine: (line) => pane.line(line),
+    mirrorAppend: (text) => pane.transcript(text),
+    diagnostic: (text) => pane.diagnostic(text),
+    clearStatus: () => pane.clearStatus(),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const result = postInOrder(payload).catch(() => null);
@@ -1670,7 +2017,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (!line.trim()) return;
-    process.stdout.write(`[${runtime}:err] ${line}\n`);
+    paneDiag(`[${runtime}:err] ${line}`);
     stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
@@ -1684,15 +2031,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       });
       if (detail) {
         reportedPiCapability = true;
-        process.stdout.write(`[pi-runner] ${detail}\n`);
+        paneDiag(`[pi-runner] ${detail}`);
       }
     }
   });
-  const input = createRunnerInput(process.stdin, process.stdout, block => core.handleUserBlock(block));
+  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block), pane);
 
   if (runtime !== "omp") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : (args.command ?? "pi")}: ${err.message}`);
+      paneDiag(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : (args.command ?? "pi")}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();
@@ -1719,7 +2066,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
-      console.error(transportUp
+      paneDiag(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
         : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
@@ -1728,7 +2075,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.exitCode = code ?? 1;
   };
   child.on("error", (err) => {
-    console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
+    paneDiag(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
   // "close" fires once OMP's stdio is drained, so its stderr is in the tail
