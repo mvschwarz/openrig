@@ -259,7 +259,10 @@ describe("host pairing with the kernel operator running: the person's answer goe
     const item = f.repo.getById(f.ask)!;
     expect(item).toMatchObject({ sourceSession: OPERATOR, destinationSession: PERSON, tier: "human-gate" });
     expect(item.body).toContain(`Answer with Approve or Deny, or in your own words. ${OPERATOR} reads your answer and acts on it`);
-    expect(item.body).toContain(`For ${OPERATOR}: when the person's answer to this request comes back, act on it. A clear yes or an Approve click: rig host approve ${f.issued.code}. A clear no or a Deny click: rig host deny ${f.issued.code}.`);
+    expect(item.body).toContain(`For ${OPERATOR}: when the person's answer to this request comes back, act on it. ${PERSON} is the person asked, on this host; requester@far-host is the other machine, asking to pair. A clear yes or an Approve click: rig host approve ${f.issued.code}. A clear no or a Deny click: rig host deny ${f.issued.code}.`);
+    // An unclear answer is asked back through the person asked, never human@host.
+    expect(item.body).toContain(`ask them back with an ask to ${PERSON} that names pairing code ${f.issued.code}: rig queue create --destination ${PERSON}`);
+    expect(item.body).toContain("Don't write to human@host: nothing is delivered there. Then act on what they answer.");
   });
 
   it.each(["yes", "no", "yes, but which machine?"])("a typed %j (Steering) reaches the operator as a reply with the person's words, and decides nothing by itself", async (words) => {
