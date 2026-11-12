@@ -3,7 +3,8 @@
 This note is for an agent on an install that was just upgraded to 0.7.12.
 OpenRig 0.7.12 routes a person's typed, clicked or qualified answers with the
 question to the configured receiving agent or the kernel operator to decide.
-Answers wait when no receiver is available. Setup offers to register the person. `rig down` stops
+Answers wait when no receiver is available. Setup's guidance asks the agent to
+offer to register the person, which it didn't reliably do in testing. `rig down` stops
 only terminals it can show belong to the seat. It adds five database
 migrations. If you upgraded from 0.7.10 or earlier, also read "What changed in
 OpenRig 0.7.11" below, and so on back. For the full capability map, read
@@ -31,30 +32,49 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   upgrade can ask for hook approval until it's relaunched.
 - **`rig down` now leaves some terminals running.** It stops only a tmux session
   carrying the seat's own `OPENRIG_NODE_ID`, on the server and session it read.
-  For a terminal OpenRig didn't create, a mismarked or replaced one, or a seat
-  joined with `rig attach --self`, it exits 2 and names the terminal and how to
-  stop it. Tell the person, and stop those by hand if they're theirs to stop.
+  For a terminal OpenRig didn't create, or a mismarked or replaced one, it exits
+  2 and names the terminal and how to stop it. A seat joined with `rig attach` as
+  an external CLI is listed as not stopped, which alone doesn't make it exit 2.
+  Tell the person, and stop those by hand if they're theirs to stop.
   ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
 
 ## Answers from a person reach an agent
 
 - Answers nothing else reads, such as a host pairing request or a mode's
   scheduled end, use the configured receiving agent or the kernel operator.
-  Answers wait when no receiver is available. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
+  Answers wait when no receiver is available, and nothing decides them
+  meanwhile; a direct decision uses the request's own command (`rig host approve`
+  or `rig host deny`, `rig seat decide-permission`). An ordinary close isn't
+  permission, and kept words aren't a default permit. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
 - Pairing answers go to the receiving agent, and a person can decide directly in
   the TUI's pairing settings. ([#2931](https://github.com/mvschwarz/openrig/pull/2931), [#2935](https://github.com/mvschwarz/openrig/pull/2935))
 - A runner's permission answer goes to the receiving agent, which decides while
   the runner waits, so a qualified answer ("only if it's the test file") is
-  read before anything acts. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
+  read before anything acts. The answer is kept and an explicit decision works,
+  but the runner's confirmation updates to the person aren't written in this
+  release: no Feed confirmation, receiver-state notice or immediate wake. The
+  decision reaches the runner at its next read (up to about 21 seconds in
+  testing). Decide one directly with `rig seat decide-permission`. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
 - **What to do:** design for an agent to read the person's answer with its
   question and decide. If no receiver is available, say the answer is waiting;
   don't describe it as read or decided. Pairing settings in the TUI also offer
   the direct decision described above.
+- **A chosen receiver** (`agents.operator_session`) in an explicit or auto
+  permission mode gets no OpenRig allowance for `rig host approve` or `deny`, so
+  Claude's review can refuse them; a kernel receiver in auto mode is included.
+  The default kernel with the default policy passed at its tested scope.
+- **A receiver that was stopped and then started** may not act on an answer
+  that waited for it. When it needed to ask back in testing, the question
+  appeared in its own conversation, not in the Feed or Steering.
 
 ## Other changes to act on
 
-- **Setup** offers to register the person, and a team started from the person's
-  own assistant fits their logins, with a review before commit. ([#2924](https://github.com/mvschwarz/openrig/pull/2924), [#2905](https://github.com/mvschwarz/openrig/pull/2905))
+- **Setup's guidance** asks the agent to offer to register the person; in
+  testing it didn't reliably make the offer (0 of 5 runs). Registering works
+  when the person asks for it (`rig gateway human add`): nothing is registered
+  without their yes, an existing default is kept, and no person is chosen
+  automatically. A team started from the person's own assistant fits their
+  logins, with a review before commit. ([#2924](https://github.com/mvschwarz/openrig/pull/2924), [#2905](https://github.com/mvschwarz/openrig/pull/2905))
 - **Harnesses:** `protocol: pi-rpc`, launch wrappers in presets, and Pi
   cross-runtime switches. ([#2870](https://github.com/mvschwarz/openrig/pull/2870), [#2759](https://github.com/mvschwarz/openrig/pull/2759), [#2669](https://github.com/mvschwarz/openrig/pull/2669))
 - **A relay connector** that can't accept incoming connections can pull
@@ -89,8 +109,25 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   ([#2980](https://github.com/mvschwarz/openrig/pull/2980))
 - **Custom blocker IDs** explain the wait but give no event wake; the timer
   remains. ([#2983](https://github.com/mvschwarz/openrig/pull/2983))
-- **Runner permission answers** haven't been run end to end with a real runner
-  waiting. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
+- **Runner permission answers** were run end to end with a real receiving agent
+  and the example runner, whose requesting agent was a stand-in; a model-driven
+  runner waiting on a person's answer hasn't been run. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
+- **An already-running tmux server** keeps its old environment, daemon
+  credentials included, until it restarts. ([#2850](https://github.com/mvschwarz/openrig/pull/2850))
+- **Delivery:** events are best effort, so a missing event isn't proof nothing
+  was sent. A footer row OpenRig doesn't recognize can still hold a delivery ([#2925](https://github.com/mvschwarz/openrig/issues/2925)),
+  and a held message's full envelope can stay held; clearing a draft doesn't
+  deliver it ([#2515](https://github.com/mvschwarz/openrig/pull/2515)). With unreadable input, `--dangerously-interact` pastes
+  with a warning and doesn't press Enter ([#2800](https://github.com/mvschwarz/openrig/pull/2800)).
+- **Not run for this release** (not run, not passed): the two-seat Codex journey
+  with `AGENTS.md` restore; Codex account-home, upgrade and continuity checks;
+  the OpenShell worker's second report; Pi model switches on real providers; ACP
+  in a desktop app; Slack directory paging; some Slack setup cases; native
+  checks of [#2786](https://github.com/mvschwarz/openrig/pull/2786), [#2799](https://github.com/mvschwarz/openrig/pull/2799), [#2807](https://github.com/mvschwarz/openrig/pull/2807) and [#2813](https://github.com/mvschwarz/openrig/pull/2813) ([#2947](https://github.com/mvschwarz/openrig/pull/2947) partly); a button-and-words
+  answer, a non-pairing ask with an explicit owner, Steering's Approve page, and
+  the answer and setup checks on a default model; `--wait-for-kernel` ([#2888](https://github.com/mvschwarz/openrig/pull/2888)),
+  [#2800](https://github.com/mvschwarz/openrig/pull/2800)'s installed effect, and [#2720](https://github.com/mvschwarz/openrig/issues/2720) beyond one platform. Don't tell a person
+  these work.
 - **0.7.11's limits below** still apply, except Codex hook setup with smol-toml
   1.9.x ([#2720](https://github.com/mvschwarz/openrig/issues/2720)), fixed by [#2804](https://github.com/mvschwarz/openrig/pull/2804).
 

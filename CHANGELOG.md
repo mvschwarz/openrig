@@ -13,11 +13,13 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 OpenRig 0.7.12 is a patch for people running their own agent teams, cut from
 main `16e8b7fb`. When you answer your team, by typing, clicking or qualifying
 an answer, the answer now goes to an agent that reads it with the question and
-decides, and there is always a default agent to receive it. Setup offers to
-register you as the team's person. `rig down` no longer stops a terminal it
+decides. When no receiving agent is available, your answer waits. Setup's
+guidance asks your agent to offer to register you as the team's person, and
+registering works when you ask for it. `rig down` no longer stops a terminal it
 can't show belongs to the seat. There are fixes across delivery, Codex,
 restore, the queue, Slack and speed, many contributed by people using
-OpenRig. Two repairs aren't in this release: see Known limits.
+OpenRig. Two repairs aren't in this release, and some checks weren't run: see
+Known limits.
 
 ### Before you upgrade
 
@@ -25,7 +27,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   seat's own `OPENRIG_NODE_ID`, on the server and session it read. A terminal
   OpenRig didn't create, a mismarked one or a replaced one is left running, and
   `rig down` exits 2 naming it and how to stop it yourself. A seat joined with
-  `rig attach --self` is in that group. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
+  `rig attach` as an external CLI is listed as not stopped, since OpenRig never
+  stops it; that alone doesn't make `rig down` exit 2. ([#2962](https://github.com/mvschwarz/openrig/pull/2962))
 - **openrig-core is 0.1.28.** A Codex session kept running across the upgrade
   can ask for hook approval until it's relaunched.
 
@@ -33,15 +36,29 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 - Answers nothing else reads, such as a host pairing request or a mode's
   scheduled end, use the configured receiving agent or the kernel operator.
-  Answers wait when no receiver is available. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
+  Answers wait when no receiver is available, and nothing decides them
+  meanwhile. To decide one yourself, use its own command: `rig host approve` or
+  `rig host deny` for a pairing request, `rig seat decide-permission` for a
+  runner's request. Closing an ask isn't permission, and words that were kept
+  aren't a default permit. ([#2923](https://github.com/mvschwarz/openrig/pull/2923))
 - Pairing answers go to the receiving agent, and you can decide directly in the
   TUI's pairing settings. A pairing request says who it went to and who reads
   the answer. ([#2931](https://github.com/mvschwarz/openrig/pull/2931), [#2935](https://github.com/mvschwarz/openrig/pull/2935))
 - A runner's permission answer goes to the receiving agent, which decides while
   the runner waits, so a qualified answer such as "only if it's the test file"
-  is read before anything acts. ([#2934](https://github.com/mvschwarz/openrig/pull/2934), [#2938](https://github.com/mvschwarz/openrig/pull/2938), [#2950](https://github.com/mvschwarz/openrig/pull/2950), [#2966](https://github.com/mvschwarz/openrig/pull/2966))
-- Setup offers to register you as the team's person, and the empty-registry
-  hint is right. A team you start from your own assistant fits your own logins,
+  is read before anything acts. Your answer is kept and an explicit decision
+  works, but the runner's confirmation updates to you aren't written in this
+  release. Don't expect a confirmation in the Feed, a notice of the receiver's
+  state or an immediate wake: the decision reaches the runner at its next read
+  (up to about 21 seconds in testing). To decide one yourself:
+  `rig seat decide-permission <askId> --option <id> --reason "…"`. This is the
+  runner's path only: a pairing request says who reads the answer, as above. ([#2934](https://github.com/mvschwarz/openrig/pull/2934), [#2938](https://github.com/mvschwarz/openrig/pull/2938), [#2950](https://github.com/mvschwarz/openrig/pull/2950), [#2966](https://github.com/mvschwarz/openrig/pull/2966))
+- Setup's guidance asks your agent to offer to register you as the team's
+  person. In testing the agent didn't reliably make that offer (0 of 5 runs).
+  Registering works when you ask for it: `rig gateway human add`. Nothing is
+  registered without your yes, an existing default person is kept, and no person
+  is chosen automatically. The empty-registry hint is right. A team you start
+  from your own assistant fits your own logins,
   with a review before anything is committed. ([#2924](https://github.com/mvschwarz/openrig/pull/2924), [#2905](https://github.com/mvschwarz/openrig/pull/2905))
 
 ### Harnesses and connections
@@ -79,8 +96,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 - **Delivery and drafts:** Claude seats with a custom status line read idle and
   verify sends; a fresh idle hook doesn't type into a current Claude dialog;
-  Claude's context hint and drawn cursor are read correctly; a deliberate
-  override is delivered when the input can't be read; update notices beside the
+  Claude's context hint and drawn cursor are read correctly; when the input
+  can't be read, a deliberate override (`--dangerously-interact`) pastes with a
+  warning and doesn't press Enter, so it isn't submitted; update notices beside the
   paste hint are recognized. ([#2807](https://github.com/mvschwarz/openrig/pull/2807), [#2813](https://github.com/mvschwarz/openrig/pull/2813), [#2947](https://github.com/mvschwarz/openrig/pull/2947), [#2942](https://github.com/mvschwarz/openrig/pull/2942), [#2933](https://github.com/mvschwarz/openrig/pull/2933), [#2800](https://github.com/mvschwarz/openrig/pull/2800), [#2786](https://github.com/mvschwarz/openrig/pull/2786))
 - **Codex:** when you answer a Codex choice prompt, a message waiting on it is
   delivered instead of escalated; a working counter is compared only within one pane process; hook
@@ -113,8 +131,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   config accepts two keys the daemon already resolves; `rig whoami` says the
   team is still being built during `rig up`; rigs with `@` in the name find
   attention; a seat waiting on a person names its question; the installer
-  reports PATH gaps with shell hints; daemon credentials stay out of the tmux
-  server's environment. ([#2914](https://github.com/mvschwarz/openrig/pull/2914), [#2969](https://github.com/mvschwarz/openrig/pull/2969), [#2955](https://github.com/mvschwarz/openrig/pull/2955), [#2949](https://github.com/mvschwarz/openrig/pull/2949), [#2891](https://github.com/mvschwarz/openrig/pull/2891), [#2888](https://github.com/mvschwarz/openrig/pull/2888), [#2883](https://github.com/mvschwarz/openrig/pull/2883), [#2850](https://github.com/mvschwarz/openrig/pull/2850))
+  reports PATH gaps with shell hints; daemon credentials stay out of a tmux
+  server's environment from its next start (a server already running keeps its
+  old environment until it restarts). ([#2914](https://github.com/mvschwarz/openrig/pull/2914), [#2969](https://github.com/mvschwarz/openrig/pull/2969), [#2955](https://github.com/mvschwarz/openrig/pull/2955), [#2949](https://github.com/mvschwarz/openrig/pull/2949), [#2891](https://github.com/mvschwarz/openrig/pull/2891), [#2888](https://github.com/mvschwarz/openrig/pull/2888), [#2883](https://github.com/mvschwarz/openrig/pull/2883), [#2850](https://github.com/mvschwarz/openrig/pull/2850))
 - **Pi and OMP:** typed edits submit in order on the affected Node releases
   (22.21.x to 22.22.0, 24.9.0 to 24.11.1, 25.0.0 to 25.1.0) instead of appending an
   insertion at the end. ([#2847](https://github.com/mvschwarz/openrig/pull/2847))
@@ -155,11 +174,35 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 - **Custom blocker IDs** explain the wait, but their progress gives no event
   wake; the timer remains. ([#2983](https://github.com/mvschwarz/openrig/pull/2983))
 - **Delivery evidence** records what was known, not that the agent read the
-  message; where the input ended up can read unknown. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
-- **Runner permission answers** are checked with test runners; a real runner
-  waiting on a person's answer hasn't been run end to end. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
+  message; where the input ended up can read unknown. Events are best effort, so
+  a missing event isn't proof nothing was sent. ([#2937](https://github.com/mvschwarz/openrig/pull/2937), [#2943](https://github.com/mvschwarz/openrig/pull/2943))
+- **Runner permission answers** were run end to end with a real receiving
+  agent and the example runner, whose requesting agent was a stand-in; a
+  model-driven runner waiting on a person's answer hasn't been run. ([#2934](https://github.com/mvschwarz/openrig/pull/2934))
 - **herdr-app views** are one-shot; following isn't claimed. **Pull relay**
   needs a connector that implements pull. ([#2744](https://github.com/mvschwarz/openrig/pull/2744), [#2844](https://github.com/mvschwarz/openrig/pull/2844))
+- **A receiving agent you choose** (`agents.operator_session`) that runs in an
+  explicit or auto permission mode gets no OpenRig allowance for
+  `rig host approve` or `rig host deny`, so Claude's review can refuse them. A
+  kernel receiver in auto mode is included. The default kernel with the default
+  policy passed at its tested scope.
+- **A receiver that was stopped and then started** may not act on an answer that
+  waited for it. In the tested case where it needed to ask you something back,
+  the question appeared in its own conversation, not in the Feed or Steering.
+- **Delivery isn't fixed in general:** a footer row OpenRig doesn't recognize can
+  still hold a delivery ([#2925](https://github.com/mvschwarz/openrig/issues/2925)), and a held message's full envelope can stay held;
+  clearing a draft doesn't deliver it ([#2515](https://github.com/mvschwarz/openrig/pull/2515)).
+- **Not run for this release** (not run, not passed): the two-seat Codex journey
+  with `AGENTS.md` restore; Codex account-home, upgrade and continuity checks;
+  the OpenShell worker's second report; Pi model switches on real providers; ACP
+  in a desktop app; Slack directory paging; some Slack setup cases (channel and
+  thread precedence, a stopped receiver's delayed pickup, an inherited inbound
+  default, a plain yes with no receiver); native checks of [#2786](https://github.com/mvschwarz/openrig/pull/2786), [#2799](https://github.com/mvschwarz/openrig/pull/2799), [#2807](https://github.com/mvschwarz/openrig/pull/2807)
+  and [#2813](https://github.com/mvschwarz/openrig/pull/2813), with [#2947](https://github.com/mvschwarz/openrig/pull/2947) partly; a button-and-words answer, a non-pairing ask
+  with an explicit owner, Steering's Approve page, and these answer and setup
+  checks on a default model (the tested runs used smaller models);
+  `--wait-for-kernel` ([#2888](https://github.com/mvschwarz/openrig/pull/2888)), the installed effect of [#2800](https://github.com/mvschwarz/openrig/pull/2800), and [#2720](https://github.com/mvschwarz/openrig/issues/2720) beyond one
+  platform.
 - **From 0.7.11:** its known limits below still apply, except Codex hook setup
   with smol-toml 1.9.x ([#2720](https://github.com/mvschwarz/openrig/issues/2720)), fixed by [#2804](https://github.com/mvschwarz/openrig/pull/2804). 0.7.12 changes openrig-core
   again, so the Codex hook note there applies to this upgrade too. They weren't
