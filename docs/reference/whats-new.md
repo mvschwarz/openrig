@@ -33,7 +33,9 @@ version. Without a running daemon, read the packaged
 - **A runner's permission answer gets a note back to the person:** who decides
   it and in what state, or that it's kept and the tool hasn't run. A runner
   already waiting sees the decision at once. If a person asks what happened to
-  an answer, read that note; don't ask them to answer again.
+  an answer, read that note before asking them to answer again. If it says the
+  answer couldn't be passed on, follow its retry instruction or use the
+  `rig seat decide-permission` command it names.
   ([#3001](https://github.com/mvschwarz/openrig/pull/3001))
 - **If you receive a person's answer**, the text you read now says what an answer
   typed at this machine's terminal or TUI means (recorded as `human@host`): act
@@ -73,14 +75,22 @@ version. Without a running daemon, read the packaged
   ([#3023](https://github.com/mvschwarz/openrig/pull/3023))
 - **Passive SSH host status reads `unknown`** now that routine listings don't
   probe SSH hosts. Use `rig host doctor` to check one. ([#2979](https://github.com/mvschwarz/openrig/pull/2979))
-- **Guidance files** keep one copy of each managed block. A file with a damaged
-  marker is named (`guidance_block_markers_damaged`) and left as it is; repair
-  the marker by hand. ([#3020](https://github.com/mvschwarz/openrig/pull/3020))
+- **Guidance files:** cleanup removes redundant recognized copies of a managed
+  block and keeps distinct edited copies. A saved write record lets OpenRig keep
+  a person's edits; on a fresh start, a differing block with no write record is
+  refreshed and named, while an exact resume or restore keeps it. A recognized
+  block whose marker pair is incomplete is named
+  (`guidance_block_markers_damaged`) and left as it is; repair the marker by
+  hand. If both marker words were changed, it can read as no block. ([#3020](https://github.com/mvschwarz/openrig/pull/3020))
 - **Delivery reads truer:** Claude's auto-update failure footers (one clipped form
-  too) no longer hold a send, an unrecognised wake result reads unknown, and a
-  parked item's one-time wake is kept until it's delivered. ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038))
-- **The TUI** shows a seat the daemon reads as unknown as unknown, not idle, and
-  Feed times use `ui.timezone`. ([#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022))
+  too) no longer hold a send, an unrecognised wake result reads unknown, and an
+  ordinary one-time park wake is kept and retried while its park is
+  current and the failed attempt typed nothing (an unknown effect needs checking;
+  repeating waits and usage-limit expiry keep their own lifecycle). ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038))
+- **The TUI:** for a quiet seat the daemon explicitly reads as unknown, the
+  list, explorer and agent-detail status rows show unknown. Screen motion still
+  shows active, a daemon that serves no activity keeps the screen fallback, and
+  the topology graph is unchanged. Feed times use `ui.timezone`. ([#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022))
 - **Experimental, at the person's own risk:** `rig network connect <seat> --hub
   <url> --as <participant> --token-file <path>` joins one local seat to a
   participant on a hub they already have (`status`, `disconnect`). Plain http

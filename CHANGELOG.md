@@ -37,7 +37,9 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 - A runner's permission answer gets a note back to you: who decides it and in
   what state, or that it's kept and the tool hasn't run. A runner waiting on
-  the decision wakes when it's made. Read that note before answering again.
+  the decision wakes when it's made. Read that note before answering again. If
+  it says your answer couldn't be passed on, follow its retry instruction or use
+  the `rig seat decide-permission` command it names.
   ([#3001](https://github.com/mvschwarz/openrig/pull/3001))
 - The answer a receiving agent reads now says what an answer typed at this
   machine's terminal or TUI means, to act on a clear answer with the request's
@@ -73,7 +75,11 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   process and its tmux session, and `rig seat stop`'s help matches. A fresh
   launch after `rig unclaim` ended the server's last session reopens the server.
   ([#2996](https://github.com/mvschwarz/openrig/pull/2996), [#3006](https://github.com/mvschwarz/openrig/pull/3006), [#3014](https://github.com/mvschwarz/openrig/pull/3014), [#3009](https://github.com/mvschwarz/openrig/pull/3009))
-- Pane claims left by removed or archived owners are reclaimed, and when a seat
+- A handover whose successor was launched into the seat's own tmux session
+  can reclaim a claim left by a removed owner, or by an archived owner whose
+  latest session for that node is superseded, detached or exited; a live owner
+  still refuses.
+  When a seat
   with no declared route can't be woken, the finding goes to the item's creator,
   skipping a creator that is a terminal seat. ([#2869](https://github.com/mvschwarz/openrig/pull/2869), [#2987](https://github.com/mvschwarz/openrig/pull/2987), [#2995](https://github.com/mvschwarz/openrig/pull/2995))
 
@@ -81,25 +87,33 @@ OpenRig. Two repairs aren't in this release: see Known limits.
 
 - **Delivery:** Claude's auto-update failure footers, including one clipped form,
   no longer hold a send to an idle Claude seat; an unrecognised wake result reads unknown, not
-  delivered; a parked item's one-time wake is kept until it's delivered, across
-  failed attempts; a `custody-verified:` note whose target is followed by a
+  delivered; an ordinary one-time park wake is kept and retried
+  while its park is current and the failed attempt typed nothing into the seat
+  (an attempt whose effect is unknown needs checking, and repeating waits and
+  usage-limit expiry keep their own lifecycle); a `custody-verified:` note whose target is followed by a
   period, comma or other closing punctuation now verifies it; the Pi runner pane keeps the operator's
   draft out of the stream. ([#2948](https://github.com/mvschwarz/openrig/pull/2948), [#3016](https://github.com/mvschwarz/openrig/pull/3016), [#3011](https://github.com/mvschwarz/openrig/pull/3011), [#3038](https://github.com/mvschwarz/openrig/pull/3038), [#3004](https://github.com/mvschwarz/openrig/pull/3004), [#2842](https://github.com/mvschwarz/openrig/pull/2842))
 - **Codex and Claude:** completed Codex 0.167 turns read idle, and unsupported
   versions stay unknown; a usage-limit banner with a curly apostrophe is
   detected; refocus bounds Codex context and records what it left out; an
   unreadable Claude status-line cache gets its own reason. ([#2954](https://github.com/mvschwarz/openrig/pull/2954), [#2879](https://github.com/mvschwarz/openrig/pull/2879), [#2951](https://github.com/mvschwarz/openrig/pull/2951), [#2880](https://github.com/mvschwarz/openrig/pull/2880))
-- **TUI and CLI:** instance rows are grouped by rig; a seat the daemon reads as
-  unknown shows unknown, not idle; Feed times use the configured time zone; the
+- **TUI and CLI:** instance rows are grouped by rig; for a quiet seat the
+  daemon explicitly reads as unknown, the list, explorer and agent-detail status
+  rows show unknown, not idle (screen motion still shows active, a daemon that
+  serves no activity keeps the screen fallback, and the topology graph is
+  unchanged); Feed times use the configured time zone; the
   CLI doesn't call a daemon stopped when the shell can't see its process (a
   sandbox), and says not to start another; ssh options are separated from the
   target, and the generated attach command quotes the session name. ([#2857](https://github.com/mvschwarz/openrig/pull/2857), [#3012](https://github.com/mvschwarz/openrig/pull/3012), [#3022](https://github.com/mvschwarz/openrig/pull/3022), [#2913](https://github.com/mvschwarz/openrig/pull/2913), [#2973](https://github.com/mvschwarz/openrig/pull/2973), [#2971](https://github.com/mvschwarz/openrig/pull/2971))
 - **Scope and workflows:** qualified slice reads and proof discovery are scoped
   by mission; workflow spec reads are recorded across restarts; the spec library skips
   synthetic alias entries. ([#2960](https://github.com/mvschwarz/openrig/pull/2960), [#2986](https://github.com/mvschwarz/openrig/pull/2986), [#2999](https://github.com/mvschwarz/openrig/pull/2999))
-- **Guidance and plugins:** a repository's `AGENTS.md` or `CLAUDE.md` keeps one
-  copy of each OpenRig-managed block, even when an editor rewrapped a marker,
-  and a person's edited copy is never overwritten; a bundled plugin's files,
+- **Guidance and plugins:** guidance cleanup in a repository's `AGENTS.md` or
+  `CLAUDE.md` removes redundant recognized copies of an OpenRig-managed block,
+  including after an editor rewrapped a marker, and keeps distinct edited
+  copies. A saved write record lets OpenRig identify and keep your edits; on a
+  fresh start, a differing block with no write record is refreshed to OpenRig's
+  text and named, while an exact resume or restore keeps it; a bundled plugin's files,
   including a binary icon, are copied byte for byte; the plugins carry https
   repository URLs and a PNG icon for Claude's plugin directory, and the Codex
   manifests link the privacy policy and terms. ([#3020](https://github.com/mvschwarz/openrig/pull/3020), [#3025](https://github.com/mvschwarz/openrig/pull/3025), [#3021](https://github.com/mvschwarz/openrig/pull/3021), [#3064](https://github.com/mvschwarz/openrig/pull/3064))
@@ -137,8 +151,8 @@ OpenRig. Two repairs aren't in this release: see Known limits.
   handshake can make OpenSSH block real logins for a while. Hosts that used to
   read reachable now read unknown; `rig host doctor` still checks actively.
   ([#2979](https://github.com/mvschwarz/openrig/pull/2979))
-- **`rig package install` leaves a guidance file with a damaged managed-block
-  marker alone,** lists it under "Left as it is:" and installs the rest, instead
+- **`rig package install` leaves a guidance file alone when a recognized
+  managed block has no complete marker pair,** lists it under "Left as it is:" and installs the rest, instead
   of appending a second copy. Launch and restore name such a file
   (`guidance_block_markers_damaged`). ([#3020](https://github.com/mvschwarz/openrig/pull/3020))
 
