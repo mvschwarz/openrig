@@ -14,7 +14,7 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, claimedOriginFor, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, claimedOriginFor, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -80,6 +80,38 @@ export function crossHostProvenanceTags(existing: string[] | undefined): string[
   const fromHost = `from-host:${osHostname()}`;
   const additions = [CROSS_HOST_TAG, fromHost].filter((t) => !base.includes(t));
   return [...base, ...additions];
+}
+
+/**
+ * #3018 — the identity a FORWARDING daemon relays to the host that keeps the record. The forwarded body
+ * carries only a `sourceSession`, so the receiving daemon recorded `claimed:v1` with no origin; the CLI's
+ * `rig queue update --host` calls that host directly and already carries the session-with-origin form.
+ * The actor is re-stamped with THIS daemon's host suffix (the same value the forwarded body's
+ * sourceSession carries), and the relay/provenance markers keep the receiving hop from presenting a
+ * relayed actor as transport-verified (resolveRecordedProvenance records relay:v1). `Via` marks the
+ * request as another hop, so a loopback receiver doesn't read it as a direct local client and drop the
+ * claim. A request with no transport identity stays header-less: a body claim is never laundered.
+ */
+export function relayedSenderHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
+  const sender = transportSenderSession(c as Context);
+  const selfId = getSelfHostId();
+  if (!sender || !selfId) return undefined;
+  if (c.req.header(ORIGIN_UNKNOWN_HEADER) === "true") {
+    return {
+      [SENDER_IDENTITY_HEADER]: sender,
+      [ORIGIN_UNKNOWN_HEADER]: "true",
+      [RELAY_HEADER]: selfId,
+      via: selfId,
+      [IDENTITY_PROVENANCE_HEADER]: "origin-unknown:v1",
+    };
+  }
+  const relayedHere = !!c.req.header(RELAY_HEADER)?.trim();
+  return {
+    [SENDER_IDENTITY_HEADER]: stampSelfHostSuffix(sender),
+    [RELAY_HEADER]: selfId,
+    via: selfId,
+    [IDENTITY_PROVENANCE_HEADER]: relayedHere ? "claimed:v1" : "transport:v1",
+  };
 }
 
 /** Human requests: canonical human destination or human blocker, excluding
@@ -377,6 +409,8 @@ export function queueRoutes(): Hono {
     hostId: string,
     path: string,
     forwardBody: Record<string, unknown>,
+    /** #3018: relay this daemon's resolved sender to the host that keeps the record (create only). */
+    relayIdentity = false,
   ): Promise<
     | { ok: true; payload: unknown; status: number }
     | { ok: false; response: Response }
@@ -412,12 +446,16 @@ export function queueRoutes(): Hono {
         "unsupported-transport",
       );
     }
+    const relay = relayIdentity ? relayedSenderHeaders(c) : undefined;
     const res = await remoteJsonRequest(resolved.host, path, {
       method: "POST",
       body: forwardBody,
       timeoutMs: QUEUE_FORWARD_TIMEOUT_MS,
       fetchImpl,
-      headers: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : undefined,
+      headers: {
+        ...(c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : {}),
+        ...(relay ?? {}),
+      },
     });
     if (res.ok) {
       // The origin daemon's structured response, verbatim — its row is the
@@ -692,7 +730,9 @@ export function queueRoutes(): Hono {
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
         tags: crossHostProvenanceTags(body.tags),
       };
-      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
+      // #3018: relay this daemon's resolved sender (relayedSenderHeaders), so the host that keeps the
+      // record writes the origin beside its identity instead of inferring a bare body claim.
+      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody, true);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;

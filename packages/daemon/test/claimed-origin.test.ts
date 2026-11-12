@@ -2,7 +2,7 @@
 // CLAIMED beside the receiving hop's transport identity and any loopback-established principal. Missing or malformed
 // reads as unknown and never refuses a write; the claim is evidence only, never identity, actor, principal, or permission.
 import { afterEach, describe, expect, it } from "vitest";
-import type { Context } from "hono";
+import { Hono, type Context } from "hono";
 import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
 import { createDb } from "../src/db/connection.js";
@@ -16,6 +16,8 @@ import { StreamStore } from "../src/domain/stream-store.js";
 import { InboxHandler } from "../src/domain/inbox-handler.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import { MAX_CLAIMED_ORIGIN_LENGTH, claimedOriginFor, parseClaimedOrigin, resolveRecordedIdentity } from "../src/routes/require-sender-identity.js";
+import { queueRoutes } from "../src/routes/queue.js";
+import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { createTestApp } from "./helpers/test-app.js";
 
 const ALICE = JSON.stringify({ source: "file", id: "alice" });
@@ -239,4 +241,54 @@ describe("#3018 a remote write records the claim on the row it already writes", 
     expect(db.prepare("SELECT claimed_origin AS origin FROM queue_transitions_archive").get()).toEqual({ origin: "host-remote1" });
     expect(log.listForQitem("done1")[0]).toMatchObject({ claimedOrigin: "host-remote1" });
   });
+});
+
+describe("#3018 a forwarded create relays the sender, so the host that keeps the record stores the origin", () => {
+  it("carries the stamped sender, relay and provenance, and records relay:v1 beside the origin", async () => {
+    const row = (db: ReturnType<typeof database>, qitemId: string) =>
+      db.prepare("SELECT actor_session AS actor, identity_provenance AS p, identity_principal AS who, claimed_origin AS origin FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id").all(qitemId) as Array<{ actor: string; p: string; who: string | null; origin: string | null }>;
+
+    // The host that keeps the record: a plain queue app, as the receiving daemon serves it.
+    const receiverDb = database();
+    const receiverRepo = new QueueRepository(receiverDb, new EventBus(receiverDb), { validateRig: () => true });
+    const { app: receiver } = createTestApp(receiverDb, { appDeps: { queueRepo: receiverRepo } });
+
+    // The forwarding daemon: its own registry entry for the receiver, its fetch replaying into that app.
+    const forwarderDb = database();
+    const forwarderRepo = new QueueRepository(forwarderDb, new EventBus(forwarderDb), { validateRig: () => true });
+    const forwarder = new Hono();
+    forwarder.use("*", async (c, next) => {
+      const set = c.set.bind(c) as (k: string, v: unknown) => void;
+      set("queueRepo", forwarderRepo);
+      set("eventBus", new EventBus(forwarderDb));
+      set("hostRegistryLoader", () => ({ ok: true, registry: { hosts: [{ id: "vps-b", transport: "http", url: "http://vps-b:7433" }] } }));
+      set("remoteFetchImpl", (async (url: string, init: RequestInit) => {
+        // A real deployment's two daemons have their own ids; this in-process pair shares one global, so
+        // switch it to the receiver's before its handlers read their own id (a foreign suffix is not stripped).
+        setSelfHostId("host-receiver");
+        return receiver.request(new URL(url).pathname, init);
+      }) as typeof fetch);
+      await next();
+    });
+    forwarder.route("/api/queue", queueRoutes());
+
+    setSelfHostId("host-forwarder");
+    try {
+      const res = await forwarder.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig-a" },
+        body: JSON.stringify({ qitemId: "forwarded-1", destinationSession: "dev@rig-b", body: "do it", nudge: false, hostId: "vps-b" }),
+      });
+      expect(res.status).toBe(201);
+    } finally {
+      setSelfHostId(null);
+    }
+
+    // Before the relay the receiver had only the forwarded body's sourceSession: claimed:v1, no origin.
+    expect(row(receiverDb, "forwarded-1")).toEqual([
+      { actor: "orch@rig-a@host-forwarder", p: "relay:v1", who: null, origin: "host-forwarder" },
+    ]);
+    // Origin owns the record: nothing was written on the forwarding daemon.
+    expect(forwarderRepo.getById("forwarded-1")).toBeNull();
+  }, 30_000);
 });
