@@ -4,6 +4,7 @@ import type { InstallPlanEntry } from "./install-planner.js";
 import type { PolicyResult } from "./install-policy.js";
 import type { RefinedInstallPlan } from "./conflict-detector.js";
 import { InstallRepository, type JournalEntry } from "./install-repository.js";
+import { damagedManagedBlockNote, findManagedBlocks, mergeManagedBlockText } from "./managed-blocks.js";
 
 export interface EngineFsOps {
   readFile: (filePath: string) => string;
@@ -178,34 +179,17 @@ export class InstallEngine {
 
     if (this.fs.exists(entry.targetPath)) {
       const existing = this.fs.readFile(entry.targetPath);
-      const startMarker = BLOCK_START(packageName);
-      const endMarker = BLOCK_END(packageName);
-      const legacyStart = `<!-- BEGIN RIGGED MANAGED BLOCK: ${packageName} -->`;
-      const legacyEnd = `<!-- END RIGGED MANAGED BLOCK: ${packageName} -->`;
-      // Prefer the OpenRig form; fall back to legacy markers from
-      // prior installs so re-applying a guidance package over a
-      // pre-rename file replaces the old block instead of appending a
-      // duplicate.
-      let startIdx = existing.indexOf(startMarker);
-      let endIdx = existing.indexOf(endMarker, startIdx + startMarker.length);
-      let matchedEndLength = endMarker.length;
-      if (startIdx === -1 || endIdx === -1) {
-        const legacyStartIdx = existing.indexOf(legacyStart);
-        const legacyEndIdx = existing.indexOf(legacyEnd, legacyStartIdx + legacyStart.length);
-        if (legacyStartIdx !== -1 && legacyEndIdx !== -1) {
-          startIdx = legacyStartIdx;
-          endIdx = legacyEndIdx;
-          matchedEndLength = legacyEnd.length;
-        }
-      }
-
-      if (startIdx !== -1 && endIdx !== -1) {
-        // Update existing block (rewrites legacy markers to OpenRig form).
-        const updated = existing.slice(0, startIdx) + block + existing.slice(endIdx + matchedEndLength);
-        this.fs.writeFile(entry.targetPath, updated);
-      } else {
+      const found = findManagedBlocks(existing, packageName);
+      if (found.blocks.length === 0 && found.unpaired === 0) {
         // Insert new block at end
         this.fs.writeFile(entry.targetPath, existing + "\n\n" + block + "\n");
+      } else {
+        // Update the block in place, in the OpenRig form (legacy markers too), and take out any later copy. A marker
+        // without its pair stops the install: another copy beside a block that can't be read is the duplicate this
+        // avoids, and the error names the file so the marker can be fixed.
+        const updated = mergeManagedBlockText(existing, packageName, block);
+        if (updated === null) throw new Error(damagedManagedBlockNote(entry.targetPath, packageName));
+        this.fs.writeFile(entry.targetPath, updated);
       }
     } else {
       // New file

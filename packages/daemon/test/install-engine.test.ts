@@ -234,6 +234,30 @@ describe("InstallEngine", () => {
     expect(fs.readFileSync(targetPath, "utf8")).toBe(`${prefix}<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nUpdated guidance.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer\n`);
   });
 
+  it("keeps one copy of its block: the first is updated in place and the repeats go", () => {
+    const pkg = seedPackage();
+    const sourcePath = writeSource("guidance/AGENTS.md", "Updated guidance.");
+    const targetPath = path.join(repoRoot, "AGENTS.md");
+    const old = "<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nOld content.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->";
+    fs.writeFileSync(targetPath, `# Header\n\n${old}\n\n${old}\n# Footer\n`);
+    const entry = makeEntry({ exportType: "guidance", classification: "managed_merge", targetPath, sourcePath });
+    new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot);
+    expect(fs.readFileSync(targetPath, "utf8")).toBe(
+      "# Header\n\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nUpdated guidance.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer\n");
+  });
+
+  it("adds no copy beside a block whose END was lost: the install stops, names the file, and leaves it", () => {
+    const pkg = seedPackage();
+    const sourcePath = writeSource("guidance/AGENTS.md", "Updated guidance.");
+    const targetPath = path.join(repoRoot, "AGENTS.md");
+    const text = "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nOld content.\n# Footer\n";
+    fs.writeFileSync(targetPath, text);
+    const entry = makeEntry({ exportType: "guidance", classification: "managed_merge", targetPath, sourcePath });
+    expect(() => new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot))
+      .toThrow(/^guidance_block_markers_damaged: .*AGENTS\.md: test-pkg has a BEGIN or END marker without its pair/);
+    expect(fs.readFileSync(targetPath, "utf8")).toBe(text);
+  });
+
   // Test 7: Backup created before overwrite
   it("backup created before overwrite", () => {
     const pkg = seedPackage();
