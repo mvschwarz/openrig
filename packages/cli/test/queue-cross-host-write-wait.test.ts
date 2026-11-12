@@ -18,7 +18,8 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 });
 
 type Reply = { status: number; data: unknown } | Error;
-type Request = { path: string; options?: { timeoutMs?: number } };
+type RequestOptions = { timeoutMs?: number; headers?: Record<string, string> };
+type Request = { path: string; options?: RequestOptions };
 const CREATED: Reply = { status: 201, data: { qitemId: "qitem-20261024070000-aaaa", destinationSession: "dev@rig-b", state: "pending" } };
 const HANDED_OFF: Reply = { status: 200, data: { closed: { qitemId: "qitem-src-1", state: "handed-off" }, created: { qitemId: "qitem-20261024070000-bbbb", state: "pending" } } };
 
@@ -30,7 +31,7 @@ function makeDeps(replies: Reply[]): { deps: QueueDeps; requests: Request[] } {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
         get: vi.fn(async () => ({ status: 200, data: {} })),
-        post: vi.fn(async (p: string, _body: unknown, options?: { timeoutMs?: number }) => {
+        post: vi.fn(async (p: string, _body: unknown, options?: RequestOptions) => {
           requests.push({ path: p, options });
           const reply = replies.shift() ?? { status: 500, data: { error: "unrouted" } };
           if (reply instanceof Error) throw reply;
@@ -81,13 +82,30 @@ describe("cross-host queue writes wait for the daemon's answer", () => {
     it(`${c.verb} to another host waits longer than the daemon's 10 s forward deadline`, async () => {
       const requests = await run(c.argv("dev@rig-b@vps-b"), [c.reply]);
       expect(requests).toHaveLength(1);
-      expect(requests[0]!.options?.timeoutMs).toBe(15_000);
+      const options = requests[0]!.options;
+      expect(options?.timeoutMs).toBe(15_000);
+      if (c.verb === "create") {
+        expect(options).toEqual({ timeoutMs: 15_000 });
+      } else {
+        expect(options).toEqual({
+          timeoutMs: 15_000,
+          headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+        });
+      }
     });
 
     it(`${c.verb} on this daemon keeps the client's default wait`, async () => {
       const requests = await run(c.argv("dev@rig-b"), [c.reply]);
       expect(requests).toHaveLength(1);
-      expect(requests[0]!.options).toBeUndefined();
+      const options = requests[0]!.options;
+      expect(options?.timeoutMs).toBeUndefined();
+      if (c.verb === "create") {
+        expect(options).toBeUndefined();
+      } else {
+        expect(options).toEqual({
+          headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+        });
+      }
     });
   }
 
