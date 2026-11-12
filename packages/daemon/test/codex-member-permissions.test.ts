@@ -82,6 +82,51 @@ describe("the typed Codex envelope", () => {
   });
 });
 
+describe("a seat's explicit filesystem policy", () => {
+  const policy = { approval: "never", filesystem: {
+    ":minimal": "read", ":workspace_roots": "read", "/lease/a": "write", "/lease/a/private": "deny",
+  }, network_access: false };
+
+  it("accepts native read, write and deny entries without a legacy sandbox selection", () => {
+    expect(validateCodexMemberPermissions(policy)).toEqual(policy);
+    expect(validateCodexMemberPermissions({ approval: "on-request", filesystem: { ":minimal": "read" } }))
+      .toEqual({ approval: "on-request", filesystem: { ":minimal": "read" }, network_access: false });
+  });
+
+  it("keeps two seats' filesystem choices separate and clears only the selected seat", async () => {
+    const f = fixture();
+    const other = { approval: "on-request", filesystem: { ":minimal": "read", "/lease/b": "write" }, network_access: false };
+    expect(await f.service.setPermissions(set(policy))).toMatchObject({ ok: true, to: policy });
+    expect(await f.service.setPermissions({ ...set(other), seatRef: "dev-b@codex-team" })).toMatchObject({ ok: true, to: other });
+    const store = new NativePermissionStore(f.db);
+    expect(store.launchOverride(f.a.id, "codex").codexPermissions).toEqual(policy);
+    expect(store.launchOverride(f.b.id, "codex").codexPermissions).toEqual(other);
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", mode: "inherit", actor: "operator@codex-team", reason: "Clear only A" }))
+      .toMatchObject({ ok: true });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toBeUndefined();
+    expect(store.launchOverride(f.b.id, "codex").codexPermissions).toEqual(other);
+  });
+
+  it.each([
+    { ...policy, sandbox: "workspace-write" },
+    { ...policy, writable_roots: ["/another/root"] },
+    { ...policy, exclude_slash_tmp: true },
+    { ...policy, filesystem: {} },
+    { ...policy, filesystem: { "relative/path": "deny" } },
+    { ...policy, filesystem: { ":unknown": "write" } },
+    { ...policy, filesystem: { "/a\nb": "deny" } },
+    { ...policy, filesystem: { "/private": "none" } },
+    { ...policy, filesystem: { "/private": true } },
+    { ...policy, network_access: "yes" },
+  ])("rejects incomplete or mixed policy without replacing a saved choice: %j", async (invalid) => {
+    expect(() => validateCodexMemberPermissions(invalid)).toThrow();
+    const f = fixture();
+    expect(await f.service.setPermissions(set(reader))).toMatchObject({ ok: true });
+    expect(await f.service.setPermissions(set(invalid))).toMatchObject({ ok: false });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toEqual(reader);
+  });
+});
+
 describe("a Codex seat's current envelope (offline, no native enforcement claim)", () => {
   it("gives two seats in one folder their own envelopes, as the seat's explicit choice", async () => {
     const f = fixture();

@@ -9,7 +9,7 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 /** A Codex seat's own sandbox and approval choice, emitted as explicit flags on its managed launches and resumes.
  *  Full access is not an envelope: it stays the full_bypass mode. Normalized, a workspace-write envelope states every
  *  field the emitter sets, so nothing falls back to a profile's value for them. */
-export interface CodexMemberPermissions {
+export interface CodexSandboxPermissions {
   sandbox: "workspace-write" | "read-only";
   approval: "never" | "on-request" | "untrusted";
   network_access?: boolean;
@@ -18,20 +18,53 @@ export interface CodexMemberPermissions {
   exclude_slash_tmp?: boolean;
 }
 
+export type CodexFilesystemAccess = "read" | "write" | "deny";
+
+/** An explicit native filesystem policy, mutually exclusive with the legacy sandbox fields. */
+export interface CodexFilesystemPermissions {
+  filesystem: Record<string, CodexFilesystemAccess>;
+  approval: CodexSandboxPermissions["approval"];
+  network_access?: boolean;
+}
+
+export type CodexMemberPermissions = CodexSandboxPermissions | CodexFilesystemPermissions;
+
 const KEYS = ["sandbox", "approval", "network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
 const WORKSPACE_ONLY = ["network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
+const FILESYSTEM_KEYS = ["filesystem", "approval", "network_access"];
+const FILESYSTEM_SPECIAL_PATHS = new Set([":root", ":minimal", ":workspace_roots", ":tmpdir", ":slash_tmp"]);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
 export function validateCodexMemberPermissions(value: unknown, label = "codex_permissions"): CodexMemberPermissions {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}: expected a mapping with sandbox and approval`);
-  const raw = value as Record<string, unknown>;
-  for (const key of Object.keys(raw)) if (!KEYS.includes(key)) throw new Error(`${label}.${key}: unsupported key; supported keys are ${KEYS.join(", ")}`);
-  const sandbox = raw.sandbox;
+  if (!isRecord(value)) throw new Error(`${label}: expected a mapping with sandbox or filesystem, and approval`);
+  const raw = value;
+  const keys = "filesystem" in raw ? FILESYSTEM_KEYS : KEYS;
+  for (const key of Object.keys(raw)) if (!keys.includes(key)) throw new Error(`${label}.${key}: unsupported key; supported keys are ${keys.join(", ")}`);
   const approval = raw.approval;
-  if (sandbox === "danger-full-access") throw new Error(`${label}.sandbox: full access is the full_bypass mode, not an envelope; select it with --mode full_bypass`);
-  if (sandbox !== "workspace-write" && sandbox !== "read-only") throw new Error(`${label}.sandbox: expected workspace-write or read-only`);
   if (approval !== "never" && approval !== "on-request" && approval !== "untrusted") {
     throw new Error(`${label}.approval: expected never, on-request or untrusted`);
   }
+  if ("filesystem" in raw) {
+    if (!isRecord(raw.filesystem) || Object.keys(raw.filesystem).length === 0) {
+      throw new Error(`${label}.filesystem: expected a nonempty mapping of paths to read, write or deny`);
+    }
+    const filesystem: CodexFilesystemPermissions["filesystem"] = {};
+    for (const [path, access] of Object.entries(raw.filesystem)) {
+      if (/[\0\r\n]/.test(path) || !(isAbsolute(path) || path.startsWith("~/") || FILESYSTEM_SPECIAL_PATHS.has(path))) {
+        throw new Error(`${label}.filesystem: expected an absolute path, ~/path or a supported native special path; got ${JSON.stringify(path)}`);
+      }
+      if (access !== "read" && access !== "write" && access !== "deny") {
+        throw new Error(`${label}.filesystem[${JSON.stringify(path)}]: expected read, write or deny`);
+      }
+      filesystem[path] = access;
+    }
+    if (raw.network_access !== undefined && typeof raw.network_access !== "boolean") throw new Error(`${label}.network_access: expected true or false`);
+    return { approval, filesystem, network_access: raw.network_access === true };
+  }
+  const sandbox = raw.sandbox;
+  if (sandbox === "danger-full-access") throw new Error(`${label}.sandbox: full access is the full_bypass mode, not an envelope; select it with --mode full_bypass`);
+  if (sandbox !== "workspace-write" && sandbox !== "read-only") throw new Error(`${label}.sandbox: expected workspace-write or read-only`);
   if (sandbox === "read-only") {
     const extra = WORKSPACE_ONLY.find(key => raw[key] !== undefined);
     if (extra) throw new Error(`${label}.${extra}: only valid with sandbox workspace-write`);
@@ -42,20 +75,22 @@ export function validateCodexMemberPermissions(value: unknown, label = "codex_pe
   }
   const roots = raw.writable_roots ?? [];
   if (!Array.isArray(roots)) throw new Error(`${label}.writable_roots: expected a list of absolute paths`);
-  roots.forEach((root, index) => {
+  const writableRoots: string[] = [];
+  roots.forEach((root: unknown, index) => {
     if (typeof root !== "string" || !root.trim() || !isAbsolute(root) || /[\0\r\n]/.test(root)) {
       throw new Error(`${label}.writable_roots[${index}]: expected an absolute path without newlines`);
     }
+    writableRoots.push(root);
   });
   return {
     sandbox: "workspace-write", approval,
-    network_access: raw.network_access === true, writable_roots: [...roots] as string[],
+    network_access: raw.network_access === true, writable_roots: writableRoots,
     exclude_tmpdir_env_var: raw.exclude_tmpdir_env_var === true, exclude_slash_tmp: raw.exclude_slash_tmp === true,
   };
 }
 
 /** The native policy codexEnvelopeArgs emits for this choice. */
-export function codexMemberEnvelope(permissions: CodexMemberPermissions): CodexPermissionEnvelope {
+export function codexMemberEnvelope(permissions: CodexSandboxPermissions): CodexPermissionEnvelope {
   if (permissions.sandbox === "read-only") return { approvalPolicy: permissions.approval, sandboxPolicy: { type: "read-only" } };
   return { approvalPolicy: permissions.approval, sandboxPolicy: { type: "workspace-write",
     writable_roots: permissions.writable_roots ?? [], network_access: permissions.network_access === true,
