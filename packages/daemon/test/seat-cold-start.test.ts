@@ -362,6 +362,32 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  it("leaves an opted-in single-seat rig dormant without a live peer", async () => {
+    const f = fixture();
+    f.db.prepare("DELETE FROM nodes WHERE id='n2'").run();
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    expect(f.ledger()).toBeUndefined();
+    f.db.close();
+  });
+
+  it("opens the next attempt exactly at the named minimum interval", async () => {
+    const f = fixture();
+    let now = Date.now();
+    f.deps.now = () => new Date(now);
+    f.starter.notify("dev.impl@fleet", {});
+    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    now += COLD_START_MIN_INTERVAL_MS - 1;
+    f.starter.notify("dev.impl@fleet", {});
+    await flush();
+    expect(f.launches).toHaveLength(1);
+    now += 1;
+    f.starter.notify("dev.impl@fleet", {});
+    await vi.waitFor(() => expect(f.launches).toHaveLength(2));
+    f.db.close();
+  });
+
   it("finds a live sixth peer after five stale running peers", async () => {
     const f = fixture();
     for (let i = 3; i <= 7; i++) {

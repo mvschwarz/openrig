@@ -822,19 +822,27 @@ The daemon cold-starts a seat only when all of these hold:
     separate feature) stops a seat as operator `daemon:seat-reaper` with reason
     `idle_reap` precisely so new work can wake it again;
   - a seat that was never stopped intentionally (a crash, a lost session) is dormant;
-  - a rolled-back launch (`superseded` row, a failed start) is retryable, under the
-    same backoff as any other attempt;
+  - a rolled-back launch (`superseded` row, a failed start) is retryable only if no
+    intentional stop was recorded afterward, under the same backoff as any other attempt;
 - the seat's tmux session is gone.
 
+Stop attribution is tied to the exact session id, not its reusable tmux name. An old
+reaper stop cannot authorize reviving a later generation stopped by a person or `rig down`.
+A rig whose **only seat is dormant never cold-starts**: the running-rig gate requires
+a live peer. Start that seat explicitly with `rig launch`; this flag does not start down rigs.
+
 The launch is the ordinary single-seat door (`rig launch`), so it takes the
-delivery-guard lifecycle lease and applies the normal restore decision: a
+delivery-guard lifecycle lease, rechecks stop intent, opt-in and seat identity under that
+lease, and applies the normal restore decision: a
 `resume_if_possible` seat with a usable token resumes its conversation, and a seat
 whose conversation cannot be resumed parks as `awaiting-decision` with no session
 started rather than being silently replaced by a fresh one.
 
 Simultaneous arrivals are coalesced into one launch, attempts are at least a minute
 apart, and a seat that fails to start three times in a row stops cold-starting
-until a launch succeeds. Once the seat is running, the queue's existing
+until liveness is observed or 15 minutes have passed since the last attempt. Refusal
+evaluations coalesce per seat within each queue drain pass, with a one-second TTL;
+the next pass checks liveness again. Once the seat is running, the queue's existing
 unroutable-wake retry delivers the waiting rows; no new scheduler is involved.
 Idle stopping and reaping are a separate feature and not part of this opt-in.
 

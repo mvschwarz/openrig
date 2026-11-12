@@ -39,7 +39,7 @@ import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
-/** After this many consecutive failed attempts the seat stops cold-starting until a launch succeeds. */
+/** Failure cap within the quiet window; observed liveness or expiry clears it. */
 export const COLD_START_MAX_CONSECUTIVE_FAILURES = 3;
 export const COLD_START_FAILURE_WINDOW_MS = 15 * 60_000;
 export const COLD_START_EVALUATION_TTL_MS = 1_000;
@@ -98,6 +98,15 @@ function isRevivableStop(operator: string, reason: string): boolean {
  * human both set it — so eligibility reads the event when the flag is set. Attribution
  * uses the existing transactional event ledger, not a reusable tmux name: a missing or
  * legacy event without this exact session id is conservative, never revivable.
+ *
+ * | Latest session state | Classification | May cold-start |
+ * | No row | dormant (never ran) | yes |
+ * | Explicit stop + exact reaper/idle_reap attribution | daemon_reclaim | yes |
+ * | Explicit stop + any other, legacy or absent attribution | intentional | no |
+ * | Superseded, without explicit stop intent | failed_start | under backoff |
+ * | Other row, without explicit stop intent (crash/lost session) | dormant | yes |
+ *
+ * All yes cases still require opt-in, an unchanged seat, no live target and a live peer.
  */
 export function classifyColdStartStop(db: Database.Database, nodeId: string): ColdStartStopIntent {
   const latest = db.prepare(`SELECT id AS sessionId, session_name AS sessionName, status, intentionally_stopped AS intentionallyStopped
