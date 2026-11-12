@@ -2761,20 +2761,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       undefined,
       legacyProviderUsageDirectory(OPENRIG_HOME),
     ),
-  ), session => piAdapter.readRunnerSidecar(session).state);
+  ));
   deps.contextMonitor = contextMonitor;
   // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
   const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
-  deps.piCompactionService = new PiCompactionService({
+  if (sessionTransport) deps.piCompactionService = new PiCompactionService({
     readSidecar: session => piAdapter.readRunnerSidecar(session).state,
-    resolveTarget: seat => {
-      const binding = sessionRegistry.getBindingForNode(seat.nodeId);
-      return binding?.tmuxSession === seat.sessionName ? binding.tmuxPane ?? binding.tmuxSession : null;
-    },
-    tmux: tmuxAdapter,
+    // The agent's ordinary guarded send path (session transport + delivery guard),
+    // not a raw tmux write: drafts, holds, prompts and the occupant are respected.
+    send: (session, text, opts) => sessionTransport.send(session, text, opts),
+    terminalPolicies: new TerminalPolicyStore(db),
   });
 
   // GHOST-STAGE (e/Class-B) — construct the canonical OccupantInvalidator now that both Class-A deps

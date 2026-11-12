@@ -10,7 +10,7 @@ applies-when: |
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
 last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-11-11
+last-updated: 2026-11-12
 ---
 
 # Content libraries and compaction
@@ -332,87 +332,80 @@ a library read or one successfully queued message.
 
 ## Pi native compaction
 
-`rig compact <pi-seat>` submits Pi's native `compact` RPC after a fresh idle-state
-probe; it does not run Claude's preparation, restore or audit lifecycle. This
-section was checked against `6ed7aafea`. The other sections retain their earlier
-verification boundaries. OMP is excluded even though it shares runner code, and
+`rig compact <pi-seat>` asks for Pi's native `compact` RPC; it does not run
+Claude's preparation, restore or audit lifecycle. This section was checked against
+omo 5.1.48 (engine senpi 2026.10.25-2), the Pi fork used for the live probe. It
+does not claim general Pi support: the `unsupported` detection below matches that
+fork's error text. The other sections retain their earlier verification
+boundaries. OMP is excluded even though it shares runner code, and
 `rig compact-plan` remains Claude-only.
 
-### Trigger and durable completion
+### Trigger through the guarded send path
 
 [`PiCompactionService`](../../../packages/daemon/src/domain/pi-compaction-service.ts)
 is wired beside the Claude enforcer in
-[`startup.ts`](../../../packages/daemon/src/startup.ts), with the seat's bound tmux
-pane and `PiRuntimeAdapter.readRunnerSidecar()` as its reader.
-[`compaction.ts`](../../../packages/daemon/src/routes/compaction.ts) dispatches
-`/api/compaction/trigger` and `/api/compaction/state` by runtime.
+[`startup.ts`](../../../packages/daemon/src/startup.ts), with
+`PiRuntimeAdapter.readRunnerSidecar()` as its reader and the session transport's
+ordinary `send()` as its writer. [`compaction.ts`](../../../packages/daemon/src/routes/compaction.ts)
+dispatches `/api/compaction/trigger` and `/api/compaction/state` by runtime.
 
-1. Before either control paste, the service asks the runner's actual readline editor
-   to prove empty. A framed `/openrig-inspect <id> <base64url-expected>` query is
-   consumed before draft insertion and writes only an inspection result (never draft
-   content) to the sidecar. Only advertised protocol-1 runners receive these queries;
-   older/unprovable editors refuse with `draft_input_unknown`. An existing draft
-   refuses with `draft_input_busy`. After paste, a fresh inspection must prove that
-   the whole editor line and end cursor exactly match the expected control token;
-   changed input refuses with `draft_input_changed` without Enter.
-   The service sends the exact `/openrig-state <probe-id>` input and Enter. In
-   [`RunnerCore`](../../../packages/daemon/src/adapters/pi-runner.ts), this bypasses
-   echo/prompt handling and emits `get_state` under a distinct control request ID.
-   A successful reply updates only `liveState` (`probeId`, `isStreaming`, `isCompacting`,
-   `updatedAt`), leaving readiness and session identity unchanged.
-2. The whole control sequence is bounded to two seconds, including compact delivery.
-   Every attempt has a unique probe ID; only an exactly matching reply with a live-state
-   timestamp strictly newer than the request-send time proves freshness; a newer
-   unrelated sidecar write cannot authorize submission. Missing/ambiguous state
-   refuses with `live_state_unavailable`; either busy flag refuses with `mid_work`.
-   A pre-existing unfinished compaction can refuse with `already_in_progress`, but
-   a pre-existing idle sidecar never authorizes a trigger.
-3. The service sends the exact `/openrig-compact` input and Enter. The runner emits
-   native `compact`, never `/compact` as prompt text. The trigger returns
-   `submitted_unconfirmed`: successful input delivery is not completion.
-4. `compaction_start` atomically writes the runner's `compaction` record and emits
-   `active/compaction`. `compaction_end` writes its terminal record and attempts
-   `Stop/compaction` unless pending attention suppresses that advisory post.
-   The terminal record retains the request identity, reason,
-   timestamps and available result/error/abort fields. The service uses the
-   sidecar, not activity arrival, to report `in_progress`, `completed`, `aborted`,
-   `failed` or `unsupported`; without a compaction record it reports `unknown`.
-5. Terminal identity is `requestId` when present, otherwise `reason:endedAt`
-   (`unknown:endedAt` without a reason). The runner re-arms idle heartbeats even
-   when the terminal post is lost or attention suppresses it; attention itself is
-   not cleared and continues to gate idle reports. Completion survives later sidecar writes until
-   the next `compaction_start` replaces it or runner restart clears it.
+1. The service mints one attempt id and sends the reserved
+   `/openrig-compact <attempt-id>` input with `openrigNotice`. It uses no raw tmux
+   call and no separate state probe. The guarded send path supplies what the
+   removed handshake covered: a person's draft (the delivery guard holds a
+   non-empty composer), a typing-guard hold, an interactive prompt, and the bound
+   occupant/pane. Those are the same refusals every other send to the seat gets.
+2. The selected node, session and pane are re-checked by the delivery guard at the
+   actual text write and at Enter. The service binds the runner's `launchId`
+   before the send and checks it at those same two moments, through the send's
+   `beforeWrite` callback, so a request cannot reach a replacement occupant or a
+   rebound runner.
+3. The caller's actor reaches the same terminal-policy check the Claude path uses
+   (`claude-compaction-enforcer.ts`). `TerminalPolicyStore.check(nodeId,
+   "compaction", actor)` is consulted before any input; self, peer and
+   unattributed handling are unchanged, so a denied peer is refused with
+   `terminal_policy_refused`. This is the existing rule applied to Pi.
+4. The trigger returns `submitted_unconfirmed` when the guarded send delivered
+   text and Enter, and `uncertain` when input may have been written but the result
+   is unconfirmed. Only a proven pre-input refusal (the transport's own reasons,
+   an already-running compaction, unsupported, or the policy) is "not started".
+
+### The requested run, scoped to its launch
+
+[`RunnerCore`](../../../packages/daemon/src/adapters/pi-runner.ts) turns the exact
+reserved input into the native `compact` RPC, naming the attempt in the RPC id.
+It stamps that attempt id onto the sidecar `compaction` record at
+`compaction_start`; an automatic run (threshold/overflow) never takes it.
+
+- `compaction_start` writes the runner's `compaction` record and emits
+  `active/compaction`. `compaction_end` writes its terminal record and attempts
+  `Stop/compaction` unless pending attention suppresses that advisory post.
+- The service reads the sidecar, not the activity, for status. The requested
+  attempt reports `completed`, `failed`, `aborted` or `unsupported` only from a
+  record whose attempt id matches. A record from an automatic run, or from an
+  earlier request, is never this request's answer: it is shown separately as
+  `automatic`, and the new attempt stays `uncertain`.
+- A request that may have been submitted with no result, and a start with no end,
+  both report `uncertain` (`submitted_no_result` and `started_no_end`), including
+  in the CLI, never "was not started". The sidecar record survives later writes
+  until the next `compaction_start` replaces it; runner restart drops it as
+  launch-scoped state.
+- The runner re-arms idle heartbeats at `compaction_end` even when the terminal
+  post is lost or attention suppresses it. Activity is advisory; completion is
+  durable in the sidecar.
 
 An older Pi build that rejects native `compact` records an explicit unsupported
 error; subsequent triggers refuse rather than retrying as text. The first trigger
-can have returned submission success before that RPC error arrives. Unsupported
-`get_session_stats` clears the runner's usage sample rather than inventing one.
-`--skip-map` is accepted but ignored for Pi; `--cancel` rejects Pi with `runtime_filter`
-and supplies no native abort path. Refusal examples above are not exhaustive.
-
-### Usage is separate from completion
-
-After `compaction_end` and `agent_end`, the runner requests `get_session_stats` and
-atomically publishes `contextUsage`. Null tokens/percent after compaction are
-honest unknowns, not zero or the compact result's `estimatedTokensAfter`.
-[`ContextMonitor`](../../../packages/daemon/src/domain/context-monitor.ts) polls
-running Pi seats, using the same adapter reader as the service, then
-[`ContextUsageStore`](../../../packages/daemon/src/domain/context-usage-store.ts)
-normalizes and persists the sample with source `pi`. OMP is not eligible.
-
-A fresh numeric sample becomes visible through existing context-usage status
-surfaces after the monitor polls it, normally following a later assistant
-response. Sample freshness uses `contextUsage.updatedAt`, not the outer sidecar
-timestamp. Runner restart drops launch-local usage; missing samples read unknown.
-`rig compact --state` shows compaction state, not a context-usage sample. To check
-both outcomes, read it for completion and `rig ps --nodes --json` for usage.
+can have returned submission success before that RPC error arrives. `--skip-map`
+is accepted but ignored for Pi; `--cancel` rejects Pi with `runtime_filter` and
+supplies no native abort path.
 
 [`pi-compaction-seam.test.ts`](../../../packages/daemon/test/pi-compaction-seam.test.ts)
-drives real `RunnerCore` input/RPC handling, atomic sidecar output, the service,
-activity store, monitor and in-memory SQLite usage store. Its four cases cover
-optional request identity and delayed/lost terminal activity, ordered beats,
-progress before end, durable completion, null usage and later sampled visibility.
-This is an executable producer/consumer proof, not a live Pi process or tmux test.
+drives the real `RunnerCore` input/RPC handling, atomic sidecar output, the
+service and the activity store. Its cases cover optional request identity,
+delayed or lost terminal activity, ordered beats, durable completion scoped by
+attempt id, and idle re-arming. This is an executable producer/consumer proof, not
+a live Pi process or tmux test.
 
 ## Related maps
 

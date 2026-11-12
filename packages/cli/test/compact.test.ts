@@ -50,13 +50,13 @@ for (const json of [false, true]) {
  });
 }
 
-it('help separates the runtime-neutral core from Claude and Pi behavior and marks compact-plan Claude-only',()=>{const f=fixture();let text='';f.cmd.configureOutput({writeOut:value=>{text+=value;}});f.cmd.outputHelp();expect(text).toContain('Claude guided lifecycle');expect(text).toContain('native compact RPC');expect(text).toContain('Pi seats send the reserved /openrig-compact input');expect(text).toContain('Claude-only');expect(text).toContain('runtime_filter');expect(text).toContain('unsupported');expect(text).toContain('sidecar');expect(text).not.toContain('Non-Claude seats are rejected');});
+it('help separates the runtime-neutral core from Claude and Pi behavior and marks compact-plan Claude-only',()=>{const f=fixture();let text='';f.cmd.configureOutput({writeOut:value=>{text+=value;}});f.cmd.outputHelp();expect(text).toContain('Claude guided lifecycle');expect(text).toContain('native compact RPC');expect(text).toContain('reserved /openrig-compact <attempt-id> input');expect(text).toContain('Claude-only');expect(text).toContain('runtime_filter');expect(text).toContain('unsupported');expect(text).toContain('sidecar');expect(text).not.toContain('Non-Claude seats are rejected');});
 
-it('Pi trigger reports submitted, unconfirmed and promises no restore or audit',async()=>{const f=fixture();f.post.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',stage:'submitted_unconfirmed'}} as any);await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('Manual compaction for writer@demo: submitted, unconfirmed (stage: submitted_unconfirmed)');expect(out).toContain('runtime: pi');expect(out).toContain('--state');expect(out).toContain('sidecar');expect(out).not.toContain('follow automatically');});
+it('Pi trigger reports submitted, unconfirmed and promises no restore or audit',async()=>{const f=fixture();f.post.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',stage:'submitted_unconfirmed'}} as any);await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('Manual compaction for writer@demo: submitted, unconfirmed (runtime: pi)');expect(out).toContain('runtime: pi');expect(out).toContain('--state');expect(out).toContain('sidecar');expect(out).not.toContain('follow automatically');});
 
 it('Pi trigger JSON passes the daemon response through unchanged',async()=>{const f=fixture();const data={ok:true,session:'writer@demo',runtime:'pi',stage:'submitted_unconfirmed'};f.post.mockResolvedValueOnce({status:200,data} as any);await f.cmd.parseAsync(['node','rig','writer@demo','--json']);expect(JSON.parse(String((console.log as any).mock.calls[0][0]))).toEqual(data);});
 
-for (const reason of ['unsupported','runtime_filter','draft_input_busy','draft_input_unknown','draft_input_changed','live_state_unavailable','mid_work','already_in_progress','send_failed','submit_failed']) {
+for (const reason of ['unsupported','runtime_filter','terminal_policy_refused','terminal_policy_unavailable','already_in_progress','held','send_failed','submit_failed']) {
  it(`Pi ${reason} refusal surfaces the reason plainly without a generic HTTP error`,async()=>{
   const f=fixture();
   f.post.mockResolvedValueOnce({status:422,data:{ok:false,session:'writer@demo',runtime:'pi',reason}} as any);
@@ -68,14 +68,18 @@ for (const reason of ['unsupported','runtime_filter','draft_input_busy','draft_i
  });
 }
 
-it('Pi state reports the authoritative sidecar status with no restore or audit promise',async()=>{const f=fixture();f.get.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',state:{status:'completed',completionKey:'synthetic-request',compaction:{reason:'manual',startedAt:'2026-11-11T10:00:00Z',endedAt:'2026-11-11T10:00:05Z'}}}} as any);await f.cmd.parseAsync(['node','rig','writer@demo','--state']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('Pi compaction state for writer@demo: completed (completion: synthetic-request)');expect(out).toContain('sidecar');expect(out).not.toContain('follow automatically');expect(f.post).not.toHaveBeenCalled();});
+it('Pi state reports the requested attempt and does not promise restore or audit',async()=>{const f=fixture();f.get.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',state:{status:'completed',attemptId:'attempt-1',compaction:{reason:'manual',startedAt:'2026-11-11T10:00:00Z',endedAt:'2026-11-11T10:00:05Z'}}}} as any);await f.cmd.parseAsync(['node','rig','writer@demo','--state']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('Pi compaction state for writer@demo: completed (attempt: attempt-1)');expect(out).toContain('sidecar');expect(out).not.toContain('follow automatically');expect(f.post).not.toHaveBeenCalled();});
+
+it.each([{phase:'submitted_no_result',expected:'(may have been submitted, no result yet)'},{phase:'started_no_end',expected:'(started, no end: the result is unknown)'}])('Pi state names $phase as uncertain, never as not started',async({phase,expected})=>{const f=fixture();f.get.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',state:{status:'uncertain',attemptId:'attempt-1',phase}}} as any);await f.cmd.parseAsync(['node','rig','writer@demo','--state']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('uncertain');expect(out).toContain(expected);expect(out).not.toContain('not started');});
+
+it('Pi uncertain trigger says input may have reached the seat',async()=>{const f=fixture();f.post.mockResolvedValueOnce({status:200,data:{ok:true,session:'writer@demo',runtime:'pi',attemptId:'attempt-1',stage:'uncertain'}} as any);await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('uncertain — input may have reached the seat; no result yet');expect(out).toContain('(attempt: attempt-1)');expect(out).not.toContain('was not started');});
 
 it('help qualifies asynchronous unsupported detection, example refusals and ignored Pi skip-map', () => {
  const f = fixture(); let text = '';
  f.cmd.configureOutput({ writeOut: value => { text += value; } });
  f.cmd.outputHelp();
  expect(text).toMatch(/first trigger may return submitted_unconfirmed/);
- expect(text).toMatch(/subsequent triggers refuse with unsupported/);
+ expect(text).toMatch(/later triggers refuse/);
  expect(text).toMatch(/Refusal examples \(not exhaustive\)/);
  expect(text).toMatch(/--skip-map is ignored for Pi/);
  expect(text).toMatch(/--cancel is rejected for Pi/);

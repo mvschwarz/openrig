@@ -431,7 +431,7 @@ describe("heartbeat scheduler cadence", () => {
 describe("runner input", () => {
   const start = "\u001b[200~";
   const end = "\u001b[201~";
-  function terminal(onSubmit?: (s: string) => void, onInspect?: (result: { probeId: string; state: string }) => void) {
+  function terminal(onSubmit?: (s: string) => void) {
     const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false,
       setRawMode: vi.fn(function (this: { isRaw: boolean }, value: boolean) { this.isRaw = value; }) });
     const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
@@ -439,41 +439,9 @@ describe("runner input", () => {
     let screen = "";
     output.on("data", chunk => { screen += chunk.toString(); });
     const editor = createRunnerInput(input as unknown as NodeJS.ReadStream,
-      output as unknown as NodeJS.WriteStream, { submit: s => { blocks.push(s); onSubmit?.(s); }, inspect: onInspect });
+      output as unknown as NodeJS.WriteStream, s => { blocks.push(s); onSubmit?.(s); });
     return { input, output, editor, blocks, screen: () => screen };
   }
-
-  it("inspects an existing draft without merging or submitting the control query", () => {
-    // Given a multiline draft in the real readline editor.
-    const inspected: { probeId: string; state: string }[] = [];
-    const t = terminal(undefined, result => inspected.push(result));
-    try {
-      t.input.write(start + "draft\nsecond line" + end);
-      // When the daemon asks whether it may paste a control token.
-      t.input.write(start + "/openrig-inspect probe-a " + Buffer.from("/openrig-compact").toString("base64url") + end);
-      // Then the draft is unchanged and no prompt is submitted.
-      expect(inspected.at(-1)).toEqual({ probeId: "probe-a", state: "busy" });
-      expect(t.editor.line).toBe("draft\nsecond line");
-      expect(t.blocks).toEqual([]);
-    } finally { t.editor.close(); }
-  });
-
-  it.each(["/openrig-state probe-a", "/openrig-compact"])("proves exact staged input %s and detects later typing", token => {
-    // Given an empty real editor with the inspection callback installed.
-    const inspected: { probeId: string; state: string }[] = [];
-    const t = terminal(undefined, result => inspected.push(result));
-    const query = start + "/openrig-inspect probe-a " + Buffer.from(token).toString("base64url") + end;
-    try {
-      // When inspection surrounds a paste and then additional typing.
-      t.input.write(query);
-      t.input.write(start + token + end + query);
-      t.input.write("suffix" + query);
-      // Then only the exact control text was a match; no Enter was sent.
-      expect(inspected.map(result => result.state)).toEqual(["empty", "matched", "busy"]);
-      expect(t.editor.line).toBe(token + "suffix");
-      expect(t.blocks).toEqual([]);
-    } finally { t.editor.close(); }
-  });
 
   it.each([1011, 1012, 1023, 2048, 16384])("accepts %i bytes then abort and next", size => {
     const t = terminal();

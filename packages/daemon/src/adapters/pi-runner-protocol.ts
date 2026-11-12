@@ -51,19 +51,11 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 // ── Runner-state sidecar ─────────────────────────────────────────────────────
 
 export interface PiRunnerState {
-  inputInspection?: {
-    readonly protocol: 1;
-    readonly probeId: string;
-    readonly state: "empty" | "matched" | "busy" | "unknown";
-    readonly updatedAt: string;
-  };
-  liveState?: {
-    readonly probeId: string;
-    readonly isStreaming: boolean;
-    readonly isCompacting: boolean;
-    readonly updatedAt: string;
-  };
   compaction?: {
+    /** The OpenRig manual-compaction attempt this run answers. Present only for a
+     *  requested run: the runner stamps the id carried by `/openrig-compact <id>`.
+     *  Automatic runs carry none, so an earlier result never answers a new request. */
+    readonly attemptId?: string;
     readonly requestId?: string;
     readonly reason?: string;
     readonly startedAt?: string;
@@ -72,12 +64,6 @@ export interface PiRunnerState {
     readonly aborted?: boolean;
     readonly willRetry?: boolean;
     readonly errorMessage?: string;
-  };
-  contextUsage?: {
-    readonly tokens: number | null;
-    readonly contextWindow: number;
-    readonly percent: number | null;
-    readonly updatedAt: string;
   };
   ready: boolean;
   /** Launch-attempt scope (guard fold, code-review):

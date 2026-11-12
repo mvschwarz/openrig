@@ -10,7 +10,7 @@ applies-when: |
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
 last-verified-against-source: b29a70f14fc11797d46cbd9f12d4e61a523c3d06
-last-updated: 2026-11-11
+last-updated: 2026-11-12
 ---
 
 # CLI Reference — Registered Commands and Options
@@ -1071,46 +1071,47 @@ for input and receipt examples, rollback, and snapshot behavior.
 |---|---|---|
 | `rig compact <session>` | — | `--json`<br>`--skip-map`<br>`--cancel`<br>`--state` |
 
-Compaction semantics below were checked at `6ed7aafea`; this does not revalidate the
-command inventory's older source snapshot. The command targets one Claude or Pi
-seat, independently of the automatic threshold. Claude retains its guided
-preparation/compact/restore/audit lifecycle. `--skip-map` affects only Claude and is
-accepted but ignored for Pi; `--cancel` rejects Pi with `runtime_filter` (HTTP 422).
+Compaction semantics below were checked against omo 5.1.48 (engine senpi
+2026.10.25-2), the Pi fork used for the live probe; this does not claim general Pi
+support and does not revalidate the command inventory's older source snapshot. The
+command targets one Claude or Pi seat, independently of the automatic threshold.
+Claude retains its guided preparation/compact/restore/audit lifecycle. `--skip-map`
+affects only Claude and is accepted but ignored for Pi; `--cancel` rejects Pi with
+`runtime_filter` (HTTP 422).
 
 For a Pi seat:
 
-- `rig compact builder@my-rig` first requests fresh idle state through the runner's
-  exact reserved `/openrig-state <probe-id>` input. Each attempt has a unique ID;
-  only its matching live-state reply with a timestamp strictly newer than the probe
-  send time can authorize input. The entire control sequence is bounded to two seconds. Either streaming
-  or compacting refuses with `mid_work`; missing, stale, ambiguous or unavailable
-  live state refuses with `live_state_unavailable`. An existing sidecar never proves idle.
-- Before either control paste the runner's readline editor must prove empty; before
-  Enter it must prove that its entire staged input exactly matches that control token.
-  Editor inspection is an out-of-band framed query consumed before draft insertion;
-  it neither inserts text nor submits a prompt. Missing inspection support fails closed.
-  Refusal examples (not exhaustive): `draft_input_busy`, `draft_input_unknown`,
-  `draft_input_changed`, `already_in_progress`, `session_missing`, `send_failed`,
-  `submit_failed`, `mid_work`, `live_state_unavailable`, `unsupported`, `runtime_filter`.
-- After that gate, `/openrig-compact` becomes Pi's native `compact` RPC, not a model
-  prompt or interactive `/compact`. Success means `submitted_unconfirmed`, **not completed**.
+- `rig compact builder@my-rig` sends the reserved `/openrig-compact <attempt-id>`
+  input through the same guarded send path every other message to the seat uses:
+  the session transport and its delivery guard. A person's draft, a hold, an
+  interactive prompt and the bound occupant are respected; the selected node,
+  session and pane are re-checked at the actual write and at Enter, and the
+  runner launch is checked there too. There is no separate state probe, no editor
+  inspection handshake and no raw tmux write.
+- The runner turns that input into Pi's native `compact` RPC, not a model prompt
+  or interactive `/compact`. One attempt id is minted at the trigger, carried into
+  that command and stamped onto the runner sidecar's compaction record, so the
+  requested run is reported separately from an automatic one.
+- Success means `submitted_unconfirmed`, **not completed**. If input may have been
+  written but Enter was not confirmed, the trigger reports `uncertain` rather than
+  "not started"; the text may sit in the seat's input box and is not retried.
 - `rig compact builder@my-rig --state --json` reads authoritative runner-sidecar
   state through the logical seat address's physical session binding, while echoing
-  the caller's address. It reports
-  state: `unknown`, `in_progress`, `completed`, `aborted`, `failed` or `unsupported`.
-  `compaction_start` establishes progress; `compaction_end` establishes completion
-  or the terminal error/abort outcome. `completionKey` is `requestId` when present,
-  otherwise `reason:endedAt` (or `unknown:endedAt` if reason is missing). Activity
-  delivery can lag or be lost without preventing sidecar completion.
-- Completion does not prove a context-usage decrease. Pi can report null tokens
-  and percent immediately after compaction, so usage remains unknown rather than
-  zero or an estimated post-compaction value. After a later assistant response,
-  the runner samples stats again; `rig ps --nodes --json` exposes the fresh reading
-  after the context monitor polls it. `compact --state` reports compaction, not usage.
+  the caller's address. It reports the requested attempt as `completed`, `failed`,
+  `aborted` or `unsupported`. An attempt that may have been submitted without a
+  result, or that started without an end, is reported as `uncertain` (with
+  `phase: submitted_no_result` or `phase: started_no_end`), not as "not started".
+  An earlier completion, and an automatic threshold/overflow run (reported
+  separately as `automatic`), never answers a newer request. Activity delivery can
+  lag or be lost without preventing sidecar completion; the sidecar is authoritative.
+- The caller's actor reaches the same terminal-policy check as the Claude path:
+  `terminal_policy_refused` and `terminal_policy_unavailable` use the seat's
+  existing self/peer/OpenRig rules, with unattributed callers unchanged. This is
+  the existing rule applied to Pi, not a new permission model.
 - A Pi build without native `compact` RPC records `unsupported` on its RPC error;
   even the first request may already have returned submission success. Inspect
-  `--state` before retrying. A runner unable to answer the live probe fails closed
-  without submitting compaction. There is no text-command fallback.
+  `--state` before retrying. The detection matches that fork's error text. There is
+  no text-command fallback and no automatic retry.
 
 OpenRig sends no Pi restore or audit prompts and offers no Pi cancellation here.
 This extension is Pi-only: OMP and other non-Claude runtimes remain unsupported.

@@ -66,12 +66,18 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (row.runtime === "pi") {
       const service = c.get("piCompactionService" as never) as PiCompactionService | undefined;
       if (!service) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
-      const outcome = await service.trigger({ nodeId: row.node_id, sessionName, runtime: row.runtime });
-      if (outcome.triggered) return c.json({ ok: true, session: sessionName, runtime: "pi", stage: outcome.stage });
-      const status = outcome.reason === "unsupported" || outcome.reason === "runtime_filter" ? 422
-        : outcome.reason === "session_missing" ? 404
+      // The caller's actor reaches the same terminal-policy check the Claude path uses.
+      const outcome = await service.trigger({ nodeId: row.node_id, sessionName, runtime: row.runtime },
+        { source: "caller", session: transportSenderSession(c) ?? null });
+      if (outcome.triggered) return c.json({ ok: true, session: sessionName, runtime: "pi",
+        attemptId: outcome.attemptId, stage: outcome.stage });
+      const status = outcome.reason === "unsupported" || outcome.reason === "runtime_filter"
+        || outcome.reason === "terminal_policy_refused" ? 422
+        : outcome.reason === "session_missing" || outcome.reason === "guard_target_unknown" ? 404
+        : outcome.reason === "tmux_unavailable" ? 503
         : outcome.reason === "send_failed" || outcome.reason === "submit_failed" ? 502 : 409;
-      return c.json({ ok: false, session: sessionName, runtime: "pi", reason: outcome.reason }, status);
+      return c.json({ ok: false, session: sessionName, runtime: "pi", reason: outcome.reason,
+        ...(outcome.detail ? { error: outcome.detail } : {}) }, status);
     }
     if (!enforcer || !usageStore) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
 

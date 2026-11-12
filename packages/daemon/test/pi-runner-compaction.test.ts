@@ -45,65 +45,64 @@ describe("Pi compaction sidecar", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
-  it.each(["agent_end", "compaction_end"])("samples context after %s and retains honest nulls within the launch", type => {
+
+  it("carries the requested attempt id into the native compact command and back into the record", () => {
+    // Given a requested manual compaction.
     const f = fixture();
-    f.event({ type, reason: "manual" });
-    expect(f.rpc.at(-1)).toEqual({ type: "get_session_stats", id: "pi-runner-session-stats" });
-    f.event({ type: "response", id: "pi-runner-session-stats", success: true,
-      data: { contextUsage: { tokens: null, percent: null, contextWindow: 200000 } } });
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    // Then the reserved input becomes the native compact RPC, naming the attempt.
+    expect(f.rpc.at(-1)).toEqual({ type: "compact", id: "pi-runner-compact:attempt-1" });
+    expect(f.lines.some(line => line.includes("/openrig-compact"))).toBe(false);
+    expect(f.activity.some(beat => beat.hookEvent === "UserPromptSubmit")).toBe(false);
+    // When Pi starts and ends that run.
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
+    expect(f.sidecars.at(-1)?.compaction).toEqual({
+      attemptId: "attempt-1", requestId: "request-1", reason: "manual", startedAt: "2026-11-11T10:00:00.000Z" });
     f.advance();
-    f.event({ type: "response", id: "pi-runner-get-state", data: {} });
-    expect(f.sidecars.at(-1)?.contextUsage).toEqual({ tokens: null, percent: null, contextWindow: 200000, updatedAt: "2026-11-11T10:00:00.000Z" });
+    f.event({ type: "compaction_end", reason: "manual", requestId: "request-1", result: { summary: "summary", tokensBefore: 123 } });
+    // Then the terminal record still names the requested attempt.
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({
+      attemptId: "attempt-1", requestId: "request-1", startedAt: "2026-11-11T10:00:00.000Z",
+      endedAt: "2026-11-11T10:00:01.000Z", result: { summary: "summary", tokensBefore: 123 },
+    });
   });
 
-  it("replaces null usage with a fresh numeric sample", () => {
+  it("never lets an automatic run take a pending attempt id", () => {
     const f = fixture();
-    f.event({ type: "response", id: "pi-runner-session-stats", data: { contextUsage: { tokens: null, percent: null, contextWindow: 10000 } } });
-    f.advance();
-    f.event({ type: "response", id: "pi-runner-session-stats", data: { contextUsage: { tokens: 123, percent: 1.23, contextWindow: 10000 } } });
-    expect(f.sidecars.at(-1)?.contextUsage).toMatchObject({ tokens: 123, percent: 1.23, contextWindow: 10000 });
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    f.event({ type: "compaction_start", reason: "threshold", requestId: "auto-1" });
+    expect(f.sidecars.at(-1)?.compaction).toEqual({ requestId: "auto-1", reason: "threshold", startedAt: "2026-11-11T10:00:00.000Z" });
+    f.event({ type: "compaction_end", reason: "threshold", requestId: "auto-1" });
+    expect(f.sidecars.at(-1)?.compaction).not.toHaveProperty("attemptId");
+    f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", reason: "manual" });
   });
 
-  it.each([{}, { tokens: 0, percent: 0 }, { tokens: "123", percent: null, contextWindow: 10000 }])("does not fabricate usage from malformed stats %j", contextUsage => {
+  it("records an unsupported compact RPC against the attempt that asked for it", () => {
     const f = fixture();
-    f.event({ type: "response", id: "pi-runner-session-stats", data: { contextUsage } });
-    expect(f.sidecars.at(-1)?.contextUsage).toBeUndefined();
-  });
-
-  it.each(["compact", "get_session_stats"])("surfaces unsupported %s without a success claim", command => {
-    const f = fixture();
-    f.event({ type: "response", id: command === "compact" ? "pi-runner-compact" : "pi-runner-session-stats",
-      command, success: false, error: `Unknown command: ${command}` });
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    f.event({ type: "response", id: "pi-runner-compact:attempt-1", command: "compact", success: false, error: "Unknown command: compact" });
     expect(f.lines.at(-1)).toContain("unsupported");
-    if (command === "compact") expect(f.sidecars.at(-1)?.compaction).toMatchObject({ reason: "manual", errorMessage: expect.stringContaining("Unknown command"), endedAt: expect.any(String) });
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", reason: "manual",
+      errorMessage: expect.stringContaining("Unknown command"), endedAt: expect.any(String) });
     expect(f.activity.some(beat => beat.subtype === "compaction")).toBe(false);
-  });
-
-  it("drops a previous usage sample when stats become unsupported", () => {
-    const f = fixture();
-    f.event({ type: "response", id: "pi-runner-session-stats", data: { contextUsage: { tokens: 123, percent: 1.23, contextWindow: 10000 } } });
-    f.event({ type: "response", id: "pi-runner-session-stats", success: false, error: "Unknown command: get_session_stats" });
-    expect(f.sidecars.at(-1)?.contextUsage).toBeUndefined();
   });
 
   it("retains event identity when the compact RPC also reports failure", () => {
     const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-1");
     f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
     f.event({ type: "compaction_end", reason: "manual", requestId: "request-1", errorMessage: "Nothing to compact" });
     f.advance();
-    f.event({ type: "response", id: "pi-runner-compact", success: false, error: "Nothing to compact" });
-    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ requestId: "request-1", startedAt: "2026-11-11T10:00:00.000Z", endedAt: "2026-11-11T10:00:00.000Z", errorMessage: "Nothing to compact" });
+    f.event({ type: "response", id: "pi-runner-compact:attempt-1", success: false, error: "Nothing to compact" });
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", requestId: "request-1",
+      startedAt: "2026-11-11T10:00:00.000Z", endedAt: "2026-11-11T10:00:00.000Z", errorMessage: "Nothing to compact" });
   });
 
-  it("never requests stats on OMP completion", () => {
-    const f = fixture("omp");
-    f.event({ type: "agent_end" });
-    f.event({ type: "compaction_end" });
-    expect(f.rpc.some(cmd => cmd.type === "get_session_stats")).toBe(false);
-  });
   it.each([false, true])("posts ordered compaction beats and re-arms idle when terminal delivery is lost=%s", lost => {
     const f = fixture();
     f.core.heartbeat();
+    f.core.handleUserBlock("/openrig-compact attempt-1");
     f.event({ type: "compaction_start", reason: "manual", requestId: "request-1" });
     const active = f.activity.at(-1);
     f.io.postActivity = payload => {
@@ -112,8 +111,10 @@ describe("Pi compaction sidecar", () => {
     };
     f.advance();
     f.event({ type: "compaction_end", reason: "manual", requestId: "request-1", aborted: true });
-    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ requestId: "request-1", aborted: true, endedAt: "2026-11-11T10:00:01.000Z" });
-    if (!lost) expect(f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "compaction", requestId: "request-1", reason: "manual", endedAt: "2026-11-11T10:00:01.000Z" });
+    expect(f.sidecars.at(-1)?.compaction).toMatchObject({ attemptId: "attempt-1", requestId: "request-1",
+      aborted: true, endedAt: "2026-11-11T10:00:01.000Z" });
+    if (!lost) expect(f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "compaction",
+      requestId: "request-1", reason: "manual", endedAt: "2026-11-11T10:00:01.000Z" });
     expect(active).toMatchObject({ hookEvent: "active", subtype: "compaction", requestId: "request-1" });
     f.core.heartbeat();
     expect(f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "idle_heartbeat" });
@@ -126,6 +127,7 @@ describe("Pi compaction sidecar", () => {
     expect(f.sidecars.at(-1)?.compaction).toBeUndefined();
     expect(f.activity.filter(beat => beat.subtype === "compaction").map(beat => beat.hookEvent)).toEqual(["active"]);
   });
+
   it("re-arms idle on compaction end even when attention suppresses the Stop post", () => {
     const f = fixture();
     f.core.heartbeat();
@@ -139,15 +141,11 @@ describe("Pi compaction sidecar", () => {
     f.core.heartbeat();
     expect(f.activity).toHaveLength(beats);
   });
-  it("dispatches only the exact reserved Pi block without echo or prompt activity", () => {
-    const f = fixture();
-    f.core.handleUserBlock("/openrig-compact");
-    expect(f.rpc.at(-1)).toMatchObject({ type: "compact" });
-    expect(f.lines.some(line => line.includes("/openrig-compact"))).toBe(false);
-    expect(f.activity.some(beat => beat.hookEvent === "UserPromptSubmit")).toBe(false);
-  });
 
-  it.each([" /openrig-compact", "/openrig-compact ", "/openrig-compact\ntext", "text /openrig-compact", "/compact"])("keeps %j as model input", block => {
+  it.each([
+    " /openrig-compact attempt-1", "/openrig-compact attempt-1 ", "/openrig-compact attempt-1\ntext",
+    "text /openrig-compact attempt-1", "/openrig-compact", "/compact",
+  ])("keeps %j as model input", block => {
     const f = fixture();
     f.core.handleUserBlock(block);
     expect(f.rpc.at(-1)).toMatchObject({ type: "prompt", message: block });
@@ -155,42 +153,35 @@ describe("Pi compaction sidecar", () => {
 
   it("leaves the reserved block as ordinary OMP input", () => {
     const f = fixture("omp");
-    f.core.handleUserBlock("/openrig-compact");
-    expect(f.rpc.at(-1)).toMatchObject({ type: "prompt", message: "/openrig-compact" });
+    f.core.handleUserBlock("/openrig-compact attempt-1");
+    expect(f.rpc.at(-1)).toMatchObject({ type: "prompt", message: "/openrig-compact attempt-1" });
   });
+
   it.each(["request-1", undefined])("retains terminal identity %s across later writes", requestId => {
-    // Given an announced compaction.
     const f = fixture();
+    f.core.handleUserBlock("/openrig-compact attempt-1");
     f.event({ type: "compaction_start", reason: "manual", requestId });
     f.advance();
-    // When it ends and another sidecar write follows.
     f.event({ type: "compaction_end", reason: "manual", requestId, result: { summary: "summary", tokensBefore: 123 }, aborted: false });
     f.event({ type: "response", id: "pi-runner-get-state", data: {} });
-    // Then its request id or reason/end timestamp remains durable.
     expect(parsePiRunnerState(JSON.stringify(f.sidecars.at(-1)))?.compaction).toMatchObject({
-      reason: "manual", startedAt: "2026-11-11T10:00:00.000Z", endedAt: "2026-11-11T10:00:01.000Z",
-      result: { summary: "summary", tokensBefore: 123 }, ...(requestId ? { requestId } : {}),
+      attemptId: "attempt-1", reason: "manual", startedAt: "2026-11-11T10:00:00.000Z",
+      endedAt: "2026-11-11T10:00:01.000Z", result: { summary: "summary", tokensBefore: 123 },
+      ...(requestId ? { requestId } : {}),
     });
   });
 
   it("replaces terminal state when the next compaction starts", () => {
-    // Given a completed compaction.
     const f = fixture();
     f.event({ type: "compaction_end", reason: "manual", errorMessage: "failed" });
-    // When a new compaction starts.
     f.event({ type: "compaction_start", reason: "threshold", requestId: "next" });
-    // Then no old terminal fields survive.
     expect(f.sidecars.at(-1)?.compaction).toEqual({ reason: "threshold", requestId: "next", startedAt: "2026-11-11T10:00:00.000Z" });
   });
 
-  it("drops launch-local compaction and usage on restart but retains the cursor", () => {
-    // Given prior launch telemetry.
+  it("drops launch-local compaction on restart but retains the cursor", () => {
     const prior: PiRunnerState = { ready: true, updatedAt: "old", lastEntryId: "cursor",
-      compaction: { reason: "manual", endedAt: "old" },
-      contextUsage: { tokens: null, percent: null, contextWindow: 200000, updatedAt: "old" } };
-    // When the launch-scoped reset runs.
+      compaction: { attemptId: "attempt-1", reason: "manual", endedAt: "old" } };
     const pending = buildPendingRunnerState("next", "now", prior);
-    // Then only the durable cursor crosses launches.
     expect(pending).toEqual({ ready: false, launchId: "next", updatedAt: "now", lastEntryId: "cursor" });
   });
 });

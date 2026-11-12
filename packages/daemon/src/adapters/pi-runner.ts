@@ -74,13 +74,8 @@ export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 export function createRunnerInput(
   input: NodeJS.ReadableStream & { readonly isTTY?: boolean; readonly isRaw?: boolean; setRawMode: (raw: boolean) => unknown },
   output: NodeJS.WritableStream & { readonly isTTY?: boolean },
-  callbacks: ((block: string) => void) | {
-    readonly submit: (block: string) => void;
-    readonly inspect?: (result: { readonly probeId: string; readonly state: "empty" | "matched" | "busy" }) => void;
-  },
+  onSubmit: (block: string) => void,
 ): readline.Interface {
-  const onSubmit = typeof callbacks === "function" ? callbacks : callbacks.submit;
-  const onInspect = typeof callbacks === "function" ? undefined : callbacks.inspect;
   const reject = () => output.write(
     "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.\n",
   );
@@ -183,14 +178,6 @@ export function createRunnerInput(
         discarded = false;
       } else {
         if (!discarded) {
-          const inspection = onInspect && /^\/openrig-inspect ([\w-]+) ([\w-]+)$/.exec(paste);
-          if (inspection) {
-            const expected = Buffer.from(inspection[2] ?? "", "base64url").toString("utf8");
-            onInspect({ probeId: inspection[1] ?? "", state: editor.line === "" ? "empty"
-              : editor.line === expected && editor.cursor === editor.line.length ? "matched" : "busy" });
-            paste = null;
-            continue;
-          }
           const line = editor.line.slice(0, editor.cursor) + paste + editor.line.slice(editor.cursor);
           if (Buffer.byteLength(line) > MAX_PI_INPUT_BYTES) { clear(); reject(); }
           else {
@@ -404,9 +391,9 @@ export function writePiRunnerSidecar(path: string, state: PiRunnerState): void {
 }
 
 const GET_STATE_ID = "pi-runner-get-state";
-const CONTROL_STATE_ID = "pi-runner-control-state:";
-const SESSION_STATS_ID = "pi-runner-session-stats";
-const COMPACT_ID = "pi-runner-compact";
+/** The reserved manual-compaction input carries its attempt id in the RPC id, so a
+ *  reply and the sidecar record can name exactly the request OpenRig made. */
+const COMPACT_ID = "pi-runner-compact:";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
@@ -474,10 +461,9 @@ export async function readPiSessionEntryIds(
 }
 
 export class RunnerCore {
-  private liveState: PiRunnerState["liveState"];
-  private inputInspection: PiRunnerState["inputInspection"];
   private compaction: PiRunnerState["compaction"];
-  private contextUsage: PiRunnerState["contextUsage"];
+  /** The attempt a `/openrig-compact <id>` input named, awaiting its compaction_start. */
+  private pendingCompactAttemptId: string | null = null;
   private streaming = false;
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
@@ -624,21 +610,13 @@ export class RunnerCore {
 
   private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
-  recordInputInspection(result: { readonly probeId: string; readonly state: "empty" | "matched" | "busy" | "unknown" }): void {
-    if (this.runtime !== "pi") return;
-    this.inputInspection = { protocol: 1, ...result, updatedAt: this.io.now() };
-    this.writeSidecar({});
-  }
-
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
-    const probe = /^\/openrig-state ([\w-]+)$/.exec(block);
-    if (this.runtime === "pi" && probe) {
-      this.io.sendRpc({ type: "get_state", id: CONTROL_STATE_ID + probe[1] });
-      return;
-    }
-    if (this.runtime === "pi" && block === "/openrig-compact") {
-      this.io.sendRpc({ type: "compact", id: COMPACT_ID });
+    const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
+    if (this.runtime === "pi" && compact) {
+      const attemptId = compact[1]!;
+      this.pendingCompactAttemptId = attemptId;
+      this.io.sendRpc({ type: "compact", id: COMPACT_ID + attemptId });
       return;
     }
     if (block === "/abort") {
@@ -682,17 +660,6 @@ export class RunnerCore {
   }
 
   private handleResponse(record: Record<string, unknown>): void {
-    if (this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(CONTROL_STATE_ID)) {
-      const data = record.data;
-      if (record.success === true && record.error == null && data !== null && typeof data === "object"
-        && "isStreaming" in data && typeof data.isStreaming === "boolean"
-        && "isCompacting" in data && typeof data.isCompacting === "boolean") {
-        this.liveState = { probeId: record.id.slice(CONTROL_STATE_ID.length),
-          isStreaming: data.isStreaming, isCompacting: data.isCompacting, updatedAt: this.io.now() };
-        this.writeSidecar({});
-      }
-      return;
-    }
     if (record.id === NEGOTIATE_ID && this.v2Limit !== null) {
       if (record.success === true) {
         this.frameDecoder = new OmpFrameDecoder(this.v2Limit);
@@ -706,16 +673,19 @@ export class RunnerCore {
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
-      if (this.runtime === "pi" && (record.id === COMPACT_ID || record.id === SESSION_STATS_ID)) {
-        const command = record.id === COMPACT_ID ? "compact" : "get_session_stats";
+      const compactId = this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)
+        ? record.id : null;
+      if (compactId) {
+        const attemptId = compactId.slice(COMPACT_ID.length);
         const unsupported = /unknown command|unsupported|not supported/i.test(detail);
-        this.io.mirrorLine(`[pi-runner] ERROR rpc ${command}${unsupported ? " unsupported" : " failed"}: ${message}`);
-        if (record.id === COMPACT_ID) {
-          this.compaction = { ...this.compaction, reason: this.compaction?.reason ?? "manual",
-            endedAt: this.compaction?.endedAt ?? this.io.now(), errorMessage: detail };
-        } else {
-          this.contextUsage = undefined;
-        }
+        this.io.mirrorLine(`[pi-runner] ERROR rpc compact${unsupported ? " unsupported" : " failed"}: ${message}`);
+        // A failure with no start replaces any older record: this attempt is the answer.
+        const prior = this.compaction?.attemptId === attemptId ? this.compaction : undefined;
+        this.pendingCompactAttemptId = null;
+        this.compaction = { attemptId, reason: prior?.reason ?? "manual",
+          ...(prior?.requestId ? { requestId: prior.requestId } : {}),
+          ...(prior?.startedAt ? { startedAt: prior.startedAt } : {}),
+          endedAt: prior?.endedAt ?? this.io.now(), errorMessage: detail };
         this.writeSidecar({});
         return;
       }
@@ -741,19 +711,6 @@ export class RunnerCore {
       if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
         this.raiseAttention("runtime_error");
       }
-      return;
-    }
-    if (this.runtime === "pi" && record.id === SESSION_STATS_ID) {
-      const data = record.data;
-      const usage = data !== null && typeof data === "object" && "contextUsage" in data ? data.contextUsage : undefined;
-      this.contextUsage = undefined;
-      if (usage !== null && typeof usage === "object" && "tokens" in usage && "percent" in usage && "contextWindow" in usage
-        && (usage.tokens === null || (typeof usage.tokens === "number" && Number.isFinite(usage.tokens)))
-        && (usage.percent === null || (typeof usage.percent === "number" && Number.isFinite(usage.percent)))
-        && typeof usage.contextWindow === "number" && Number.isFinite(usage.contextWindow) && usage.contextWindow > 0) {
-        this.contextUsage = { tokens: usage.tokens, percent: usage.percent, contextWindow: usage.contextWindow, updatedAt: this.io.now() };
-      }
-      this.writeSidecar({});
       return;
     }
     if (record.id === GET_STATE_ID) {
@@ -941,8 +898,14 @@ export class RunnerCore {
         ...(typeof event.requestId === "string" ? { requestId: event.requestId } : {}),
         ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
       };
+      // The attempt id OpenRig's reserved input named rides the runner's native
+      // compact command and returns here. An automatic run (threshold/overflow)
+      // never takes it, so its result cannot answer a requested attempt.
+      const manualReason = typeof event.reason !== "string" || event.reason === "manual";
       if (event.type === "compaction_start") {
-        this.compaction = { ...identity, startedAt: this.io.now() };
+        const attemptId = manualReason ? this.pendingCompactAttemptId ?? undefined : undefined;
+        if (attemptId) this.pendingCompactAttemptId = null;
+        this.compaction = { ...(attemptId ? { attemptId } : {}), ...identity, startedAt: this.io.now() };
       } else {
         const result = event.result;
         const summary = result !== null && typeof result === "object" ? Object.fromEntries(
@@ -950,7 +913,10 @@ export class RunnerCore {
             (["summary", "firstKeptEntryId"].includes(key) && typeof value === "string") ||
             (["tokensBefore", "estimatedTokensAfter"].includes(key) && typeof value === "number")),
         ) : undefined;
-        this.compaction = { ...this.compaction, ...identity, endedAt: this.io.now(),
+        const attemptId = this.compaction?.attemptId
+          ?? (manualReason ? this.pendingCompactAttemptId ?? undefined : undefined);
+        if (attemptId && this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        this.compaction = { ...this.compaction, ...(attemptId ? { attemptId } : {}), ...identity, endedAt: this.io.now(),
           ...(result === null ? { result: null } : summary ? { result: summary } : {}),
           ...(typeof event.aborted === "boolean" ? { aborted: event.aborted } : {}),
           ...(typeof event.willRetry === "boolean" ? { willRetry: event.willRetry } : {}),
@@ -1029,9 +995,6 @@ export class RunnerCore {
       // completed turn — get_entries returns append-order entries with stable
       // ids; the response handler advances the cursor from the tail.
       this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
-    }
-    if (this.runtime === "pi" && (event.type === "agent_end" || event.type === "compaction_end")) {
-      this.io.sendRpc({ type: "get_session_stats", id: SESSION_STATS_ID });
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -1160,8 +1123,7 @@ export class RunnerCore {
       sessionFile: this.sessionFile,
       sessionId: this.sessionId,
       lastEntryId: this.lastEntryId,
-      ...(this.runtime === "pi" ? { compaction: this.compaction, contextUsage: this.contextUsage, liveState: this.liveState,
-        ...(this.inputInspection ? { inputInspection: this.inputInspection } : {}) } : {}),
+      ...(this.runtime === "pi" ? { compaction: this.compaction } : {}),
       updatedAt: this.io.now(),
       ...patch,
     });
@@ -1704,13 +1666,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       }
     }
   });
-  const input = createRunnerInput(process.stdin, process.stdout, runtime === "pi" ? {
-    submit: block => core.handleUserBlock(block),
-    inspect: result => core.recordInputInspection(result),
-  } : block => core.handleUserBlock(block));
-  if (runtime === "pi" && process.stdin.isTTY && process.stdout.isTTY) {
-    core.recordInputInspection({ probeId: "", state: "unknown" });
-  }
+  const input = createRunnerInput(process.stdin, process.stdout, block => core.handleUserBlock(block));
 
   if (runtime !== "omp") {
     child.on("error", (err) => {

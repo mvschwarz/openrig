@@ -7,7 +7,6 @@ import {
   type ReadinessOptions,
   type ReadinessResult,
 } from "./runtime-adapter.js";
-import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
 import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-samples-store.js";
 import type { ContextUsage } from "./types.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, readPendingStartupContext } from "./startup-orchestrator.js";
@@ -64,7 +63,6 @@ export class ContextMonitor {
   private claudeContextProvisioner: ClaudeContextProvisioner | null;
   private compactionEnforcer: ClaudeCompactionEnforcer | null;
   private readinessCheckers: Record<string, RuntimeReadinessChecker | undefined>;
-  private piRunnerState: ((sessionName: string) => PiRunnerState | null) | null = null;
   private usageSamples: UsageSamplesStore | null = null;
   private providerWindowSampler: (() => ProviderWindowSampleInput[]) | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -78,7 +76,6 @@ export class ContextMonitor {
     readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
     usageSamples?: UsageSamplesStore,
     providerWindowSampler?: () => ProviderWindowSampleInput[],
-    piRunnerState?: (sessionName: string) => PiRunnerState | null,
   ) {
     this.db = db;
     this.store = store;
@@ -87,7 +84,6 @@ export class ContextMonitor {
     this.claudeContextProvisioner = claudeContextProvisioner ?? null;
     this.compactionEnforcer = compactionEnforcer ?? null;
     this.readinessCheckers = readinessCheckers ?? {};
-    this.piRunnerState = piRunnerState ?? null;
     if (claudeContextProvisioner && !this.readinessCheckers["claude-code"]) {
       this.readinessCheckers["claude-code"] = claudeContextProvisioner;
     }
@@ -289,7 +285,6 @@ export class ContextMonitor {
               OR s.startup_status IN ('failed', 'attention_required')
             )
           )
-          OR (n.runtime = 'pi' AND s.status = 'running') -- openrig#2967: OMP deliberately excluded
         )
         AND (r.archived_at IS NULL OR s.status = 'running')
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
@@ -303,17 +298,6 @@ export class ContextMonitor {
       return this.store.readCodexAndNormalize({
         threadId: session.resume_token,
         sessionName: session.session_name,
-      });
-    }
-
-    if (session.runtime === "pi") {
-      // The runner sidecar is the only Pi source (#2967); without a reader this
-      // monitor configuration cannot observe the runtime — never fall through to
-      // the Claude statusline sidecar path.
-      if (!this.piRunnerState) return this.store.unknownUsage("unsupported_runtime");
-      return this.store.readPiAndNormalize({
-        sessionName: session.session_name,
-        state: this.piRunnerState(session.session_name),
       });
     }
 

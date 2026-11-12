@@ -1,121 +1,178 @@
 import { randomUUID } from "node:crypto";
 import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
-import { createPiComposerInspector, type PiComposerInspector } from "./pi-composer-inspector.js";
+import type { SendOpts, SendResult } from "./session-transport.js";
+import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { TerminalPolicyRefusal, type TerminalActor } from "./terminal-policy.js";
 
 type PiSeat = { readonly nodeId: string; readonly sessionName: string; readonly runtime: string | null };
-type PiCompactionReason = "runtime_filter" | "already_in_progress" | "unsupported" | "session_missing"
-  | "mid_work" | "live_state_unavailable" | "send_failed" | "submit_failed"
-  | "draft_input_busy" | "draft_input_unknown" | "draft_input_changed";
-export type PiCompactionOutcome = { readonly triggered: true; readonly stage: "submitted_unconfirmed" }
-  | { readonly triggered: false; readonly reason: PiCompactionReason };
-type PiCompactionDeps = {
-  readonly readSidecar: (session: string) => PiRunnerState | null;
-  readonly resolveTarget: (seat: PiSeat) => string | null;
-  readonly tmux: Pick<TmuxAdapter, "sendText" | "sendKeys">;
-  readonly inspectComposer?: PiComposerInspector;
-  readonly now?: () => number;
-  readonly sleep?: (ms: number) => Promise<void>;
+type PiCompactionRecord = NonNullable<PiRunnerState["compaction"]>;
+
+/**
+ * A manual Pi compaction request. The attempt id is minted here, carried by the
+ * reserved `/openrig-compact <id>` input into the runner's native compact
+ * command, and reported back by the sidecar record it stamps. The requested
+ * result is therefore always separable from an automatic run.
+ */
+export type PiCompactionOutcome =
+  | { readonly triggered: true; readonly attemptId: string; readonly stage: "submitted_unconfirmed" | "uncertain" }
+  | { readonly triggered: false; readonly reason: string; readonly detail?: string };
+
+/** Statuses of the REQUESTED attempt only; an automatic run is reported separately. */
+export type PiCompactionStatus = "not_requested" | "uncertain" | "completed" | "failed" | "aborted" | "unsupported";
+export type PiCompactionState = {
+  readonly status: PiCompactionStatus;
+  readonly attemptId: string | null;
+  readonly requestedAt?: string;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  /** How an uncertain attempt is uncertain: it may have been submitted, or it started without an end. */
+  readonly phase?: "submitted_no_result" | "started_no_end";
+  readonly result?: PiCompactionRecord["result"];
+  readonly errorMessage?: string;
+  readonly aborted?: boolean;
+  readonly willRetry?: boolean;
+  /** A run that isn't this request, normally an automatic threshold/overflow one. Never this request's answer. */
+  readonly automatic: PiCompactionRecord | null;
 };
 
+type SendEffect = Pick<SendResult, "ok" | "sent" | "outcome" | "reason" | "inputPhase" | "error">;
+type PiCompactionDeps = {
+  readonly readSidecar: (session: string) => PiRunnerState | null;
+  /** The agent's ordinary guarded send path: session transport + delivery guard. */
+  readonly send: (sessionName: string, text: string, opts: Pick<SendOpts, "openrigNotice" | "beforeWrite">) => Promise<SendEffect>;
+  readonly terminalPolicies?: { check(nodeId: string, action: "compaction", actor: TerminalActor): unknown };
+  readonly now?: () => number;
+  readonly newAttemptId?: () => string;
+};
+
+type RequestedAttempt = { readonly attemptId: string; readonly launchId: string | null; readonly submittedAt: string };
+
+const UNSUPPORTED = /unknown command|unsupported|not supported/i;
+
 export class PiCompactionService {
-  private readonly pending = new Set<string>();
+  private readonly requested = new Map<string, RequestedAttempt>();
   private readonly now: () => number;
-  private readonly sleep: (ms: number) => Promise<void>;
-  private readonly inspectComposer: PiComposerInspector;
+  private readonly newAttemptId: () => string;
 
   constructor(private readonly deps: PiCompactionDeps) {
     this.now = deps.now ?? Date.now;
-    this.sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
-    this.inspectComposer = deps.inspectComposer ?? createPiComposerInspector(deps);
+    this.newAttemptId = deps.newAttemptId ?? randomUUID;
   }
 
-  async trigger(seat: PiSeat): Promise<PiCompactionOutcome> {
+  async trigger(seat: PiSeat, actor: TerminalActor = { source: "caller", session: null }): Promise<PiCompactionOutcome> {
     if (seat.runtime !== "pi") return { triggered: false, reason: "runtime_filter" };
-    if (this.pending.has(seat.sessionName)) return { triggered: false, reason: "already_in_progress" };
+    // The same actor policy the Claude path applies: caller attribution, unchanged self/peer/unattributed handling.
+    const refusal = this.policyRefusal(seat.nodeId, actor);
+    if (refusal) return { triggered: false, ...refusal };
     const prior = this.deps.readSidecar(seat.sessionName);
-    if (this.getState(seat.sessionName).status === "unsupported") return { triggered: false, reason: "unsupported" };
+    if (UNSUPPORTED.test(prior?.compaction?.errorMessage ?? "")) return { triggered: false, reason: "unsupported" };
+    if (this.getState(seat.sessionName).status === "uncertain") return { triggered: false, reason: "already_in_progress" };
     if (prior?.compaction?.startedAt && !prior.compaction.endedAt) return { triggered: false, reason: "already_in_progress" };
-    const target = this.deps.resolveTarget(seat);
-    if (!target) return { triggered: false, reason: "session_missing" };
-    this.pending.add(seat.sessionName);
-    const deadline = this.now() + 2000;
-    let expired = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<PiCompactionOutcome>(resolve => {
-      timer = setTimeout(() => {
-        expired = true;
-        resolve({ triggered: false, reason: "live_state_unavailable" });
-      }, 2000);
-    });
-    const gate = { seat, target, launchId: prior?.launchId, deadline,
-      expired: () => expired || this.now() >= deadline };
-    const run = async (): Promise<PiCompactionOutcome> => {
-      const probe = await this.probe(gate);
-      if ("reason" in probe) return { triggered: false, reason: probe.reason };
-      if (probe.live.isStreaming || probe.live.isCompacting) return { triggered: false, reason: "mid_work" };
-      const current = this.getState(seat.sessionName);
-      if (current.status === "in_progress") return { triggered: false, reason: "already_in_progress" };
-      if (current.status === "unsupported") return { triggered: false, reason: "unsupported" };
-      const reason = await this.submitControl({ ...gate, text: "/openrig-compact" });
-      return reason ? { triggered: false, reason } : { triggered: true, stage: "submitted_unconfirmed" };
-    };
-    try {
-      return await Promise.race([run(), timeout]);
-    } finally {
-      expired = true;
-      clearTimeout(timer);
-      this.pending.delete(seat.sessionName);
-    }
-  }
 
-  getState(session: string) {
-    const compaction = this.deps.readSidecar(session)?.compaction ?? null;
-    const completionKey = compaction?.endedAt
-      ? compaction.requestId ?? `${compaction.reason ?? "unknown"}:${compaction.endedAt}` : null;
-    const status = !compaction ? "unknown"
-      : compaction.errorMessage && /unknown command|unsupported|not supported/i.test(compaction.errorMessage) ? "unsupported"
-      : compaction.endedAt ? compaction.errorMessage ? "failed" : compaction.aborted ? "aborted" : "completed"
-      : compaction.startedAt ? "in_progress" : "unknown";
-    return { status, compaction, completionKey };
-  }
-
-  private async submitControl(input: { readonly seat: PiSeat; readonly target: string; readonly text: string;
-    readonly expired: () => boolean }): Promise<PiCompactionReason | null> {
-    const inspect = { sessionName: input.seat.sessionName, target: input.target, expected: input.text };
-    const before = await this.inspectComposer(inspect);
-    if (input.expired()) return "live_state_unavailable";
-    if (before === "unknown") return "draft_input_unknown";
-    if (before !== "empty") return "draft_input_busy";
-    const sent = await this.deps.tmux.sendText(input.target, input.text);
-    if (input.expired()) return "live_state_unavailable";
-    if (!sent.ok) return "send_failed";
-    const after = await this.inspectComposer(inspect);
-    if (input.expired()) return "live_state_unavailable";
-    if (after === "unknown") return "draft_input_unknown";
-    if (after !== "matched") return "draft_input_changed";
-    const submitted = await this.deps.tmux.sendKeys(input.target, ["Enter"]);
-    if (input.expired()) return "live_state_unavailable";
-    return submitted.ok ? null : "submit_failed";
-  }
-
-  private async probe(input: { readonly seat: PiSeat; readonly target: string; readonly launchId: string | undefined;
-    readonly deadline: number; readonly expired: () => boolean }): Promise<
-      { readonly live: NonNullable<PiRunnerState["liveState"]> } | { readonly reason: PiCompactionReason }> {
-    const sentAt = this.now();
-    const probeId = randomUUID();
-    const refusal = await this.submitControl({ ...input, text: `/openrig-state ${probeId}` });
-    if (refusal) return { reason: refusal };
-    while (!input.expired()) {
-      const state = this.deps.readSidecar(input.seat.sessionName);
-      if (state?.launchId !== input.launchId || state?.exited) return { reason: "live_state_unavailable" };
-      const live = state?.liveState;
-      if (live?.probeId === probeId && Date.parse(live.updatedAt) > sentAt && Date.parse(live.updatedAt) <= input.deadline) {
-        if (state?.ready !== true || typeof live.isStreaming !== "boolean" || typeof live.isCompacting !== "boolean") return { reason: "live_state_unavailable" };
-        return { live };
+    const attemptId = this.newAttemptId();
+    const launchId = prior?.launchId ?? null;
+    // The guard re-checks node, session, occupant and pane at the write and at
+    // Enter. This bound launch check runs at those same two moments, so a
+    // request cannot reach a replacement occupant or a rebound runner.
+    const beforeWrite = () => {
+      if (launchId === null) return;
+      if (this.deps.readSidecar(seat.sessionName)?.launchId !== launchId) {
+        throw new DeliveryGuardError("launch_changed", "The runner launch changed; no OpenRig compaction input was written.");
       }
-      await this.sleep(Math.min(25, input.deadline - this.now()));
+    };
+    let result: SendEffect;
+    try {
+      result = await this.deps.send(seat.sessionName, `/openrig-compact ${attemptId}`, { openrigNotice: true, beforeWrite });
+    } catch (error) {
+      // The guarded send throws once a write may have been issued. A guard refusal
+      // before any write is a refusal; anything later is an uncertain attempt.
+      const tagged = error as { inputWritten?: boolean; inputAttempted?: boolean; message?: string };
+      if (tagged?.inputWritten === true || tagged?.inputAttempted === true) {
+        this.remember(seat.sessionName, attemptId, launchId);
+        return { triggered: true, attemptId, stage: "uncertain" };
+      }
+      if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code, detail: error.message };
+      return { triggered: false, reason: "send_failed", ...(tagged?.message ? { detail: tagged.message } : {}) };
     }
-    return { reason: "live_state_unavailable" };
+    if (result.ok && result.outcome !== "retained") {
+      this.remember(seat.sessionName, attemptId, launchId);
+      return { triggered: true, attemptId, stage: "submitted_unconfirmed" };
+    }
+    // Text or Enter may have reached the seat. Report the attempt as uncertain:
+    // never "was not started" once submission is possible.
+    if (result.inputPhase === "written" || result.inputPhase === "attempted" || result.sent === true) {
+      this.remember(seat.sessionName, attemptId, launchId);
+      return { triggered: true, attemptId, stage: "uncertain" };
+    }
+    if (result.outcome === "retained") {
+      return { triggered: false, reason: "held", detail: "The seat's delivery guard held the request; no compaction input was written." };
+    }
+    if (result.inputPhase === "not_reached" || result.sent === false) {
+      return { triggered: false, reason: result.reason ?? "send_failed", ...(result.error ? { detail: result.error } : {}) };
+    }
+    // No positive pre-input result: the write outcome is unknown, so the request
+    // may have been submitted. Keep it as an uncertain attempt rather than deny it.
+    this.remember(seat.sessionName, attemptId, launchId);
+    return { triggered: true, attemptId, stage: "uncertain" };
+  }
+
+  /**
+   * The requested attempt's status, scoped to its launch. A record from an
+   * automatic run, or from an earlier request, never answers a newer one: with
+   * no matching record the attempt reads `uncertain`, not completed.
+   */
+  getState(session: string): PiCompactionState {
+    const sidecar = this.deps.readSidecar(session);
+    return this.attemptState(this.requested.get(session) ?? null, sidecar);
+  }
+
+  private remember(session: string, attemptId: string, launchId: string | null): void {
+    this.requested.set(session, { attemptId, launchId, submittedAt: new Date(this.now()).toISOString() });
+  }
+
+  private attemptState(requested: RequestedAttempt | null, sidecar: PiRunnerState | null): PiCompactionState {
+    const record = sidecar?.compaction ?? null;
+    const automatic = record && !record.attemptId ? record : null;
+    // After a daemon restart the in-memory request is gone, but the sidecar's
+    // attempt id still names the run the runner carried.
+    const attemptId = requested?.attemptId ?? record?.attemptId ?? null;
+    if (!attemptId) return { status: "not_requested", attemptId: null, automatic };
+    // Scoped to the launch that received the request: a record from another runner
+    // launch never answers it, even if it somehow names the same attempt id.
+    const sameLaunch = requested?.launchId == null || sidecar == null || sidecar.launchId === requested.launchId;
+    const scoped = record?.attemptId === attemptId && sameLaunch ? record : null;
+    const requestedAt = requested?.submittedAt;
+    if (scoped?.endedAt) {
+      const status: PiCompactionStatus = UNSUPPORTED.test(scoped.errorMessage ?? "") ? "unsupported"
+        : scoped.aborted ? "aborted" : scoped.errorMessage ? "failed" : "completed";
+      return {
+        status, attemptId, ...(requestedAt ? { requestedAt } : {}),
+        ...(scoped.startedAt ? { startedAt: scoped.startedAt } : {}), endedAt: scoped.endedAt,
+        ...(scoped.result !== undefined ? { result: scoped.result } : {}),
+        ...(scoped.errorMessage ? { errorMessage: scoped.errorMessage } : {}),
+        ...(scoped.aborted !== undefined ? { aborted: scoped.aborted } : {}),
+        ...(scoped.willRetry !== undefined ? { willRetry: scoped.willRetry } : {}),
+        automatic,
+      };
+    }
+    if (scoped?.startedAt) {
+      return { status: "uncertain", phase: "started_no_end", attemptId, ...(requestedAt ? { requestedAt } : {}),
+        startedAt: scoped.startedAt, automatic };
+    }
+    // A request this daemon made, or a record that named an attempt, with no
+    // matching result yet: submission (or its start) is possible, so uncertain.
+    return { status: "uncertain", phase: "submitted_no_result", attemptId,
+      ...(requestedAt ? { requestedAt } : {}), automatic };
+  }
+
+  private policyRefusal(nodeId: string, actor: TerminalActor): { reason: "terminal_policy_refused" | "terminal_policy_unavailable"; detail?: string } | null {
+    if (!this.deps.terminalPolicies) return null;
+    try {
+      this.deps.terminalPolicies.check(nodeId, "compaction", actor);
+      return null;
+    } catch (error) {
+      if (error instanceof TerminalPolicyRefusal) return { reason: "terminal_policy_refused", detail: error.message };
+      return actor.source === "openrig" ? null : { reason: "terminal_policy_unavailable" };
+    }
   }
 }

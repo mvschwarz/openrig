@@ -1,225 +1,210 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { PiCompactionService } from "../src/domain/pi-compaction-service.js";
-import { parsePiRunnerState, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
+import { DeliveryGuardError } from "../src/domain/seat-delivery-guard.js";
+import { TerminalPolicyRefusal, type TerminalActor } from "../src/domain/terminal-policy.js";
+import type { SendResult } from "../src/domain/session-transport.js";
+import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
 
 const seat = { nodeId: "node", sessionName: "pi@test", runtime: "pi" };
 const start = Date.parse("2026-11-11T10:00:00Z");
-function fixture(inspections?: readonly ("empty" | "matched" | "busy" | "unknown")[]) {
+type SendEffect = Pick<SendResult, "ok" | "sent" | "outcome" | "reason" | "inputPhase" | "error">;
+
+function fixture(opts: {
+  sidecar?: PiRunnerState | null;
+  send?: (text: string, beforeWrite?: () => void) => Promise<SendEffect>;
+  check?: (nodeId: string, action: "compaction", actor: TerminalActor) => void;
+} = {}) {
   let time = start;
-  let state: PiRunnerState | null = { ready: true, launchId: "launch", updatedAt: new Date(time).toISOString() };
-  const inputs: string[] = [];
-  const targets: string[] = [];
-  let onProbe = () => {};
-  let inspectionIndex = 0;
-  let enters = 0;
+  let state: PiRunnerState | null = opts.sidecar === undefined
+    ? { ready: true, launchId: "launch", updatedAt: new Date(time).toISOString() }
+    : opts.sidecar;
+  const sent: string[] = [];
+  let beforeWrite: (() => void) | undefined;
+  let attempt = 0;
   const service = new PiCompactionService({
     readSidecar: () => state,
-    resolveTarget: () => "%7",
-    inspectComposer: async () => {
-      const index = inspectionIndex++;
-      return inspections ? inspections[index] ?? "unknown" : index % 2 === 0 ? "empty" : "matched";
+    send: async (session, text, sendOpts) => {
+      sent.push(`${session}:${text}`);
+      beforeWrite = sendOpts.beforeWrite;
+      return opts.send
+        ? opts.send(text, sendOpts.beforeWrite)
+        : { ok: true, sent: true, outcome: "rendered-unconfirmed" };
     },
-    tmux: {
-      sendText: async (target, text) => { targets.push(target); inputs.push(text); return { ok: true }; },
-      sendKeys: async () => { enters++; if (inputs.at(-1)?.startsWith("/openrig-state")) onProbe(); return { ok: true }; },
-    },
-    now: () => time, sleep: async ms => { time += ms; },
+    ...(opts.check ? { terminalPolicies: { check: opts.check } } : {}),
+    now: () => time,
+    newAttemptId: () => `attempt-${++attempt}`,
   });
-  const update = (patch: Partial<PiRunnerState>) => {
-    state = { ready: true, launchId: "launch", updatedAt: new Date(time + 1).toISOString(), ...patch };
+  const update = (patch: Partial<PiRunnerState> | null) => {
+    state = patch === null ? null : { ready: true, launchId: "launch", updatedAt: new Date(time + 1).toISOString(), ...patch };
   };
-  return { service, inputs, targets, update, elapsed: () => time - start, enters: () => enters,
-    probe: (fn: () => void) => { onProbe = fn; },
-    live: (flags = { isStreaming: false, isCompacting: false }, at = start + 1) => update({
-      liveState: { probeId: inputs.at(-1)?.split(" ")[1] ?? "", ...flags, updatedAt: new Date(at).toISOString() },
-    }),
-  };
+  return { service, sent, update, attemptId: () => `attempt-${attempt}`, beforeWrite: () => beforeWrite,
+    advance: () => { time += 1000; } };
 }
 
 describe("PiCompactionService", () => {
-  it.each([
-    { inspections: ["busy"], reason: "draft_input_busy", sent: 0, entered: 0 },
-    { inspections: ["unknown"], reason: "draft_input_unknown", sent: 0, entered: 0 },
-    { inspections: ["empty", "busy"], reason: "draft_input_changed", sent: 1, entered: 0 },
-    { inspections: ["empty", "unknown"], reason: "draft_input_unknown", sent: 1, entered: 0 },
-    { inspections: ["empty", "matched", "busy"], reason: "draft_input_busy", sent: 1, entered: 1 },
-    { inspections: ["empty", "matched", "empty", "busy"], reason: "draft_input_changed", sent: 2, entered: 1 },
-  ] as const)("refuses composer guard $reason at $inspections", async ({ inspections, reason, sent, entered }) => {
-    // Given a draft or unprovable editor at a control-input boundary.
-    const f = fixture(inspections);
-    f.probe(() => f.live());
-    // When the service tries to compact.
-    const result = await f.service.trigger(seat);
-    // Then the refusal is explicit and no unsafe submission occurs.
-    expect(result).toEqual({ triggered: false, reason });
-    expect(f.inputs).toHaveLength(sent);
-    expect(f.enters()).toBe(entered);
+  it.each(["omp", "claude-code", "codex", null])("rejects runtime %s before any send", async runtime => {
+    const f = fixture();
+    expect(await f.service.trigger({ ...seat, runtime })).toMatchObject({ triggered: false, reason: "runtime_filter" });
+    expect(f.sent).toEqual([]);
   });
-  it("refuses a delayed idle reply from a timed-out attempt during retry", async () => {
-    // Given probe A times out without an answer.
+
+  it("sends the reserved input and its attempt id through the guarded send path", async () => {
+    const f = fixture();
+    const result = await f.service.trigger(seat);
+    expect(result).toEqual({ triggered: true, attemptId: "attempt-1", stage: "submitted_unconfirmed" });
+    // One write to the seat's own session, carrying the id the runner stamps back.
+    expect(f.sent).toEqual(["pi@test:/openrig-compact attempt-1"]);
+    expect(f.beforeWrite()).toBeTypeOf("function");
+    // Submission is not completion: no record yet reads uncertain for this attempt.
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "submitted_no_result", attemptId: "attempt-1" });
+  });
+
+  it("reports a held send as not started, with no attempt to track", async () => {
+    const f = fixture({ send: async () => ({ ok: true, sent: false, outcome: "retained", reason: "typing_guard_enabled" }) });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "held" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+  });
+
+  it("reports input that may have been written as uncertain, never was-not-started", async () => {
+    const f = fixture({ send: async () => ({ ok: false, sent: true, inputPhase: "written", reason: "submit_failed" }) });
+    expect(await f.service.trigger(seat)).toEqual({ triggered: true, attemptId: "attempt-1", stage: "uncertain" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "submitted_no_result", attemptId: "attempt-1" });
+  });
+
+  it("treats an indeterminate write as an uncertain attempt, not a pre-input refusal", async () => {
+    const f = fixture({ send: async () => ({ ok: false, outcome: "failed", reason: "delivery_indeterminate" }) });
+    expect(await f.service.trigger(seat)).toEqual({ triggered: true, attemptId: "attempt-1", stage: "uncertain" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "submitted_no_result", attemptId: "attempt-1" });
+  });
+
+  it("keeps the guard's pre-input reason when nothing was written", async () => {
+    const f = fixture({ send: async () => ({ ok: false, sent: false, inputPhase: "not_reached", reason: "target_needs_input" }) });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "target_needs_input" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested" });
+  });
+
+  it("turns a guarded send that throws after a write into an uncertain attempt", async () => {
+    const f = fixture({ send: async () => {
+      throw Object.assign(new DeliveryGuardError("launch_changed", "The runner launch changed."), { inputWritten: true });
+    } });
+    expect(await f.service.trigger(seat)).toEqual({ triggered: true, attemptId: "attempt-1", stage: "uncertain" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-1" });
+  });
+
+  it("keeps a guard refusal that throws before any write", async () => {
+    const f = fixture({ send: async () => { throw new DeliveryGuardError("launch_changed", "The runner launch changed."); } });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "launch_changed" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested" });
+  });
+
+  it("refuses a second request while a run has started and not ended", async () => {
+    const f = fixture({ sidecar: { ready: true, launchId: "launch", updatedAt: "old",
+      compaction: { attemptId: "attempt-0", startedAt: new Date(start).toISOString() } } });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "already_in_progress" });
+    expect(f.sent).toEqual([]);
+  });
+
+  it("refuses a second request while the first is still unconfirmed", async () => {
     const f = fixture();
     await f.service.trigger(seat);
-    const probeA = f.inputs[0]?.split(" ")[1];
-    f.probe(() => f.update({ liveState: { probeId: probeA ?? "", isStreaming: false,
-      isCompacting: false, updatedAt: new Date(start + 2001).toISOString() } }));
-    // When probe B receives A's delayed answer with an otherwise fresh timestamp.
-    const result = await f.service.trigger(seat);
-    // Then correlation, not arrival time, prevents compaction.
-    expect(result).toEqual({ triggered: false, reason: "live_state_unavailable" });
-    expect(f.inputs[1]).not.toBe(f.inputs[0]);
-    expect(f.inputs).not.toContain("/openrig-compact");
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "already_in_progress" });
+    expect(f.sent).toHaveLength(1);
   });
-  it("submits only after fresh idle state through the bound pane", async () => {
-    // Given a fresh idle reply to the probe.
+
+  it("refuses retry after an unsupported compact RPC", async () => {
+    const f = fixture({ sidecar: { ready: true, launchId: "launch", updatedAt: "old",
+      compaction: { attemptId: "attempt-0", reason: "manual", endedAt: new Date(start).toISOString(), errorMessage: "Unknown command: compact" } } });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "unsupported", attemptId: "attempt-0" });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "unsupported" });
+    expect(f.sent).toEqual([]);
+  });
+
+  it("never lets an automatic completion answer the request", async () => {
     const f = fixture();
-    f.probe(() => f.live());
-    // When compaction is requested.
-    const result = await f.service.trigger(seat);
-    // Then submission is truthful, not completion.
-    expect(result).toEqual({ triggered: true, stage: "submitted_unconfirmed" });
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/), "/openrig-compact"]);
-    expect(f.targets).toEqual(["%7", "%7"]);
+    await f.service.trigger(seat);
+    f.update({ compaction: { reason: "threshold", endedAt: new Date(start).toISOString() } });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "submitted_no_result", attemptId: "attempt-1",
+      automatic: { reason: "threshold" } });
   });
 
-  it.each([{ isStreaming: true, isCompacting: false }, { isStreaming: false, isCompacting: true }])(
-    "refuses live busy flags %j despite an idle pre-existing sidecar", async flags => {
-      // Given a live busy reply.
-      const f = fixture();
-      f.probe(() => f.live(flags));
-      // When compaction is requested.
-      const result = await f.service.trigger(seat);
-      // Then compact input is never submitted.
-      expect(result).toMatchObject({ triggered: false, reason: "mid_work" });
-      expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
-    });
+  it("never lets an earlier request's completion answer a new one", async () => {
+    const f = fixture({ sidecar: { ready: true, launchId: "launch", updatedAt: "old",
+      compaction: { attemptId: "attempt-old", reason: "manual", endedAt: new Date(start).toISOString() } } });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: true, attemptId: "attempt-1" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "submitted_no_result", attemptId: "attempt-1", automatic: null });
+  });
 
-  it.each([start - 1, start, -1])("refuses non-newer live timestamp %s within two seconds", async at => {
-    // Given an old or equal idle sample.
+  it("reports a start with no end as uncertain", async () => {
     const f = fixture();
-    f.probe(() => f.live(undefined, at));
-    // When compaction is requested.
-    const result = await f.service.trigger(seat);
-    // Then the sample never proves idle.
-    expect(result).toMatchObject({ triggered: false, reason: "live_state_unavailable" });
-    expect(f.elapsed()).toBe(2000);
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
+    await f.service.trigger(seat);
+    f.update({ compaction: { attemptId: "attempt-1", reason: "manual", startedAt: new Date(start).toISOString() } });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+      phase: "started_no_end", attemptId: "attempt-1", startedAt: new Date(start).toISOString() });
   });
 
-  it("ignores a concurrent unrelated sidecar write for freshness", async () => {
-    // Given old live state followed by a newer outer sidecar timestamp.
+  it("reports the matching attempt's terminal outcome", async () => {
     const f = fixture();
-    f.live(undefined, start - 1);
-    f.probe(() => f.update({ updatedAt: new Date(start + 100).toISOString(),
-      liveState: { probeId: f.inputs.at(-1)?.split(" ")[1] ?? "", isStreaming: false, isCompacting: false, updatedAt: new Date(start - 1).toISOString() } }));
-    // When compaction is requested.
-    const result = await f.service.trigger(seat);
-    // Then only liveState freshness counts.
-    expect(result).toMatchObject({ triggered: false, reason: "live_state_unavailable" });
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
+    await f.service.trigger(seat);
+    const endedAt = new Date(start).toISOString();
+    f.update({ compaction: { attemptId: "attempt-1", reason: "manual", startedAt: endedAt, endedAt,
+      result: { summary: "done" }, aborted: false } });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "completed", attemptId: "attempt-1",
+      startedAt: endedAt, endedAt, result: { summary: "done" }, aborted: false });
   });
 
-  it("uses the pre-existing sidecar only to refuse an in-progress compaction", async () => {
-    // Given an unfinished compaction.
+  it.each([
+    { compaction: { errorMessage: "Nothing to compact" }, status: "failed" },
+    { compaction: { aborted: true }, status: "aborted" },
+    { compaction: { errorMessage: "Unknown command: compact" }, status: "unsupported" },
+  ] as const)("reports %j as $status", ({ compaction, status }) => {
+    const f = fixture({ sidecar: { ready: true, launchId: "launch", updatedAt: "old",
+      compaction: { attemptId: "attempt-restart", reason: "manual", endedAt: new Date(start).toISOString(), ...compaction } } });
+    // No in-memory request: the sidecar's own attempt id still names the run after a daemon restart.
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status, attemptId: "attempt-restart" });
+  });
+
+  it("checks the carried launch at the write and at Enter", async () => {
     const f = fixture();
-    f.update({ compaction: { reason: "manual", startedAt: new Date(start).toISOString() } });
-    // When another request arrives.
-    const result = await f.service.trigger(seat);
-    // Then no input is sent.
-    expect(result).toMatchObject({ triggered: false, reason: "already_in_progress" });
-    expect(f.inputs).toEqual([]);
+    await f.service.trigger(seat);
+    const check = f.beforeWrite();
+    expect(check).toBeTypeOf("function");
+    f.update({ launchId: "replacement" });
+    expect(() => check?.()).toThrow(DeliveryGuardError);
   });
 
-  it("refuses ambiguous fresh flags instead of treating missing flags as idle", async () => {
-    // Given a malformed but freshly timestamped sidecar from the file boundary.
+  it("applies the caller's terminal-policy actor to the Pi operation", async () => {
+    const check = (_nodeId: string, _action: "compaction", actor: TerminalActor) => {
+      if (actor.source === "caller" && actor.session === "stranger@pi-rig") throw new TerminalPolicyRefusal("peer", "compaction");
+    };
+    const denied = fixture({ check });
+    expect(await denied.service.trigger(seat, { source: "caller", session: "stranger@pi-rig" }))
+      .toMatchObject({ triggered: false, reason: "terminal_policy_refused" });
+    expect(denied.sent).toEqual([]);
+    // Self and unattributed callers keep today's behaviour.
+    expect(await fixture({ check }).service.trigger(seat, { source: "caller", session: "pi@test" }))
+      .toMatchObject({ triggered: true });
+    expect(await fixture({ check }).service.trigger(seat, { source: "caller", session: null }))
+      .toMatchObject({ triggered: true });
+  });
+
+  it("refuses when the policy schema is unavailable for an attributed caller", async () => {
+    const f = fixture({ check: () => { throw new Error("no schema"); } });
+    expect(await f.service.trigger(seat, { source: "caller", session: "pi@test" }))
+      .toMatchObject({ triggered: false, reason: "terminal_policy_unavailable" });
+    expect(f.sent).toEqual([]);
+  });
+
+  it("allows a new request after the previous one completed", async () => {
     const f = fixture();
-    f.probe(() => f.update(parsePiRunnerState(JSON.stringify({ ready: true, updatedAt: new Date(start + 1).toISOString(),
-      liveState: { isStreaming: false, updatedAt: new Date(start + 1).toISOString() },
-    })) ?? {}));
-    // When compaction is requested.
-    const result = await f.service.trigger(seat);
-    // Then no compact input is sent.
-    expect(result).toMatchObject({ triggered: false, reason: "live_state_unavailable" });
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
-  });
-
-  it("refuses when compaction starts alongside an idle control reply", async () => {
-    // Given a fresh idle sample followed by an independent compaction start.
-    const f = fixture();
-    f.probe(() => f.update({ liveState: { probeId: f.inputs.at(-1)?.split(" ")[1] ?? "", isStreaming: false, isCompacting: false, updatedAt: new Date(start + 1).toISOString() },
-      compaction: { startedAt: new Date(start + 2).toISOString(), reason: "threshold" } }));
-    // When compaction is requested.
-    const result = await f.service.trigger(seat);
-    // Then the newer durable in-progress record refuses submission.
-    expect(result).toMatchObject({ triggered: false, reason: "already_in_progress" });
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
-  });
-
-  it("bounds a hung tmux probe to two seconds and never submits late Enter", async () => {
-    // Given a tmux paste that remains pending past the deadline.
-    vi.useFakeTimers();
-    let release: ((result: { ok: true }) => void) | undefined;
-    const keys = vi.fn(async () => ({ ok: true as const }));
-    const service = new PiCompactionService({ readSidecar: () => null, resolveTarget: () => "%7",
-      inspectComposer: async () => "empty",
-      tmux: { sendText: () => new Promise(resolve => { release = resolve; }), sendKeys: keys } });
-    try {
-      // When the two-second deadline elapses before paste completes.
-      const pending = service.trigger(seat);
-      await vi.advanceTimersByTimeAsync(2000);
-      const result = await pending;
-      release?.({ ok: true });
-      await Promise.resolve();
-      // Then refusal is bounded and no late Enter is emitted.
-      expect(result).toMatchObject({ triggered: false, reason: "live_state_unavailable" });
-      expect(keys).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it.each(["omp", "claude-code", "codex"])("rejects runtime %s before any input", async runtime => {
-    // Given a non-Pi target.
-    const f = fixture();
-    // When it reaches this service.
-    const result = await f.service.trigger({ ...seat, runtime });
-    // Then no Pi control input leaks to another runtime.
-    expect(result).toMatchObject({ triggered: false, reason: "runtime_filter" });
-    expect(f.inputs).toEqual([]);
-  });
-
-  it("fails closed when a runner cannot answer the probe", async () => {
-    // Given only a ready sidecar, as with an older runner.
-    const f = fixture();
-    // When no fresh response arrives.
-    const result = await f.service.trigger(seat);
-    // Then it times out without compaction.
-    expect(result).toMatchObject({ triggered: false, reason: "live_state_unavailable" });
-    expect(f.elapsed()).toBe(2000);
-    expect(f.inputs).toEqual([expect.stringMatching(/^\/openrig-state [\w-]+$/)]);
-  });
-
-  it("reports unsupported compact RPC from the authoritative sidecar and refuses retry", async () => {
-    // Given a durable unknown-command error from Pi.
-    const f = fixture();
-    f.update({ compaction: { reason: "manual", endedAt: new Date(start).toISOString(), errorMessage: "Unknown command: compact" } });
-    // When state and a new request are read.
-    const state = f.service.getState(seat.sessionName);
-    const result = await f.service.trigger(seat);
-    // Then unsupported is explicit and no retry is sent.
-    expect(state).toMatchObject({ status: "unsupported" });
-    expect(result).toMatchObject({ triggered: false, reason: "unsupported" });
-    expect(f.inputs).toEqual([]);
-  });
-
-  it.each(["req-1", undefined])("reads completion solely from sidecar with identity %s", requestId => {
-    // Given a terminal sidecar with optional request identity and no activity delivery.
-    const f = fixture();
-    f.update({ compaction: { requestId, reason: "manual", endedAt: new Date(start).toISOString(), aborted: false } });
-    // When state is read.
-    const state = f.service.getState(seat.sessionName);
-    // Then terminal state and identity come from the producer.
-    expect(state).toMatchObject({ status: "completed", compaction: { reason: "manual", endedAt: new Date(start).toISOString() },
-      completionKey: requestId ?? `manual:${new Date(start).toISOString()}` });
-    expect(f.inputs).toEqual([]);
+    await f.service.trigger(seat);
+    const endedAt = new Date(start).toISOString();
+    f.update({ compaction: { attemptId: "attempt-1", reason: "manual", startedAt: endedAt, endedAt } });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: true, attemptId: "attempt-2" });
+    expect(f.sent).toHaveLength(2);
   });
 });

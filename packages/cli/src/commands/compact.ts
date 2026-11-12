@@ -75,22 +75,28 @@ share one 180-second budget and stop as before; while an attempt is held, a manu
 request reads already_in_progress until --cancel.
 Stopped attempts may retry automatically after the cooldown; cancellation does not.
 Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.
-Pi seats send the reserved /openrig-compact input, which the runner turns into Pi's
-native compact RPC (not prompt text). A successful trigger is reported as
-"submitted, unconfirmed" because OpenRig does not wait for Pi to finish; read
-completion and its request identity from the Pi runner sidecar with
-rig compact <session> --state (activity is advisory, the sidecar is authoritative).
-OpenRig sends no restore or audit prompts for Pi, and Pi's context usage may stay
-unknown until the next assistant response. Both control inputs require an empty
-editor before paste and an exact staged-token match before Enter. Refusal examples (not exhaustive):
-draft_input_busy, draft_input_unknown, draft_input_changed, live_state_unavailable,
-mid_work, already_in_progress, send_failed and submit_failed.
---skip-map is ignored for Pi; --cancel is rejected for Pi with runtime_filter.
+Pi seats send the reserved /openrig-compact <attempt-id> input through the same
+guarded send path every other message to the seat uses: the session transport
+and its delivery guard, which respects a person's draft, a hold, a prompt and
+the bound occupant. The runner turns it into Pi's native compact RPC (not
+prompt text). Each request has one attempt id, carried into that command and
+back into the runner sidecar, so the requested run is reported separately from
+an automatic one and an earlier completion never answers a new request.
+A successful trigger is reported as "submitted, unconfirmed"; when input may
+have been written it is reported as uncertain. --state reports the requested
+attempt as completed, failed, aborted or unsupported; an attempt that may have
+been submitted without a result, or that started without an end, is uncertain,
+not "not started". Activity is advisory; the sidecar is authoritative.
+OpenRig sends no restore or audit prompts for Pi. --skip-map is ignored for Pi;
+--cancel is rejected for Pi with runtime_filter. Refusal examples (not exhaustive):
+already_in_progress, unsupported, terminal_policy_refused,
+terminal_policy_unavailable, held and the transport's own reasons.
 
-Runtimes other than Claude and Pi are rejected as runtime_filter. On a Pi build without
-native compact RPC, the first trigger may return submitted_unconfirmed before the RPC
-error is recorded; --state then reports unsupported and subsequent triggers refuse with unsupported.
-An older runner without editor inspection fails closed with draft_input_unknown.
+Runtimes other than Claude and Pi are rejected as runtime_filter. The unsupported
+detection matches the error text of omo 5.1.48 (engine senpi 2026.10.25-2), the
+fork this was checked against; general Pi support is not claimed. On such a
+build, the first trigger may return submitted_unconfirmed before the RPC error
+is recorded; --state then reports unsupported and later triggers refuse.
 `);
 
   const getDepsF = (): CompactDeps => depsOverride ?? {
@@ -137,9 +143,12 @@ An older runner without editor inspection fails closed with draft_input_unknown.
 
     if (opts.state || opts.cancel) {
       if (opts.state && res.data["runtime"] === "pi") {
-        const state = res.data["state"] as { status?: string; completionKey?: string | null } | undefined;
-        console.log(`Pi compaction state for ${session}: ${state?.status ?? "unknown"}${state?.completionKey ? ` (completion: ${state.completionKey})` : ""}`);
-        console.log("Read from the Pi runner sidecar (authoritative); activity is advisory. No restore or audit prompts are owed for Pi, and context usage may stay unknown until the next assistant response.");
+        const state = res.data["state"] as { status?: string; attemptId?: string | null; phase?: string } | undefined;
+        const uncertainty = state?.status !== "uncertain" ? ""
+          : state?.phase === "started_no_end" ? " (started, no end: the result is unknown)"
+          : " (may have been submitted, no result yet)";
+        console.log(`Pi compaction state for ${session}: ${state?.status ?? "unknown"}${uncertainty}${state?.attemptId ? ` (attempt: ${state.attemptId})` : ""}`);
+        console.log("Read from the Pi runner sidecar (authoritative); activity is advisory. No restore or audit prompts are owed for Pi.");
         return;
       }
       console.log(JSON.stringify(res.data, null, 2)); return;
@@ -147,9 +156,12 @@ An older runner without editor inspection fails closed with draft_input_unknown.
     const stage = res.data["stage"] as string | undefined;
     const compact = res.data["compact"] as string | undefined;
     if (res.data["runtime"] === "pi") {
-      console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""} (runtime: pi)`);
+      const attemptId = res.data["attemptId"] as string | undefined;
+      const outcome = stage === "uncertain" ? "uncertain — input may have reached the seat; no result yet"
+        : compact ?? "submitted, unconfirmed";
+      console.log(`Manual compaction for ${session}: ${outcome}${attemptId ? ` (attempt: ${attemptId})` : ""} (runtime: pi)`);
       if (opts.skipMap) console.log("--skip-map is ignored for Pi; no restore-map lifecycle is used.");
-      console.log(`Pi runs its native compact RPC. Completion is read from the Pi runner sidecar: rig compact ${session} --state. OpenRig sends no restore or audit prompts for Pi; context usage may stay unknown until the next assistant response.`);
+      console.log(`Pi runs its native compact RPC. Read the requested run with rig compact ${session} --state; the sidecar is authoritative and activity is advisory. OpenRig sends no restore or audit prompts for Pi.`);
       return;
     }
     console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""}`);

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import os from "node:os";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
-import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
 import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
@@ -192,42 +191,6 @@ export class ContextUsageStore {
     });
   }
 
-  /** Normalize a Pi runner sidecar's launch-scoped contextUsage (openrig#2967).
-   *  The runner is the single writer; a missing contextUsage (fresh launch, or
-   *  the launch-scoped restart reset dropped it) and null tokens/percent (the
-   *  honest post-compaction window) both read as unknown — never zero, never a
-   *  fabricated decrease. */
-  readPiAndNormalize(input: { sessionName: string; state: PiRunnerState | null }): ContextUsage {
-    const usage = input.state?.contextUsage;
-    if (!usage || typeof usage.contextWindow !== "number" || !(usage.contextWindow > 0)) {
-      return this.unknownUsage("no_data");
-    }
-    const tokens = typeof usage.tokens === "number" && Number.isFinite(usage.tokens) ? usage.tokens : null;
-    const percent = typeof usage.percent === "number" && Number.isFinite(usage.percent) ? usage.percent : null;
-    if (tokens === null && percent === null) {
-      return { ...this.unknownUsage("no_data"),
-        sessionId: input.state?.sessionId ?? null, sessionName: input.sessionName, sampledAt: usage.updatedAt };
-    }
-    const usedPercentage = percent !== null
-      ? clampPercentage(Math.round(percent))
-      : clampPercentage(Math.round((tokens! / usage.contextWindow) * 100));
-    return {
-      availability: "known",
-      reason: null,
-      source: "pi",
-      usedPercentage,
-      remainingPercentage: 100 - usedPercentage,
-      contextWindowSize: usage.contextWindow,
-      totalInputTokens: tokens,
-      totalOutputTokens: null,
-      currentUsage: null,
-      transcriptPath: input.state?.sessionFile ?? null,
-      sessionId: input.state?.sessionId ?? null,
-      sessionName: input.sessionName,
-      sampledAt: usage.updatedAt,
-      fresh: this.isFresh(usage.updatedAt),
-    };
-  }
   /** Resolve an explicitly selected native thread, even before its first token count. */
   readCodexTranscriptPath(threadId: string): string | null {
     return this.readCodexThread(threadId)?.rollout_path ?? null;
