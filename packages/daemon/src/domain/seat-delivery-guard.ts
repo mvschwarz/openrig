@@ -132,7 +132,7 @@ export class SeatDeliveryGuard {
   private readonly leftovers = new Map<string, { target: GuardTarget; humanEpoch: number; text: string; collapsedPaste: string | null }>();
   private inspectInput?: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>;
   /** When a writable tmux client of the seat last had activity (epoch ms, whole seconds); null when no writable client
-   *  has; a rejection when that can't be known. */
+   *  is attached; a rejection when that can't be known. */
   private inputActivity?: (target: GuardTarget) => Promise<number | null>;
   private inputAbsent?: (target: GuardTarget) => Promise<boolean>;
   private readonly hasModeConfig: boolean;

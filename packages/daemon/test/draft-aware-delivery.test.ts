@@ -43,7 +43,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; a
       INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh'),('gb','b',1,'g2','fresh');`);
   }
   const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void>;
-    settle?: (ms: number) => void | Promise<void> } = {};
+    settle?: (ms: number) => void | Promise<void>; clients?: () => string } = {};
   // The guard's own waits (its re-reads) go to `settle`, kept apart from the transport's `sleep`; none is real time.
   const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name), async ms => { await hooks.settle?.(ms); });
   guard.recoverActivation();
@@ -56,6 +56,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; a
   const echo = (node: string, body: string) => (db.prepare("SELECT runtime FROM nodes WHERE id=?").get(node) as { runtime: string }).runtime === "terminal"
     ? `${body}\n` : `${body.split("\n").map((row, i) => (i ? "  " : "❯ ") + row).join("\n")}\n`;
   const tmux = new TmuxAdapter(async command => {
+    if (command.includes("list-clients")) return hooks.clients?.() ?? "";
     if (command.includes("load-buffer")) await hooks.load?.();
     const node = command.includes("%2") ? "b" : "a";
     if (command.includes("paste-buffer")) {
@@ -1209,7 +1210,7 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   it("counts the quiet window from the end of the whole second tmux reports: 3.5 s ago still holds, 4.5 s ago delivers", async () => {
     const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
-    let last = Date.now() - 3500;   // a key at N.999 s reads as N: it may have been 2.5 s ago
+    let last = Date.now() - 3500;   // activity at N.999 s reads as N: it may have been 2.5 s ago
     setActivity(f, () => last);
     const held = await f.send("whole-second", "Wake timer fired.", { openrigNotice: true, verify: false });
     expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
@@ -1270,9 +1271,47 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     // The person types between the guard's last check and tmux's paste: the paste lands after their text.
     f.hooks.paste = () => { if (!typed) { typed = true; f.bodies.a = draft; } };
     const result = await f.send("final-boundary", notice, { openrigNotice: true, verify: false });
-    expect(result).toMatchObject({ ok: false });          // pasted (sent) but never confirmed as delivered
-    expect(f.submissions).toEqual([]);                    // not submitted: the Enter was refused
-    expect(f.bodies.a!.startsWith(draft)).toBe(true);     // the person's text kept, in front
-    expect(f.bodies.a).toContain("Wake timer fired.");    // the notice beside it: the contamination this PR narrows
+    // Contamination: exactly one paste, and the input is the person's text followed by it, nothing removed.
+    expect(pasted(f)).toHaveLength(1);
+    const staged = pasted(f)[0]!.slice("paste:a:".length);
+    expect(f.bodies.a).toBe(draft + staged);
+    // Submission: none. No key at all reached the pane (no Enter, C-m or C-u), and the guard says why.
+    expect(f.writes.filter(w => w.startsWith("keys:a"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(result).toMatchObject({ ok: false });
+    expect(JSON.stringify(result)).toContain("draft_input_changed");
+  });
+
+  it("checks the activity again after the final read: activity that appears at that read holds the paste", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let last: number | null = Date.now() - 60_000;
+    setActivity(f, () => last);
+    const real = f.tmux.captureComposerSnapshot.getMockImplementation()!;
+    let armed = false;
+    f.hooks.settle = () => { armed = true; };
+    // The composer still reads empty at the final read, but a writable client has activity right then.
+    vi.spyOn(f.tmux, "captureComposerSnapshot").mockImplementation(async (name: string) => {
+      const shot = await real(name);
+      if (armed) { armed = false; last = Date.now(); }
+      return shot;
+    });
+    const result = await f.send("activity-at-final-read", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+  });
+
+  it("reads tmux's real list-clients output end to end: an attach in this second holds, a quiet client delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const now = () => Math.floor(Date.now() / 1000);
+    f.hooks.clients = () => `1|${now()}\n0|${now()}\n`;   // a viewer tile and a writable client attached this second
+    const held = await f.send("attach-now", notice, { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    f.hooks.clients = () => `1|${now()}\n0|${now() - 10}\n`;   // only the read-only tile is active
+    f.advance();
+    const sent = await f.send("attach-quiet", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
   });
 });
