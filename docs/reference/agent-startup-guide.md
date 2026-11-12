@@ -35,8 +35,17 @@ command. `rig ps --nodes` shows it under "Startup details (<seat>)", and
 
 The attention codes that stop startup this way are `trust_gate`,
 `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,
-`bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
+`bypass_consent_gate`, `claude_resume_selection_prompt`,
+`claude_gated_grants_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
 They are recognized from each harness's English prompt text.
+`claude_gated_grants_gate` is Claude Code's workspace trust check that warns "This folder
+pre-approves N tool permissions" (from the folder's `.claude/settings.json`): OpenRig never
+answers it, not even with `recovery.auto_drive_provider_prompts`, because its default choice
+declines those permissions (or exits) and approving them is your call. With that setting on,
+the plain workspace trust prompt is answered only when its options are exactly "No, exit" and
+"Yes, I trust this folder": Claude Code 2.1.322 opens it on "No, exit", so OpenRig moves the
+selection down once and presses Enter only after it reads the focus on "Yes". Any other option
+set, a prompt drawn without a cursor or a focus that does not reach "Yes" gets no confirmation.
 
 ## Continue a Codex fork whose child ID arrived late
 
