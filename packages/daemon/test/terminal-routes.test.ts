@@ -193,5 +193,25 @@ describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () =
     });
     expect(delRes.status).toBe(200);
     expect(retireRigViewer).toHaveBeenCalledExactlyOnceWith({ kind: "tmux", sessionId: "$1", nonce: "n1" });
+
+    // T3: DELETE /api/terminal/rig-viewers also accepts query parameters without body:
+    const delQuery = await app.request("/api/terminal/rig-viewers?kind=tmux&sessionId=%241&nonce=n1", {
+      method: "DELETE",
+    });
+    expect(delQuery.status).toBe(200);
+    expect(retireRigViewer).toHaveBeenCalledTimes(2);
+  });
+
+  it("J11: maps corrupt_ledger on POST /api/terminal/close-all to HTTP 500", async () => {
+    const closeAll = vi.fn(async () => ({
+      ok: false,
+      code: "corrupt_ledger",
+      error: "Rig-viewer journal is corrupt",
+      viewers: [],
+      notes: [],
+    }));
+    const { app } = makeApp({ service: { closeAll } });
+    const res = await post(app, "/api/terminal/close-all", {});
+    expect(res.status).toBe(500);
   });
 });

@@ -59,6 +59,7 @@ import type { FollowControls } from "./terminal-follow-policy.js";
 // herdr 0.7.1's socket API (`herdr tab focus|close <tab_id>`); a refusal of either
 // is reported as a note, never as a failed seat.
 
+import { randomUUID } from "node:crypto";
 import type {
   AbsentSeat,
   ComposedPane,
@@ -77,6 +78,7 @@ import type {
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
 import { findLiveHerdrWorkspace, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
+import { sameIdSet } from "./rig-viewer-records.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
@@ -321,6 +323,7 @@ export interface HerdrCreatedIds {
   endpoint: string;
   workspaceId: string;
   tabIds: string[];
+  tabLabels: string[];
   paneIds: string[];
 }
 
@@ -469,7 +472,7 @@ export class HerdrAdapter implements TerminalProvider {
     this.transport = deps.transportFactory();
     this.tabPrefix = deps.tabPrefix ?? "openrig";
     this.newLaunchToken =
-      deps.newLaunchToken ?? (() => `l${(this.launchCounter += 1)}`);
+      deps.newLaunchToken ?? (() => `l${(this.launchCounter += 1)}-${randomUUID().slice(0, 8)}`);
   }
 
   async status(): Promise<ProviderStatus> {
@@ -712,8 +715,8 @@ export class HerdrAdapter implements TerminalProvider {
     }
 
     const appliedTabIds: string[] = [];
+    const collectedTabLabels: string[] = [];
     const collectedPaneIds: string[] = [];
-    const observedAllTabIds = new Set<string>();
     let paneIdsComplete = true;
     let firstPopulatedTabId: string | null = null;
     // The starting tab is known blank only if every page applied AND reported its tab id:
@@ -733,13 +736,17 @@ export class HerdrAdapter implements TerminalProvider {
           root: pagePlan.root,
         });
         const tabId = extractTabId(applied);
+        const appliedLayout = applied["layout"];
+        const echoedPaneIds = appliedLayout && typeof appliedLayout === "object"
+          ? appliedPaneIds(pagePlan.root, (appliedLayout as Record<string, unknown>)["root"])
+          : null;
         // Without a tab id the page's panes can't be told apart from other tabs, so no check runs.
         const uncertain = new Set<string>();
         const pagePaneIds: string[] = [];
         const gone = tabId
-          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes, uncertain, pagePaneIds, observedAllTabIds)
+          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes, uncertain, pagePaneIds)
           : new Set<string>();
-        if (!tabId || uncertain.size > 0 || pagePaneIds.length === 0) {
+        if (!tabId || !echoedPaneIds || echoedPaneIds.length === 0 || uncertain.size > 0 || !sameIdSet(pagePaneIds, echoedPaneIds)) {
           paneIdsComplete = false;
         } else {
           collectedPaneIds.push(...pagePaneIds);
@@ -751,6 +758,7 @@ export class HerdrAdapter implements TerminalProvider {
         resumeReports.push(...pageResumeReports(applied, pagePlan.root, pagePanes, new Set([...gone, ...uncertain]), unmatchedResume));
         if (tabId) {
           appliedTabIds.push(tabId);
+          collectedTabLabels.push(pagePlan.tabLabel);
           if (pagePanes.some((pane) => !gone.has(pane.seat) && !uncertain.has(pane.seat))) firstPopulatedTabId ??= tabId;
         } else everyPageKnown = false;
         for (const pane of pagePanes) {
@@ -760,6 +768,7 @@ export class HerdrAdapter implements TerminalProvider {
         }
       } catch (err) {
         everyPageKnown = false;
+        paneIdsComplete = false;
         // The whole page failed to apply — degrade its seats honestly.
         for (const pane of pagePanes) {
           degraded.push({
@@ -803,13 +812,41 @@ export class HerdrAdapter implements TerminalProvider {
       view.id.startsWith("rig:") &&
       (opened.length > 0 || degraded.some((d) => d.code === "pane_unconfirmed"))
     ) {
-      const allowedTabs = new Set(defaultTabId && defaultTabClosed ? appliedTabIds : [...appliedTabIds, ...(defaultTabId ? [defaultTabId] : [])]);
-      const noForeignTabPanes = [...observedAllTabIds].every(id => allowedTabs.has(id));
-      if (opened.length > 0 && everyPageKnown && defaultTabClosed && paneIdsComplete && noForeignTabPanes && collectedPaneIds.length > 0) {
-        created = { endpoint: this.endpointKey(), workspaceId, tabIds: [...appliedTabIds], paneIds: collectedPaneIds };
-      } else {
-        created = { incomplete: true };
+      let confirmed = false;
+      if (
+        opened.length > 0 &&
+        everyPageKnown &&
+        defaultTabClosed &&
+        paneIdsComplete &&
+        collectedPaneIds.length > 0 &&
+        appliedTabIds.length === collectedTabLabels.length
+      ) {
+        try {
+          const postTabList = await this.transport.request("tab.list", { workspace_id: workspaceId });
+          const postPaneList = await this.transport.request("pane.list", { workspace_id: workspaceId });
+          const rawTabs = Array.isArray(postTabList["tabs"]) ? postTabList["tabs"] : null;
+          const rawPanes = Array.isArray(postPaneList["panes"]) ? postPaneList["panes"] : null;
+          if (rawTabs && rawPanes) {
+            const tabs = rawTabs.filter((t): t is Record<string, unknown> => Boolean(t && typeof t === "object"));
+            const panes = rawPanes.filter((p): p is Record<string, unknown> => Boolean(p && typeof p === "object"));
+            const liveTabIds = tabs.map(t => t["tab_id"]).filter((id): id is string => typeof id === "string" && id.length > 0);
+            const livePaneIds = panes.map(p => p["pane_id"]).filter((id): id is string => typeof id === "string" && id.length > 0);
+            const tabSetMatches = liveTabIds.length === tabs.length && sameIdSet(liveTabIds, appliedTabIds);
+            const labelsMatch = tabSetMatches && appliedTabIds.every((id, idx) => {
+              const tab = tabs.find(t => t["tab_id"] === id);
+              return tab?.["label"] === collectedTabLabels[idx];
+            });
+            const paneSetMatches = livePaneIds.length === panes.length && sameIdSet(livePaneIds, collectedPaneIds);
+            const panesInTabs = panes.every(p => typeof p["tab_id"] === "string" && appliedTabIds.includes(p["tab_id"] as string));
+            confirmed = tabSetMatches && labelsMatch && paneSetMatches && panesInTabs;
+          }
+        } catch {
+          confirmed = false;
+        }
       }
+      created = confirmed
+        ? { endpoint: this.endpointKey(), workspaceId, tabIds: [...appliedTabIds], tabLabels: [...collectedTabLabels], paneIds: [...collectedPaneIds] }
+        : { incomplete: true };
     }
 
     return {

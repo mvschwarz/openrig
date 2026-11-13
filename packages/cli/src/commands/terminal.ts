@@ -101,7 +101,7 @@ export interface OpenAllRigResult {
   code?: string;
   error?: string;
   notes?: string[];
-  cleanup?: "closed" | "unknown";
+  cleanup?: "closed" | "already_gone" | "unknown";
 }
 
 export interface OpenAllResult {
@@ -212,45 +212,56 @@ function printOpen(json: boolean, r: OpenViewResult, status: number, viaWindow =
 }
 
 function printOpenAll(json: boolean, r: OpenAllResult, status: number): void {
+  const rigs = r && typeof r === "object" && Array.isArray(r.rigs) ? r.rigs : null;
+  const notes = r && typeof r === "object" && Array.isArray(r.notes) ? r.notes : [];
   if (json) {
     console.log(JSON.stringify(r));
+  } else if (!rigs) {
+    console.log((r && typeof r === "object" && typeof r.error === "string" && r.error) || "Daemon returned an invalid bulk terminal open response.");
+    for (const n of notes) console.log(`  note: ${n}`);
   } else {
     const lines: string[] = [];
-    const active = r.rigs.filter(rig => rig.outcome === "opened" || rig.outcome === "reused").length;
+    const active = rigs.filter(rig => rig.outcome === "opened" || rig.outcome === "reused").length;
     lines.push(r.error
       ? r.error
-      : `Bulk terminal open (${r.provider}): ${active} rig(s) opened/reused out of ${r.rigs.length}.`);
-    for (const rig of r.rigs) {
-      lines.push(`  [${rig.outcome}] ${rig.view}${rig.opened.length ? ` (${rig.opened.length} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
-      for (const s of rig.skipped) lines.push(`    skipped ${s.seat}: ${s.reason}`);
-      for (const n of rig.notes ?? []) lines.push(`    note: ${n}`);
+      : `Bulk terminal open (${r.provider}): ${active} rig(s) opened/reused out of ${rigs.length}.`);
+    for (const rig of rigs) {
+      const openedCount = Array.isArray(rig.opened) ? rig.opened.length : 0;
+      lines.push(`  [${rig.outcome}] ${rig.view}${openedCount ? ` (${openedCount} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
+      for (const s of Array.isArray(rig.skipped) ? rig.skipped : []) lines.push(`    skipped ${s.seat}: ${s.reason}`);
+      for (const n of Array.isArray(rig.notes) ? rig.notes : []) lines.push(`    note: ${n}`);
     }
-    for (const n of r.notes ?? []) lines.push(`  note: ${n}`);
+    for (const n of notes) lines.push(`  note: ${n}`);
     console.log(lines.join("\n"));
   }
-  const hasOpenedOrReused = Array.isArray(r.rigs) && r.rigs.some(rig => rig.outcome === "opened" || rig.outcome === "reused");
-  if (status >= 400 || (!r.ok && !hasOpenedOrReused)) {
+  const hasOpenedOrReused = !!rigs && rigs.some(rig => rig.outcome === "opened" || rig.outcome === "reused");
+  if (status >= 400 || !rigs || (!r.ok && !hasOpenedOrReused)) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }
 
 function printCloseAll(json: boolean, r: CloseAllResult, status: number): void {
+  const viewers = r && typeof r === "object" && Array.isArray(r.viewers) ? r.viewers : null;
+  const notes = r && typeof r === "object" && Array.isArray(r.notes) ? r.notes : [];
   if (json) {
     console.log(JSON.stringify(r));
+  } else if (!viewers) {
+    console.log((r && typeof r === "object" && typeof r.error === "string" && r.error) || "Daemon returned an invalid bulk terminal close response.");
+    for (const n of notes) console.log(`  note: ${n}`);
   } else {
     const lines: string[] = [];
     if (r.error) lines.push(r.error);
-    else if (r.viewers.length === 0) lines.push(r.notes?.[0] ?? "no OpenRig rig viewers recorded");
+    else if (viewers.length === 0) lines.push(notes[0] ?? "no OpenRig rig viewers recorded");
     else {
-      for (const v of r.viewers) {
+      for (const v of viewers) {
         lines.push(`  [${v.outcome}] ${v.view} (${v.provider}:${v.target})${v.reason ? ` — ${v.reason}` : ""}`);
       }
     }
-    for (const n of r.notes ?? []) if (r.viewers.length > 0) lines.push(`  note: ${n}`);
+    for (const n of notes) if (viewers.length > 0) lines.push(`  note: ${n}`);
     console.log(lines.join("\n"));
   }
-  const anyFailed = Array.isArray(r.viewers) && r.viewers.some(v => v.outcome === "failed");
-  if (status >= 400 || !r.ok || anyFailed) {
+  const anyFailed = !!viewers && viewers.some(v => v.outcome === "failed");
+  if (status >= 400 || !viewers || !r.ok || anyFailed) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }

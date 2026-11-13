@@ -53,6 +53,8 @@ import {
   type HerdrRigViewerRecord,
   type RigViewerEndpointTx,
   type RigViewerRecord,
+  CorruptRigViewerLedgerError,
+  sameIdSet,
   type TmuxRigViewerRecord,
   type TmuxRigViewerRegistration,
   type TmuxRigViewerRetirement,
@@ -98,7 +100,7 @@ export interface OpenViewRequest {
   viewportColumns?: number;
   /** Reuse a workspace that still shows this view live instead of opening a copy (herdr). */
   reuseLive?: boolean;
-  /** The hedr-app client (its app home) for provider herdr-app. */
+  /** The herdr-app client (its app home) for provider herdr-app. */
   herdrApp?: HerdrAppTarget;
   /** True only when previewing a rig for bulk `--all` open (partitions stopped/unbound/remote). */
   bulk?: boolean;
@@ -112,6 +114,7 @@ export interface TerminalPreview {
   tmux?: TmuxServerSelection;
   view: string;
   planId: string;
+  rigViewer?: boolean;
   composed: ComposedView;
   /** Seats skipped in bulk rig preview (e.g. non-local host). */
   skipped?: SkippedSeat[];
@@ -175,7 +178,7 @@ export interface OpenAllRigResult {
   code?: string;
   error?: string;
   notes?: string[];
-  cleanup?: "closed" | "unknown";
+  cleanup?: "closed" | "already_gone" | "unknown";
 }
 
 export interface OpenAllResult {
@@ -320,18 +323,10 @@ function partitionRigRowsForBulk(rows: BulkSeatRow[]): {
   return { tmuxRows, absent, skipped };
 }
 
-function sameIdSet(actual: readonly string[], expected: readonly string[]): boolean {
-  if (actual.length !== expected.length) return false;
-  const actualSet = new Set(actual);
-  const expectedSet = new Set(expected);
-  if (actualSet.size !== expected.length || expectedSet.size !== expected.length) return false;
-  for (const id of expectedSet) if (!actualSet.has(id)) return false;
-  return true;
-}
-
 function isTmuxNoServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /no server running|failed to connect to server|error connecting to/i.test(msg);
+  if (/permission denied|operation not permitted|eacces|eperm/i.test(msg)) return false;
+  return /\bno server running\b|\bno current target\b|failed to connect to server: (?:no such file|connection refused)/i.test(msg);
 }
 
 interface TmuxInventorySession { sessionId: string; sessionName: string; windowIds: string[]; paneIds: string[] }
@@ -372,7 +367,7 @@ async function readTmuxInventory(runTmux: (args: string[]) => Promise<string>): 
 /** The default kernel view's space name in a terminal multiplexer such as Herdr. */
 export const KERNEL_SPACE_LABEL = "openrig kernel";
 
-type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number; task?: TaskMembership } | { code: string; error: string };
+type ResolvedView = { id: string; rigViewer?: boolean; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number; task?: TaskMembership } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
@@ -510,56 +505,82 @@ export class TerminalService {
     if ("ok" in selected) return selected;
     const { provider, session } = selected;
 
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
+    const composed = await this.resolveComposedWithMeta(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    await this.viewerMappings(provider, composed);
-    const planId = this.planId(providerName, composed, session);
+    const { composed: composedView, rigViewer } = composed;
+    await this.viewerMappings(provider, composedView);
+    const planId = this.planId(providerName, composedView, session);
     if (req.expectedPlan !== undefined && req.expectedPlan !== planId) {
       return errorResult(providerName, "preview_changed", "View membership, layout or provider session changed. Refresh the preview before Open; nothing was launched.");
     }
-    const notes = composed.task ? [...composed.task.issues] : composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
+    const notes = composedView.task ? [...composedView.task.issues] : composedView.kernelLayout ? [`Default kernel view: ${composedView.kernelLayout}.`] : [];
     if (fellBack) notes.push(`Herdr isn't available here (not installed or not answering), so this view uses ${providerName}.`);
-    if (composed.kernelLayout && composed.opened.length === 0) {
+    if (composedView.kernelLayout && composedView.opened.length === 0) {
       return {
-        ...errorResult(providerName, "kernel_seats_unavailable", `No kernel conversations are attachable: ${composed.absent.map(member => `${member.seat} (${member.reason})`).join("; ")}`),
+        ...errorResult(providerName, "kernel_seats_unavailable", `No kernel conversations are attachable: ${composedView.absent.map(member => `${member.seat} (${member.reason})`).join("; ")}`),
         ...(session !== undefined ? { session } : {}),
-        absent: composed.absent, degraded: composed.degraded, notes,
+        absent: composedView.absent, degraded: composedView.degraded, notes,
       };
     }
-    let result: OpenViewResult;
-    if (composed.id.startsWith("rig:") && provider instanceof HerdrAdapter) {
-      const tracked = await provider.openViewTracked({ ...composed, planId }, req.reuseLive ? { reuseLive: true } : undefined, true);
-      result = tracked.result;
-      if (tracked.created && "workspaceId" in tracked.created && !result.reusedWorkspace) {
-        await this.rigViewers.upsert({
-          kind: "herdr",
-          endpoint: tracked.created.endpoint,
-          view: composed.id,
-          workspaceId: tracked.created.workspaceId,
-          tabIds: tracked.created.tabIds,
-          paneIds: tracked.created.paneIds,
-          planId,
-          createdAt: new Date().toISOString(),
-          phase: "created",
-        });
-      }
-    } else {
-      result = req.reuseLive ? await provider.openView({ ...composed, planId }, { reuseLive: true }) : await provider.openView({ ...composed, planId });
-    }
+    const tracked = await this.openTrackedHerdr(provider, composedView, planId, req.reuseLive, rigViewer, false);
+    const result = tracked.result;
+    notes.push(...tracked.extraNotes);
     // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
     // A reused workspace already shows every tile.
-    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app" && !result.reusedWorkspace) {
+    if (result.opened.length === 0 && composedView.opened.length > 0 && providerName !== "herdr-app" && !result.reusedWorkspace) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
-      for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
+      for (const pane of composedView.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
       notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");
     }
-    if (!composed.kernelLayout && composed.opened.some(pane => !pane.readOnly)) {
+    if (!composedView.kernelLayout && composedView.opened.some(pane => !pane.readOnly)) {
       notes.push("The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.");
     }
-    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), remote: remoteOpened(composed, result.opened), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
+    return { ...result, viewDescriptor: composedView.viewDescriptor, ...(composedView.task ? { task: composedView.task } : {}), ...(session !== undefined ? { session } : {}), remote: remoteOpened(composedView, result.opened), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
   }
 
-  private async composeRigBulk(rig: string, panesPerPage?: number, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; skipped: SkippedSeat[] } | null> {
+  private async openTrackedHerdr(
+    provider: TerminalProvider,
+    composed: ComposedView,
+    planId: string,
+    reuseLive?: boolean,
+    collectCreated = false,
+    noteIncomplete = false,
+  ): Promise<{ result: OpenViewResult; workspaceId?: string; extraNotes: string[] }> {
+    const extraNotes: string[] = [];
+    const openOpts = reuseLive ? { reuseLive: true } : undefined;
+    if (collectCreated && provider instanceof HerdrAdapter) {
+      const tracked = await provider.openViewTracked({ ...composed, planId }, openOpts, true);
+      if (tracked.created && "workspaceId" in tracked.created && !tracked.result.reusedWorkspace) {
+        try {
+          await this.rigViewers.upsert({
+            kind: "herdr",
+            endpoint: tracked.created.endpoint,
+            view: composed.id,
+            workspaceId: tracked.created.workspaceId,
+            tabIds: tracked.created.tabIds,
+            tabLabels: tracked.created.tabLabels,
+            paneIds: tracked.created.paneIds,
+            planId,
+            createdAt: new Date().toISOString(),
+            phase: "created",
+          });
+          return { result: tracked.result, workspaceId: tracked.created.workspaceId, extraNotes };
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          extraNotes.push(`Herdr workspace was opened, but its ownership could not be persisted in the journal and it was not recorded for close (${detail}).`);
+          return { result: tracked.result, extraNotes };
+        }
+      }
+      if (noteIncomplete && tracked.created && "incomplete" in tracked.created && !tracked.result.reusedWorkspace) {
+        extraNotes.push("Herdr workspace identity could not be confirmed completely and was not recorded for close.");
+      }
+      return { result: tracked.result, extraNotes };
+    }
+    const result = await provider.openView({ ...composed, planId }, openOpts);
+    return { result, extraNotes };
+  }
+
+  private async composeRigBulk(rig: string, panesPerPage?: number, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; bulkAbsent: AbsentSeat[]; skipped: SkippedSeat[] } | null> {
     const rows = await this.deps.listRigSeats(rig);
     if (rows == null) return null;
     const { tmuxRows, absent: bulkAbsent, skipped } = partitionRigRowsForBulk(rows);
@@ -572,16 +593,21 @@ export class TerminalService {
       localTmuxServerMode: daemonTmuxServerInfo()?.mode,
       ...(viewportColumns !== undefined ? { viewportColumns } : {}),
     });
-    composed.absent = [...bulkAbsent, ...composed.absent];
     composed.viewDescriptor = { kind: "following", name: `rig:${rig}` };
-    return { composed, skipped };
+    return { composed, bulkAbsent, skipped };
   }
 
   private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
+    const res = await this.resolveComposedWithMeta(viewArg, panesPerPage, viewportColumns);
+    return "code" in res ? res : res.composed;
+  }
+
+  private async resolveComposedWithMeta(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; rigViewer: boolean } | { code: string; error: string }> {
     const view = (viewArg ?? "").trim();
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
+    const rigViewer = resolved.rigViewer === true;
     const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode });
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
       : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
@@ -596,16 +622,16 @@ export class TerminalService {
           composed.absent.push({ seat: member.seat, host: member.key.hostId, reason: member.reason ?? member.availability });
         }
       }
-      return { ...composed, task: resolved.task };
+      return { composed: { ...composed, task: resolved.task }, rigViewer };
     }
     if (resolved.kernelLayout && Number.isSafeInteger(viewportColumns) && viewportColumns! >= 120) {
       // The default's members are operator, dashboard, advisor. Keep the advisor separate
       // even when one of the other roles is unavailable; chunking two at a time would not.
       const page = (indexes: number[]) => indexes.flatMap(index => composed.opened.filter(pane => pane.seat === resolved.members[index]?.seat));
       const pages = [page([1, 0]), page([2])].filter(panes => panes.length > 0);
-      return { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2, spaceLabel: KERNEL_SPACE_LABEL };
+      return { composed: { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2, spaceLabel: KERNEL_SPACE_LABEL }, rigViewer };
     }
-    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns, spaceLabel: KERNEL_SPACE_LABEL } : composed;
+    return { composed: resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns, spaceLabel: KERNEL_SPACE_LABEL } : composed, rigViewer };
   }
 
   private planId(provider: string, composed: ComposedView, session?: string): string {
@@ -623,19 +649,22 @@ export class TerminalService {
       const bulk = await this.composeRigBulk(rigName, provider.panesPerPage, req.viewportColumns);
       if (!bulk) return errorResult(providerName, "view_not_found", `unknown rig '${rigName}'`);
       const tmux = daemonTmuxServerInfo();
+      const planId = this.planId(providerName, bulk.composed, session);
+      const composed = { ...bulk.composed, absent: [...bulk.bulkAbsent, ...bulk.composed.absent] };
       return {
         provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}),
-        view: req.view, composed: bulk.composed, skipped: bulk.skipped, remote: remoteOpened(bulk.composed),
-        viewDescriptor: bulk.composed.viewDescriptor, capabilities: { ensureViewer: false },
-        grids: bulk.composed.pages.map(page => buildGridRoot(page, bulk.composed.columns)),
-        planId: this.planId(providerName, bulk.composed, session), status: await provider.status(),
+        view: req.view, rigViewer: true, composed, skipped: bulk.skipped, remote: remoteOpened(composed),
+        viewDescriptor: composed.viewDescriptor, capabilities: { ensureViewer: false },
+        grids: composed.pages.map(page => buildGridRoot(page, composed.columns)),
+        planId, status: await provider.status(),
       };
     }
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
-    if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
+    const resolved = await this.resolveComposedWithMeta(req.view, provider.panesPerPage, req.viewportColumns);
+    if ("code" in resolved) return errorResult(providerName, resolved.code, resolved.error);
+    const { composed, rigViewer } = resolved;
     await this.viewerMappings(provider, composed);
     const tmux = daemonTmuxServerInfo();
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, remote: remoteOpened(composed), viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, rigViewer, composed, remote: remoteOpened(composed), viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
       capabilities: { ensureViewer: !!composed.task && !!provider.ensureViewer },
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }
@@ -727,61 +756,37 @@ export class TerminalService {
     if (!bulk) {
       return { rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], code: "view_not_found", error: `unknown rig '${rig}'` };
     }
-    const { composed, skipped } = bulk;
+    const { composed, bulkAbsent, skipped } = bulk;
     if (composed.opened.length === 0) {
-      const outcome = skipped.length > 0 && composed.absent.length === 0 ? "skipped" : "absent";
-      return { rig, view, outcome, opened: [], absent: composed.absent, degraded: composed.degraded, skipped };
+      const mergedAbsent = [...bulkAbsent, ...composed.absent];
+      const outcome = skipped.length > 0 && mergedAbsent.length === 0 ? "skipped" : "absent";
+      return { rig, view, outcome, opened: [], absent: mergedAbsent, degraded: composed.degraded, skipped };
     }
     const planId = this.planId("herdr", composed, session);
     try {
-      const openOpts = reuseLive ? { reuseLive: true } : undefined;
-      let result: OpenViewResult;
-      let workspaceId: string | undefined;
-      if (provider instanceof HerdrAdapter) {
-        const tracked = await provider.openViewTracked({ ...composed, planId }, openOpts, true);
-        result = tracked.result;
-        if (tracked.created && "workspaceId" in tracked.created && !result.reusedWorkspace) {
-          workspaceId = tracked.created.workspaceId;
-          await this.rigViewers.upsert({
-            kind: "herdr",
-            endpoint: tracked.created.endpoint,
-            view,
-            workspaceId: tracked.created.workspaceId,
-            tabIds: tracked.created.tabIds,
-            paneIds: tracked.created.paneIds,
-            planId,
-            createdAt: new Date().toISOString(),
-            phase: "created",
-          });
-        } else if (tracked.created && "incomplete" in tracked.created && !result.reusedWorkspace) {
-          result = {
-            ...result,
-            notes: [...(result.notes ?? []), "Herdr workspace identity could not be confirmed completely and was not recorded for close."],
-          };
-        }
-      } else {
-        result = await provider.openView({ ...composed, planId }, openOpts);
-      }
+      const { result, workspaceId, extraNotes } = await this.openTrackedHerdr(provider, composed, planId, reuseLive, true, true);
+      const mergedAbsent = [...bulkAbsent, ...result.absent];
+      const notes = [...(result.notes ?? []), ...extraNotes];
       if (result.reusedWorkspace) {
         return {
-          rig, view, outcome: "reused", opened: [], absent: result.absent, degraded: result.degraded, skipped,
-          workspaceId: result.reusedWorkspace.id, ...(result.notes ? { notes: result.notes } : {}),
+          rig, view, outcome: "reused", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
+          workspaceId: result.reusedWorkspace.id, ...(notes.length ? { notes } : {}),
         };
       }
       if (result.opened.length > 0) {
         return {
-          rig, view, outcome: "opened", opened: result.opened, absent: result.absent, degraded: result.degraded, skipped,
-          ...(workspaceId ? { workspaceId } : {}), ...(result.notes ? { notes: result.notes } : {}),
+          rig, view, outcome: "opened", opened: result.opened, absent: mergedAbsent, degraded: result.degraded, skipped,
+          ...(workspaceId ? { workspaceId } : {}), ...(notes.length ? { notes } : {}),
         };
       }
       return {
-        rig, view, outcome: "failed", opened: [], absent: result.absent, degraded: result.degraded, skipped,
+        rig, view, outcome: "failed", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
         ...(result.code ? { code: result.code } : {}), error: result.error ?? "no seats opened",
-        ...(result.notes ? { notes: result.notes } : {}),
+        ...(notes.length ? { notes } : {}),
       };
     } catch (err) {
       return {
-        rig, view, outcome: "failed", opened: [], absent: composed.absent, degraded: composed.degraded, skipped,
+        rig, view, outcome: "failed", opened: [], absent: [...bulkAbsent, ...composed.absent], degraded: composed.degraded, skipped,
         error: err instanceof Error ? err.message : String(err),
       };
     }
@@ -795,7 +800,15 @@ export class TerminalService {
     if (named && named !== "herdr" && named !== "tmux") {
       return { ok: false, viewers: [], code: "unknown_provider", error: `unknown provider '${named}' — expected herdr or tmux` };
     }
-    const allEntries = await this.rigViewers.listAll();
+    let allEntries: Array<{ endpoint: string; key: string; record: RigViewerRecord }>;
+    try {
+      allEntries = await this.rigViewers.listAll();
+    } catch (err) {
+      if (err instanceof CorruptRigViewerLedgerError || (err as { code?: string })?.code === "corrupt_ledger") {
+        return { ok: false, viewers: [], code: "corrupt_ledger", error: err instanceof Error ? err.message : String(err) };
+      }
+      throw err;
+    }
     const filtered = allEntries.filter(({ record }) => !named || record.kind === named);
     if (filtered.length === 0) {
       return { ok: true, viewers: [], notes: ["no OpenRig rig viewers recorded"] };
@@ -822,12 +835,17 @@ export class TerminalService {
     return { ok: viewers.every(v => v.outcome !== "failed"), viewers };
   }
 
-  private resolveHerdrAdapterForEndpoint(endpoint: string, session?: string): HerdrAdapter | null {
+  private resolveHerdrAdapterStatus(
+    endpoint: string,
+    session?: string,
+  ): { status: "matched"; adapter: HerdrAdapter } | { status: "different_endpoint"; activeEndpoint: string } | { status: "missing" } {
     const candidate = session !== undefined
       ? this.deps.resolveSessionProvider?.("herdr", session)
       : this.deps.resolveProvider("herdr");
-    if (candidate instanceof HerdrAdapter && candidate.endpointKey() === endpoint) return candidate;
-    return null;
+    if (!(candidate instanceof HerdrAdapter)) return { status: "missing" };
+    const activeEndpoint = candidate.endpointKey();
+    if (activeEndpoint === endpoint) return { status: "matched", adapter: candidate };
+    return { status: "different_endpoint", activeEndpoint };
   }
 
   private async closeHerdrEndpoint(
@@ -837,25 +855,35 @@ export class TerminalService {
     tx: RigViewerEndpointTx,
     viewers: CloseAllViewerResult[],
   ): Promise<void> {
-    const adapter = this.resolveHerdrAdapterForEndpoint(endpoint, session);
-    if (!adapter) {
+    const resolved = this.resolveHerdrAdapterStatus(endpoint, session);
+    if (resolved.status === "different_endpoint") {
+      for (const { record } of entries) {
+        viewers.push({
+          view: record.view, provider: "herdr", target: record.workspaceId,
+          outcome: "kept", code: "different_endpoint",
+          reason: `Viewer belongs to a different Herdr endpoint (${endpoint}) than active endpoint (${resolved.activeEndpoint}).`,
+        });
+      }
+      return;
+    }
+    if (resolved.status === "missing") {
       for (const { record } of entries) {
         viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "failed", code: "provider_unreachable", reason: "No matching Herdr endpoint configured." });
       }
       return;
     }
-    let inv: Awaited<ReturnType<HerdrAdapter["readInventory"]>>;
-    try {
-      inv = await adapter.readInventory();
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      for (const { record } of entries) {
-        viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "failed", code: "provider_unreachable", reason });
-      }
-      return;
-    }
+    const { adapter } = resolved;
 
     for (const { key, record } of entries) {
+      let inv: Awaited<ReturnType<HerdrAdapter["readInventory"]>>;
+      try {
+        inv = await adapter.readInventory();
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "failed", code: "provider_unreachable", reason });
+        continue;
+      }
+
       const ws = inv.workspaces.find(w => w.workspace_id === record.workspaceId);
       const wsTabs = inv.tabsByWorkspace.get(record.workspaceId) ?? [];
       const wsPanes = inv.panesByWorkspace.get(record.workspaceId) ?? [];
@@ -868,11 +896,21 @@ export class TerminalService {
         continue;
       }
 
-      const intact = sameIdSet(wsTabs.map(t => t.tab_id), record.tabIds)
+      const labelsMatch = !record.tabLabels
+        || (record.tabLabels.length === record.tabIds.length && record.tabIds.every((id, idx) => {
+          const tab = wsTabs.find(t => t.tab_id === id);
+          return tab?.label === record.tabLabels![idx];
+        }));
+      const intact = labelsMatch
+        && sameIdSet(wsTabs.map(t => t.tab_id), record.tabIds)
         && sameIdSet(wsPanes.map(p => p.pane_id), record.paneIds)
         && wsPanes.every(p => record.tabIds.includes(p.tab_id));
       if (!intact) {
-        viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "kept", code: "not_separable", reason: "Workspace has foreign or modified tabs/panes." });
+        viewers.push({
+          view: record.view, provider: "herdr", target: record.workspaceId,
+          outcome: "kept", code: labelsMatch ? "not_separable" : "ownership_unconfirmed",
+          reason: labelsMatch ? "Workspace has foreign or modified tabs/panes." : "Workspace tab labels do not match the recorded rig viewer.",
+        });
         continue;
       }
 
@@ -901,22 +939,25 @@ export class TerminalService {
     const currentEndpoint = tmuxEndpointKey(this.getTmuxServerArgs());
     if (endpoint !== currentEndpoint) {
       for (const { record } of entries) {
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason: "Viewer belongs to a different tmux server endpoint." });
-      }
-      return;
-    }
-    let inv: Map<string, TmuxInventorySession>;
-    try {
-      inv = await readTmuxInventory(args => this.runDaemonTmux(args));
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      for (const { record } of entries) {
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
+        viewers.push({
+          view: record.view, provider: "tmux", target: record.sessionName,
+          outcome: "kept", code: "different_endpoint",
+          reason: `Viewer belongs to a different tmux server endpoint (${endpoint}) than active endpoint (${currentEndpoint}).`,
+        });
       }
       return;
     }
 
     for (const { key, record } of entries) {
+      let inv: Map<string, TmuxInventorySession>;
+      try {
+        inv = await readTmuxInventory(args => this.runDaemonTmux(args));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
+        continue;
+      }
+
       const live = inv.get(record.sessionId);
       if (!live) {
         tx.remove(key);
@@ -930,7 +971,14 @@ export class TerminalService {
         viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "already_gone" });
         continue;
       }
-      const liveNonce = (await this.runDaemonTmux(["show-options", "-qv", "-t", record.sessionId, "@openrig_rig_viewer"]).catch(() => "")).trim();
+      let liveNonce: string;
+      try {
+        liveNonce = (await this.runDaemonTmux(["show-options", "-qv", "-t", record.sessionId, "@openrig_rig_viewer"])).trim();
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
+        continue;
+      }
       const intact = liveNonce === record.nonce
         && sameIdSet(live.windowIds, record.windowIds)
         && sameIdSet(live.paneIds, record.paneIds);
@@ -1082,10 +1130,10 @@ export class TerminalService {
     }
     if (view.startsWith("saved:")) {
       const saved = this.deps.viewsStore.get(view.slice(6));
-      if (saved) return { id: saved.id, members: saved.members.map(savedMemberToInput) };
+      if (saved) return { id: saved.id, rigViewer: false, members: saved.members.map(savedMemberToInput) };
       if (view === "saved:kernel") {
         const kernel = await this.defaultKernelView();
-        if (kernel) return kernel;
+        if (kernel) return { ...kernel, rigViewer: false };
         return { code: "view_not_found", error: "No kernel rig is installed; saved:kernel has no installed bindings" };
       }
       return { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
@@ -1131,7 +1179,7 @@ export class TerminalService {
     const rigArg = explicitRig ? view.slice("rig:".length) : view;
     const rigRows = await this.deps.listRigSeats(rigArg);
     if (rigRows != null) {
-      return { id: `rig:${rigArg}`, members: deriveViewMembers(rigRows, { readOnly: false }) };
+      return { id: `rig:${rigArg}`, rigViewer: true, members: deriveViewMembers(rigRows, { readOnly: false }) };
     }
     // An explicit `rig:<x>` that resolves to no rig is a named not-found — it must
     // NOT fall through to the saved-view lookup (the caller asked for a rig).
@@ -1142,7 +1190,7 @@ export class TerminalService {
     // 4. a saved-view id.
     const saved = this.deps.viewsStore.get(view);
     if (saved) {
-      return { id: saved.id, members: saved.members.map(savedMemberToInput) };
+      return { id: saved.id, rigViewer: false, members: saved.members.map(savedMemberToInput) };
     }
 
     return {

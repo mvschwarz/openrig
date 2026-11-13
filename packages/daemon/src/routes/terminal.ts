@@ -14,10 +14,10 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 // view → 404; a provider-unavailable or honest-partial is a 200 whose BODY
 // tells the truth (ok / opened / degraded), never an error status.
 //
-// No new auth/trust surface (PRD "no new auth surface v1"): these routes mirror
-// the shipped cmux launch route's posture (which does not gate on the terminal
-// bearer token) — composing a view reads inventory and returns attach commands
-// the provider runs client-side; it mutates no daemon state.
+// `POST /open`, `GET /views`, `GET /status`, `GET /preview`, `POST /close`, and
+// `/api/rigs/:rigId/terminal/open` keep the shipped no-bearer-token posture
+// ("no new auth surface v1"). `/open-all`, `/close-all`, `/follow`, and
+// `/rig-viewers` require the `terminalAuth` bearer token.
 
 import { Hono } from "hono";
 import type { HerdrAppTarget, TerminalService } from "../domain/terminal/terminal-service.js";
@@ -48,8 +48,9 @@ function getService(c: { get(key: string): unknown }): TerminalService | null {
 }
 
 /** Map a service OpenViewResult code to an HTTP status (body is always the full result). */
-function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 {
+function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 | 500 {
   if (ok) return 200;
+  if (code === "corrupt_ledger") return 500;
   if (code === "view_required" || code === "unknown_provider" || code === "unsupported_provider") return 400;
   if (code === "invalid_terminal_session" || code === "unsupported_terminal_session") return 400;
   if (code === "view_not_found" || code === "scope_not_found") return 404;

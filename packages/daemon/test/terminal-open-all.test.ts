@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,18 +26,43 @@ const leafLabels = (node: unknown): string[] => {
   return [...leafLabels(obj["first"]), ...leafLabels(obj["second"])];
 };
 
+function echoAppliedRoot(
+  node: unknown,
+  tabId: string,
+  panes: Pane[],
+  workspaceId: string,
+): unknown {
+  if (!node || typeof node !== "object") return node;
+  const obj = node as Record<string, unknown>;
+  if (obj["type"] === "pane") {
+    const label = String(obj["label"] ?? "");
+    const pane_id = `${tabId}-p${panes.length + 1}`;
+    const cmd = Array.isArray(obj["command"]) ? (obj["command"] as string[]).join(" ") : "";
+    const seatMatch = cmd.match(/'openrig-tile' '([^']+)'/);
+    panes.push({ workspace_id: workspaceId, tab_id: tabId, pane_id, label, ...(seatMatch?.[1] ? { tmuxSession: seatMatch[1] } : {}) });
+    return { ...obj, pane_id };
+  }
+  return {
+    ...obj,
+    first: echoAppliedRoot(obj["first"], tabId, panes, workspaceId),
+    second: echoAppliedRoot(obj["second"], tabId, panes, workspaceId),
+  };
+}
+
 type Ws = { workspace_id: string; label: string };
 type Tab = { workspace_id: string; tab_id: string; label: string };
-type Pane = { workspace_id: string; tab_id: string; pane_id: string; label: string };
+type Pane = { workspace_id: string; tab_id: string; pane_id: string; label: string; tmuxSession?: string };
 
 function makeInMemoryHerdr(opts?: {
   alive?: boolean;
   failCreateForLabel?: RegExp;
   omitLayoutTabId?: boolean;
   omitLayoutTabIdOnCall?: number;
+  omitLayoutRoot?: boolean;
   failDefaultTabClose?: boolean;
   failPaneListCount?: number;
   reuseLive?: boolean;
+  injectPersonPaneInAppliedTabOnPaneList?: boolean;
 }) {
   const workspaces: Ws[] = [];
   const tabs: Tab[] = [];
@@ -65,9 +90,17 @@ function makeInMemoryHerdr(opts?: {
         }
         failBareFallback = false;
         const workspace_id = `w${workspaces.length + 1}`;
+        const defaultTabId = `${workspace_id}:t0`;
+        const rootPaneId = `${defaultTabId}-p0`;
         workspaces.push({ workspace_id, label });
-        tabs.push({ workspace_id, tab_id: `${workspace_id}:t0`, label: "1" });
-        return { type: "workspace_created", workspace: { workspace_id }, tab: { tab_id: `${workspace_id}:t0` } };
+        tabs.push({ workspace_id, tab_id: defaultTabId, label: "1" });
+        panes.push({ workspace_id, tab_id: defaultTabId, pane_id: rootPaneId, label: "" });
+        return {
+          type: "workspace_created",
+          workspace: { workspace_id },
+          tab: { tab_id: defaultTabId },
+          root_pane: { pane_id: rootPaneId, tab_id: defaultTabId },
+        };
       }
       if (method === "layout.apply") {
         layoutApplyCalls++;
@@ -75,26 +108,58 @@ function makeInMemoryHerdr(opts?: {
         const nextIdx = tabs.filter(t => t.workspace_id === workspace_id).length;
         const tab_id = `${workspace_id}:t${nextIdx}`;
         tabs.push({ workspace_id, tab_id, label: String(params["tab_label"] ?? "") });
-        for (const label of leafLabels(params["root"])) {
-          panes.push({ workspace_id, tab_id, pane_id: `${tab_id}-p${panes.length + 1}`, label });
-        }
+        const rootEcho = echoAppliedRoot(params["root"], tab_id, panes, workspace_id);
         const omitTab = Boolean(opts?.omitLayoutTabId || (opts?.omitLayoutTabIdOnCall && layoutApplyCalls === opts.omitLayoutTabIdOnCall));
-        return { type: "layout_apply", layout: { workspace_id, ...(omitTab ? {} : { tab_id }) } };
+        return {
+          type: "layout_apply",
+          layout: {
+            workspace_id,
+            ...(omitTab ? {} : { tab_id }),
+            ...(opts?.omitLayoutRoot ? {} : { root: rootEcho }),
+          },
+        };
+      }
+      if (method === "tab.list") {
+        return { type: "tab_list", tabs: tabs.filter(t => t.workspace_id === params["workspace_id"]) };
       }
       if (method === "pane.list") {
         paneListCalls++;
         if (opts?.failPaneListCount && paneListCalls === opts.failPaneListCount) throw new Error("pane.list unavailable");
+        if (opts?.injectPersonPaneInAppliedTabOnPaneList && paneListCalls === 1) {
+          const wid = String(params["workspace_id"]);
+          const appliedTab = tabs.find(t => t.workspace_id === wid && !t.tab_id.endsWith(":t0"));
+          if (appliedTab) {
+            panes.push({ workspace_id: wid, tab_id: appliedTab.tab_id, pane_id: `${appliedTab.tab_id}-person`, label: "person-shell" });
+          }
+        }
         return { type: "pane_list", panes: panes.filter(p => p.workspace_id === params["workspace_id"]) };
       }
       if (method === "tab.close") {
         if (opts?.failDefaultTabClose) throw new Error("tab.close denied");
-        const idx = tabs.findIndex(t => t.tab_id === params["tab_id"]);
+        const tabId = String(params["tab_id"]);
+        const idx = tabs.findIndex(t => t.tab_id === tabId);
         if (idx >= 0) tabs.splice(idx, 1);
+        for (let i = panes.length - 1; i >= 0; i--) {
+          if (panes[i]!.tab_id === tabId) panes.splice(i, 1);
+        }
         return { type: "ok" };
       }
       if (method === "tab.focus") {
         const tab = tabs.find(t => t.tab_id === params["tab_id"]);
         return { type: "tab_focused", tab: { tab_id: tab?.tab_id, workspace_id: tab?.workspace_id } };
+      }
+      if (method === "workspace.close") {
+        const workspaceId = String(params["workspace_id"] ?? "");
+        const wsIdx = workspaces.findIndex(w => w.workspace_id === workspaceId);
+        if (wsIdx === -1) throw new Error(`Unknown workspace: ${workspaceId}`);
+        workspaces.splice(wsIdx, 1);
+        for (let i = tabs.length - 1; i >= 0; i--) {
+          if (tabs[i]!.workspace_id === workspaceId) tabs.splice(i, 1);
+        }
+        for (let i = panes.length - 1; i >= 0; i--) {
+          if (panes[i]!.workspace_id === workspaceId) panes.splice(i, 1);
+        }
+        return { type: "workspace_closed", workspace_id: workspaceId };
       }
       return { type: "ok" };
     },
@@ -111,12 +176,7 @@ function makeInMemoryHerdr(opts?: {
     },
     exec: async (file: string, args: string[]) => {
       if (file === "/bin/sh" && args[1] === "command -v tmux") return "/usr/bin/tmux\n";
-      return panes.map((p) => {
-        const seatLabel = p.label.split(" ")[0] ?? p.label;
-        const seat = seatLabel.replace(/^pod\./, "");
-        const rig = seat.split("-")[0] ?? "alpha";
-        return `901\t${seat}@${rig}\t0`;
-      }).join("\n");
+      return panes.filter(p => Boolean(p.tmuxSession)).map((p) => `901\t${p.tmuxSession}\t0`).join("\n");
     },
   } : undefined;
 
@@ -330,6 +390,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
 
   it.each([
     ["missing page tab id", { omitLayoutTabIdOnCall: 2 }, 17],
+    ["missing layout root echo", { omitLayoutRoot: true }, 1],
     ["unclosed default tab", { failDefaultTabClose: true }, 1],
     ["pane.list readback fails", { failPaneListCount: 2 }, 17],
   ] as const)("does not write a close record and notes incomplete identity when %s", async (_label, mode, seatCount) => {
@@ -352,25 +413,38 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
   });
 
-  it("writes a record for single-rig rig:<name> / bare <name> opens, never for saved/pod/seat/saved:kernel views", async () => {
+  it("writes a record for single-rig rig:<name> / bare <name> opens, never for saved/pod/seat/saved:rig:/default saved:kernel views (T4/J05)", async () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr();
     const svc = new TerminalService({
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: {
-        get: (id) => id === "watchtower" ? { id: "watchtower", name: "Watchtower", members: [{ seat: "op@alpha", tmuxSession: "op@alpha" }] } : null,
+        get: (id) => {
+          if (id === "watchtower") return { id: "watchtower", name: "Watchtower", members: [{ seat: "op@alpha", tmuxSession: "op@alpha" }] };
+          if (id === "rig:example") return { id: "rig:example", name: "Saved Rig Collision", members: [{ seat: "op@alpha", tmuxSession: "op@alpha" }] };
+          return null;
+        },
         list: () => [],
       },
       listRigNames: () => ["alpha", "kernel"],
-      listRigSeats: (rig) => rig === "alpha" ? [makeRigSeat("alpha", "op")] : rig === "kernel" ? [makeRigSeat("kernel", "operator")] : null,
+      listRigSeats: (rig) => rig === "alpha"
+        ? [makeRigSeat("alpha", "op")]
+        : rig === "kernel"
+          ? [{ canonicalSessionName: "kernel-op", attachmentType: "tmux", tmuxSession: "kernel-op", rigName: "kernel", logicalId: "operator.agent" }]
+          : null,
       listPodSeats: (rig, pod) => rig === "alpha" && pod === "pod" ? [makeRigSeat("alpha", "op")] : null,
       resolveHost: () => null,
       hasSession: () => true,
       rigViewersDir,
     } satisfies TerminalServiceDeps);
 
-    await svc.openView({ view: "watchtower", provider: "herdr" });
-    await svc.openView({ view: "saved:kernel", provider: "herdr" });
+    const watchtower = await svc.openView({ view: "watchtower", provider: "herdr" });
+    expect(watchtower.ok).toBe(true);
+    const savedRig = await svc.openView({ view: "saved:rig:example", provider: "herdr" });
+    expect(savedRig.ok).toBe(true);
+    const savedKernel = await svc.openView({ view: "saved:kernel", provider: "herdr" });
+    expect(savedKernel.ok).toBe(true);
+    expect(savedKernel.opened).toEqual(["kernel-op"]);
     await svc.openView({ view: "pod:alpha/pod", provider: "herdr" });
     await svc.openView({ view: "seat:alpha/pod.op", provider: "herdr" });
     expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
@@ -378,5 +452,139 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     await svc.openView({ view: "alpha", provider: "herdr" });
     const afterRig = Object.values(readRecords(rigViewersDir)) as Array<{ view: string }>;
     expect(afterRig.map(r => r.view)).toEqual(["rig:alpha"]);
+
+    // Closing must only close rig:alpha, never saved:rig:example or saved:kernel:
+    const closed = await svc.closeAll({ provider: "herdr" });
+    expect(closed.viewers.map(v => ({ view: v.view, outcome: v.outcome }))).toEqual([{ view: "rig:alpha", outcome: "closed" }]);
+    expect(h.workspaces).toHaveLength(5);
+  });
+
+  it("J02: rejects creation ownership when an unexplained person pane appears in the applied tab between layout.apply and pane.list", async () => {
+    const rigViewersDir = tempDir("rig-viewers-");
+    const h = makeInMemoryHerdr({ injectPersonPaneInAppliedTabOnPaneList: true });
+    const svc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: (rig) => [makeRigSeat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    } satisfies TerminalServiceDeps);
+
+    const res = await svc.openAll({ provider: "herdr" });
+    expect(res.ok).toBe(true);
+    expect(res.rigs[0]?.notes?.join("\n")).toMatch(/not recorded for close/i);
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
+    expect(h.panes.some(p => p.pane_id.endsWith("-person"))).toBe(true);
+
+    const closed = await svc.closeAll({ provider: "herdr" });
+    expect(closed.viewers).toEqual([]);
+    expect(h.workspaces).toHaveLength(1);
+    expect(h.panes.some(p => p.pane_id.endsWith("-person"))).toBe(true);
+  });
+
+  it("J09: reuses a live workspace across single open and open --all in both directions even with stopped/unbound/external seats", async () => {
+    const seats = [
+      makeRigSeat("alpha", "alpha-op"),
+      makeRigSeat("alpha", "stopped", { attachmentType: "none", canonicalSessionName: "" }),
+      makeRigSeat("alpha", "ext", { attachmentType: "external_cli" }),
+    ];
+
+    // Direction 1: single open -> bulk open --all reuses existing workspace
+    const dir1 = tempDir("rig-viewers-");
+    const h1 = makeInMemoryHerdr({ reuseLive: true });
+    const svc1 = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h1.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: () => seats,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir: dir1,
+    } satisfies TerminalServiceDeps);
+
+    const singleFirst = await svc1.openView({ view: "rig:alpha", provider: "herdr", reuseLive: true });
+    expect(singleFirst.ok).toBe(true);
+    expect(h1.workspaces).toHaveLength(1);
+    const bulkSecond = await svc1.openAll({ provider: "herdr", reuseLive: true });
+    expect(bulkSecond.ok).toBe(true);
+    expect(bulkSecond.rigs[0]).toMatchObject({ rig: "alpha", outcome: "reused", workspaceId: "w1" });
+    expect(h1.workspaces).toHaveLength(1);
+
+    // Direction 2: bulk open --all -> single open reuses existing workspace
+    const dir2 = tempDir("rig-viewers-");
+    const h2 = makeInMemoryHerdr({ reuseLive: true });
+    const svc2 = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h2.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: () => seats,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir: dir2,
+    } satisfies TerminalServiceDeps);
+
+    const bulkFirst = await svc2.openAll({ provider: "herdr", reuseLive: true });
+    expect(bulkFirst.rigs[0]?.outcome).toBe("opened");
+    expect(h2.workspaces).toHaveLength(1);
+    const singleSecond = await svc2.openView({ view: "rig:alpha", provider: "herdr", reuseLive: true });
+    expect(singleSecond.ok).toBe(true);
+    expect(singleSecond.reusedWorkspace?.id).toBe("w1");
+    expect(h2.workspaces).toHaveLength(1);
+  });
+
+  it("J10: keeps successful open result and attaches not-recorded warning when journal upsert fails in both single and bulk opens", async () => {
+    const parent = tempDir("rig-viewers-parent-");
+    const blockedDir = path.join(parent, "not-a-dir");
+    writeFileSync(blockedDir, "file-blocks-mkdir\n");
+
+    const h = makeInMemoryHerdr();
+    const svc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha", "beta"],
+      listRigSeats: (rig) => [makeRigSeat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir: blockedDir,
+    } satisfies TerminalServiceDeps);
+
+    const single = await svc.openView({ view: "rig:alpha", provider: "herdr" });
+    expect(single.ok).toBe(true);
+    expect(single.opened).toEqual(["op@alpha"]);
+    expect(single.notes?.join("\n")).toMatch(/not recorded for close/i);
+    expect(h.workspaces).toHaveLength(1);
+    expect(h.calls.some(c => c.method === "workspace.close")).toBe(false);
+
+    const bulk = await svc.openAll({ provider: "herdr" });
+    expect(bulk.ok).toBe(true);
+    expect(bulk.rigs.map(r => r.outcome)).toEqual(["opened", "opened"]);
+    expect(bulk.rigs.every(r => r.notes?.some(n => /not recorded for close/i.test(n)))).toBe(true);
+    expect(h.workspaces).toHaveLength(3);
+    expect(h.calls.some(c => c.method === "workspace.close")).toBe(false);
+  });
+
+  it("T5: openAll returns ok: false when every rig fails", async () => {
+    const rigViewersDir = tempDir("rig-viewers-");
+    const h = makeInMemoryHerdr({ failCreateForLabel: /.*/ });
+    const svc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha", "beta"],
+      listRigSeats: (rig) => [makeRigSeat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    } satisfies TerminalServiceDeps);
+
+    const res = await svc.openAll({ provider: "herdr" });
+    expect(res.ok).toBe(false);
+    expect(res.rigs.map(r => r.outcome)).toEqual(["failed", "failed"]);
   });
 });

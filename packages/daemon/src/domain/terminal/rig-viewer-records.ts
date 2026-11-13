@@ -10,6 +10,7 @@ export interface HerdrRigViewerRecord {
   view: string;
   workspaceId: string;
   tabIds: string[];
+  tabLabels?: string[];
   paneIds: string[];
   planId: string;
   createdAt: string;
@@ -55,10 +56,33 @@ interface JournalFile {
 
 const ENDPOINT_FILE_RE = /^[0-9a-f]{64}\.json$/;
 
+export class CorruptRigViewerLedgerError extends Error {
+  readonly code = "corrupt_ledger" as const;
+  constructor(readonly filePath: string, reason: string) {
+    super(`Rig-viewer ledger file '${filePath}' is corrupt: ${reason}`);
+    this.name = "CorruptRigViewerLedgerError";
+  }
+}
+
+export function sameIdSet(actual: readonly string[], expected: readonly string[]): boolean {
+  if (actual.length !== expected.length) return false;
+  const actualSet = new Set(actual);
+  const expectedSet = new Set(expected);
+  if (actualSet.size !== expected.length || expectedSet.size !== expected.length) return false;
+  for (const id of expectedSet) if (!actualSet.has(id)) return false;
+  return true;
+}
+
 export function rigViewerRecordKey(
-  record: { kind: "herdr"; workspaceId: string } | { kind: "tmux"; sessionId: string; nonce: string },
+  record: { kind: "herdr"; workspaceId: string; tabLabels?: readonly string[] } | { kind: "tmux"; sessionId: string; nonce: string },
 ): string {
-  if (record.kind === "herdr") return `herdr:${record.workspaceId}`;
+  if (record.kind === "herdr") {
+    if (record.tabLabels && record.tabLabels.length > 0) {
+      const labelDigest = createHash("sha256").update(JSON.stringify(record.tabLabels)).digest("hex").slice(0, 12);
+      return `herdr:${record.workspaceId}:${labelDigest}`;
+    }
+    return `herdr:${record.workspaceId}`;
+  }
   return `tmux:${record.sessionId}:${record.nonce}`;
 }
 
@@ -107,6 +131,50 @@ export interface RigViewerEndpointTx {
   remove(key: string): boolean;
 }
 
+function isValidRigViewerRecord(raw: unknown): raw is RigViewerRecord {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const r = raw as Record<string, unknown>;
+  if (typeof r["endpoint"] !== "string" || !r["endpoint"]) return false;
+  if (typeof r["view"] !== "string" || !r["view"].startsWith("rig:")) return false;
+  if (typeof r["createdAt"] !== "string" || !r["createdAt"]) return false;
+  if (r["phase"] !== "created" && r["phase"] !== "closing") return false;
+  if (r["kind"] === "herdr") {
+    if (typeof r["workspaceId"] !== "string" || !r["workspaceId"]) return false;
+    if (!isStringArray(r["tabIds"]) || r["tabIds"].length === 0) return false;
+    if (!isStringArray(r["paneIds"]) || r["paneIds"].length === 0) return false;
+    if (typeof r["planId"] !== "string") return false;
+    if (r["tabLabels"] !== undefined && (!Array.isArray(r["tabLabels"]) || !r["tabLabels"].every(item => typeof item === "string"))) return false;
+    return true;
+  }
+  if (r["kind"] === "tmux") {
+    if (typeof r["sessionName"] !== "string" || !r["sessionName"]) return false;
+    if (typeof r["sessionId"] !== "string" || !r["sessionId"]) return false;
+    if (typeof r["nonce"] !== "string" || !r["nonce"]) return false;
+    if (!isStringArray(r["windowIds"]) || r["windowIds"].length === 0) return false;
+    if (!isStringArray(r["paneIds"]) || r["paneIds"].length === 0) return false;
+    return true;
+  }
+  return false;
+}
+
+function parseJournalFile(rawText: string, file: string): JournalFile {
+  let parsed: Partial<JournalFile>;
+  try {
+    parsed = JSON.parse(rawText) as Partial<JournalFile>;
+  } catch (err) {
+    throw new CorruptRigViewerLedgerError(file, err instanceof Error ? err.message : "invalid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== "object" || Array.isArray(parsed.entries)) {
+    throw new CorruptRigViewerLedgerError(file, "expected version 1 object with entries map");
+  }
+  for (const [key, entry] of Object.entries(parsed.entries)) {
+    if (!isValidRigViewerRecord(entry)) {
+      throw new CorruptRigViewerLedgerError(file, `invalid record for key '${key}'`);
+    }
+  }
+  return { version: 1, entries: { ...parsed.entries } };
+}
+
 /**
  * Per-endpoint ownership ledger for OpenRig-created rig viewers (`rig:<name>`).
  * Serialized per endpoint file; uses in-memory storage when no directory is passed (unit tests).
@@ -128,11 +196,7 @@ export class RigViewerLedger {
     }
     const file = this.filePath(endpoint);
     try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<JournalFile>;
-      if (parsed.version === 1 && parsed.entries && typeof parsed.entries === "object" && !Array.isArray(parsed.entries)) {
-        return { version: 1, entries: { ...parsed.entries } };
-      }
-      throw new Error(`Invalid rig viewer ledger format in ${file}`);
+      return parseJournalFile(readFileSync(file, "utf8"), file);
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
         return { version: 1, entries: {} };
@@ -224,10 +288,7 @@ export class RigViewerLedger {
     const out: Array<{ endpoint: string; key: string; record: RigViewerRecord }> = [];
     for (const file of files) {
       const full = path.join(this.dir, file);
-      const parsed = JSON.parse(readFileSync(full, "utf8")) as Partial<JournalFile>;
-      if (parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== "object" || Array.isArray(parsed.entries)) {
-        continue;
-      }
+      const parsed = parseJournalFile(readFileSync(full, "utf8"), full);
       for (const [key, record] of Object.entries(parsed.entries)) {
         out.push({ endpoint: record.endpoint, key, record });
       }

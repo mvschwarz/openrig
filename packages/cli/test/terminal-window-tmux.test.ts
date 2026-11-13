@@ -392,4 +392,283 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(retired).toHaveLength(0);
     expect(launchCalls).toBe(0);
   });
+
+  it("J04/T2/J15: preserves viewer record on Permission denied or attached client or post-kill still-listed, and distinguishes already_gone", async () => {
+    // 1. Permission denied on pre/post cleanup check MUST return cleanup: "unknown" and NOT retire record:
+    const perm = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const permRes = await openAllTerminalWindows(perm.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("Not authorized to send Apple events (-1743)");
+        if (file === "tmux") {
+          if (args.includes("list-sessions") && perm.registered.length > 0) {
+            throw new Error("error connecting to /tmp/tmux-1000/default (Permission denied)");
+          }
+          return tmux(perm.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "perm",
+    });
+    expect(permRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(perm.retired).toHaveLength(0);
+
+    // 2. Attached client on failing viewer MUST check list-clients, NOT kill-session, and MUST return cleanup: "unknown":
+    const attached = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    let attachedClientChecks = 0;
+    const attachedKillCalls: string[][] = [];
+    const attRes = await openAllTerminalWindows(attached.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("window failed");
+        if (file === "tmux") {
+          if (args.includes("list-clients") && args.includes("#{client_name}")) {
+            attachedClientChecks++;
+            return "client-1\n";
+          }
+          if (args.includes("kill-session")) {
+            attachedKillCalls.push(args);
+            return "";
+          }
+          return tmux(attached.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "att",
+    });
+    expect(attachedClientChecks).toBe(1);
+    expect(attachedKillCalls).toEqual([]);
+    expect(attRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(tmux(attached.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-att");
+    expect(attached.retired).toHaveLength(0);
+
+    // 3. Already-gone viewer BEFORE cleanup returns cleanup: "already_gone" and retires record:
+    const gone = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const goneRes = await openAllTerminalWindows(gone.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          tmux(gone.server, ["kill-session", "-t", "openrig-view-gone"]);
+          throw new Error("window failed");
+        }
+        if (file === "tmux") return tmux(gone.server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "gone",
+    });
+    expect(goneRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "already_gone" });
+    expect(gone.retired).toHaveLength(1);
+
+    // 4. Permission denied on post-kill readback MUST return cleanup: "unknown" and retain record:
+    const postPerm = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const postPermKillCalls: string[][] = [];
+    let postPermPostListCalls = 0;
+    const postPermRes = await openAllTerminalWindows(postPerm.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("window failed");
+        if (file === "tmux") {
+          if (args.includes("kill-session")) {
+            postPermKillCalls.push(args);
+            return tmux(postPerm.server, args);
+          }
+          if (args.includes("list-sessions") && postPermKillCalls.length > 0) {
+            postPermPostListCalls++;
+            throw new Error("error connecting to /tmp/tmux-1000/default (Permission denied)");
+          }
+          return tmux(postPerm.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "postperm",
+    });
+    expect(postPermKillCalls).toHaveLength(1);
+    expect(postPermPostListCalls).toBe(1);
+    expect(postPermRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(postPerm.retired).toHaveLength(0);
+
+    // 5. Post-kill still-listed viewer MUST return cleanup: "unknown" and retain record:
+    const stillListed = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const stillKillCalls: string[][] = [];
+    let stillPostListCalls = 0;
+    const stillRes = await openAllTerminalWindows(stillListed.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("window failed");
+        if (file === "tmux") {
+          if (args.includes("kill-session")) {
+            stillKillCalls.push(args);
+            return "";
+          }
+          if (args.includes("list-sessions") && stillKillCalls.length > 0) {
+            stillPostListCalls++;
+            return tmux(stillListed.server, args);
+          }
+          return tmux(stillListed.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "still",
+    });
+    expect(stillKillCalls).toHaveLength(1);
+    expect(stillPostListCalls).toBe(1);
+    expect(stillRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(tmux(stillListed.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-still");
+    expect(stillListed.retired).toHaveLength(0);
+  });
+
+  it("J05: reads top-level rigViewer and skips @openrig_rig_viewer/registration for saved:rig:example and rigViewer:false spoofed rig:* payloads, while rig:alpha registers", async () => {
+    const id = randomUUID().slice(0, 10);
+    const server = `j05-${id}`;
+    sockets.push(server);
+    tmux(server, ["new-session", "-d", "-s", "op@alpha", "sleep 60"]);
+    const posts: unknown[] = [];
+    const previewClient = (rigViewer: boolean, composedId = "rig:alpha") => ({
+      baseUrl: "http://localhost:7433",
+      isLocalInstance: vi.fn(async () => true),
+      get: vi.fn(async () => ({
+        status: 200,
+        data: {
+          planId: "p1",
+          rigViewer,
+          status: {},
+          composed: {
+            id: composedId,
+            localTmuxServer: ["-L", server],
+            opened: [{ seat: "op@alpha", label: "op", paneCommand: `tmux -L ${server} -f /dev/null attach-session -t '=op@alpha'` }],
+            pages: [[{ seat: "op@alpha", label: "op", paneCommand: `tmux -L ${server} -f /dev/null attach-session -t '=op@alpha'` }]],
+            columns: 1,
+            absent: [],
+            degraded: [],
+          },
+        },
+      })),
+      post: vi.fn(async (_url: string, body: unknown) => {
+        posts.push(body);
+        return { status: 200, data: { ok: true } };
+      }),
+    }) as unknown as DaemonClient;
+
+    const depsFor = (viewerId: string): WindowDeps => ({
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") return "window";
+        if (file === "tmux") return tmux(server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => viewerId,
+    });
+
+    await openTerminalWindow(previewClient(false), "saved:rig:alpha", "tmux", depsFor("saved1"));
+    const savedRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"])
+      .trim()
+      .split("\n")
+      .map(line => line.split("|"));
+    expect(savedRows.find(row => row[0] === "openrig-view-saved1")?.[1]).toBe("");
+    expect(posts).toHaveLength(0);
+
+    await openTerminalWindow(previewClient(false, "rig:spoofed"), "rig:spoofed", "tmux", depsFor("spoof1"));
+    const spoofRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"])
+      .trim()
+      .split("\n")
+      .map(line => line.split("|"));
+    expect(spoofRows.find(row => row[0] === "openrig-view-spoof1")?.[1]).toBe("");
+    expect(posts).toHaveLength(0);
+
+    await openTerminalWindow(previewClient(true), "rig:alpha", "tmux", depsFor("rig1"));
+    const rigRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"])
+      .trim()
+      .split("\n")
+      .map(line => line.split("|"));
+    expect(rigRows.find(row => row[0] === "openrig-view-rig1")?.[1]).toMatch(/^[0-9a-f-]{8,}$/);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("J14: fails openAllTerminalWindows when /api/terminal/views fails and omits close --all advice when unregistered", async () => {
+    const server = `j14-${randomUUID().slice(0, 10)}`;
+    sockets.push(server);
+    tmux(server, ["new-session", "-d", "-s", "op@alpha", "sleep 60"]);
+    const badViewsClient = {
+      baseUrl: "http://localhost:7433",
+      isLocalInstance: vi.fn(async () => true),
+      get: vi.fn(async (url: string) => {
+        if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", server] }, providers: [] } };
+        if (url === "/api/terminal/views") return { status: 500, data: { error: "views down" } };
+        return { status: 404, data: {} };
+      }),
+    } as unknown as DaemonClient;
+    const viewsRes = await openAllTerminalWindows(badViewsClient, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async file => (file === "/bin/sh" ? "tmux" : ""),
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "j14a",
+    });
+    expect(viewsRes.ok).toBe(false);
+
+    // Registration fails BEFORE launch -> cleanup: unknown, and notes must NOT tell user close --all works!
+    const base = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const regFailClient = {
+      ...base.client,
+      post: vi.fn(async () => ({ status: 500, data: { error: "journal full" } })),
+    } as unknown as DaemonClient;
+    const regRes = await openAllTerminalWindows(regFailClient, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "tmux") {
+          if (args.includes("kill-session")) throw new Error("kill denied");
+          return tmux(base.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "regfail",
+    });
+    expect(regRes.rigs[0]?.outcome).toBe("failed");
+    expect((regRes.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
+  });
 });

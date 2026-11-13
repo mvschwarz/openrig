@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,13 +42,35 @@ const leafLabels = (node: unknown): string[] => {
   return [...leafLabels(obj["first"]), ...leafLabels(obj["second"])];
 };
 
-function makeCloseHerdr() {
+function echoAppliedRoot(
+  node: unknown,
+  tabId: string,
+  panes: Array<{ workspace_id: string; tab_id: string; pane_id: string; label: string }>,
+  workspaceId: string,
+): unknown {
+  if (!node || typeof node !== "object") return node;
+  const obj = node as Record<string, unknown>;
+  if (obj["type"] === "pane") {
+    const label = String(obj["label"] ?? "");
+    const pane_id = `${tabId}-p${panes.length + 1}`;
+    panes.push({ workspace_id: workspaceId, tab_id: tabId, pane_id, label });
+    return { ...obj, pane_id };
+  }
+  return {
+    ...obj,
+    first: echoAppliedRoot(obj["first"], tabId, panes, workspaceId),
+    second: echoAppliedRoot(obj["second"], tabId, panes, workspaceId),
+  };
+}
+
+function makeCloseHerdr(opts?: { launchTokenPrefix?: string; onWorkspaceClose?: (wid: string) => void; socketPath?: string }) {
   const workspaces: Array<{ workspace_id: string; label: string }> = [];
   const tabs: Array<{ workspace_id: string; tab_id: string; label: string }> = [];
   const panes: Array<{ workspace_id: string; tab_id: string; pane_id: string; label: string }> = [];
   const closedWorkspaces: string[] = [];
   let keepAfterClose = false;
   let failList = false;
+  let tokenCounter = 0;
 
   const transport: HerdrTransport = {
     probe: async () => ({ alive: !failList, version: failList ? null : "0.9.5", protocol: failList ? null : 22 }),
@@ -60,18 +82,24 @@ function makeCloseHerdr() {
       if (method === "workspace.list") return { type: "workspace_list", workspaces };
       if (method === "workspace.create") {
         const workspace_id = `w${workspaces.length + 1}`;
+        const defaultTabId = `${workspace_id}:t0`;
+        const rootPaneId = `${defaultTabId}-p0`;
         workspaces.push({ workspace_id, label: String(params["label"] ?? "") });
-        tabs.push({ workspace_id, tab_id: `${workspace_id}:t0`, label: "1" });
-        return { type: "workspace_created", workspace: { workspace_id }, tab: { tab_id: `${workspace_id}:t0` } };
+        tabs.push({ workspace_id, tab_id: defaultTabId, label: "1" });
+        panes.push({ workspace_id, tab_id: defaultTabId, pane_id: rootPaneId, label: "" });
+        return {
+          type: "workspace_created",
+          workspace: { workspace_id },
+          tab: { tab_id: defaultTabId },
+          root_pane: { pane_id: rootPaneId, tab_id: defaultTabId },
+        };
       }
       if (method === "layout.apply") {
         const workspace_id = String(params["workspace_id"]);
         const tab_id = `${workspace_id}:t${tabs.filter(t => t.workspace_id === workspace_id).length}`;
         tabs.push({ workspace_id, tab_id, label: String(params["tab_label"] ?? "") });
-        for (const label of leafLabels(params["root"])) {
-          panes.push({ workspace_id, tab_id, pane_id: `${tab_id}-p${panes.length + 1}`, label });
-        }
-        return { type: "layout_apply", layout: { workspace_id, tab_id } };
+        const rootEcho = echoAppliedRoot(params["root"], tab_id, panes, workspace_id);
+        return { type: "layout_apply", layout: { workspace_id, tab_id, root: rootEcho } };
       }
       if (method === "tab.list") {
         return { type: "tab_list", tabs: tabs.filter(t => t.workspace_id === params["workspace_id"]) };
@@ -80,8 +108,12 @@ function makeCloseHerdr() {
         return { type: "pane_list", panes: panes.filter(p => p.workspace_id === params["workspace_id"]) };
       }
       if (method === "tab.close") {
-        const idx = tabs.findIndex(t => t.tab_id === params["tab_id"]);
+        const tabId = String(params["tab_id"]);
+        const idx = tabs.findIndex(t => t.tab_id === tabId);
         if (idx >= 0) tabs.splice(idx, 1);
+        for (let i = panes.length - 1; i >= 0; i--) {
+          if (panes[i]!.tab_id === tabId) panes.splice(i, 1);
+        }
         return { type: "ok" };
       }
       if (method === "tab.focus") {
@@ -91,6 +123,7 @@ function makeCloseHerdr() {
       if (method === "workspace.close") {
         const id = String(params["workspace_id"]);
         closedWorkspaces.push(id);
+        opts?.onWorkspaceClose?.(id);
         if (!keepAfterClose) {
           const wIdx = workspaces.findIndex(w => w.workspace_id === id);
           if (wIdx >= 0) workspaces.splice(wIdx, 1);
@@ -105,8 +138,8 @@ function makeCloseHerdr() {
 
   const adapter = new HerdrAdapter({
     transportFactory: () => transport,
-    launch: { socketPath: "/tmp/herdr-close.sock" },
-    newLaunchToken: () => "c1",
+    launch: { socketPath: opts?.socketPath ?? "/tmp/herdr-close.sock" },
+    newLaunchToken: () => `${opts?.launchTokenPrefix ?? "c"}-${++tokenCounter}`,
   });
 
   return {
@@ -372,5 +405,247 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     expect(remainingSessions).toContain("openrig-view-v3");
     expect(remainingSessions).not.toContain("openrig-view-v1");
     expect(runTmux(socket, ["list-panes", "-t", "=op@alpha", "-F", "#{pane_id}|#{pane_pid}"]).trim()).toBe(sourcePaneBefore);
+  });
+
+  it("J01: refreshes fresh inventory per target during closeAll on both Herdr and tmux so person content added to B while A closes survives", async () => {
+    // 1. Herdr race-at-B: closing w1 triggers person adding a tab to w2 before w2 is checked
+    const herdrDir = tempDir("rig-viewers-j01-h-");
+    let mutatedB = false;
+    const h = makeCloseHerdr({
+      onWorkspaceClose: (wid) => {
+        if (!mutatedB && wid === "w1") {
+          mutatedB = true;
+          h.tabs.push({ workspace_id: "w2", tab_id: "w2:person", label: "notes" });
+        }
+      },
+    });
+    const herdrSvc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha", "beta"],
+      listRigSeats: (rig) => [seat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir: herdrDir,
+    });
+    await herdrSvc.openAll({ provider: "herdr" });
+    const herdrClose = await herdrSvc.closeAll({ provider: "herdr" });
+    expect(herdrClose.viewers.find(v => v.view === "rig:alpha")).toMatchObject({ outcome: "closed" });
+    expect(herdrClose.viewers.find(v => v.view === "rig:beta")).toMatchObject({ outcome: "kept" });
+    expect(h.workspaces.map(w => w.workspace_id)).toEqual(["w2"]);
+    expect(h.tabs.some(t => t.tab_id === "w2:person")).toBe(true);
+
+    // 2. Tmux race-at-B: killing v1 triggers person adding a window to v2 before v2 is killed
+    const tmuxDir = tempDir("rig-viewers-j01-t-");
+    const socket = `close-race-${randomUUID().slice(0, 10)}`;
+    sockets.push(socket);
+    const v1Out = runTmux(socket, ["new-session", "-d", "-s", "openrig-view-r1", "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", "sleep 60"]).trim();
+    const [s1Id, w1Id, p1Id] = v1Out.split("|");
+    runTmux(socket, ["set-option", "-t", s1Id!, "@openrig_rig_viewer", "nonce-r1"]);
+    const v2Out = runTmux(socket, ["new-session", "-d", "-s", "openrig-view-r2", "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", "sleep 60"]).trim();
+    const [s2Id, w2Id, p2Id] = v2Out.split("|");
+    runTmux(socket, ["set-option", "-t", s2Id!, "@openrig_rig_viewer", "nonce-r2"]);
+
+    const serverArgs = ["-L", socket, "-f", "/dev/null"];
+    let tmuxMutatedB = false;
+    const tmuxSvc = new TerminalService({
+      resolveProvider: () => null,
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [],
+      listRigSeats: () => null,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir: tmuxDir,
+      tmuxServerArgs: () => serverArgs,
+      tmuxExec: async (args) => {
+        const out = execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: tmuxEnv, timeout: 5000 });
+        if (!tmuxMutatedB && args[0] === "kill-session" && args.includes(s1Id!)) {
+          tmuxMutatedB = true;
+          runTmux(socket, ["new-window", "-d", "-t", s2Id!, "-n", "person-extra", "sleep 60"]);
+        }
+        return out;
+      },
+    });
+    await tmuxSvc.registerRigViewer({
+      kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-r1", sessionId: s1Id!,
+      nonce: "nonce-r1", windowIds: [w1Id!], paneIds: [p1Id!], phase: "created",
+    });
+    await tmuxSvc.registerRigViewer({
+      kind: "tmux", view: "rig:beta", sessionName: "openrig-view-r2", sessionId: s2Id!,
+      nonce: "nonce-r2", windowIds: [w2Id!], paneIds: [p2Id!], phase: "created",
+    });
+    const tmuxClose = await tmuxSvc.closeAll({ provider: "tmux" });
+    expect(tmuxClose.viewers.find(v => v.view === "rig:alpha")).toMatchObject({ outcome: "closed" });
+    expect(tmuxClose.viewers.find(v => v.view === "rig:beta")).toMatchObject({ outcome: "kept" });
+    const liveWins = runTmux(socket, ["list-windows", "-t", s2Id!, "-F", "#{window_name}"]).trim().split("\n");
+    expect(liveWins).toContain("person-extra");
+  });
+
+  it("J04/T2: treats tmux Permission denied on pre-close/post-kill readback as provider_unreachable/close_pending (retaining records) and handles kill-success-but-still-listed", async () => {
+    const rigViewersDir = tempDir("rig-viewers-j04-");
+    const serverArgs = ["-L", "perm-test", "-f", "/dev/null"];
+    let mode: "perm-pre" | "perm-post" | "still-listed" = "perm-pre";
+    let killed = false;
+    const svc = new TerminalService({
+      resolveProvider: () => null,
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [],
+      listRigSeats: () => null,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+      tmuxServerArgs: () => serverArgs,
+      tmuxExec: async (args) => {
+        if (mode === "perm-pre") {
+          throw new Error("error connecting to /tmp/tmux-1000/perm-test (Permission denied)");
+        }
+        if (mode === "perm-post" && killed && args[0] === "list-sessions") {
+          throw new Error("error connecting to /tmp/tmux-1000/perm-test (Permission denied)");
+        }
+        if (args[0] === "kill-session") {
+          killed = true;
+          return "";
+        }
+        if (args[0] === "list-sessions") return "$1|openrig-view-1\n";
+        if (args[0] === "list-windows") return "$1|@1\n";
+        if (args[0] === "list-panes") return "$1|%1\n";
+        if (args[0] === "show-options") return "nonce-1\n";
+        return "";
+      },
+    });
+    await svc.registerRigViewer({
+      kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-1", sessionId: "$1",
+      nonce: "nonce-1", windowIds: ["@1"], paneIds: ["%1"], phase: "created",
+    });
+
+    // 1. Pre-close permission error -> failed / provider_unreachable + keeps record
+    const pre = await svc.closeAll({ provider: "tmux" });
+    expect(pre.ok).toBe(false);
+    expect(pre.viewers[0]).toMatchObject({ outcome: "failed", code: "provider_unreachable" });
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(1);
+
+    // 2. Post-kill permission error -> failed / close_pending + keeps record
+    mode = "perm-post";
+    killed = false;
+    const postPerm = await svc.closeAll({ provider: "tmux" });
+    expect(postPerm.ok).toBe(false);
+    expect(postPerm.viewers[0]).toMatchObject({ outcome: "failed", code: "close_pending" });
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(1);
+
+    // 3. kill-session exits cleanly, yet list-sessions still lists $1 -> failed / close_pending + phase closing
+    mode = "still-listed";
+    killed = false;
+    const stillListed = await svc.closeAll({ provider: "tmux" });
+    expect(stillListed.ok).toBe(false);
+    expect(stillListed.viewers[0]).toMatchObject({ outcome: "failed", code: "close_pending" });
+    const recs = Object.values(readRecords(rigViewersDir));
+    expect(recs).toHaveLength(1);
+    expect(recs[0]?.["phase"]).toBe("closing");
+  });
+
+  it("J08: keeps a Herdr workspace whose w1/t1/p1 IDs were reused after restart with different tab labels (person content survives)", async () => {
+    const rigViewersDir = tempDir("rig-viewers-j08-");
+    const h = makeCloseHerdr({ launchTokenPrefix: "daemon1" });
+    const svc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: (rig) => [seat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    });
+    const opened = await svc.openAll({ provider: "herdr" });
+    expect(opened.rigs[0]?.workspaceId).toBe("w1");
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(1);
+
+    // Simulate Herdr restart reusing identical IDs w1, w1:t1, w1:t1-p2 for a person's workspace or new non-matching tab label:
+    for (const t of h.tabs) if (t.workspace_id === "w1") t.label = "person-notes";
+
+    const res = await svc.closeAll({ provider: "herdr" });
+    expect(res.viewers[0]).toMatchObject({ view: "rig:alpha", target: "w1", outcome: "kept" });
+    expect(h.closedWorkspaces).toEqual([]);
+    expect(h.workspaces.map(w => w.workspace_id)).toEqual(["w1"]);
+  });
+
+  it("J11: fails closed with corrupt-ledger diagnostic and preserves corrupt bytes without overwriting", async () => {
+    const rigViewersDir = tempDir("rig-viewers-j11-");
+    const corruptHash = createHash("sha256").update("herdr:/tmp/herdr-close.sock").digest("hex");
+    const corruptPath = path.join(rigViewersDir, `${corruptHash}.json`);
+    const corruptBytes = "{corrupt-not-json\n";
+    writeFileSync(corruptPath, corruptBytes, { mode: 0o600 });
+
+    const h = makeCloseHerdr();
+    const svc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [],
+      listRigSeats: () => null,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    });
+
+    const res = await svc.closeAll({});
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("corrupt_ledger");
+    expect(res.error).toContain(`${corruptHash}.json`);
+    expect(readFileSync(corruptPath, "utf8")).toBe(corruptBytes);
+  });
+
+  it("J12: distinguishes records belonging to a different Herdr/tmux endpoint from provider_unreachable", async () => {
+    const rigViewersDir = tempDir("rig-viewers-j12-");
+    const otherHerdr = makeCloseHerdr({ socketPath: "/tmp/herdr-other.sock" });
+    const otherSvc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? otherHerdr.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: (rig) => [seat(rig, "op")],
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    });
+    await otherSvc.openAll({ provider: "herdr" });
+
+    const defaultHerdr = makeCloseHerdr({ socketPath: "/tmp/herdr-default.sock" });
+    const defaultSvc = new TerminalService({
+      resolveProvider: (n) => (n === "herdr" ? defaultHerdr.adapter : null),
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [],
+      listRigSeats: () => null,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+    });
+    await defaultSvc.registerRigViewer({
+      kind: "tmux", view: "rig:beta", sessionName: "openrig-view-other", sessionId: "$9",
+      nonce: "nonce-9", windowIds: ["@9"], paneIds: ["%9"], phase: "created",
+    });
+
+    const closeDefault = await defaultSvc.closeAll({});
+    const herdrRes = closeDefault.viewers.find(v => v.provider === "herdr");
+    expect(herdrRes).toMatchObject({ outcome: "kept", code: "different_endpoint" });
+    expect(herdrRes?.reason).not.toMatch(/unreachable/i);
+
+    const closeOtherTmux = await new TerminalService({
+      resolveProvider: () => null,
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [],
+      listRigSeats: () => null,
+      listPodSeats: () => null,
+      resolveHost: () => null,
+      hasSession: () => true,
+      rigViewersDir,
+      tmuxServerArgs: () => ["-L", "other-tmux-server"],
+      tmuxExec: async () => "",
+    }).closeAll({ provider: "tmux" });
+    expect(closeOtherTmux.viewers[0]).toMatchObject({ outcome: "kept", code: "different_endpoint" });
   });
 });
