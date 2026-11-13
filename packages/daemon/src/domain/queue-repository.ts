@@ -81,7 +81,7 @@ import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
-import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
+import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -4821,6 +4821,17 @@ export class QueueRepository {
       if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
       const choice = parseReplyToChoice(t.transitionNote ?? "");
       if (choice) return choice;
+    }
+    return null;
+  }
+
+  /** #2990 — the thread an inbound reply actually arrived in, without gate correlation.
+   *  Only an in-process daemon write counts, with the same trust rule as replyToChoiceFor. */
+  arrivalThreadFor(qitemId: string): { threadTs: string; channel: string } | null {
+    for (const t of this.transitionLog.listForQitem(qitemId).reverse()) {
+      if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
+      const arrival = parseArrivalThread(t.transitionNote ?? "");
+      if (arrival) return arrival;
     }
     return null;
   }
