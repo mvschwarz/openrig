@@ -67,6 +67,10 @@ export interface NodeEntry {
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
+  /** The conversation outcome restore or handover recorded: `resumed` only on a bound strict proof. */
+  continuityOutcome?: string | null;
+  /** The stage of this session's own startup failure while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
   oriented?: string;
   lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
@@ -829,10 +833,43 @@ function summarizeRigs(entries: PsEntry[]): {
   return { totalRigs: entries.length, totalRunning, byLifecycle, byStatus };
 }
 
+/** A roll call of agent seats, read from facts the daemon already reports: no probe, no wait. Each bucket says what it
+ *  counts, so a person can tell which conversations came back and which seats didn't start. The running counts above
+ *  are unchanged. */
+export const ROLL_CALL_EVIDENCE = {
+  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed",
+  agentRunningConversationUnproven: "a runtime hook reports the agent; resuming its original conversation isn't recorded",
+  bareShell: "restore left the pane as a shell: startup needs attention, harness not started",
+  sessionMissing: "no running session, or tmux reports the session missing",
+  unknown: "a running session with no current runtime hook report of an agent in it",
+} as const;
+export type RollCallBucket = keyof typeof ROLL_CALL_EVIDENCE;
+
+export function rollCallBucket(n: NodeEntry): RollCallBucket {
+  if (n.sessionStatus !== "running" || n.identityVerdict?.verdict === "session_missing") return "sessionMissing";
+  if (n.startupStatus === "attention_required" && n.latestErrorStage === "harness_not_started") return "bareShell";
+  const a = n.agentActivity;
+  if (!a || a.evidenceSource !== "runtime_hook" || a.state === "unknown" || a.stale || a.fallback) return "unknown";
+  return n.continuityOutcome === "resumed" ? "originalConversation" : "agentRunningConversationUnproven";
+}
+
+export function rollCall(entries: NodeEntry[]): { agentSeats: number } & Record<RollCallBucket, { count: number; seats: string[]; evidence: string }> {
+  const buckets = Object.fromEntries((Object.keys(ROLL_CALL_EVIDENCE) as RollCallBucket[])
+    .map((bucket) => [bucket, { count: 0, seats: [] as string[], evidence: ROLL_CALL_EVIDENCE[bucket] }])) as Record<RollCallBucket, { count: number; seats: string[]; evidence: string }>;
+  const agents = entries.filter((n) => n.nodeKind === "agent");
+  for (const n of agents) {
+    const bucket = buckets[rollCallBucket(n)];
+    bucket.count += 1;
+    bucket.seats.push(n.canonicalSessionName ?? n.logicalId);
+  }
+  return { agentSeats: agents.length, ...buckets };
+}
+
 function summarizeNodes(entries: NodeEntry[]): {
   totalNodes: number;
   byLifecycle: Record<string, number>;
   bySessionStatus: Record<string, number>;
+  rollCall: ReturnType<typeof rollCall>;
 } {
   const byLifecycle: Record<string, number> = {};
   const bySessionStatus: Record<string, number> = {};
@@ -842,7 +879,7 @@ function summarizeNodes(entries: NodeEntry[]): {
     const ss = n.sessionStatus ?? "unknown";
     bySessionStatus[ss] = (bySessionStatus[ss] ?? 0) + 1;
   }
-  return { totalNodes: entries.length, byLifecycle, bySessionStatus };
+  return { totalNodes: entries.length, byLifecycle, bySessionStatus, rollCall: rollCall(entries) };
 }
 
 // Compact rig-level lifecycle codes for the rig table header (3-char fixed width).
@@ -983,7 +1020,7 @@ Exit codes:
     .option("--verbose", "Alias for --full")
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
-    .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
+    .option("--summary", "Emit aggregate-only output (counts by status/lifecycle). With --nodes, also a roll call of agent seats: original conversation back, agent running with its conversation unproven, bare shell, session missing, unknown, each with what it counts")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state, contextUsage.percent, contextUsage.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
     .option("--running", "Alias for --active")
@@ -1365,6 +1402,11 @@ async function handleNodes(
       console.log(`totalNodes: ${summary.totalNodes}`);
       console.log(`bySessionStatus: ${JSON.stringify(summary.bySessionStatus)}`);
       console.log(`byLifecycle: ${JSON.stringify(summary.byLifecycle)}`);
+      console.log(`rollCall (${summary.rollCall.agentSeats} agent seats; what each line counts is in brackets):`);
+      for (const bucket of Object.keys(ROLL_CALL_EVIDENCE) as RollCallBucket[]) {
+        const { count, seats, evidence } = summary.rollCall[bucket];
+        console.log(`  ${bucket}: ${count}${seats.length > 0 ? ` (${seats.join(", ")})` : ""} [${evidence}]`);
+      }
     }
     return;
   }
