@@ -7,7 +7,7 @@ import type { Migration } from "../migrate.js";
  * resets the consecutive-failure count; a seat with no row has never been cold-started.
  */
 export const seatColdStartsSchema: Migration = {
-  name: "158_seat_cold_starts.sql",
+  name: "167_seat_cold_starts.sql",
   sql: `
     CREATE TABLE IF NOT EXISTS seat_cold_starts (
       node_id TEXT PRIMARY KEY,
