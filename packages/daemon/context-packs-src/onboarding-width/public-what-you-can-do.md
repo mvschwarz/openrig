@@ -148,9 +148,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   A seat's typing guard and `--wait-for-idle` retain their checks. Managed compaction follows the
   ordinary draft default and explicit operator protections; it separately reconciles its own
   uncertain `/compact` write before sending restore input. Draft detection isn't complete.
-  **Each send records one `transport.delivery_evidence` event**: what was admitted, what reached
-  the input, what the screen check showed, and for which occupant. Read it as what was known about
-  the delivery, not proof the agent read it; where the input landed can read unknown.
+  **Each send records one `transport.delivery_evidence` event**, best effort: what was admitted, what
+  reached the input, what the screen check showed, and for which occupant. Read it as what was known
+  about the delivery, not proof the agent read it; where the input landed can read unknown, and a
+  missing record doesn't show there was no send.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -272,8 +273,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
   the failure. In the window's `--json` output, `reusedWorkspace` with no new tiles means an
   existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
-  view in a provider that is already running, without opening a window. Ordinary opens add a new
-  workspace, so to come back to a fixed view, focus its open space; task follow mode reuses one.
+  view in a provider that is already running, without opening a window. Herdr reuses a workspace
+  that still shows the view with live attachments (`reusedWorkspace`, no new tiles); otherwise an
+  ordinary open adds a new workspace. Task follow mode reuses one.
   **`qitem:<id>` as the view** previews or opens the current local owners of that task: its
   pending, in-progress and blocked rows through explicitly linked successors, without closed
   predecessors or past senders. It's a read-only membership view: stopped, missing, external and
@@ -684,7 +686,7 @@ not have to tear one down to change it, and you rarely have to start from nothin
   someone edited it.
   **Since 0.7.12 it stops only a tmux session that carries the seat's own `OPENRIG_NODE_ID`**, on the
   server and session it read. A terminal OpenRig didn't create, a mismarked or replaced one, or a seat
-  joined with `rig attach --self` is left running, and `rig down` exits 2 naming it and the manual way
+  joined with `rig attach --self` from a tmux pane is left running, and `rig down` exits 2 naming it and the manual way
   to stop it. Teardown is incomplete for those terminals: if one is yours, look at it and stop it
   yourself, then run `rig down` again.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
@@ -790,6 +792,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
   A start reservation left from an earlier boot is archived by the next start; don't clear it by
   hand.
+- **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
+  activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
+  so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its
@@ -1270,6 +1275,12 @@ reaching them is ordinary work rather than an escalation.
   a person can decide directly in the TUI's pairing settings. A relay connector that can't accept
   incoming connections can pull instead (`OPENRIG_RELAY_MODE=pull` in the relay secrets file); push
   stays the default, and a person's connector binding can be unset.
+- **The `relay` gateway connector** carries a registered person's questions, updates and notices to a
+  bridge process you run, over loopback HTTP, and takes their replies back with the sender resolved
+  against their bindings. It's off until a person has a relay binding (`rig gateway human add <id> …
+  --binding "relay:<connectorRef>:file:<absolute env file>:primary:handle=<alias>"`). The handle is how
+  their replies are matched to them: a binding without one is outbound-only. The bridge, with its reach to
+  any messaging platform, is yours (`docs/reference/gateway-relay.md`).
 - **`rig gateway channel add <id> --display-name <name> --binding
   slack:<connectorRef>:<secretsRef>:<channelId>`** — a Slack shared channel as one participant,
   `<id>@external` (Slack only). Anyone writing there reaches the team, registered or not. Each row
@@ -1439,6 +1450,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
   --account-home <dir> --reason "<why>"` (preview with `--dry-run`). It starts a fresh conversation with a handover
   and retains the seat's address and work. `--clear-account-home --reason "<why>"` returns to configured defaults.
+- **A Pi seat switches accounts** with `rig provider switch --seat <pi seat> --to-account <name> --account-home <dir>
+  --reason "<why>"` (`--dry-run` shows the plan), through a confirmed successor that keeps its model, effort and
+  wrapper. A Pi seat that declares an absolute `PI_CODING_AGENT_DIR` in its `env:` uses that folder as its account
+  home on launch, restart, resume and restore, and needs a readable `auth.json` there, or the launch stops; remove
+  the declaration to keep the managed seat login. A seat that has its own Pi login as well stops at launch even with
+  an `auth.json` there, and the error says why (for example, that the existing login isn't a managed account link).
 - **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
   `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with
   `--to-account plan --token-file <abs>`. The API-key path remains unqualified; verify the resulting
@@ -1580,6 +1597,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   selected plugin's skills there (into `.claude/skills/` or `.agents/skills/` only for a seat
   without that storage), so don't copy them by hand; read the `plugin_skill_*` warnings if one
   is missing. TDD is no longer a default skill.
+- **`on_restore: follow_source`** on a spec's `resources.skills[]` entry refreshes that skill from its source when
+  a Claude or Codex seat is restored, keeping its conversation, while the seat's copy is still what OpenRig wrote: an
+  edited, unrecorded or linked copy is kept and named, and a source that can't be read leaves the saved copy.
+  `keep_saved`, the default, keeps the saved copy, but a missing file comes back only from a source that still has the
+  bytes OpenRig wrote: a file whose source changed after `rig down` stays missing, named in the restore's warnings,
+  even when the rest of the skill (its `SKILL.md`, say) is unchanged.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.

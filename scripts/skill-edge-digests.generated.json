@@ -2,7 +2,7 @@
   "version": 1,
   "edges": {
     "bundle": {
-      "working-with-an-openrig-team/SKILL.md": "01b0aaeb3454bbb4b881dba058022d5a80e62da15516be7db8390b281dd3a228"
+      "working-with-an-openrig-team/SKILL.md": "c383675a7425ba6ea40221b05b4ec95112daafcbd5e88bd90812b06815e702ad"
     },
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
@@ -27,7 +27,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "01b0aaeb3454bbb4b881dba058022d5a80e62da15516be7db8390b281dd3a228",
+      "core/working-with-an-openrig-team/SKILL.md": "c383675a7425ba6ea40221b05b4ec95112daafcbd5e88bd90812b06815e702ad",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
@@ -132,7 +132,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "01b0aaeb3454bbb4b881dba058022d5a80e62da15516be7db8390b281dd3a228",
+      "core/working-with-an-openrig-team/SKILL.md": "c383675a7425ba6ea40221b05b4ec95112daafcbd5e88bd90812b06815e702ad",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",

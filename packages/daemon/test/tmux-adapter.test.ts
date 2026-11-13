@@ -51,6 +51,47 @@ describe("TmuxAdapter.listSessionClientTerminals", () => {
   });
 });
 
+describe("TmuxAdapter.lastClientActivity (#3076)", () => {
+  const activity = (stdout: string) => adapterFor(mockExec({ "list-clients": { stdout } })).lastClientActivity("op@kernel");
+
+  it("is the latest activity of a writable client, in milliseconds", async () => {
+    expect(await activity("0|1790000100\n0|1790000105\n")).toBe(1790000105000);
+  });
+
+  it("does not count a read-only client (a viewer tile)", async () => {
+    expect(await activity("1|1790000200\n0|1790000100\n")).toBe(1790000100000);
+    expect(await activity("1|1790000200\n")).toBeNull();
+  });
+
+  it("counts an attach as recent activity: a key in the same second as the attach can't be told apart from it", async () => {
+    // tmux would report client_created == client_activity for both an attach alone and an attach plus a key that second.
+    expect(await activity("0|1790000300\n")).toBe(1790000300000);
+  });
+
+  it("is null with no client", async () => {
+    expect(await activity("")).toBeNull();
+    expect(await activity("\n")).toBeNull();
+  });
+
+  it("throws on a row it can't read, alone or next to a readable one, so the guard holds", async () => {
+    for (const stdout of ["0|abc\n", "0|0\n", "0\n", "2|1790000100\n", "0|1790000000|1790000100\n", "0|1790000100\n0|abc\n"]) {
+      await expect(activity(stdout)).rejects.toThrow();
+    }
+  });
+
+  it("throws when tmux can't say", async () => {
+    for (const error of [new Error("can't find session: op@kernel"), NO_SERVER_ERROR, new Error("command timed out")]) {
+      await expect(adapterFor(mockExec({ "list-clients": { error } })).lastClientActivity("op@kernel")).rejects.toThrow();
+    }
+  });
+
+  it("asks tmux for the read-only flag and the activity of each client of the session", async () => {
+    const commands: string[] = [];
+    await adapterFor(async command => { commands.push(command); return ""; }).lastClientActivity("op@kernel");
+    expect(commands.some(c => c.includes("list-clients") && c.includes("#{client_readonly}|#{client_activity}"))).toBe(true);
+  });
+});
+
 describe("TmuxAdapter", () => {
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;

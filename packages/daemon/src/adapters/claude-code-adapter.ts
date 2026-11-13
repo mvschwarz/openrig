@@ -16,7 +16,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -709,6 +709,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const checkEvery = 5;
     let attempts = windowAttempts;
     let slowStart = false;
+    // #2820 item 2: the trust prompt's selection was moved from "No, exit" (once: its two options wrap), and the prompt
+    // was confirmed (once: a frame drawn before Claude took the Enter still shows the prompt).
+    let trustMoved = false;
+    let trustEntered = false;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
@@ -749,9 +753,25 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           slowStart = false;
           break;
         }
-        const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
-        if (!enterResult.ok) {
-          return { ok: false, error: `Claude trust prompt auto-drive failed: ${enterResult.message}`,
+        // #2820 item 2: Enter confirms the focused option, and Claude Code 2.1.322 opens this prompt on "No, exit". So
+        // Enter goes once, and only with the focus read on "Yes, I trust this folder" of the plain prompt's two options.
+        // On "No, exit" the selection moves down once (the two options wrap: a second Down would go back) and the next
+        // polls wait to see the focus on "Yes". A screen with no key to send (another option set, no cursor, a focus
+        // that never reaches "Yes") gets no confirmation; in the longer wait it ends at once, as without the auto-drive.
+        const focus = claudeTrustPromptFocus(paneContent);
+        const key = focus === "yes" && !trustEntered ? "Enter" : focus === "no" && !trustMoved ? "Down" : null;
+        if (!key) {
+          if (slowStart && !trustMoved && !trustEntered) {
+            slowStart = false;
+            break;
+          }
+          await this.sleep(200);
+          continue;
+        }
+        if (key === "Enter") trustEntered = true; else trustMoved = true;
+        const keyResult = await this.tmux.sendKeys(tmuxSession, [key]);
+        if (!keyResult.ok) {
+          return { ok: false, error: `Claude trust prompt auto-drive failed: ${keyResult.message}`,
             probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession) };
         }
         await this.sleep(200);
