@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record.js";
 
 export interface Rig {
   id: string;
@@ -159,6 +160,9 @@ export type RigEvent =
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "seat.runtime_home_recorded"; rigId: string; nodeId: string; logicalId: string; runtime: string; from: string | null; to: string;
+      slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
+      reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -460,6 +464,10 @@ export interface SnapshotData {
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
   envReceipt?: EnvReceipt | null;
+  /** Each seat's latest operator-recorded runtime home at capture: the home, the original conversation and occupant it
+   *  was recorded against, and its revision. A restore review shows it beside the seat's current record, so a later
+   *  correction is a visible choice bound by the review's revision. Absent when no seat has one. */
+  runtimeHomeRecordsByNode?: Record<string, RuntimeHomeRecordRef>;
 }
 
 export type SnapshotOccupantState =

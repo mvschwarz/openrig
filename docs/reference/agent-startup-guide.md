@@ -447,6 +447,7 @@ running seat only through the action in the last column.
 | Reasoning effort | `rig seat set-effort` | `rig seat effort <seat>`: requested, saved, sent at launch, and what the session recorded, which is not verified until it takes a turn | Its next managed continuation; nothing restarts |
 | Permissions | `rig seat set-permissions` (`--mode`, `--rules`, or for Codex `--codex-permissions` or `--codex-profile`), shown by `rig seat status` | What it launched with; a status read doesn't prove the running process enforces the selection | Its next managed launch or resume ([per-seat permission mode](getting-started.md#per-seat-permission-mode)) |
 | Working directory | `rig seat set-cwd`, shown by `rig seat status` as **Working directory for future launches** | The directory it started in | `rig seat launch --fresh --stop` (a blank conversation) or `rig handover --source rebuild` (durable context); [details](#change-an-existing-seats-working-directory) |
+| Runtime home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) of an existing seat | `rig seat record-runtime-home`, shown by `rig seat runtime-home` | The home it started with; whether a running process uses the recorded one isn't checked | Its next resume, restore or launch; [details](#record-where-an-existing-seats-conversation-lives) |
 | Launch wrapper (`launch_wrapper`) | Member `launch_wrapper` in `rig.yaml` (`pi`, `codex` and `claude-code` only; `launch_wrapper: []` clears, omitting retains on existing-seat apply; surfaced as `launchWrapper` in `rig ps --nodes --json` when set; no live `rig seat` edit verb) | The literal wrapper argv that prefixes the resolved Codex entry or Claude executable (preserving TTY stdio) or the resolved Pi child executable inside OpenRig's host runner (preserving RPC pipes and runner lifecycle) when that session launched; a configured prefix is not proof of isolation, tooling, memory or governance | Supported spec create/recreate/apply flow, then the seat's next managed launch, resume, restore or handover (fails closed when wrapper support is unavailable; never falls back to bare child launch; [details](rig-spec.md#launch-wrapper-runtime-pi-and-codex)) |
 | Startup files and skills | The spec's startup files, skills and actions | What its conversation read when it started; editing a file afterwards doesn't reach it | A fresh launch or a handover delivers them again; for the running seat, send or walk the change (`rig walk <seat> --through <files>`) |
 | Guidance blocks (`CLAUDE.md`, `AGENTS.md`) | The seat's startup selection, which OpenRig merges into its guidance file as managed blocks at each start and restore | `rig seat status` **Guidance**: when OpenRig wrote each of its blocks, before or after the session's recorded startup finish (for a claimed session, when OpenRig recorded it). That's chronology, not what the agent has: the harness reads the file earlier in startup, Claude Code reloads it after `/compact` or `/clear`, Codex reads it at session start, and the agent can read it, or be sent it, at any time. OpenRig doesn't record what an agent read | Claude: its next compaction, `/clear` or restart. Codex: its next start. Without either, [tell it](#new-guidance-for-a-running-seat) |
@@ -611,6 +612,42 @@ on those commands as well.
 This separates provider files, not OS users or accounts. Project-local resources
 still use the selected project directory; shared project and system settings
 remain shared.
+
+### Record where an existing seat's conversation lives
+
+When an existing seat's conversation lives under a different runtime home from the one OpenRig has for it (after a
+recovery, say, or a move between homes), record that home so the seat's next resume or restore launches from it, with
+the same conversation and no successor:
+
+```bash
+rig seat runtime-home dev-impl@my-rig
+rig seat record-runtime-home dev-impl@my-rig --home /home/me/.codex-b \
+  --expect-occupant <generation> --expect-original <conversation id> --expect-revision <n> --reason "home after recovery"
+```
+
+`rig seat runtime-home` shows the home the next launch uses and where it comes from, with the seat's current occupant
+generation, its original conversation and the revision of its latest recorded home (0 when none), and prints the
+record command with those values. It works for Claude Code and Codex seats.
+
+- **What it's recorded against.** The occupant, original conversation and revision you read. If any of them changed
+  since, because a successor took the seat or someone else recorded a home, nothing is applied and the current values
+  are shown, so a replacement occupant is never changed by mistake.
+- **Retrying is safe.** Each recording has an operation id, generated and printed when you don't pass
+  `--operation-id`. If the result is unknown (a timeout), run the same command with that id: it returns what was
+  recorded, or records it once. The same id with a different request applies nothing.
+- **What changes.** Only the seat's home and an audit record (`seat.runtime_home_recorded`). No running process,
+  pane, login, credential, conversation, model, effort or cwd changes; nothing is copied, switched or launched.
+- **Where it's stored, and credentials.** In the place that decides the seat's home today, so credential handling
+  stays as it is. A seat on a home chosen by an account switch keeps that, with provider credentials still unset at
+  launch, and gets the new path. Any other seat gets its own `env:` value for the home variable, as a seat that declares
+  one in its spec has, and nothing is unset.
+- **What it says, and doesn't.** The result says whether the home exists and whether the original conversation's
+  record was found in it. That doesn't show one copy of a conversation is fresher than another, and whether a running
+  process uses the home isn't checked (the result says `runningProcess: unverified`).
+- **Restore.** Snapshots carry each seat's recorded home. Reviewing a selected history shows the current record beside
+  the snapshot's, and whether it was recorded for the selected conversation or another one. A recording made after the
+  review, even to the same home, changes the review's revision, so a resume reviewed before it doesn't run. Review
+  again and decide.
 
 ### Codex guidance at launch
 

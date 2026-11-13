@@ -375,12 +375,13 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
-    || code === "missing_permissions_to" || code === "permissions_to_not_a_person") return 400;
+    || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
+    || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
     || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
-    || code === "permissions_to_unavailable") return 500;
+    || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -456,6 +457,30 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const result = await seatLifecycleService(c).setCwd({
     seatRef: c.req.param("seatRef"),
     cwd: typeof body.cwd === "string" ? body.cwd : "",
+    reason: typeof body.reason === "string" ? body.reason : "",
+    operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// A seat's runtime home and what a recording is made against; read only.
+seatRoutes.get("/runtime-home/:seatRef", (c) => {
+  const result = seatLifecycleService(c).runtimeHome(c.req.param("seatRef"));
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// Record an operator-selected runtime home for a seat's next launch. Every expectation is required and passed through
+// as sent (null for none), so a stale read is a conflict, never a guess.
+seatRoutes.post("/record-runtime-home/:seatRef", async (c) => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = seatLifecycleService(c).recordRuntimeHome({
+    seatRef: c.req.param("seatRef"),
+    home: body.home,
+    expectedOccupant: body.expectedOccupant,
+    expectedOriginal: body.expectedOriginal,
+    expectedRevision: body.expectedRevision,
+    operationId: body.operationId,
     reason: typeof body.reason === "string" ? body.reason : "",
     operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
   });

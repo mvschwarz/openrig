@@ -1100,6 +1100,8 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
 | `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat runtime-home <seat>` | — | `--json` |
+| `rig seat record-runtime-home <seat>` | — | `--home <directory>` **required**<br>`--expect-occupant <generation>` **required**<br>`--expect-original <id>` **required**<br>`--expect-revision <n>` **required**<br>`--reason <text>` **required**<br>`--operation-id <id>`<br>`--operator <address>`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>`<br>`--plan`<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat restart <seat>` | — | `--keep-conversation` **required**<br>`--reason <text>`<br>`--plan`<br>`--verify`<br>`--expect-account <text>`<br>`--operator <address>`<br>`--host <id>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |

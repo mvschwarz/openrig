@@ -202,6 +202,41 @@ describe("rig seat set-permissions", () => {
   });
 });
 
+describe("rig seat runtime-home and record-runtime-home", () => {
+  const args = ["node", "rig", "seat", "record-runtime-home", "dev-impl@homes", "--home", "/homes/codex-b", "--expect-occupant", "gen-1",
+    "--expect-original", "none", "--expect-revision", "0", "--reason", "home after recovery"];
+
+  it("shows what a recording is made against, with the command that records against it", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "dev.impl", rigName: "homes" }, runtime: "codex",
+      variable: "CODEX_HOME", home: "/homes/codex-a", source: "member", occupantGeneration: "gen-1", original: "019a-orig", revision: 2,
+      record: { revision: 2, home: "/homes/codex-a", recordedAt: "2026-11-13T22:00:00Z" } } }, calls);
+    const { logs } = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "runtime-home", "dev-impl@homes"]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/runtime-home/dev-impl%40homes", body: undefined }]);
+    expect(logs.join("\n")).toContain("CODEX_HOME=/homes/codex-a from member");
+    expect(logs.join("\n")).toContain("--expect-occupant gen-1 --expect-original 019a-orig --expect-revision 2");
+  });
+
+  it("sends every expectation, none as null, with an operation id it prints", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "dev.impl", rigName: "homes" }, to: "/homes/codex-b",
+      revision: 1, changed: true, replayed: false, observation: { home: "present", original: "none" } } }, calls);
+    const { logs } = await captureLogs(() => makeCommand(deps).parseAsync(args).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/record-runtime-home/dev-impl%40homes", body: { home: "/homes/codex-b", expectedOccupant: "gen-1",
+      expectedOriginal: null, expectedRevision: 0, operationId: expect.stringMatching(/^runtime-home-/), reason: "home after recovery", operator: undefined } }]);
+    expect(logs.join("\n")).toContain(`Operation id: ${(calls[0]!.body as { operationId: string }).operationId}`);
+  });
+
+  it("treats a timeout as an unknown result and gives the same operation id to retry with", async () => {
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("timed out"); });
+    const deps = { ...makeDeps({ status: 200, data: {} }, []), clientFactory: () => ({ post }) as never };
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--operation-id", "op-retry-00001", "--json"]).then(() => {}));
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "record_runtime_home_outcome_unknown",
+      guidance: expect.stringContaining("--operation-id op-retry-00001") });
+    expect(exitCode).toBe(1);
+  });
+});
+
 describe("rig seat set-cwd", () => {
   const args = ["node", "rig", "seat", "set-cwd", "planner@project", "--cwd", "/srv/remote/space dir/../planner", "--reason", "isolate planning"];
 

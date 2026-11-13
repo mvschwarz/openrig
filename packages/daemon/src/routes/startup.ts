@@ -20,6 +20,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { currentRestoreSnapshot } from "../domain/current-restore-snapshot.js";
+import { latestRuntimeHomeRecord, readRuntimeHomeState, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
 import { HISTORY_REF_RE, listSharedHistories } from "../domain/shared-history-selection.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { observeSolePane } from "../domain/pane-binding-observation.js";
@@ -144,7 +145,9 @@ function selectedState(c: Context, rigId: string, nodeId: string, refs: HistoryR
   let permissionPlan: ReturnType<typeof selectedPermissionFacts>;
   try { permissionPlan = selectedPermissionFacts(c, rigId, nodeId, savedNode.runtime ?? ""); }
   catch { return { permissionUnavailable: true }; }
-  const stable = { rig, node, savedSelection, stableSource, context, permissions, permissionPlan };
+  // A recorded runtime home binds here too, even one recorded with the value the seat already had.
+  const runtimeHomeRecord = latestRuntimeHomeRecord(db, nodeId);
+  const stable = { rig, node, savedSelection, stableSource, context, permissions, permissionPlan, runtimeHomeRecord };
   const native = createHash("sha256").update(JSON.stringify(stable)).digest("hex");
   const histories = db.prepare("SELECT id, status, resume_type, resume_token, restore_policy FROM sessions WHERE node_id = ? ORDER BY id").all(nodeId);
   const binding = one("SELECT * FROM bindings WHERE node_id = ?", nodeId);
@@ -152,6 +155,21 @@ function selectedState(c: Context, rigId: string, nodeId: string, refs: HistoryR
   const review = createHash("sha256").update(JSON.stringify({ stable, histories, binding, occupancy,
     snapshotId: snapshot.id, historySessionId: refs.historySessionId })).digest("hex");
   return { review, native };
+}
+
+/** The runtime home the selected resume launches in, and any operator-recorded home beside the one the snapshot
+ *  captured, with whether the current record was made for the selected history's conversation. A record made for
+ *  another conversation, or a correction newer than the snapshot's, is shown here and bound by the review's revision;
+ *  the conversation ids themselves aren't repeated. */
+function selectedRuntimeHome(c: Context, node: Node, snapshot: Snapshot, historySessionId: string) {
+  if (node.runtime !== "codex" && node.runtime !== "claude-code") return null;
+  const state = readRuntimeHomeState(repo(c).db, sessions(c), node.id, node.runtime);
+  const selectedToken = snapshot.data.sessions.find(row => row.id === historySessionId)?.resumeToken ?? null;
+  const shown = (record: RuntimeHomeRecordRef | null | undefined) => record
+    ? { revision: record.revision, home: record.home, slot: record.slot, operationId: record.operationId, recordedAt: record.recordedAt } : null;
+  return { value: state.home, source: state.source, authentication: "unconfirmed" as const,
+    record: shown(state.record), snapshotRecord: shown(snapshot.data.runtimeHomeRecordsByNode?.[node.id]),
+    recordedFor: state.record ? state.record.original !== null && state.record.original === selectedToken ? "selected_history" : "another_conversation" : null };
 }
 
 async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
@@ -312,6 +330,7 @@ startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
   try { permission = selectedPermissionFacts(c, rigId, nodeId, facts.node.runtime ?? ""); }
   catch { return c.json({ ok: false, code: "permission_unavailable", message: "The selected seat's saved permission choice needs repair before launch." }, 409); }
   const effort = readSeatEffort(repo(c).db, nodeId);
+  const runtimeHome = selectedRuntimeHome(c, facts.node, facts.snapshot, refs.historySessionId);
   return c.json({ ok: true, contract: "startup-history.v1", rigId, nodeId, logicalId: facts.node.logicalId,
     snapshotId: refs.snapshotId, historySessionId: refs.historySessionId, history: selection.histories[0],
     forecast, observed: { state: observed.state, sessionName: observed.sessionName },
@@ -319,7 +338,8 @@ startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
       effort: { value: effort?.choice ?? capturedNode?.effort ?? null,
         source: effort?.choice ? "saved_choice" : "snapshot" },
       permission,
-      codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" } },
+      codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" },
+      ...(runtimeHome ? { runtimeHome } : {}) },
     revision: state.review, mutated: false });
 });
 

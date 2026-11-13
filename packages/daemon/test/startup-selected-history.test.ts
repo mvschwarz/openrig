@@ -491,4 +491,35 @@ describe("selected-history startup", () => {
     expect(kill).not.toHaveBeenCalled();
     expect(await response.json()).toMatchObject({ ok: false, resultSessionId: expect.any(String) });
   });
+
+  it("shows a recorded runtime home beside the snapshot's, and a newer correction, even to the same home, needs a new review", async () => {
+    const f = fixture();
+    const recordHome = async (home: string, operationId: string) => {
+      const state = await (await setup.app.request("/api/seat/runtime-home/desk.lead")).json() as Record<string, unknown>;
+      const res = await setup.app.request("/api/seat/record-runtime-home/desk.lead", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ home, expectedOccupant: state.occupantGeneration, expectedOriginal: state.original,
+          expectedRevision: state.revision, operationId, reason: "home after recovery" }) });
+      expect(res.status).toBe(200);
+    };
+    await recordHome("/homes/codex-b", "op-review-home-1");
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const first = await review({ ...f, refs });
+    expect(first.response.status).toBe(200);
+    // The record was made for the seat's newest conversation (B); the selected history is A, so it says so.
+    expect(first.body).toMatchObject({ settingsSource: { runtimeHome: { value: "/homes/codex-b", source: "member", authentication: "unconfirmed",
+      record: { revision: 1, home: "/homes/codex-b" }, snapshotRecord: { revision: 1 }, recordedFor: "another_conversation" } } });
+
+    await recordHome("/homes/codex-b", "op-review-home-2");
+    const second = await review({ ...f, refs });
+    expect(second.body).toMatchObject({ settingsSource: { runtimeHome: { record: { revision: 2 }, snapshotRecord: { revision: 1 } } } });
+    expect(second.body.revision).not.toBe(first.body.revision);
+    expect(JSON.stringify(second.body)).not.toContain(tokenA);
+    expect(JSON.stringify(second.body)).not.toContain(tokenB);
+    const create = vi.spyOn(setup.tmuxAdapter, "createSession");
+    const stale = await request(f.path, { action: "resume", ...refs, revision: first.body.revision });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ ok: false, code: "selection_changed" });
+    expect(create).not.toHaveBeenCalled();
+  });
 });
