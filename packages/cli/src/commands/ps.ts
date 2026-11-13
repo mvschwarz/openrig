@@ -67,7 +67,8 @@ export interface NodeEntry {
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
-  /** The conversation outcome restore or handover recorded: `resumed` only on a bound strict proof. */
+  /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
+   *  launch, or a strict operator-recovered proof, brought back this occupant's conversation. */
   continuityOutcome?: string | null;
   /** The stage of this session's own startup failure while startup needs attention (`harness_not_started`: no harness). */
   latestErrorStage?: string | null;
@@ -89,7 +90,7 @@ export interface NodeEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
   } | null;
-  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null; evidence?: { observedCommand?: string | null } | null } | null;
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
@@ -837,17 +838,31 @@ function summarizeRigs(entries: PsEntry[]): {
  *  counts, so a person can tell which conversations came back and which seats didn't start. The running counts above
  *  are unchanged. */
 export const ROLL_CALL_EVIDENCE = {
-  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed",
+  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed for this occupant",
   agentRunningConversationUnproven: "a runtime hook reports the agent; resuming its original conversation isn't recorded",
-  bareShell: "restore left the pane as a shell: startup needs attention, harness not started",
+  bareShell: "the pane holds a shell, not the agent: restore's harness-not-started marker, or the current identity check saw a shell",
   sessionMissing: "no running session, or tmux reports the session missing",
   unknown: "a running session with no current runtime hook report of an agent in it",
 } as const;
 export type RollCallBucket = keyof typeof ROLL_CALL_EVIDENCE;
 
+// The shells the daemon's identity check reads as "no agent" (seat-identity-reconciler.ts, SHELL_COMMANDS).
+const IDENTITY_SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh", "-bash", "-zsh", "-fish", "-sh", "-dash", "-tcsh", "-csh"]);
+
+/** The served identity verdict (the daemon serves only one that applies to the current session and pane) saw a shell where
+ *  the seat's agent should be. An ambiguous or unavailable check isn't a shell. */
+function identityShowsShell(verdict: NodeEntry["identityVerdict"]): boolean {
+  const command = verdict?.evidence?.observedCommand;
+  return verdict?.verdict === "mismatch" && verdict.reason === "process_identity_mismatch"
+    && typeof command === "string" && IDENTITY_SHELLS.has(command.trim().toLowerCase());
+}
+
 export function rollCallBucket(n: NodeEntry): RollCallBucket {
-  if (n.sessionStatus !== "running" || n.identityVerdict?.verdict === "session_missing") return "sessionMissing";
+  // The daemon serves an applicable session_missing check as a detached session.
+  if (n.sessionStatus !== "running") return "sessionMissing";
   if (n.startupStatus === "attention_required" && n.latestErrorStage === "harness_not_started") return "bareShell";
+  // A positive shell outranks a hook report, which may predate the agent's exit.
+  if (identityShowsShell(n.identityVerdict)) return "bareShell";
   const a = n.agentActivity;
   if (!a || a.evidenceSource !== "runtime_hook" || a.state === "unknown" || a.stale || a.fallback) return "unknown";
   return n.continuityOutcome === "resumed" ? "originalConversation" : "agentRunningConversationUnproven";
