@@ -671,4 +671,448 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(regRes.rigs[0]?.outcome).toBe("failed");
     expect((regRes.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
   });
+
+  function tmuxSubcommand(args: string[]): string {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (arg === "-L" || arg === "-f" || arg === "-S" || arg === "-T" || arg === "-c") {
+        i++;
+        continue;
+      }
+      if (arg.startsWith("-")) continue;
+      return arg;
+    }
+    return "";
+  }
+
+  function setupMultiPageRigTmux(rig: string, pagesSpec: string[][]) {
+    const id = randomUUID().slice(0, 10);
+    const server = `mp-${id}`;
+    sockets.push(server);
+    for (const seat of pagesSpec.flat()) {
+      tmux(server, ["new-session", "-d", "-s", `${seat}@${rig}`, "sleep 60"]);
+    }
+    const events: string[] = [];
+    const registered: Array<{ sessionName: string; sessionId: string; nonce: string; windowIds: string[]; paneIds: string[] }> = [];
+    const retired: string[] = [];
+    const pages = pagesSpec.map(page =>
+      page.map(seat => ({
+        seat: `${seat}@${rig}`,
+        label: seat,
+        paneCommand: `tmux -L ${server} -f /dev/null attach-session -t '=${seat}@${rig}'`,
+      })),
+    );
+    const composed = {
+      id: `rig:${rig}`,
+      localTmuxServer: ["-L", server],
+      opened: pages.flat(),
+      pages,
+      columns: Math.max(1, ...pagesSpec.map(p => p.length)),
+      absent: [],
+      degraded: [],
+      skipped: [],
+    };
+    const client = {
+      baseUrl: "http://localhost:7433",
+      isLocalInstance: vi.fn(async () => true),
+      get: vi.fn(async (url: string) => {
+        if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", server] }, providers: [] } };
+        if (url === "/api/terminal/views") return { status: 200, data: { rigs: [rig] } };
+        if (url.startsWith("/api/terminal/preview?")) {
+          return { status: 200, data: { planId: `plan-${rig}`, rigViewer: true, tmux: { mode: "isolated" }, status: {}, composed } };
+        }
+        return { status: 404, data: {} };
+      }),
+      post: vi.fn(async (url: string, body: unknown) => {
+        if (url === "/api/terminal/rig-viewers") {
+          events.push(`register:${(body as { view: string }).view}`);
+          registered.push(body as { sessionName: string; sessionId: string; nonce: string; windowIds: string[]; paneIds: string[] });
+        }
+        return { status: 200, data: { ok: true } };
+      }),
+      delete: vi.fn(async (url: string) => {
+        if (url.startsWith("/api/terminal/rig-viewers")) {
+          events.push("retire");
+          retired.push(url);
+        }
+        return { status: 200, data: { ok: true } };
+      }),
+    } as unknown as DaemonClient;
+    return { server, client, events, registered, retired, composed };
+  }
+
+  it("refuses pre-inventory foreign pane on succeeding bulk openAllTerminalWindows without false registration or nonce", async () => {
+    const { server, client, registered, retired } = setupBulkTmux([{ rig: "alpha", seats: ["op", "lead"] }]);
+    const killCalls: string[][] = [];
+    let foreignPaneId = "";
+    const res = await openAllTerminalWindows(client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") return "window";
+        if (file === "tmux") {
+          if (args.includes("kill-session")) {
+            killCalls.push(args);
+            return tmux(server, args);
+          }
+          const out = tmux(server, args);
+          if (!foreignPaneId && tmuxSubcommand(args) === "select-window") {
+            foreignPaneId = tmux(server, ["split-window", "-d", "-t", "openrig-view-s01pane:", "-P", "-F", "#{pane_id}", "sleep 60"]).trim();
+          }
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01pane",
+    });
+
+    expect(foreignPaneId).toMatch(/^%\d+$/);
+    expect(killCalls).toEqual([]);
+    expect(registered).toEqual([]);
+    expect(retired).toEqual([]);
+    expect(res.ok).toBe(false);
+    expect(res.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect((res.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
+    const sessRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
+    expect(sessRows.find(row => row[0] === "openrig-view-s01pane")?.[1]).toBe("");
+    const livePanes = tmux(server, ["list-panes", "-s", "-t", "=openrig-view-s01pane", "-F", "#{pane_id}"]).trim().split("\n");
+    expect(livePanes).toContain(foreignPaneId);
+  });
+
+  it("refuses pre-inventory foreign window across multi-page failed bulk launch and preserves foreign window", async () => {
+    const { server, client, registered, retired } = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const killCalls: string[][] = [];
+    let foreignWinId = "";
+    const res = await openAllTerminalWindows(client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("window failed");
+        if (file === "tmux") {
+          if (args.includes("kill-session")) {
+            killCalls.push(args);
+            return tmux(server, args);
+          }
+          const out = tmux(server, args);
+          if (!foreignWinId && tmuxSubcommand(args) === "select-window") {
+            foreignWinId = tmux(server, ["new-window", "-d", "-t", "openrig-view-s01win:", "-n", "person-win", "-P", "-F", "#{window_id}", "sleep 60"]).trim();
+          }
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01win",
+    });
+
+    expect(foreignWinId).toMatch(/^@\d+$/);
+    expect(killCalls).toHaveLength(0);
+    expect(registered).toEqual([]);
+    expect(retired).toEqual([]);
+    expect(res.ok).toBe(false);
+    expect(res.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect((res.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
+    const sessRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
+    expect(sessRows.find(row => row[0] === "openrig-view-s01win")?.[1]).toBe("");
+    const liveWindows = tmux(server, ["list-windows", "-t", "=openrig-view-s01win", "-F", "#{window_id}|#{window_name}"]).trim().split("\n");
+    expect(liveWindows).toContain(`${foreignWinId}|person-win`);
+  });
+
+  it("single-rig openTerminalWindow refuses pre-inventory foreign content on standard and kernelLayout placeholder paths", async () => {
+    const std = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    let stdForeignPane = "";
+    const stdRes = await openTerminalWindow(std.client, "rig:alpha", "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") return "window";
+        if (file === "tmux") {
+          const out = tmux(std.server, args);
+          if (!stdForeignPane && tmuxSubcommand(args) === "select-window") {
+            stdForeignPane = tmux(std.server, ["split-window", "-d", "-t", "openrig-view-s01std:", "-P", "-F", "#{pane_id}", "sleep 60"]).trim();
+          }
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01std",
+    });
+
+    expect(stdForeignPane).toMatch(/^%\d+$/);
+    expect(std.registered).toEqual([]);
+    expect(stdRes.ok).toBe(false);
+    const stdRows = tmux(std.server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
+    expect(stdRows.find(row => row[0] === "openrig-view-s01std")?.[1]).toBe("");
+    expect(tmux(std.server, ["list-panes", "-s", "-t", "=openrig-view-s01std", "-F", "#{pane_id}"]).trim().split("\n")).toContain(stdForeignPane);
+
+    const kbase = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const kernelClient = {
+      ...kbase.client,
+      get: vi.fn(async (url: string) => {
+        const res = await kbase.client.get(url) as { status: number; data: { composed?: Record<string, unknown> } };
+        if (res.data?.composed) {
+          return {
+            ...res,
+            data: {
+              ...res.data,
+              composed: { ...res.data.composed, kernelLayout: "dual-runtime" },
+            },
+          };
+        }
+        return res;
+      }),
+    } as unknown as DaemonClient;
+    let kForeignWin = "";
+    const kres = await openTerminalWindow(kernelClient, "rig:alpha", "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          kForeignWin = tmux(kbase.server, ["new-window", "-d", "-t", "openrig-view-s01k:", "-n", "person-kwin", "-P", "-F", "#{window_id}", "sleep 60"]).trim();
+          return "window:120";
+        }
+        if (file === "tmux") return tmux(kbase.server, args);
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01k",
+    });
+
+    expect(kForeignWin).toMatch(/^@\d+$/);
+    expect(kbase.registered).toEqual([]);
+    expect(kres.ok).toBe(false);
+    const kRows = tmux(kbase.server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
+    expect(kRows.find(row => row[0] === "openrig-view-s01k")?.[1]).toBe("");
+    const kWins = tmux(kbase.server, ["list-windows", "-t", "=openrig-view-s01k", "-F", "#{window_id}|#{window_name}"]).trim().split("\n");
+    expect(kWins).toContain(`${kForeignWin}|person-kwin`);
+  });
+
+  it("multi-page split rig viewer positive controls: records creation IDs, cleans up unpoisoned failure, and preserves late post-registration addition", async () => {
+    const clean = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const expectedSessionIds = new Set<string>();
+    const expectedWindowIds = new Set<string>();
+    const expectedPaneIds = new Set<string>();
+    const cleanRes = await openAllTerminalWindows(clean.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") return "window";
+        if (file === "tmux") {
+          const sub = tmuxSubcommand(args);
+          const out = tmux(clean.server, args);
+          if (sub === "new-session" || sub === "new-window" || sub === "split-window") {
+            const paneToken = out.trim().split("|").pop()!;
+            const [sid, wid, pid] = tmux(clean.server, ["display-message", "-p", "-t", paneToken, "#{session_id}|#{window_id}|#{pane_id}"]).trim().split("|");
+            expectedSessionIds.add(sid!);
+            expectedWindowIds.add(wid!);
+            expectedPaneIds.add(pid!);
+          }
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01ok",
+    });
+
+    expect(cleanRes.ok).toBe(true);
+    expect(clean.registered).toHaveLength(1);
+    const rec = clean.registered[0]!;
+    expect(expectedSessionIds.size).toBe(1);
+    expect([...expectedSessionIds][0]).toBe(rec.sessionId);
+    expect(expectedWindowIds.size).toBe(2);
+    expect([...rec.windowIds].sort()).toEqual([...expectedWindowIds].sort());
+    expect(expectedPaneIds.size).toBe(3);
+    expect([...rec.paneIds].sort()).toEqual([...expectedPaneIds].sort());
+    const cleanTag = tmux(clean.server, ["list-sessions", "-F", "#{session_id}|#{@openrig_rig_viewer}"])
+      .trim().split("\n").map(line => line.split("|")).find(row => row[0] === rec.sessionId)?.[1];
+    expect(cleanTag).toBe(rec.nonce);
+
+    const failClean = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const failCleanKills: string[][] = [];
+    const failCleanRes = await openAllTerminalWindows(failClean.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("boom");
+        if (file === "tmux") {
+          if (args.includes("kill-session")) failCleanKills.push(args);
+          return tmux(failClean.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01failok",
+    });
+    expect(failCleanKills).toHaveLength(1);
+    expect(failCleanRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "closed" });
+    expect(failClean.retired).toHaveLength(1);
+    expect(tmux(failClean.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).not.toContain("openrig-view-s01failok");
+
+    const late = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const lateKills: string[][] = [];
+    let lateWinId = "";
+    const lateRes = await openAllTerminalWindows(late.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          lateWinId = tmux(late.server, ["new-window", "-d", "-t", "openrig-view-s01late:", "-n", "late-win", "-P", "-F", "#{window_id}", "sleep 60"]).trim();
+          throw new Error("boom");
+        }
+        if (file === "tmux") {
+          if (args.includes("kill-session")) {
+            lateKills.push(args);
+            return tmux(late.server, args);
+          }
+          return tmux(late.server, args);
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "s01late",
+    });
+    expect(lateWinId).toMatch(/^@\d+$/);
+    expect(late.registered).toHaveLength(1);
+    expect(late.retired).toHaveLength(0);
+    expect(lateKills).toHaveLength(0);
+    expect(lateRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(tmux(late.server, ["list-windows", "-t", "=openrig-view-s01late", "-F", "#{window_id}|#{window_name}"]).trim().split("\n"))
+      .toContain(`${lateWinId}|late-win`);
+  });
+
+  it("refuses incomplete, malformed, or cross-session creation responses before registration or launch", async () => {
+    const a = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    let aLaunches = 0;
+    const aKills: string[][] = [];
+    const aRes = await openAllTerminalWindows(a.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          aLaunches++;
+          return "window";
+        }
+        if (file === "tmux") {
+          if (args.includes("kill-session")) aKills.push(args);
+          const out = tmux(a.server, args);
+          if (tmuxSubcommand(args) === "new-session") return "%9\n";
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "badnew",
+    });
+    expect(aRes.ok).toBe(false);
+    expect(aRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(aRes.rigs[0]?.error).toMatch(/creation response/i);
+    expect(a.registered).toEqual([]);
+    expect(aKills).toEqual([]);
+    expect(aLaunches).toBe(0);
+
+    const b = setupBulkTmux([{ rig: "alpha", seats: ["op", "lead"] }]);
+    let bLaunches = 0;
+    const bKills: string[][] = [];
+    const bRes = await openAllTerminalWindows(b.client, "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          bLaunches++;
+          return "window";
+        }
+        if (file === "tmux") {
+          if (args.includes("kill-session")) bKills.push(args);
+          const out = tmux(b.server, args);
+          if (tmuxSubcommand(args) === "split-window") return "$999|@99|%99\n";
+          return out;
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "badsplit",
+    });
+    expect(bRes.ok).toBe(false);
+    expect(bRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
+    expect(bRes.rigs[0]?.error).toMatch(/unexpected session/i);
+    expect(b.registered).toEqual([]);
+    expect(bKills).toEqual([]);
+    expect(bLaunches).toBe(0);
+
+    const c = setupMultiPageRigTmux("alpha", [["op", "lead"]]);
+    let cLaunches = 0;
+    const cKernelClient = {
+      ...c.client,
+      get: vi.fn(async (url: string) => {
+        const res = await c.client.get(url) as { status: number; data: { composed?: Record<string, unknown> } };
+        return res.data?.composed
+          ? { ...res, data: { ...res.data, composed: { ...res.data.composed, kernelLayout: "dual-runtime" } } }
+          : res;
+      }),
+    } as unknown as DaemonClient;
+    const cRes = await openTerminalWindow(cKernelClient, "rig:alpha", "tmux", {
+      herdrConfig: () => "",
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") {
+          cLaunches++;
+          return "window:120";
+        }
+        if (file === "tmux") {
+          tmux(c.server, args);
+          if (tmuxSubcommand(args) === "new-session") return "";
+          return "";
+        }
+        throw new Error(file);
+      },
+      launch: vi.fn(async () => {}),
+      sleep: async () => {},
+      id: () => "badph",
+    });
+    expect(cRes.ok).toBe(false);
+    expect(c.registered).toEqual([]);
+    expect(cLaunches).toBe(0);
+  });
 });

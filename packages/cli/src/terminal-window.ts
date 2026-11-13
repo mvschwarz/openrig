@@ -228,6 +228,32 @@ interface CreatedTmuxViewer {
   paneIds: string[];
 }
 
+interface CreatedPlaceholder {
+  sessionId: string;
+  windowId: string;
+  paneId: string;
+}
+
+const TMUX_SESSION_ID_RE = /^\$\d+$/;
+const TMUX_WINDOW_ID_RE = /^@\d+$/;
+const TMUX_PANE_ID_RE = /^%\d+$/;
+
+function parseCreatedTmuxIds(raw: string, action: string): CreatedPlaceholder {
+  const lines = splitLines(raw);
+  if (lines.length !== 1) {
+    throw new Error(`Unexpected tmux ${action} creation response: expected 1 line, got ${lines.length}.`);
+  }
+  const parts = lines[0]!.split("|");
+  if (parts.length !== 3) {
+    throw new Error(`Unexpected tmux ${action} creation response format.`);
+  }
+  const [sessionId, windowId, paneId] = parts as [string, string, string];
+  if (!TMUX_SESSION_ID_RE.test(sessionId) || !TMUX_WINDOW_ID_RE.test(windowId) || !TMUX_PANE_ID_RE.test(paneId)) {
+    throw new Error(`Invalid tmux ${action} creation identifiers returned.`);
+  }
+  return { sessionId, windowId, paneId };
+}
+
 function sameIdSet(actual: readonly string[], expected: readonly string[]): boolean {
   if (actual.length !== expected.length) return false;
   const a = new Set(actual);
@@ -268,19 +294,56 @@ async function createTmuxViewerLayout(
   runTmux: (args: string[]) => Promise<string>,
   viewer: string,
   composed: Preview["composed"],
-  placeholder?: string,
+  placeholder?: CreatedPlaceholder,
   rigViewer = false,
 ): Promise<CreatedTmuxViewer> {
+  let expectedSessionId = placeholder?.sessionId;
+  const expectedWindowIds: string[] = [];
+  const expectedWindowSet = new Set<string>();
+  const expectedPaneIds: string[] = [];
+  const expectedPaneSet = new Set<string>();
+  let usedPlaceholder = false;
+
   for (const [pageIndex, page] of composed.pages.entries()) {
     if (!page.length) continue;
     const name = `view-${pageIndex + 1}`;
     const first = page[0]!;
-    const args = pageIndex === 0 ? ["new-session", "-d", "-s", viewer, "-n", name] : ["new-window", "-d", "-t", `${viewer}:`, "-n", name];
+    const args = !expectedSessionId ? ["new-session", "-d", "-s", viewer, "-n", name] : ["new-window", "-d", "-t", `${viewer}:`, "-n", name];
     let pane: string;
-    if (pageIndex === 0 && placeholder) {
-      await runTmux(["respawn-pane", "-k", "-t", placeholder, `env -u TMUX ${first.paneCommand}`]);
-      pane = placeholder;
-    } else pane = (await runTmux([...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
+    let currentWindowId: string;
+    if (placeholder && !usedPlaceholder) {
+      await runTmux(["respawn-pane", "-k", "-t", placeholder.paneId, `env -u TMUX ${first.paneCommand}`]);
+      usedPlaceholder = true;
+      if (expectedWindowSet.has(placeholder.windowId) || expectedPaneSet.has(placeholder.paneId)) {
+        throw new Error("Duplicate tmux placeholder creation identifiers.");
+      }
+      expectedWindowIds.push(placeholder.windowId);
+      expectedWindowSet.add(placeholder.windowId);
+      expectedPaneIds.push(placeholder.paneId);
+      expectedPaneSet.add(placeholder.paneId);
+      currentWindowId = placeholder.windowId;
+      pane = placeholder.paneId;
+    } else {
+      const action = !expectedSessionId ? "new-session" : "new-window";
+      const created = parseCreatedTmuxIds(
+        await runTmux([...args, "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", `env -u TMUX ${first.paneCommand}`]),
+        action,
+      );
+      if (!expectedSessionId) {
+        expectedSessionId = created.sessionId;
+      } else if (created.sessionId !== expectedSessionId) {
+        throw new Error(`Tmux ${action} returned unexpected session identifier "${created.sessionId}".`);
+      }
+      if (expectedWindowSet.has(created.windowId) || expectedPaneSet.has(created.paneId)) {
+        throw new Error(`Tmux ${action} returned duplicate window or pane identifier.`);
+      }
+      expectedWindowIds.push(created.windowId);
+      expectedWindowSet.add(created.windowId);
+      expectedPaneIds.push(created.paneId);
+      expectedPaneSet.add(created.paneId);
+      currentWindowId = created.windowId;
+      pane = created.paneId;
+    }
     // Nested source clients on this server can make a new window too narrow to split.
     // Use the viewer's detached size only while splitting; always release to inherited client sizing.
     const [width, height] = (await runTmux(["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
@@ -288,7 +351,16 @@ async function createTmuxViewerLayout(
       await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
       await runTmux(["select-pane", "-t", pane, "-T", first.label]);
       for (const item of page.slice(1)) {
-        pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
+        const splitCreated = parseCreatedTmuxIds(
+          await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", `env -u TMUX ${item.paneCommand}`]),
+          "split-window",
+        );
+        if (splitCreated.sessionId !== expectedSessionId || splitCreated.windowId !== currentWindowId || expectedPaneSet.has(splitCreated.paneId)) {
+          throw new Error("Tmux split-window returned an unexpected session, window, or duplicate pane identifier.");
+        }
+        expectedPaneIds.push(splitCreated.paneId);
+        expectedPaneSet.add(splitCreated.paneId);
+        pane = splitCreated.paneId;
         await runTmux(["select-pane", "-t", pane, "-T", item.label]);
         await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
       }
@@ -297,25 +369,43 @@ async function createTmuxViewerLayout(
       await runTmux(["set-option", "-wu", "-t", `${viewer}:${name}`, "window-size"]);
     }
   }
+  if (!expectedSessionId || expectedWindowIds.length === 0 || expectedPaneIds.length === 0) {
+    throw new Error(`No tmux viewer panes were created for "${viewer}".`);
+  }
   await runTmux(["select-window", "-t", `${viewer}:view-1`]);
   const nonce = randomUUID();
-  let sessionId = viewer;
-  let windowIds: string[] = [];
-  let paneIds: string[] = [];
+  const sessionId = expectedSessionId;
   if (rigViewer) {
-    const matched = splitLines(await runTmux(["list-sessions", "-F", "#{session_id}|#{session_name}"]))
+    const matchingSessions = splitLines(await runTmux(["list-sessions", "-F", "#{session_id}|#{session_name}"]))
       .map(line => {
         const sep = line.indexOf("|");
         return sep >= 0 ? [line.slice(0, sep), line.slice(sep + 1)] : ["", ""];
       })
-      .find(([, name]) => name === viewer);
-    if (!matched?.[0]) throw new Error(`Created tmux rig viewer session "${viewer}" was not found in list-sessions.`);
-    sessionId = matched[0];
+      .filter(([id, name]) => id === sessionId || name === viewer);
+    if (matchingSessions.length !== 1 || matchingSessions[0]![0] !== sessionId || matchingSessions[0]![1] !== viewer) {
+      throw new Error(`Created tmux rig viewer session "${viewer}" (${sessionId}) failed session identity verification.`);
+    }
+    const liveWindowIds = splitLines(await runTmux(["list-windows", "-t", sessionId, "-F", "#{window_id}"]));
+    const livePaneIds = splitLines(await runTmux(["list-panes", "-s", "-t", sessionId, "-F", "#{pane_id}"]));
+    if (
+      liveWindowIds.some(id => !TMUX_WINDOW_ID_RE.test(id)) ||
+      livePaneIds.some(id => !TMUX_PANE_ID_RE.test(id)) ||
+      new Set(liveWindowIds).size !== liveWindowIds.length ||
+      new Set(livePaneIds).size !== livePaneIds.length ||
+      !sameIdSet(liveWindowIds, expectedWindowIds) ||
+      !sameIdSet(livePaneIds, expectedPaneIds)
+    ) {
+      throw new Error(`Tmux rig viewer session "${viewer}" contains unexplained windows or panes; refusing ownership registration.`);
+    }
     await runTmux(["set-option", "-t", sessionId, "@openrig_rig_viewer", nonce]);
-    windowIds = splitLines(await runTmux(["list-windows", "-t", sessionId, "-F", "#{window_id}"]));
-    paneIds = splitLines(await runTmux(["list-panes", "-s", "-t", sessionId, "-F", "#{pane_id}"]));
   }
-  return { sessionName: viewer, sessionId, nonce, windowIds, paneIds };
+  return {
+    sessionName: viewer,
+    sessionId,
+    nonce,
+    windowIds: [...expectedWindowIds],
+    paneIds: [...expectedPaneIds],
+  };
 }
 
 async function verifyAndCleanupFailedTmuxViewer(
@@ -571,11 +661,14 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
     const tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
     viewer = `openrig-view-${deps.id()}`;
-    let placeholder: string | undefined;
+    let placeholder: CreatedPlaceholder | undefined;
     if (composed.kernelLayout) {
       // This is our fresh, empty viewer, never a source seat. Attach it first so Terminal can
       // report the real new window width before we select the OpenRig view layout.
-      placeholder = (await runTmux(["new-session", "-d", "-s", viewer, "-n", "view-1", "-P", "-F", "#{pane_id}"])).trim();
+      placeholder = parseCreatedTmuxIds(
+        await runTmux(["new-session", "-d", "-s", viewer, "-n", "view-1", "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}"]),
+        "placeholder new-session",
+      );
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
       await measureWindow();
