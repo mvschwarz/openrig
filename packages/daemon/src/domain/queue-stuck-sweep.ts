@@ -1719,7 +1719,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const distinct = [...new Set(creators)];
         return noWakeRecipient(seat, distinct.length === 1 ? distinct[0]! : null).seat ?? seat;
       };
-      /** Files a notice and wakes its recipient; its id, or null when the create failed (reported in failedCreates). */
+      /** Files a notice and wakes its recipient; its id, or null when deferred or when the create failed (reported in failedCreates). */
       const fileNotice = async (text: { summary: string; body: string }, recipient: string, creators: string[] = []): Promise<string | null> => {
         if (deps.queueRepo.deliveryDrains.holds(seat)) return null;
         try {

@@ -43,15 +43,24 @@ export class RigDeliveryDrainStore {
   isReviewJob(jobId: string): boolean {
     return this.available && !!this.db.prepare("SELECT 1 FROM rig_delivery_drains WHERE review_job_id=? AND ended_at IS NULL").get(jobId);
   }
+  /** A new maintenance check must never stop otherwise usable delivery on an unreadable control. */
+  private admissionRead(read: () => boolean): boolean {
+    try { return read(); } catch (error) {
+      console.error("[delivery-drain] control read unavailable; allowing automatic delivery:", error);
+      return false;
+    }
+  }
   hasActive(): boolean {
-    return this.available && !!this.db.prepare("SELECT 1 FROM rig_delivery_drains WHERE ended_at IS NULL LIMIT 1").get();
+    return this.admissionRead(() => this.available && !!this.db.prepare("SELECT 1 FROM rig_delivery_drains WHERE ended_at IS NULL LIMIT 1").get());
   }
   holds(session: string, jobId?: string): boolean {
-    if (!this.hasActive()) return false;
-    // The owner's stored review job remains usable even when its seat belongs to another drained rig.
-    if (jobId && this.isReviewJob(jobId)) return false;
-    const rigId = this.rigForSession(session);
-    return !!rigId && this.get(rigId)?.endedAt === null;
+    return this.admissionRead(() => {
+      if (!this.hasActive()) return false;
+      // The owner's stored review job remains usable even when its seat belongs to another drained rig.
+      if (jobId && this.isReviewJob(jobId)) return false;
+      const rigId = this.rigForSession(session);
+      return !!rigId && this.get(rigId)?.endedAt === null;
+    });
   }
   begin(rigId: string, input: { drainId: string; owner: string; reviewAt: string }, jobs: WatchdogJobsRepository): RigDeliveryDrain {
     return this.db.transaction(() => {
@@ -67,6 +76,7 @@ export class RigDeliveryDrainStore {
       const job = jobs.register({
         policy: "periodic-reminder", targetSession: input.owner, registeredBySession: input.owner,
         intervalSeconds: Math.max(1, Math.ceil((Date.parse(reviewAt) - this.now().getTime()) / 1000)),
+        activeWakeIntervalSeconds: 300,
         specYaml: JSON.stringify({ target: { session: input.owner }, message:
           `Review delivery drain ${input.drainId} for rig ${rigId}. END it explicitly or renew its review deadline through /api/rigs/${rigId}/delivery-drain. A deadline never resumes delivery. Automatic native starts are NOT deferred.` }),
       });

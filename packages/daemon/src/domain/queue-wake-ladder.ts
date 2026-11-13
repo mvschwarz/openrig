@@ -577,7 +577,12 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string, a
   };
 }
 
+function deliveryHeld(repo: QueueRepository, row: QueueItem): boolean {
+  return repo.deliveryDrains.holds(row.sourceSession) || repo.deliveryDrains.holds(row.destinationSession);
+}
+
 function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void {
+  if (deliveryHeld(repo, row)) return;
   repo.transitionLog.append({
     qitemId: row.qitemId,
     state: row.state,
@@ -677,7 +682,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.resolveOrchestrator ?? ((session: string) => {
         return resolveEscalationOwner(deps.db, session, target => deps.queueRepo.acceptsDestination(target)).owner;
       });
-    const attemptWake =
+    const sendWake =
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
@@ -687,6 +692,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         await deps.queueRepo.maybeNudge(qitemId, target, true, OPENRIG_SENDER, bodyOverride, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
+
+    const attemptWake = async (id: string, target: string): Promise<string> => {
+      const row = deps.queueRepo.getById(id);
+      if ((row && deliveryHeld(deps.queueRepo, row)) || deps.queueRepo.deliveryDrains.holds(target)) return "deferred:rig_delivery_drain";
+      return sendWake(id, target);
+    };
 
     const actions: WakeLadderAction[] = [];
     try {
@@ -777,7 +788,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
-      if (!row || recoversEscalationNotice(deps, row)) continue;
+      if (!row || deliveryHeld(deps.queueRepo, row) || recoversEscalationNotice(deps, row)) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -793,6 +804,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           );
           blockerByPool.set(usagePool.poolKey, blocker);
         }
+        if (deliveryHeld(deps.queueRepo, row)) continue;
         deps.queueRepo.update({
           qitemId: row.qitemId,
           actorSession: LADDER_ACTOR,
@@ -858,8 +870,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           actions.push({ qitemId: row.qitemId, action: "resume" });
         }
         if (budgetFor(row.destinationSession) >= cap) continue; // destination-bounded (F3)
-        windowBudget.set(row.destinationSession, budgetFor(row.destinationSession) + 1);
         const outcome = await attemptWake(row.qitemId, row.destinationSession);
+        if (outcome === "deferred:rig_delivery_drain") continue;
+        windowBudget.set(row.destinationSession, budgetFor(row.destinationSession) + 1);
         appendMarker(
           deps.queueRepo,
           row,
@@ -888,8 +901,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
         // Keep this recovery visible without sharing the ordinary destination aggregate or forwarding another hop.
-        await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
+        const escalation = await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
           [{ row, reason: consumedReason }], consumedReason, `consumed-hop:${row.qitemId}`, [ESCALATION_HOP_TAG]);
+        if (!escalation || deliveryHeld(deps.queueRepo, row)) continue;
         if (!view.orchRung) appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${consumedReason}`);
         if (await operatorRung(deps, row, consumedReason, actions, view)) {
           appendExhausted(deps.queueRepo, row, "consumed escalation hop reached operator fallback");
@@ -905,6 +919,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // F3 — per-destination aggregation: ONE escalation carrying the row list, refreshed
     // not duplicated (the S02 idempotency shape), and rung markers on every member baton.
     for (const [dest, members] of escalating) {
+      if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
       const orch = openEscalationOwner(deps, escalationDedupTag(dest)) ?? resolveOrch(dest);
       const route = !deps.resolveOrchestrator
         ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -914,6 +929,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       // F3 — the aggregate refresh is detection-gated (the S02 idempotency shape): a
       // live escalation group refreshes its one open row every pass, no wake attached.
       await refreshEscalationRowIfExists(deps, dest, members);
+      if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
 
       const actionable = members.filter((m) => m.due && !m.suspended);
       const needsOrchRung = actionable.filter((m) => !m.view.orchRung);
@@ -928,7 +944,8 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           // escalations view and the health count
           // expose it — it stays open past the batons' exhaustion.
           const floorDest = humanAlertCarrier(deps, dest, needsOrchRung[0]!.row.sourceSession);
-          await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
+          if (!await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason)) continue;
+          if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
@@ -943,8 +960,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         } else {
           const escRow = await ensureEscalationRow(deps, dest, orch, members, reason);
           // An already-open recovery retains its owner, including a claim made before topology changed.
+          if (!escRow || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
           const recoveryOwner = deps.queueRepo.getById(escRow.qitemId)?.destinationSession ?? orch;
           const outcome = await attemptWake(escRow.qitemId, recoveryOwner);
+          if (outcome === "deferred:rig_delivery_drain") continue;
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
@@ -1247,7 +1266,7 @@ async function advancePromptRefusals(
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
-    if (!primary || recoversEscalationNotice(deps, primary)) continue;
+    if (!primary || deliveryHeld(deps.queueRepo, primary) || recoversEscalationNotice(deps, primary)) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
@@ -1293,6 +1312,7 @@ async function advancePromptRefusals(
     return clearedAlerts.get(dest)!;
   };
   for (const job of refusedWatchdogJobs(deps.db, clearedAlert, readAt)) {
+    if (deps.queueRepo.deliveryDrains.holds(job.dest, job.jobId) || deps.queueRepo.deliveryDrains.holds(job.registeredBy)) continue;
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
@@ -1315,7 +1335,7 @@ async function advancePromptRefusals(
   if (deps.readHookReviews) {
     try {
       for (const observation of await deps.readHookReviews()) {
-        if (!freshHook(observation)) continue;
+        if (!freshHook(observation) || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
         hookObservations.set(observation.destination, observation);
         const key = `${PROMPT_EPISODE_TAG}${observation.destination}|hook-review:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
         if (closedEpisode(key)) continue;
@@ -1410,6 +1430,7 @@ async function advancePromptRefusals(
   }
 
   for (const [dest, group] of groups) {
+    if (deps.queueRepo.deliveryDrains.holds(dest) || [...group.rows.values()].some(row => deliveryHeld(deps.queueRepo, row))) continue;
     if (unreadableDestinations.has(dest)) continue;
     const state = promptState(dest);
     if (state === "clear") {
@@ -1456,6 +1477,7 @@ async function advancePromptRefusals(
           ...(group.rowKeys.get(member.row.qitemId) ?? [])] : [];
         const continuation = await ensureEscalationRow(deps, dest, humanAlertCarrier(deps, dest, member.row.sourceSession),
           [{ row: member.row, reason }], reason, `consumed-hop:${member.row.qitemId}`, [ESCALATION_HOP_TAG, ...promptTags]);
+        if (!continuation || deliveryHeld(deps.queueRepo, member.row)) continue;
         if (!view.orchRung) appendMarker(deps.queueRepo, member.row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
         // A choice alert's tags and dispatch marker must live on the same durable row the shared gate reads.
         const operatorRow = choiceOnly ? deps.queueRepo.getById(continuation.qitemId)! : member.row;
@@ -1498,6 +1520,7 @@ async function advancePromptRefusals(
     const aggregate = await ensureEscalationRow(deps, dest,
       toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
+    if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = keys.filter(key => !row.tags?.includes(key));
@@ -1547,6 +1570,7 @@ async function advancePromptRefusals(
       if (!current || !freshHook(current) || current.state !== "blocked"
         || current.episode !== hookObservations.get(dest)?.episode) continue;
     }
+    if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
     if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !freshMembers.some(fresh =>
@@ -1555,6 +1579,7 @@ async function advancePromptRefusals(
       if (!toOperator) {
         const recoveryOwner = row.destinationSession;
         const outcome = await attemptWake(row.qitemId, recoveryOwner);
+        if (outcome === "deferred:rig_delivery_drain") continue;
         appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`);
         actions.push({ qitemId: row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
         if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`);
@@ -1602,6 +1627,7 @@ async function operatorRung(
   humanRungSettingApplies = true,
 ): Promise<boolean> {
   const repo = deps.queueRepo;
+  if (deliveryHeld(repo, row)) return false;
   if (!deps.deliveryEngine) {
     appendMarker(
       repo,
@@ -1666,6 +1692,7 @@ async function refreshEscalationRowIfExists(
   members: Array<{ row: QueueItem }>,
   dedupTag = escalationDedupTag(dest),
 ): Promise<void> {
+  if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return;
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items
@@ -1705,7 +1732,9 @@ async function ensureEscalationRow(
   extraTags: string[] = [],
   /** Watchdog reminders refused at this seat's prompt: job id to the session that registered it. */
   jobs: ReadonlyMap<string, string> = new Map(),
-): Promise<{ qitemId: string }> {
+): Promise<{ qitemId: string } | null> {
+  if (deps.queueRepo.deliveryDrains.holds(dest) || deps.queueRepo.deliveryDrains.holds(orch)
+    || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return null;
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items
