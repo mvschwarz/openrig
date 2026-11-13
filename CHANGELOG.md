@@ -182,8 +182,10 @@ release doesn't fix.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.13. A change to key it by the file's own name isn't
-  in this release, and such a seat may be asked to review hooks again.
-  ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
+  in this release, and such a seat may be asked to review hooks again. With a
+  linked `config.toml`, OpenRig can also miss a setting stored for it that
+  turns OpenRig's hooks off, and set those hooks up anyway when it moves them
+  into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **From 0.7.13:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.13)
   still apply, except where this release fixes them. The runtime fixes cover
   adding missing guidance on the eligible Codex resumes described above
