@@ -95,7 +95,11 @@ export class PiCompactionService {
     const attemptId = this.newAttemptId();
     const launchId = prior?.launchId ?? null;
     const saved = this.savedRequest(seat.sessionName);
-    const previous = this.requested.get(seat.sessionName) ?? (saved && this.sameLaunch(saved.launchId, prior) ? saved : null);
+    // Pick the earlier request first (memory, else the saved copy), then apply
+    // the launch comparison to THAT: an in-memory request from a superseded
+    // runner launch must not be restored or reported when the sidecar has moved on.
+    const remembered = this.requested.get(seat.sessionName) ?? saved ?? null;
+    const previous = remembered && this.sameLaunch(remembered.launchId, prior) ? remembered : null;
     // Record the pending attempt BEFORE awaiting the send: a second caller sees it
     // in flight, and a refusal before any input restores what was current before it.
     this.remember(seat, attemptId, launchId);
@@ -160,7 +164,10 @@ export class PiCompactionService {
   getState(session: string, nodeId?: string): PiCompactionState {
     const sidecar = this.deps.readSidecar(session);
     const saved = this.savedRequest(session);
-    const requested = this.requested.get(session) ?? (saved && this.sameLaunch(saved.launchId, sidecar) ? saved : null);
+    // Same rule as request(): the in-memory request is subject to the launch
+    // comparison too — a relaunch within one daemon supersedes it.
+    const remembered = this.requested.get(session) ?? saved ?? null;
+    const requested = remembered && this.sameLaunch(remembered.launchId, sidecar) ? remembered : null;
     return this.attemptState(requested && (nodeId === undefined || requested.nodeId === nodeId) ? requested : null, sidecar);
   }
 

@@ -348,6 +348,24 @@ describe("PiCompactionService", () => {
     }
   });
 
+  it("a relaunch within one daemon, then a refused retry, does not restore the old launch's in-memory request", async () => {
+    // Launch A: a request is remembered in memory (and the store).
+    const f = fixture({ send: async () => ({ ok: true, sent: true, outcome: "rendered-unconfirmed" }) });
+    await f.service.trigger(seat); // attempt-1, launch "launch"
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-1" });
+    // The Pi runner relaunches as launch B within the same daemon: the
+    // in-memory request is superseded exactly like the saved copy would be.
+    f.update({ launchId: "launch-b" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+    // A refused retry must not restore launch A's request into memory.
+    const refused = fixture({
+      sidecar: { ready: true, launchId: "launch-b", updatedAt: "now" },
+      send: async () => ({ ok: true, sent: false, outcome: "retained", reason: "typing_guard_enabled" }),
+    });
+    expect(await refused.service.trigger(seat)).toMatchObject({ triggered: false, reason: "held" });
+    expect(refused.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+  });
+
   it("reads a saved request as uncertain when the status file is missing", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-compaction-missing-status-"));
     try {
