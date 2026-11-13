@@ -129,7 +129,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   `--verify` exits 1 when it can't confirm what its Enter did (`submission unconfirmed`, or text
   staged but not submitted): the message may still have arrived, so inspect with `rig capture`
   before any resend, and don't let a script resend on that exit code alone. Since 0.7.14 an ordinary
-  send doesn't act on an open Claude Code or Codex `/model` picker. A
+  send is refused as needing input while an open Claude Code or Codex `/model` picker is
+  positively identified; nothing is typed. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
@@ -1512,9 +1513,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   0.7.13, `rig daemon start` ends with that offer when the person registry can be read and holds
   nobody. The kernel operator's startup is also taught to run `rig gateway participants` before its
   first greeting and offer registration when nobody is registered. The agent asks first and
-  registers only on the person's yes. Since 0.7.14 a first team is fitted to the person's logins: a
-  login `rig doctor` reports missing matters when a seat you'd start runs on that harness, so say
-  which one before launch (`rig specs preview <team> --kind rig --json` shows each seat's runtime).
+  registers only on the person's yes. Since 0.7.14 setup guidance tells the agent to fit a first
+  team to the person's logins: a login `rig doctor` reports missing matters when a seat you'd start
+  runs on that harness, so say which one before launch
+  (`rig specs preview <team> --kind rig --json` shows each seat's runtime).
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig usage top`** — which of this machine's seats used the most tokens over a window (`--window

@@ -5,7 +5,7 @@ OpenRig 0.7.14 makes concurrent node reads take turns, so other reads and sends
 aren't held behind a whole burst, and indexes bounded queue listings over
 retained history. A connected assistant reaches a seat by its plain name and
 hears three new errors when it can't. Connected assistants show in `rig ps`,
-`rig_team` and the TUI. It adds two database migrations. If you upgraded from
+`rig_team` and the TUI. It adds three database migrations. If you upgraded from
 0.7.12 or earlier, also read "What changed in OpenRig 0.7.13" below, and so on
 back. For the full capability map, read
 `rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
@@ -18,22 +18,30 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   so don't use `rig down`), copy the database file (`rig config get db.path`
   shows it), install 0.7.14 with the existing installation method, then
   `rig daemon start`.
-- **The first start builds indexes before the daemon listens:** migrations 164
-  and 166. One measurement of 166 took 3.47 s on 28,976 rows, not a real
-  installation's size. The write overhead, and going back to 0.7.13 after these
-  migrations, aren't established.
-- **If `rig daemon start` reports the start pending** ("Daemon startup is
-  pending after the readiness deadline"), the daemon is still starting: the CLI
-  waits 20 s and a slow start can take longer. Don't start it again; another
-  start is blocked while this one is pending. Inspect the address and log it
-  prints, wait, then re-check with `rig daemon status`.
+- **Three migrations run before the daemon listens.** Migration 163 adds the
+  `network_installations` table and four columns to `network_bindings`.
+  Migrations 164 and 166 build indexes. The author's measurement of 166 took
+  3.47 s on 28,976 rows, not a real installation's size, so a large database can
+  take longer. The write overhead, and going back to 0.7.13 after these three
+  migrations, aren't established; keep the backup.
+- **If the start is reported pending:** the CLI waits 20 s, then may print
+  "Daemon startup is pending after the readiness deadline". Readiness remains
+  unconfirmed. It leaves the child running and the startup reservation
+  retained, without recording the daemon. Inspect the address and log it
+  prints. The child may later answer, and status can then report it running,
+  but that does not finish this start's recording or release its reservation.
+  Don't start it again. To return to a normal start, follow the restart steps
+  in the message: stop the named child PID and wait for exit, inspect
+  `daemon-start.lock`, and only when both recorded launcher and child PIDs are
+  absent, archive the lock and run `rig daemon start`. `rig daemon stop` cannot
+  stop that unpublished child.
 - **The plugins:** openrig-core stays 0.1.29. The `openrig` plugin's manifests
   carry the CLI's version, 0.7.14.
 
 ## Reads, seats and people
 
-- **Node reads take turns** through their three synchronous steps (inventory,
-  activity, terminal and work). A nodes response is no longer one snapshot
+- **Node reads take turns** through their three synchronous steps (inventory;
+  activity; terminal and work). A nodes response is no longer one snapshot
   across those steps, and in a burst each response comes later: about 43 ms
   against 21 ms median in a 24-request burst. One very large rig is still one
   step. ([#3101](https://github.com/mvschwarz/openrig/pull/3101))
@@ -46,19 +54,26 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **Connected assistants** are listed with their check-in line in `rig ps`,
   `rig_team` and the TUI's tables. The check-in is a status, never a gate on
   delivery. ([#3057](https://github.com/mvschwarz/openrig/pull/3057), [#3058](https://github.com/mvschwarz/openrig/pull/3058))
-- **A first team fits the person's logins.** A login `rig doctor` reports
-  missing isn't harmless when a seat you'd start runs on that harness; tell the
-  person which one, before launch. `rig specs preview <team> --kind rig --json`
-  shows each seat's runtime. ([#3077](https://github.com/mvschwarz/openrig/pull/3077))
-- **The kernel operator offers registration in its greeting** when nobody is
-  registered, and registers the person only on their yes. ([#3041](https://github.com/mvschwarz/openrig/pull/3041), [#3071](https://github.com/mvschwarz/openrig/pull/3071))
+- **Before a first team launches, check the logins it needs.** `rig doctor` and
+  setup now explain that a missing login matters when a seat you would start
+  runs on that harness. The operator is taught to check before launch;
+  `rig specs preview <team> --kind rig --json` shows each seat's runtime.
+  ([#3077](https://github.com/mvschwarz/openrig/pull/3077))
+- **Registration guidance:** when the readable person registry holds nobody,
+  `rig daemon start` and `rig gateway participants` tell the setup agent to
+  offer registration. The kernel operator is taught to offer it in its greeting
+  and register only on a yes. ([#3041](https://github.com/mvschwarz/openrig/pull/3041), [#3071](https://github.com/mvschwarz/openrig/pull/3071))
 
 ## Other changes to act on
 
-- An ordinary send no longer acts on an open `/model` picker, so you don't need
-  to close it first. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
-- A Codex restore or `rig up --existing` no longer writes guidance into a
-  tracked `AGENTS.md`. ([#3039](https://github.com/mvschwarz/openrig/pull/3039))
+- An ordinary send is refused as needing input while an open Claude Code or
+  Codex `/model` picker is positively identified; nothing is typed. Close the
+  picker before trying to deliver the message. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
+- On a resume of a Codex seat's own conversation in a rig with pods, including
+  `rig up --existing`, OpenRig avoids adding missing guidance blocks to the
+  repository's tracked `AGENTS.md` when Codex is 0.164.0 or later, no guidance
+  file or developer instructions are configured, and the configuration and
+  block sources can be read. ([#3039](https://github.com/mvschwarz/openrig/pull/3039))
 - `rig queue list --tag <t>` (repeatable, all must match), `--mission` and
   `--slice` filter exactly. ([#3066](https://github.com/mvschwarz/openrig/pull/3066))
 - `rig broadcast` prints a held recipient as retained; nothing was typed there.
@@ -81,9 +96,18 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   draft started during delivery.
 - **The TUI's tables** can drop a connected assistant's check-in line when its
   rig's seat inventory can't be read; `rig roster` still prints it.
-- **From 0.7.13:** its limits below still apply, except the tracked `AGENTS.md`
-  write, the operator-first registration offer, model pickers, a first team's
-  Codex sign-in and the unquoted pairing description, which this release fixes.
+- **Repository guidance on restore:** rigs without pods, old or unknown Codex
+  versions, configured guidance and unreadable configuration keep the existing
+  file path. Fresh, fork and handover launches are outside this resume fix.
+  Existing managed blocks may still refresh, and the seat-skills line still
+  belongs to the file writer; check `git status`. A block whose source can't be
+  read is reported missing.
+- **From 0.7.13:** its limits below still apply, except where this release
+  fixes them. The runtime fixes cover adding missing guidance on the eligible
+  Codex resumes described above, recognized model pickers and the unquoted
+  pairing description. This release also changes the operator-first
+  registration and pre-launch login guidance; their observed outcomes aren't
+  established yet.
 
 ## What changed in OpenRig 0.7.13
 
