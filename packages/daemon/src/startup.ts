@@ -1310,7 +1310,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "omp": ompAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter });
+  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants });
   // #2829 slice 1 — the cold-start launcher, now that the runtime adapters exist:
   // a resume needs its adapter to verify continuity and relaunch the harness (the
   // door fails closed to awaiting-decision without one), as the HTTP launch routes do.
@@ -1318,7 +1318,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     adapters: runtimeAdaptersMap,
     fsOps: { exists: (path: string) => fs.existsSync(path) },
   });
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
