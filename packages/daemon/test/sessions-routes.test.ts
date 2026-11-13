@@ -468,6 +468,53 @@ describe("Session routes", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
   });
 
+  // `rig launch <rig> <seat>` and `--seats` also take a seat's session name, resolved from the rig's own inventory.
+  async function namedSeatsRig(name: string) {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig(name);
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Development");
+    const driver = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });
+    const guard = rigRepo.addNode(rig.id, "dev.guard", { runtime: "codex", podId: pod.id });
+    const { SnapshotRepository } = await import("../src/domain/snapshot-repository.js");
+    new SnapshotRepository(db).createSnapshot(rig.id, "manual", {
+      rig: { id: rig.id, name }, nodes: [driver, guard], sessions: [], edges: [], checkpoints: {},
+    } as any);
+    const plan = (seats: string[]) => app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seats, plan: true }),
+    });
+    return { app, rig, rigRepo, sessionRegistry, plan };
+  }
+
+  it.each(["dev-driver", "dev-driver@named-rig"])("POST .../nodes/launch-subset takes the session name %s for its seat", async (ref) => {
+    const { plan } = await namedSeatsRig("named-rig");
+    const res = await plan([ref]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, targetNodes: [{ logicalId: "dev.driver" }] });
+  });
+
+  it("POST .../nodes/launch-subset explains a session name that more than one seat answers to, and launches nothing", async () => {
+    const { rig, rigRepo, sessionRegistry, plan } = await namedSeatsRig("shared-name-rig");
+    // Registration now refuses this address; a session recorded before that check can still carry it.
+    const other = rigRepo.addNode(rig.id, "ops.other", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(other.id, "ops-other@shared-name-rig");
+    db.prepare("UPDATE sessions SET session_name = ? WHERE id = ?").run("dev-driver@shared-name-rig", session.id);
+    const res = await plan(["dev-driver"]);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, code: "seat_ambiguous" });
+    expect(body.error).toContain("dev.driver (dev-driver@shared-name-rig)");
+    expect(body.error).toContain("ops.other (dev-driver@shared-name-rig)");
+  });
+
+  it("POST .../launch for a seat no name matches is still 404, and names the rig's seats", async () => {
+    const { app, rig } = await namedSeatsRig("unknown-seat-rig");
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/nonexistent/launch`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("node_not_found");
+    expect(body.error).toContain("dev.driver (dev-driver@unknown-seat-rig)");
+  });
+
   it("POST .../nodes/launch-subset does NOT report an awaiting-decision restore as a successful launch (FR-7)", async () => {
     const { app, rigRepo } = createTestApp(db);
     const podRepo = new PodRepository(db);

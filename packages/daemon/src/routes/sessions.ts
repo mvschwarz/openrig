@@ -23,6 +23,7 @@ import {
   getNodeDetail,
   getNodeInventoryWithContext,
   getNodeDetailWithContext,
+  deriveCanonicalFromEntry,
 } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
@@ -94,6 +95,26 @@ function getDeps(c: { get: (key: string) => unknown }) {
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
   };
+}
+
+/** A seat a launch names: its logical or node id, as before, or else its canonical session name (`ref` or `ref@<rig>`),
+ *  matched against this rig's inventory by the session name it records or derives, never by converting the string. One
+ *  match is the seat. More than one, or none, names the rig's candidate seats with their session names. */
+function resolveLaunchSeat(db: Parameters<typeof getNodeInventory>[0], rigId: string, rig: { rig: { name: string }; nodes: Array<{ id: string; logicalId: string }> }, ref: string):
+  { ok: true; logicalId: string } | { ok: false; code: "node_not_found" | "seat_ambiguous"; error: string } {
+  const direct = rig.nodes.find((node) => node.logicalId === ref || node.id === ref);
+  if (direct) return { ok: true, logicalId: direct.logicalId };
+  const inventory = getNodeInventory(db, rigId);
+  const wanted = ref.includes("@") ? ref : `${ref}@${rig.rig.name}`;
+  const sessionName = (entry: (typeof inventory)[number]) => entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry);
+  const matches = [...new Map(inventory
+    .filter((entry) => entry.canonicalSessionName === wanted || deriveCanonicalFromEntry(entry) === wanted)
+    .map((entry) => [entry.logicalId, entry])).values()];
+  if (matches.length === 1) return { ok: true, logicalId: matches[0]!.logicalId };
+  const listed = (entries: typeof inventory) => entries.map((entry) => `${entry.logicalId} (${sessionName(entry) ?? "no session name"})`).join(", ");
+  return matches.length > 1
+    ? { ok: false, code: "seat_ambiguous", error: `"${ref}" matches more than one seat in rig "${rig.rig.name}": ${listed(matches)}. Name one by its logical id.` }
+    : { ok: false, code: "node_not_found", error: `Node "${ref}" not found in rig "${rig.rig.name}"${inventory.length > 0 ? `. Its seats: ${listed(inventory)}` : ""}.` };
 }
 
 function narrowLaunchErrorStatus(code: string | undefined): 404 | 409 | 500 {
@@ -293,10 +314,9 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json({ ok: false, code: "rig_not_found", error: `Rig "${rigId}" not found` }, 404);
   }
 
-  const node = rig.nodes.find((entry) => entry.logicalId === logicalId || entry.id === logicalId);
-  if (!node) {
-    return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
-  }
+  const seat = resolveLaunchSeat(rigRepo.db, rigId, rig, logicalId);
+  if (!seat.ok) return c.json({ ok: false, code: seat.code, error: seat.error }, seat.code === "seat_ambiguous" ? 409 : 404);
+  const node = rig.nodes.find((entry) => entry.logicalId === seat.logicalId)!;
 
   const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
   if (body.retryStartupFrom !== undefined) {
@@ -353,7 +373,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json(result);
   }
 
-  const result = await nodeLauncher.launchNode(rigId, logicalId);
+  const result = await nodeLauncher.launchNode(rigId, node.logicalId);
 
   if (!result.ok) {
     const status = result.code === "node_not_found" ? 404
@@ -377,9 +397,18 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
+  // Each seat may be named by its session name too. An ambiguous name is explained; one that matches nothing is passed
+  // on as given, and the launch reports it unmatched as before.
+  const rig = getDeps(c).rigRepo.getRig(rigId);
+  const seats: string[] = [];
+  for (const ref of body.seats) {
+    const seat = rig && typeof ref === "string" ? resolveLaunchSeat(getDeps(c).rigRepo.db, rigId, rig, ref) : null;
+    if (seat && !seat.ok && seat.code === "seat_ambiguous") return c.json({ ok: false, code: seat.code, error: seat.error }, 409);
+    seats.push(seat?.ok ? seat.logicalId : ref);
+  }
   const result = body.plan === true
-    ? restoreOrchestrator.planNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, nonTargetMode: body.nonTargetMode })
-    : await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
+    ? restoreOrchestrator.planNodeSubset(rigId, seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, nonTargetMode: body.nonTargetMode })
+    : await restoreOrchestrator.launchNodeSubset(rigId, seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
   if (!result.ok) {
     return c.json(result, narrowLaunchErrorStatus(result.code));
   }

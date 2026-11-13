@@ -368,11 +368,15 @@ export class SeatDeliveryGuard {
   }
 
   /** Multi-seat restore takes leases in stable order before any rig mutation.
-   * Nested per-seat launch joins these leases; it must not reacquire them. */
-  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T> {
-    const ids = [...new Set(nodeIds)].sort();
+   * Nested per-seat launch joins these leases; it must not reacquire them.
+   * `custodyIds` are seats the operation only records (metadata, never input): they get a custody lease in the same sorted
+   * pass, so a paused or draft-aware seat isn't refused and its mode, draft and binding stay as they are. */
+  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>, custodyIds: readonly string[] = []): Promise<T> {
+    const writing = new Set(nodeIds);
+    const ids = [...new Set([...nodeIds, ...custodyIds])].sort();
     const acquire = async (index: number): Promise<T> => {
       const id = ids[index]; if (!id) return fn();
+      if (!writing.has(id)) return this.custodyInPass(id, () => acquire(index + 1));
       if (this.ownsLifecycle(id)) return acquire(index + 1);
       return this.operation(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
@@ -388,6 +392,27 @@ export class SeatDeliveryGuard {
       });
     };
     return acquire(0);
+  }
+
+  /** One custody lease taken inside lifecycle's sorted pass, as custody() takes each of its own. A target that changed
+   *  while waiting refuses the whole operation before any effect, as a lifecycle lease's would. */
+  private async custodyInPass<T>(id: string, next: () => Promise<T>): Promise<T> {
+    if (this.ownsCustody(id)) return next();
+    const target = this.target(id);
+    const inherited = this.scope.getStore()?.get(id);
+    const run = async () => {
+      const lease: Lease = { target, active: true, origin: "custody", humanEpoch: this.humanEpochs.get(id) ?? 0 };
+      lease.serialOwner = inherited?.active && inherited.serialOwner?.active ? inherited.serialOwner : lease;
+      try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [id, lease]]), next); }
+      finally { lease.active = false; }
+    };
+    const current = () => {
+      if (!this.same(target, this.target(id))) {
+        throw new DeliveryGuardError("guard_target_changed", "Custody target changed while waiting; no cleanup performed for this seat.");
+      }
+    };
+    if (inherited?.active && inherited.serialOwner?.active) { this.assertCurrent(id, inherited); current(); return run(); }
+    return this.serial(id, async () => { current(); return run(); });
   }
 
   /** Called only after an intentional lifecycle binding change, under its lease.

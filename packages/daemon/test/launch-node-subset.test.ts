@@ -977,8 +977,16 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const freshLaunch = vi.fn(launchFresh);
       (orchestrator as any).freshLaunch = freshLaunch;
       const launch = () => orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters: { "claude-code": readyAdapter("claude-code") } as any });
-      return { rigId, nodeIds, freshLaunch, launchFresh, launch };
+      return { rigId, nodeIds, freshLaunch, launchFresh, launch, guard };
     }
+
+    it("a paused non-target doesn't refuse the launch: the target starts, and the paused seat keeps its mode", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      await guard.set(nodeIds[1]!, true, "person", "typing a draft");
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desired: true, effective: true });
+    });
 
     it("starts: retiring the provisional shell rebinds the lease, so the persisted fresh launch owns the seat", async () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();
