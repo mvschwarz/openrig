@@ -52,6 +52,7 @@ import type {
   Checkpoint,
   RestoreSnapshotSelection,
   NodeStartupSnapshot,
+  RestoreExcludedNode,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -130,6 +131,8 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   if (allFailed) return "failed";
   // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
   if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
+  // A seat left in its external attachment wasn't restored here: the rig isn't fully restored, and the seat says why.
+  if (nodes.some((node) => node.status === "left_attached")) return "partially_restored";
   // Same for an unhealed restore gap (e.g. a current-selection re-apply
   // that was skipped, failed, or threw): the seat runs, but the restore was not whole.
   if (nodes.some((node) => (node.restoreGaps?.length ?? 0) > 0)) return "partially_restored";
@@ -443,6 +446,15 @@ export class RestoreOrchestrator {
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
+      // A seat that is still a node of this rig but isn't in the snapshot's intended roster (one claimed with rig bind or
+      // rig attach after the rig's topology was recorded) isn't started by this restore. It's named as skipped rather than
+      // filed as historical, and the rig isn't fully restored. A roster the operator narrowed on purpose keeps the rest out
+      // without reading as a skip.
+      const liveNodeIds = new Set((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => current.id));
+      const narrowedRoster = snapshot.data.topologyRoster?.source === "operator_explicit";
+      const excludedNodes: RestoreExcludedNode[] = topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
+        ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded);
+      const skippedSeats = excludedNodes.filter((excluded) => excluded.reason === "current_seat_not_in_intended_roster");
       // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
       // without its startup content; it's reported failed with the reason, and the rest of the rig restores. Any other
       // blocker, or holds on every seat this restore would launch, still stops the whole restore before any mutation.
@@ -466,7 +478,7 @@ export class RestoreOrchestrator {
           blockers: validation.blockers,
           snapshotSelection,
           intendedRoster: topology.intendedRoster,
-          excludedNodes: topology.excludedNodes,
+          excludedNodes,
         };
         return {
           ok: false,
@@ -496,7 +508,7 @@ export class RestoreOrchestrator {
         snapshotId,
         snapshotSelection,
         intendedRoster: topology.intendedRoster,
-        excludedNodes: topology.excludedNodes,
+        excludedNodes,
       });
       const attemptId = restoreStartedEvent.seq;
       try {
@@ -524,7 +536,7 @@ export class RestoreOrchestrator {
                 warnings: [`Service boot failed: ${bootResult.error}`],
                 snapshotSelection,
                 intendedRoster: topology.intendedRoster,
-                excludedNodes: topology.excludedNodes,
+                excludedNodes,
               },
             });
             return { ok: false, code: "service_boot_failed", message: `Service boot failed before agent restore: ${bootResult.error}` };
@@ -555,15 +567,19 @@ export class RestoreOrchestrator {
         }
       }
 
+      for (const skipped of skippedSeats) {
+        restoreWarnings.push(`Restore: ${skipped.logicalId} was skipped: it's a seat of this rig but not in this snapshot's intended roster (a seat claimed after the rig's topology was recorded), so restore didn't start it.`);
+      }
+      const rolledUp = rollupRestoreRigResult(nodeResults);
       const restoreResult: RestoreResult = {
         snapshotId,
         preRestoreSnapshotId: preRestoreSnapshot.id,
-        rigResult: rollupRestoreRigResult(nodeResults),
+        rigResult: rolledUp === "fully_restored" && skippedSeats.length > 0 ? "partially_restored" : rolledUp,
         nodes: nodeResults,
         warnings: restoreWarnings,
         snapshotSelection,
         intendedRoster: topology.intendedRoster,
-        excludedNodes: topology.excludedNodes,
+        excludedNodes,
       };
 
       // 7. Emit restore.completed

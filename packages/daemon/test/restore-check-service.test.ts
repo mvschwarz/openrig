@@ -1133,11 +1133,37 @@ describe("RestoreCheckService", () => {
     expect(reads).toBe(1);
   });
 
+  // A seat that isn't running is named by what restore does with it; it blocks the rig only when restore can't bring it back.
+  it.each([
+    ["kept attached as an external CLI", { attachmentType: "external_cli" }, null, "Restore leaves this seat as it is: it's attached as an external CLI"],
+    ["outside the roster restore uses", {}, [], "Restore leaves this seat as it is: it isn't in the roster this restore uses"],
+    ["brought back from its saved startup context", {}, null, "restore brings it back from its saved startup context"],
+  ] as const)("a detached seat %s reads yellow, named, and doesn't block the rig", (_label, seat, rosterIds, said) => {
+    const result = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ sessionStatus: "detached", startupStatus: "ready", tmuxAttachCommand: null, ...seat })],
+      ...(rosterIds ? { getRestoreInputs: (rigId: string) => ({
+        snapshot: { id: "snap-1", kind: "full", data: { rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+          nodes: [], sessions: [], edges: [], checkpoints: {}, topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [...rosterIds] } } },
+        servicesRecord: null,
+      }) as never } : {}),
+    })).check({ noQueue: true, noHooks: true }) as any;
+    const readiness = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+    expect(readiness).toMatchObject({ status: "yellow", evidence: expect.stringContaining(said) });
+    expect(result.checks.filter((entry: { status: string }) => entry.status === "red")).toEqual([]);
+    expect(result.verdict).not.toBe("not_restorable");
+  });
+
   it("preserves independent red and unknown causes alongside a stale selection", () => {
     const overrides = { getDesiredClaudeActivityHooks: () => ({ status: "known" as const, selected: true }) };
+    // A stopped seat restore can't bring back (no saved startup context, no resume token) stays red.
     expect(new RestoreCheckService(mockDeps({ ...overrides, probeQueueStore: () => ({ available: false, evidence: "broken" }),
       getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
+      getStartupContext: () => startupContextProbe({ status: "missing", evidence: "Persisted startup context missing" }),
     })).check({}).verdict).toBe("not_restorable");
+    // One restore brings back is named yellow instead, and doesn't block the rig on its own.
+    expect(new RestoreCheckService(mockDeps({ ...overrides, probeQueueStore: () => ({ available: false, evidence: "broken" }),
+      getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
+    })).check({}).verdict).toBe("restorable_with_caveats");
     expect(new RestoreCheckService(mockDeps({ ...overrides, getRestoreInputs: () => { throw new Error("unreadable snapshot"); },
     })).check({}).verdict).toBe("unknown");
   });
@@ -1351,7 +1377,8 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.readiness.status).toBe("not_ready");
+    // The stopped seat restore brings back from its saved startup context is a caveat, not a blocker.
+    expect(result.readiness.status).toBe("ready_with_caveats");
     expect(result.recovery).toEqual({
       status: "actionable",
       summary: expect.stringContaining("1 rig can be recovered"),
@@ -1669,8 +1696,8 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    // The stopped-seat red still wins the aggregate; the input unknown stays named.
-    expect(result.readiness.status).toBe("not_ready");
+    // The stopped seat restore brings back is a caveat, so the unknown restore input decides the aggregate, and stays named.
+    expect(result.readiness.status).toBe("unknown");
     expect(result.rigs[0].status).toBe("unknown");
     expect(result.recovery).toEqual({
       status: "unknown",

@@ -192,6 +192,8 @@ export interface NodeInventoryEntry {
   tmuxAttachCommand: string | null;
   latestError: string | null;
   cwd?: string | null;
+  /** An external CLI attachment is kept by restore (left_attached), not restarted. */
+  attachmentType?: string | null;
   /** The seat's recorded restore choice and resume token (the inventory carries them). */
   restorePolicy?: string | null;
   resumeType?: string | null;
@@ -216,6 +218,8 @@ export interface RestoreCheckDeps {
   /** Get the newest snapshot for exact restore planning when available */
   getLatestSnapshot?: (rigId: string) => { id: string; kind: string } | null;
   /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
+  /** The latest recorded topology roster (node ids), which a current-state restore uses; null when none is recorded. */
+  getMaterializedRoster?: (rigId: string) => string[] | null;
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
     | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string }
@@ -349,6 +353,7 @@ export class RestoreCheckService {
       // No added snapshot/history read on a routine status poll for an all-ready rig.
       // Explicit restore-check still assesses its next restore, even while it is running.
       let preconditionError: string | undefined;
+      let restoreRoster: Set<string> | null | undefined;
       const allReady = nodes.length > 0 && nodes.every((node) =>
         Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
       );
@@ -357,11 +362,12 @@ export class RestoreCheckService {
         checks.push(preconditions.check);
         rigChecks.push(preconditions.check);
         preconditionError = preconditions.error;
+        restoreRoster = preconditions.roster;
         restoreInputsByRig.set(rig.rigId, { snapshot: preconditions.snapshot, error: preconditions.error });
       }
 
       for (const node of nodes) {
-        const readinessCheck = this.checkSeatReadiness(node);
+        const readinessCheck = this.checkSeatReadiness(node, rig.name, restoreRoster);
         checks.push(readinessCheck);
         rigChecks.push(readinessCheck);
 
@@ -440,6 +446,8 @@ export class RestoreCheckService {
   private checkRestorePreconditions(rig: { rigId: string; name: string }, inventory: NodeInventoryEntry[]): {
     check: CheckEntry;
     snapshot: { id: string; kind: string } | null;
+    /** The node ids restore would start from (its intended roster); null when every current seat is in it, or unknown. */
+    roster?: Set<string> | null;
     error?: string;
   } {
     const check = `rig.${rig.name}.restore-preconditions`;
@@ -448,8 +456,10 @@ export class RestoreCheckService {
       if ("unavailable" in input) throw new Error(input.unavailable);
       if ("currentStateRehydrate" in input) {
         const { ok, blockers } = input.currentStateRehydrate;
+        const recorded = this.deps.getMaterializedRoster?.(rig.rigId) ?? null;
         return {
           snapshot: null,
+          roster: recorded ? new Set(recorded) : null,
           check: {
             check,
             status: ok ? "yellow" : "red",
@@ -467,8 +477,10 @@ export class RestoreCheckService {
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
       });
       const { blockers, warnings } = validation;
+      const rosterIds = input.snapshot.data.topologyRoster?.intendedNodeIds;
       return {
         snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
+        roster: rosterIds ? new Set(rosterIds) : null,
         check: {
           check,
           status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
@@ -842,7 +854,19 @@ export class RestoreCheckService {
     };
   }
 
-  private checkSeatReadiness(node: NodeInventoryEntry): CheckEntry {
+  /** What restore does with a seat that isn't running and ready: leaves it as it is (an external CLI attachment it keeps,
+   *  or a seat outside the roster it restores), brings it back (saved startup context, or a resume), or neither (null). */
+  private restoreFate(node: NodeInventoryEntry, roster: Set<string> | null | undefined): { leaves: string } | { brings: string } | null {
+    if (node.attachmentType === "external_cli") return { leaves: "it's attached as an external CLI, and restore keeps that attachment" };
+    if (roster && node.nodeId && !roster.has(node.nodeId)) {
+      return { leaves: "it isn't in the roster this restore uses (a seat claimed after the rig's topology was recorded)" };
+    }
+    if (node.nodeId && this.deps.getStartupContext(node.nodeId).status === "ok") return { brings: "restore brings it back from its saved startup context" };
+    if (seatResumes(node)) return { brings: "restore tries its saved conversation" };
+    return null;
+  }
+
+  private checkSeatReadiness(node: NodeInventoryEntry, rigName: string, roster?: Set<string> | null): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.readiness`;
 
@@ -872,6 +896,28 @@ export class RestoreCheckService {
 
     if (node.sessionStatus !== "running" || node.startupStatus !== "ready") {
       const latestError = node.latestError ? ` latestError=${node.latestError}` : "";
+      // A seat restore leaves or brings back is named here, not a blocker for the whole rig; only a seat restore itself
+      // can't bring back stays red.
+      // A running seat that isn't ready (a failed start, attention, an identity question) isn't restore's to restart.
+      const fate = node.sessionStatus === "running" ? null : this.restoreFate(node, roster);
+      if (fate && "leaves" in fate) {
+        return {
+          check,
+          status: "yellow",
+          evidence: `Seat not running/ready: sessionStatus=${node.sessionStatus ?? "unknown"} startupStatus=${node.startupStatus ?? "unknown"}${latestError}. Restore leaves this seat as it is: ${fate.leaves}.`,
+          remediation: "Restore won't start this seat; start or reattach it yourself if you need it running",
+          remediationSafe: false,
+        };
+      }
+      if (fate && "brings" in fate) {
+        return {
+          check,
+          status: "yellow",
+          evidence: `Seat not running/ready: sessionStatus=${node.sessionStatus ?? "unknown"} startupStatus=${node.startupStatus ?? "unknown"}${latestError}; ${fate.brings}.`,
+          remediation: `Preview what restore would do for this seat with: rig up ${shellQuote(rigName)} --existing --plan`,
+          remediationSafe: true,
+        };
+      }
       return {
         check,
         status: "red",

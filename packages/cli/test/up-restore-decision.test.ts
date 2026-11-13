@@ -418,6 +418,25 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(logs).toContain("The one seat is running; 1 started fresh without their conversation. The restore isn't whole, so rig up exits 1.");
   });
 
+  it("a seat of the rig outside the restore's roster is listed as skipped, and the line says so", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "main.lead", status: "resumed" }],
+      excludedNodes: [
+        { nodeId: "n-2", logicalId: "work.claimed", reason: "current_seat_not_in_intended_roster" },
+        { nodeId: "n-3", logicalId: "old.gone", reason: "historical_not_in_intended_roster" },
+      ],
+      warnings: [],
+    });
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing"]);
+    });
+    expect(logs).toContain("  work.claimed: skipped — not in this restore's roster (a seat claimed after the rig's topology was recorded)");
+    expect(logs.join("\n")).not.toContain("old.gone");
+    expect(logs).toContain("The one seat is running; work.claimed was skipped. The restore isn't whole, so rig up exits 1.");
+    expect(exitCode).toBe(1);
+  });
+
   it("every seat running with a guidance or restore gap: the line names those seats and points at the warnings", async () => {
     respond = () => ({
       status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",

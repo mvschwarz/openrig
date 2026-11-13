@@ -190,6 +190,19 @@ export function createRestoreCheckService(
     getStartupContext: (nodeId: string) => {
       return getStartupContext(rigRepo.db, nodeId);
     },
+    // The roster a current-state restore uses: the latest recorded one, as snapshot capture reads it.
+    getMaterializedRoster: (rigId: string) => {
+      const row = rigRepo.db.prepare(
+        "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+      ).get(rigId) as { payload: string } | undefined;
+      if (!row) return null;
+      try {
+        const ids = (JSON.parse(row.payload) as { intendedNodeIds?: unknown }).intendedNodeIds;
+        return Array.isArray(ids) && ids.every((id) => typeof id === "string") ? ids : null;
+      } catch {
+        return null;
+      }
+    },
     hasSnapshot: (rigId: string) => {
       return snapshotRepo.listSnapshots(rigId).length > 0;
     },

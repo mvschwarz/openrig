@@ -162,7 +162,9 @@ describe("restore-check consumes the shared snapshot validation", () => {
       getNodeInventory: (id) => [node(id)], getRestoreInputs,
     })).check({ noQueue: true, noHooks: true });
     expect(getRestoreInputs).toHaveBeenCalledTimes(2);
-    expect(result.verdict).toBe("not_restorable");
+    // No stopped seat blocks (restore brings each back from its saved startup context), so the unavailable inputs make
+    // the verdict unknown; the rigs stay isolated below.
+    expect(result.verdict).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-1")?.status).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-2")?.status).not.toBe("unknown");
     expect(result.recovery.unknown[0]?.reason).toContain(reason);
