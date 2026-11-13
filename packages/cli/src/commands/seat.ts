@@ -1710,8 +1710,27 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
 /** #2985 / #2861: `--recover` adopts the running successor of a handover that failed after launching it. The daemon
  *  proves the pane's process is that launch before committing, and types nothing into the pane. */
 async function runSeatHandoverRecover(seat: string, opts: HandoverActionOpts, client: ReturnType<SeatDeps["clientFactory"]>): Promise<void> {
-  const res = await client.post<SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}/recover`,
-    { reason: opts.reason, operator: opts.operator });
+  let res;
+  try {
+    // The proof waits for the seat's lifecycle lease and, when a first sample can't prove the successor, sleeps 3 s and
+    // samples again before it can commit, so the 5 s default deadline is too short (as for `rig seat set-runtime --recover`).
+    res = await client.post<SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}/recover`,
+      { reason: opts.reason, operator: opts.operator }, { timeoutMs: 60_000 });
+  } catch (err) {
+    // The daemon keeps working when the client stops waiting: the adoption may still commit. One request; no retry.
+    if (!(err instanceof DaemonTimeoutError)) throw err;
+    const error = {
+      ok: false as const,
+      code: "handover_outcome_unknown",
+      status: "unknown",
+      message: "The CLI stopped waiting for the daemon after 60 seconds, so the outcome of the handover recovery is unknown. The daemon may still be working on it.",
+      guidance: `Inspect the seat with: rig seat status ${seat}. Running the recovery again is safe: it types nothing, and finds nothing left to adopt if this one committed. Another handover or a fresh launch ends the running successor.`,
+    };
+    if (opts.json) console.log(JSON.stringify(error, null, 2));
+    else printSeatError(error, error.message);
+    process.exitCode = 1;
+    return;
+  }
   if (opts.json) {
     console.log(JSON.stringify(res.data, null, 2));
     if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;

@@ -1279,6 +1279,38 @@ describe("seat request deadlines (#260)", () => {
     },
   );
 
+  // #3044 CodeRabbit: the recovery's proof can wait for the seat's lifecycle lease and, when a first sample can't prove
+  // the successor, sleeps 3 s before a second one that can still commit, so the 5 s default could abort a recovery the
+  // daemon still commits. It gets 60 s, and reaching them is an unknown outcome. One request.
+  it.each([false, true])("handover --recover outlasts the 5 s default and reports an unknown outcome at 60 s (json=%s)", async json => {
+    vi.useFakeTimers();
+    const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
+    const result = captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+      "--recover", "--reason", "adopt the running successor", ...(json ? ["--json"] : [])]).then(() => undefined))
+      .catch(error => ({ error: error as Error }));
+    await vi.advanceTimersByTimeAsync(59_999);
+    const signal = (fetchImpl.mock.calls[0]![1] as RequestInit).signal!;
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted).toBe(true);
+    const output = await result;
+    if (!("logs" in output)) throw output.error;
+    expect(output.exitCode).toBe(1);
+    const text = json ? output.logs.join("\n") : output.errors.join("\n");
+    if (json) {
+      expect(output.errors).toEqual([]);
+      expect(JSON.parse(text)).toMatchObject({ ok: false, code: "handover_outcome_unknown", status: "unknown",
+        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig") });
+    } else {
+      expect(output.logs).toEqual([]);
+      expect(text).toContain("outcome of the handover recovery is unknown");
+    }
+    expect(text).toContain("may still be working");
+    expect(text).not.toMatch(/recovery failed|timed out after/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]![0]).toContain("/api/seat/handover/dev-impl%40seat-rig/recover");
+  });
+
   it("a mutating handover's connection failure stays a transport error, not an unknown outcome", async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError("fetch failed"); });
     const deps = makeDeps({ status: 200, data: {} }, []);
