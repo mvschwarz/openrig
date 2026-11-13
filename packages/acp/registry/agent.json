@@ -1,7 +1,7 @@
 {
   "id": "openrig",
   "name": "OpenRig",
-  "version": "0.7.1",
+  "version": "0.7.14",
   "description": "Send work to your OpenRig team of agents and follow it through to the result",
   "repository": "https://github.com/mvschwarz/openrig",
   "website": "https://openrig.dev",
@@ -12,7 +12,7 @@
   "license_url": "https://github.com/mvschwarz/openrig/blob/main/LICENSE",
   "distribution": {
     "npx": {
-      "package": "@openrig/acp@0.7.1"
+      "package": "@openrig/acp@0.7.14"
     }
   }
 }

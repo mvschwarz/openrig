@@ -12,9 +12,9 @@ In your project folder, add OpenRig's `rigs` skill to the agent you use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent codex
 ```
 
 These use this release's tag, for a new install. If OpenRig is already installed, replace the tag after `tree/` with
