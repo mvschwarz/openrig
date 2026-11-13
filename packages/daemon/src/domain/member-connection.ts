@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { memberConnection, type MemberConnection } from "./connection-contract.js";
-import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
+import { registeredPeople, resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
@@ -10,16 +10,20 @@ import { resolveCurrentSessionAddress } from "./session-registry.js";
  *  trigger), else the seat it addresses, read by seat rather than by the newest session row with that name, and live
  *  when a session is recorded as its current one (a record, not an observed pane). A person is one the human registry
  *  resolves, or the reserved terminal person's seat (`human@host`, `human-<x>@kernel|host`); an address shaped like a
- *  person's (`<id>@external`) that the registry doesn't resolve isn't one. An address none of them has, or any address
- *  when the registry can't be read, reads every capability unknown, with the reason. */
+ *  person's (`<id>@external`) that the registry doesn't resolve isn't one. A person is resolved before a hosted member
+ *  or seat, as the queue does, so when the registry can't be read, any spelling it could resolve to a person (an
+ *  `@external` address or a canonical `member@rig`) reads unknown rather than as whatever else has that name. Nobody
+ *  registered yet is a readable registry with no one in it. An address none of them has reads every capability
+ *  unknown too, with its own reason. */
 export function resolveMemberConnection(db: Database.Database, queue: Pick<QueueRepository, "humanRegistry" | "isHostedMember"> | undefined,
   member: string): MemberConnection {
-  const terminalPersonSeat = isHumanSeatSessionRef(member) && parseSessionName(member).kind !== "external";
-  const registry = queue?.humanRegistry();
-  if (terminalPersonSeat || (registry?.ok && resolveRegisteredHumanAddress(member, registry.entities) !== null)) {
+  const parsed = parseSessionName(member);
+  const terminalPersonSeat = isHumanSeatSessionRef(member) && parsed.kind !== "external";
+  const people = queue ? registeredPeople(queue.humanRegistry()) : null;
+  if (terminalPersonSeat || (people && resolveRegisteredHumanAddress(member, people) !== null)) {
     return memberConnection(member, { kind: "person" });
   }
-  if (isHumanSeatSessionRef(member) && !registry?.ok) {
+  if (!people && (parsed.kind === "external" || parsed.kind === "canonical")) {
     return memberConnection(member, { kind: "none", reason: "the person registry couldn't be read, so whether a person has this address is unknown" });
   }
   if (queue?.isHostedMember(member)) return memberConnection(member, { kind: "hosted" });
