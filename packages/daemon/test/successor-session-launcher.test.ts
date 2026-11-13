@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -62,6 +63,38 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it("revokes the staged attempt if its separate readiness probe fails", async () => {
+    db.prepare("INSERT INTO rigs (id,name) VALUES ('rig-bound','bound')").run();
+    db.prepare("INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('node-1','rig-bound','dev.impl','codex')").run();
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: "node-1", generation: "reserved", issuedBy: "launch",
+      run: { runId, binding: { runtime: "pi", runner: 0, pane: "%7", panePid: 101 } } });
+    const first = issue("staged"), unrelated = issue("other-staged");
+    launchHarness.mockResolvedValue({ ok: true, activityGrantId: first.grantId });
+    checkReady.mockRejectedValue(new Error("probe unavailable"));
+    expect(await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig" })).toMatchObject({ ok: false, code: "successor_readiness_failed" });
+    expect(grants.standing(first.grantId)).toBe("revoked");
+    expect(grants.standing(unrelated.grantId)).toBe("pending");
+  });
+
+  it("carries its exact issuance to abandoned cutover cleanup without revoking another pending run", async () => {
+    db.prepare("INSERT INTO rigs (id,name) VALUES ('rig-bound','bound')").run();
+    db.prepare("INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('node-1','rig-bound','dev.impl','codex')").run();
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: "node-1", generation: "reserved", issuedBy: "launch",
+      run: { runId, binding: { runtime: "pi", runner: 0, pane: "%7", panePid: 101 } } });
+    const first = issue("ready-staged"), unrelated = issue("other-staged");
+    launchHarness.mockResolvedValue({ ok: true, activityGrantId: first.grantId });
+    const subject = launcher();
+    const result = await subject.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+    expect(result).toMatchObject({ ok: true, activityGrantId: first.grantId });
+    if (!result.ok) throw new Error("successor did not start");
+    await subject.cleanup(result.tmuxSession, result.discoveredId, result.activityGrantId);
+    expect(grants.standing(first.grantId)).toBe("revoked");
+    expect(grants.standing(unrelated.grantId)).toBe("pending");
+  });
 
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({

@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
 import { randomUUID } from "node:crypto";
@@ -327,6 +328,8 @@ export class SessionRegistry {
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
+    try { new ActivityGrantStore(this.db).reconcileBinding(nodeId); }
+    catch { /* Optional run attribution must not fail an already registered claimed session. */ }
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -505,6 +508,7 @@ export class SessionRegistry {
   }
 
   updateStatus(sessionId: string, status: string): void {
+    if (["exited", "detached", "superseded"].includes(status)) new ActivityGrantStore(this.db).revokeForSession(sessionId, status);
     this.db
       .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
@@ -513,6 +517,7 @@ export class SessionRegistry {
   /** A supported stop is distinct from an observed exit. Any later status write
    * clears the intent, including a resume of this same session row. */
   markIntentionallyStopped(sessionId: string): void {
+    new ActivityGrantStore(this.db).revokeForSession(sessionId, "stopped");
     this.db.prepare(
       "UPDATE sessions SET status = 'exited', intentionally_stopped = 1, last_seen_at = datetime('now') WHERE id = ?",
     ).run(sessionId);
