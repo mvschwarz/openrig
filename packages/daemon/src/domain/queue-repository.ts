@@ -1189,7 +1189,7 @@ export class QueueRepository {
     this.db = db;
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
-    this.wakeRepo = new QueueWakeRepository(db);
+    this.wakeRepo = new QueueWakeRepository(db, (value) => this.isPersonAddress(value));
     this.validateRig = opts?.validateRig ?? (() => true);
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
     if (opts?.transport) this.attachTransport(opts.transport);
@@ -3844,7 +3844,7 @@ export class QueueRepository {
       // start explicitly; it also gives the row's wake a real "last check" time.
       jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
-    } else if (input.state === "blocked" && effectiveBlockedOn && effectiveBlockedOn !== input.qitemId && !isHumanPark
+    } else if (input.state === "blocked" && effectiveBlockedOn && effectiveBlockedOn !== input.qitemId && !isHumanPark && !isTypedGateBlocker(effectiveBlockedOn)
       && (effectiveBlockedOn.startsWith("qitem-") || isBlockerLive(this.getById(effectiveBlockedOn)?.state ?? ""))) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
     }
@@ -4040,6 +4040,8 @@ export class QueueRepository {
     ts: string;
   }): PersistedEvent[] {
     const dependentEvents: PersistedEvent[] = [];
+    // Typed gates and people own their own resolution even when a custom row ID collides.
+    if (isTypedGateBlocker(input.qitemId) || this.isPersonAddress(input.qitemId)) return dependentEvents;
     const blockedRows = this.db
       .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
       .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;

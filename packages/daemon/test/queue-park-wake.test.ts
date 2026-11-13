@@ -1412,6 +1412,33 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getById(row.qitemId)?.state).toBe("pending");
   });
 
+  it.each(["human@kernel", "fold:release", "auth:permit", "external:vendor"])("does not treat %s as a colliding queue blocker", async (ref) => {
+    const collision = await repo.create({ qitemId: ref, sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const row = await item();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: ref,
+      ...(ref === "human@kernel" ? { summary: "Decision", evidenceRef: "/evidence" } : {}), transitionNote: "wait" });
+    expect(wakes(row.qitemId)).toEqual([]);
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    const transitionId = (db.prepare("SELECT MAX(transition_id) AS id FROM queue_transitions WHERE qitem_id = ?").get(row.qitemId) as { id: number }).id;
+    db.prepare("INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref) VALUES (?, ?, 'armed', 'blocker', ?)")
+      .run(transitionId, row.qitemId, ref);
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    repo.update({ qitemId: collision.qitemId, actorSession: "peer@rig", state: "done", closureReason: "no-follow-on", transitionNote: "complete" });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "blocked", blockedOn: ref });
+  });
+
+  it("uses the registered-person classifier for custom-address collisions", async () => {
+    repo = new QueueRepository(db, bus, { loadHumanRegistry: () => ({ ok: true, entities: [{
+      entityId: "founder", class: "human", displayName: "Founder", address: "founder@external", connectorBindings: [], prefs: { deliveryClass: "A" },
+    }] }) } as never);
+    const collision = await repo.create({ qitemId: "founder@external", sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const row = await item();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: collision.qitemId, transitionNote: "wait" });
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    repo.update({ qitemId: collision.qitemId, actorSession: "peer@rig", state: "done", closureReason: "no-follow-on", transitionNote: "complete" });
+    expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+  });
+
   it("negative control: a wakeless park still succeeds and records no invented wake", async () => {
     const row = await item();
     const parked = repo.update({
