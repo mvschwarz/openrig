@@ -331,6 +331,18 @@ function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | 
 const CLAUDE_SWITCH_FLAGS: ReadonlySet<string> = new Set(["--chrome", "--no-chrome"]);
 
 function claudeSessionToken(args: string[]): string | null {
+  const parsed = claudeArgvIds(args);
+  return parsed ? claudeArgvIdentity(parsed.ids, parsed.fork) ?? null : null;
+}
+
+/** #3044: the conversation a Claude fork launch forked from: the `--resume` of a command line that also carries
+ *  `--fork-session`, read by the same parser as its identity; null when it is no fork or can't be parsed. */
+export function claudeCommandForkParent(command: string): string | null {
+  const parsed = claudeArgvIds(tokens(command).slice(1));
+  return parsed?.fork ? parsed.ids.resume : null;
+}
+
+function claudeArgvIds(args: string[]): { ids: ClaudeArgvIds; fork: boolean } | null {
   const ids: ClaudeArgvIds = { resume: null, "session-id": null };
   let fork = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -371,7 +383,7 @@ function claudeSessionToken(args: string[]): string | null {
     if (ids[kind] !== null || !value || value.startsWith("-")) return null;
     ids[kind] = value;
   }
-  return claudeArgvIdentity(ids, fork) ?? null;
+  return { ids, fork };
 }
 
 // Delivery-only reading of a Claude argv. Like the strict selector, it accepts
