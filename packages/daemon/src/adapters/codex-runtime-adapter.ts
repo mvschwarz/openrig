@@ -465,7 +465,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Codex's "continue without trusting" choice writes no state, so an existing install with no hooks.state entry for any
     // of OpenRig's hooks may be an unrecorded skip, or an older install that never granted them. OpenRig trusts its own
     // exact shipped hooks there as on a first install (#17). Any recorded choice for one of them, or a layer it can't read,
-    // leaves native review in place. A proven owned grant may renew its content approval.
+    // leaves native review in place. A proven owned grant may renew its content approval, and its declarations when a new
+    // shipped bundle changes them and every approval still matches OpenRig's own record.
     const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
       && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
     const noOwnHookChoice = (read: CodexConfigLayerRead[]) => {
@@ -482,14 +483,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       let content = before;
       const planned = planOwnedCodexContentApproval({ configPath, content, layers: currentLayers, shipped, installed: cachedDir, freshGrant });
       if (!planned) return;
+      for (const [key, hash] of Object.entries(planned.trustedHashes)) content = upsertCodexHookTrust(content, key, hash);
+      // The declaration writer ends the file with one newline; keep the owner's own ending.
+      if (content !== before) content = content.replace(/\n*$/, /\n*$/.exec(before)?.[0] ?? "");
       for (const [key, hash] of Object.entries(planned.hashes)) content = upsertCodexHookTrust(content, key, hash, "trusted_content_hash");
       // The line writer must not alter examples in strings or duplicate quoted keys.
       try {
         const expected = parseToml(before) as { hooks: { state: Record<string, Record<string, unknown>> } };
+        for (const [key, hash] of Object.entries(planned.trustedHashes)) expected.hooks.state[key]!.trusted_hash = hash;
         for (const [key, hash] of Object.entries(planned.hashes)) expected.hooks.state[key]!.trusted_content_hash = hash;
         if (!isDeepStrictEqual(parseToml(content), expected)) return;
       } catch { return; } // Leave native review and owner bytes intact for unsupported TOML spellings.
-      if (this.fs.readFile(configPath) !== before) return; // A concurrent native choice wins.
+      // A concurrent native choice wins: in this file, or in any layer the plan read (a layer appearing, changing,
+      // disappearing or becoming unreadable counts).
+      if (this.fs.readFile(configPath) !== before || !isDeepStrictEqual(readLayers(), currentLayers)) return;
       if (content !== before) this.fs.writeFile(configPath, content);
       recordOwnedCodexApproval(configPath, planned.approval);
     };

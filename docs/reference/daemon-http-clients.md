@@ -20,7 +20,8 @@ The CLI itself finds the daemon in these orders:
   `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
   `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
 - **Status** (`rig status`, `rig daemon status`): `OPENRIG_URL` (or `RIGGED_URL`) first, probed directly; else
-  the state file below.
+  the state file below. If no state is read, probe the configured `daemon.host` and `daemon.port` instead (defaulting
+  to `127.0.0.1:7433`).
 - **Start and stop** (`rig daemon start`, `stop`): the state file, `$OPENRIG_HOME/daemon.json`, then the legacy
   `~/.rigged/daemon.json`.
 

@@ -2686,7 +2686,7 @@ export class SessionTransport {
     // segment must never edit a line of the exact text.
     if (opts?.exactText !== undefined && !opts.dangerouslyInteract) {
       const { exactText, ...rest } = opts;
-      if (!isBoundTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
+      if (!isBoundTerminalSeat(this.db, sessionName) && !isBoundTerminalSeat(this.db, physicalSessionName(this.db, sessionName))) return this.send(sessionName, text, rest);
       return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined, typedExactly: true })), envelopeOmitted: true };
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
