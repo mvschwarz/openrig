@@ -31,6 +31,8 @@ interface StubResponse {
   data: unknown;
 }
 
+const STUB_SENDER = "stub@rig";
+
 function makeDeps(opts?: {
   routes?: Record<string, StubResponse | StubResponse[]>;
 }): { deps: QueueDeps; calls: Array<{ method: string; path: string; body?: unknown }> } {
@@ -41,6 +43,8 @@ function makeDeps(opts?: {
     deps: {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
+        // The sender this stub stamps; the transitions it synthesizes record it as their actor, as the daemon does.
+        senderIdentity: async () => ({ session: STUB_SENDER, originUnknown: false }),
         get: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
           const route = routes[`GET ${path}`];
@@ -54,8 +58,8 @@ function makeDeps(opts?: {
               ? (update.body as { transitionNote?: unknown }).transitionNote
               : undefined;
             return { status: 200, data: [
-              { transitionId: 1, transitionNote: null },
-              ...(typeof transitionNote === "string" ? [{ transitionId: 2, transitionNote }] : []),
+              { transitionId: 1, transitionNote: null, actorSession: STUB_SENDER },
+              ...(typeof transitionNote === "string" ? [{ transitionId: 2, transitionNote, actorSession: STUB_SENDER }] : []),
             ] };
           }
           const match = /^\/api\/queue\/([^/]+)$/.exec(path);

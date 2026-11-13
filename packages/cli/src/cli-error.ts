@@ -14,6 +14,7 @@ import type { Command } from "commander";
 import { InvalidArgumentError } from "commander";
 import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "./client.js";
 import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
+import { resetSenderSession } from "./sender-identity.js";
 
 /**
  * Commander option parser — a positive integer (>= 1). Rejects negative, zero,
@@ -175,13 +176,14 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
   };
   suppressErr(program);
 
+  // Each run starts clean: an earlier in-process run's failure isn't this run's status, and its sender isn't this run's.
+  process.exitCode = undefined;
+  resetSenderSession();
   try {
     await program.parseAsync(argv);
-    if (typeof process.exitCode === "number" && process.exitCode !== 0) {
-      exit(process.exitCode);
-      return process.exitCode;
-    }
-    return 0;
+    // An action's own failure sets process.exitCode. It's returned, not passed to process.exit(), which can drop output
+    // still being written to a pipe; the process ends with process.exitCode.
+    return typeof process.exitCode === "number" ? process.exitCode : 0;
   } catch (e) {
     if (isCleanCommanderExit(e)) return 0;
     // Response-integrity: render daemon transport failures honestly (3-part, both

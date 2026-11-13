@@ -62,12 +62,12 @@ function depsThrowing(err: Error): { queueDeps: QueueDeps } {
 async function runCli(args: string[], deps?: Parameters<typeof createProgram>[0]) {
   const out: string[] = [];
   const err: string[] = [];
-  let exitCode = 0;
   const program = createProgram(deps);
-  await runProgram(program, ["node", "rig", ...args], {
+  // The run's status is what runProgram returns; it calls exit only on its own error paths, with the same code.
+  const exitCode = await runProgram(program, ["node", "rig", ...args], {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
-    exit: (c) => { exitCode = c; },
+    exit: () => undefined,
   });
   return { out: out.join("\n"), err: err.join("\n"), exitCode };
 }

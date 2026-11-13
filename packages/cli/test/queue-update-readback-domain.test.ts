@@ -21,6 +21,7 @@ let repo: QueueRepository;
 async function runUpdate(qitemId: string, args: string[], transform: UpdateTransform = (body) => body, transitionsRead?: TransitionsRead) {
   let transitionReads = 0;
   let posts = 0;
+  let exits = 0;
   const output: string[] = [];
   const errors: string[] = [];
   const program = new Command();
@@ -40,6 +41,7 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
       isProcessAlive: () => true,
     },
     clientFactory: () => ({
+      senderIdentity: async () => ({ session: "reviewer@fixture", originUnknown: false }),
       get: async (route: string) => route.endsWith("/transitions")
         ? transitionsRead?.(transitionReads++) ?? { status: 200, data: repo.listTransitions(qitemId) }
         : { status: 200, data: repo.getById(qitemId) },
@@ -55,7 +57,7 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
       },
     }) as never,
   }));
-  process.exitCode = undefined;
+  // No exit status is reset here: each run's status is runProgram's to start clean.
   const originalLog = console.log;
   const originalError = console.error;
   console.log = (...values: unknown[]) => output.push(values.join(" "));
@@ -64,9 +66,9 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
     const code = await runProgram(program, ["node", "rig", "queue", "update", qitemId, ...args, "--json"], {
       out: (value) => output.push(value),
       err: (value) => errors.push(value),
-      exit: () => undefined,
+      exit: () => { exits += 1; },
     });
-    return { code, output, errors, row: repo.getByIdOrThrow(qitemId), transitions: repo.listTransitions(qitemId), posts };
+    return { code, output, errors, row: repo.getByIdOrThrow(qitemId), transitions: repo.listTransitions(qitemId), posts, exits };
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -218,6 +220,44 @@ describe("queue update canonical read-back against daemon domain semantics", () 
     expect(said).toContain("queue_update_readback_failed");
     expect(said).toContain("can't be shown to be new");
     expect(said).not.toContain("queue_update_preflight_failed");
+  });
+
+  it("gives each run its own exit status: a failed update, then a successful one in the same process", async () => {
+    const qitemId = await claimedRow();
+    const failed = await runUpdate(qitemId, ["--note", "dropped"], () => null);
+    const succeeded = await runUpdate(qitemId, ["--note", "kept"]);
+
+    expect(failed.code).toBe(1);
+    expect(succeeded.code, succeeded.errors.join("\n")).toBe(0);
+    // The action's failure is returned, never passed to process.exit(), which can cut off piped output.
+    expect([failed.exits, succeeded.exits]).toEqual([0, 0]);
+  });
+
+  // A note is this write's only when this write's actor recorded it, as written or with what the daemon adds for it.
+  it.each([
+    ["another writer's identical note", "other@fixture", "must persist"],
+    ["a lookalike note that starts the same way", "reviewer@fixture", "must persist (correction: still blocked)"],
+    ["a lookalike note on a new line", "reviewer@fixture", "must persist\nbut still blocked"],
+  ] as const)("doesn't take %s for a dropped note", async (_label, actor, note) => {
+    const qitemId = await claimedRow();
+    const result = await runUpdate(qitemId, ["--note", "must persist"], () => {
+      repo.update({ qitemId, actorSession: actor, transitionNote: note });
+      return null;
+    });
+
+    expect(result.transitions.at(-1)?.transitionNote).toBe(note);
+    expect(result.code).toBe(1);
+    const said = JSON.parse(result.errors.join("\n")) as { error: string; message: string };
+    expect(said.error).toBe("queue_update_readback_failed");
+    expect(said.message).toContain('no newer canonical transition carried requested note "must persist" from "reviewer@fixture"');
+  });
+
+  it("accepts the summary suffix the daemon adds to a note", async () => {
+    const qitemId = await claimedRow();
+    const result = await runUpdate(qitemId, ["--note", "must persist", "--summary", "new subject"]);
+
+    expect(result.code, result.errors.join("\n")).toBe(0);
+    expect(result.transitions.at(-1)?.transitionNote).toBe("must persist (summary updated)");
   });
 
   it("accepts a note only after its canonical transition appears", async () => {

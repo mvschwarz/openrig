@@ -1,5 +1,7 @@
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { execFileSync } from "node:child_process";
+import type Database from "better-sqlite3";
+import { openLocalDbReadonly } from "./local-db.js";
 
 export type TmuxIdentityReader = (pane: string, option: string) => string | undefined;
 
@@ -19,20 +21,65 @@ const readTmuxIdentity: TmuxIdentityReader = (pane, option) => {
   }
 };
 
+/** Whether the daemon still binds a node to a tmux session. Claim records the binding beside the session's metadata;
+ *  unclaim deletes it in its own transaction even when clearing the metadata fails. */
+export type BindingCheck = (nodeId: string, tmuxSession: string) => boolean;
+
+export function bindingIsCurrent(db: Database.Database, nodeId: string, tmuxSession: string): boolean {
+  return db.prepare("SELECT 1 FROM bindings WHERE node_id = ? AND tmux_session = ?").get(nodeId, tmuxSession) !== undefined;
+}
+
+/** The binding as this home's database records it; no database, or no answer, isn't evidence of a binding. */
+const localBindingIsCurrent: BindingCheck = (nodeId, tmuxSession) => {
+  let db: Database.Database | undefined;
+  try {
+    db = openLocalDbReadonly();
+    return bindingIsCurrent(db, nodeId, tmuxSession);
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+};
+
+// The pane's seat, read once per run (runProgram resets it), so a command's preflight and every request it sends share one
+// value and one tmux read. Keyed by what produced it, so a different pane or reader reads again.
+let paneSeat: { pane: string; tmuxReader: TmuxIdentityReader; isBound: BindingCheck; session: string | undefined } | undefined;
+
+/** Forget the pane seat read for the previous run. */
+export function resetSenderSession(): void {
+  paneSeat = undefined;
+}
+
 /**
  * The seat identity a CLI dispatch is attributed to — the SAME value the
  * DaemonClient stamps as `X-OpenRig-Session` (the P18 chokepoint), from which
  * the daemon DERIVES the actor / rendered `From:`. The process seat env wins;
  * a reconciled managed pane's `@rigged_session_name` repairs a live process
- * that predates its env binding. Caller-supplied body claims never become a
- * seat. Returns `undefined` when neither managed source resolves.
+ * that predates its env binding, but only while the daemon still binds that
+ * session's node to it: metadata left behind on a released session isn't a
+ * current seat. Caller-supplied body claims never become a seat. Returns
+ * `undefined` when neither managed source resolves.
  */
-export function resolveSenderSession(tmuxReader: TmuxIdentityReader = readTmuxIdentity): string | undefined {
+export function resolveSenderSession(
+  tmuxReader: TmuxIdentityReader = readTmuxIdentity,
+  isBound: BindingCheck = localBindingIsCurrent,
+): string | undefined {
   const env = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   if (env) return env;
   const pane = process.env.TMUX_PANE?.trim();
   if (!pane) return undefined;
-  return tmuxReader(pane, "@rigged_session_name")?.trim() || undefined;
+  if (paneSeat?.pane === pane && paneSeat.tmuxReader === tmuxReader && paneSeat.isBound === isBound) return paneSeat.session;
+  const session = boundPaneSeat(pane, tmuxReader, isBound);
+  paneSeat = { pane, tmuxReader, isBound, session };
+  return session;
+}
+
+function boundPaneSeat(pane: string, tmuxReader: TmuxIdentityReader, isBound: BindingCheck): string | undefined {
+  const session = tmuxReader(pane, "@rigged_session_name")?.trim();
+  if (!session) return undefined;
+  const nodeId = tmuxReader(pane, "@rigged_node_id")?.trim();
+  return nodeId && isBound(nodeId, session) ? session : undefined;
 }
 
 /**

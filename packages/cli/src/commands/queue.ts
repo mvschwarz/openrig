@@ -702,6 +702,7 @@ const UPDATE_READ_BACK_FIELDS = [
 interface QueueTransitionReadBack {
   transitionId: number;
   transitionNote: string | null;
+  actorSession: string;
 }
 
 function queueUpdateFieldMatches(field: (typeof UPDATE_READ_BACK_FIELDS)[number], requested: unknown, actual: unknown): boolean {
@@ -716,9 +717,34 @@ function queueUpdateFieldMatches(field: (typeof UPDATE_READ_BACK_FIELDS)[number]
   return Object.is(actual, requested);
 }
 
-function transitionCarriesRequestedNote(actual: string | null, requested: string): boolean {
-  if (actual === requested || actual === `reopen acknowledged: ${requested}`) return true;
-  return actual?.startsWith(`${requested}\n`) === true || actual?.startsWith(`${requested} (`) === true;
+/** Whether a recorded note is this update's note as the daemon records it (QueueRepository.update): as written, or with
+ *  only what the daemon adds for this request, the reopen prefix, the summary suffix, or a revised deadline's receipt
+ *  naming the new time and the accepting actor. Another writer's note that merely starts the same way isn't. */
+function noteRecordedAs(actual: string, note: string, requested: Record<string, unknown>, actor: string, deadline: unknown): boolean {
+  const bases = [note];
+  if (requested.reopen === true) bases.push(`reopen acknowledged: ${note}`);
+  if (typeof requested.summary === "string" && requested.summary.trim() && !note.includes("(summary updated)")) {
+    bases.push(`${note} (summary updated)`);
+  }
+  if (requested.closureRequiredAt === undefined) return bases.includes(actual);
+  // The receipt's earlier time isn't known here: it's one line between the fixed parts.
+  const tail = ` -> ${String(deadline)}; accepted by ${actor}`;
+  return bases.some((base) => {
+    const head = `${base}\nclosure deadline re-estimated: `;
+    if (!actual.startsWith(head) || !actual.endsWith(tail) || actual.length <= head.length + tail.length) return false;
+    return !actual.slice(head.length, actual.length - tail.length).includes("\n");
+  });
+}
+
+/** Who the daemon records as this write's actor: the sender header as sent (on this host's own daemon also without this
+ *  host's id, which the daemon drops), else the actor the body declares. Empty when neither is known. */
+async function updateActors(client: Pick<DaemonClient, "senderIdentity">, bodyActor: unknown, remote: boolean): Promise<string[]> {
+  const { session } = await client.senderIdentity();
+  if (session) {
+    const parts = session.split("@");
+    return parts.length === 3 && !remote ? [session, `${parts[0]}@${parts[1]}`] : [session];
+  }
+  return typeof bodyActor === "string" && bodyActor.trim() ? [bodyActor.trim()] : [];
 }
 
 async function readQueueTransitionCursor(
@@ -754,6 +780,8 @@ async function readBackQueueUpdate(
   transitionFloor?: number,
   /** Why the transition cursor wasn't taken before the write, when it wasn't. */
   floorUnknown?: string,
+  /** Who the daemon records as this write's actor (updateActors). */
+  actors: string[] = [],
 ): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; detail: string }> {
   let response: DaemonResponse<Record<string, unknown>>;
   try {
@@ -782,6 +810,9 @@ async function readBackQueueUpdate(
     if (transitionFloor === undefined) {
       return { ok: false, detail: `the requested note can't be shown to be new, because the transition read before the write failed (${floorUnknown ?? "no cursor"})` };
     }
+    if (actors.length === 0) {
+      return { ok: false, detail: "the requested note can't be tied to this write, because the actor it was sent as isn't known" };
+    }
     let transitions: DaemonResponse<unknown>;
     try {
       transitions = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, options);
@@ -796,11 +827,16 @@ async function readBackQueueUpdate(
       const transition = entry as Partial<QueueTransitionReadBack>;
       return typeof transition.transitionId === "number"
         && transition.transitionId > transitionFloor
-        && (typeof transition.transitionNote === "string" || transition.transitionNote === null)
-        && transitionCarriesRequestedNote(transition.transitionNote, requestedNote);
+        && typeof transition.transitionNote === "string"
+        && typeof transition.actorSession === "string"
+        && actors.includes(transition.actorSession)
+        && noteRecordedAs(transition.transitionNote, requestedNote, requested, transition.actorSession, response.data.closureRequiredAt);
     });
     if (!matching) {
-      return { ok: false, detail: `no newer canonical transition carried requested note ${JSON.stringify(requestedNote)}` };
+      return {
+        ok: false,
+        detail: `no newer canonical transition carried requested note ${JSON.stringify(requestedNote)} from ${actors.map((actor) => JSON.stringify(actor)).join(" or ")}`,
+      };
     }
   }
   return { ok: true, row: response.data };
@@ -1613,12 +1649,16 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
         }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, requested, target.options);
         if (res.status < 400) {
-          const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown);
+          const actors = await updateActors(target.client, requested.actorSession, target.remote !== undefined);
+          const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown, actors);
           if (!verified.ok) {
             emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false);
             return;
           }
-          await printQueueItemResult(target.client, qitemId, opts.json ?? false, verified.row, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
+          // The canonical row's fields win; the write's own advisories (a park with no wake) come only with its response.
+          const advisories = (res.data as { advisories?: unknown } | null)?.advisories;
+          const row = Array.isArray(advisories) ? { ...verified.row, advisories } : verified.row;
+          await printQueueItemResult(target.client, qitemId, opts.json ?? false, row, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
           return;
         }
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
