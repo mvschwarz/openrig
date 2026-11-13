@@ -79,6 +79,16 @@ describe("shared restore preconditions", () => {
       .toEqual(["startup_owner_root_missing", "required_startup_file_missing"]);
   });
 
+  it("returns the invalid_snapshot_data blocker instead of throwing when sessions is missing", () => {
+    const snapshot = data();
+    delete (snapshot as Partial<SnapshotData>).sessions;
+    const result = validatePreRestore(snapshot, { fsOps: { exists: () => true } });
+    expect(result).toEqual({
+      blockers: [expect.objectContaining({ code: "invalid_snapshot_data", target: "snapshot.sessions" })],
+      warnings: [],
+    });
+  });
+
   it("preserves the absent-service and default-existence behavior", () => {
     expect(validatePreRestore(data(), {})).toEqual({ blockers: [], warnings: [] });
   });

@@ -41,6 +41,7 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import type { TaskTerminalView, TaskMembership } from "./task-terminal-view.js";
 import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
@@ -81,6 +82,8 @@ export interface OpenViewRequest {
   expectedPlan?: string;
   /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
   viewportColumns?: number;
+  /** Reuse a workspace that still shows this view live instead of opening a copy (herdr). */
+  reuseLive?: boolean;
   /** The herdr-app client (its app home) for provider herdr-app. */
   herdrApp?: HerdrAppTarget;
 }
@@ -291,17 +294,21 @@ export class TerminalService {
       : errorResult(name, "unsupported_terminal_session", `Provider '${name}' does not support selecting a named session. Use herdr with --session <name>.`);
   }
 
-  /** Resolved once, so a preview and the open that follows compose the same pane commands. */
-  private resolveLocalTmux(): Promise<string | undefined> {
-    this.localTmux ??= (async () => {
-      try {
-        const path = await this.deps.resolveLocalTmux?.();
-        return typeof path === "string" && isAbsolute(path) ? path : undefined;
-      } catch {
-        return undefined;
-      }
-    })();
-    return this.localTmux;
+  /** Resolved once, so a preview and the open that follows compose the same pane commands; resolved again once that
+   *  file is gone (e.g. a removed version-manager shim), so a long-running daemon never hands out a dead tmux path. */
+  private async resolveLocalTmux(): Promise<string | undefined> {
+    const cached = await (this.localTmux ??= this.probeLocalTmux());
+    if (cached === undefined || existsSync(cached)) return cached;
+    return this.localTmux = this.probeLocalTmux();
+  }
+
+  private async probeLocalTmux(): Promise<string | undefined> {
+    try {
+      const path = await this.deps.resolveLocalTmux?.();
+      return typeof path === "string" && isAbsolute(path) ? path : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** An omitted provider takes the first in DEFAULT_PROVIDER_ORDER that is available and alive. With neither, it stays
@@ -345,9 +352,10 @@ export class TerminalService {
         absent: composed.absent, degraded: composed.degraded, notes,
       };
     }
-    const result = await provider.openView({ ...composed, planId });
+    const result = req.reuseLive ? await provider.openView({ ...composed, planId }, { reuseLive: true }) : await provider.openView({ ...composed, planId });
     // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
-    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app") {
+    // A reused workspace already shows every tile.
+    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app" && !result.reusedWorkspace) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
       notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");

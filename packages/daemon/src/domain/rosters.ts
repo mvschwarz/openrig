@@ -27,7 +27,8 @@ export interface RosterMember extends Reference {
   /** A hosted member's trigger, rung when a row lands for it. */
   wake?: RosterWake;
   /** How often a hosted member is expected to check its queue, in minutes, as its person set it up (an hourly schedule
-   *  is 60). Stated, not observed: absent means it checks only when a person prompts it. */
+   *  is 60). Stated, not observed. Absent implies neither a schedule nor on request: without `check_in_on_request`
+   *  either, the member's check-in status reads unknown. */
   check_in_minutes?: number;
   /** Its person set it to check in when asked, not on a schedule. */
   check_in_on_request?: true;

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { communityHarnessLabel, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
+import type { RunnerGrantIssuer } from "../src/domain/runner-grant-launch.js";
 import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harness-runtime-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
@@ -15,7 +16,7 @@ const PRESET = "format: 1\nname: synth\ncommand: synth-launch --serve\nmaintaine
 const binding = { tmuxSession: "w@r" } as NodeBinding;
 
 /** A seat whose launcher writes `record(attempt)` to the file this launch names (or nothing, for undefined). */
-function seat(record?: (attempt: string, file: string) => unknown, preset = PRESET) {
+function seat(record?: (attempt: string, file: string) => unknown, preset = PRESET, runnerGrants?: RunnerGrantIssuer) {
   const presets = scratch("harness-presets-");
   writeFileSync(join(presets, "synth.yaml"), preset);
   const root = scratch("harness-results-");
@@ -27,7 +28,7 @@ function seat(record?: (attempt: string, file: string) => unknown, preset = PRES
     return { ok: true as const };
   });
   const app = new CommunityHarnessRuntimeAdapter("synth", { tmux: { hasSession: vi.fn(async () => true), getPaneCommand: vi.fn(async () => "node"), sendShellCommand },
-    presetsDir: () => presets, launchResultRoot: () => root, launchResultWait: { timeoutMs: 20, intervalMs: 10 } });
+    runnerGrants, presetsDir: () => presets, launchResultRoot: () => root, launchResultWait: { timeoutMs: 20, intervalMs: 10 } });
   return { app, sendShellCommand, presets, root };
 }
 const good = (attempt: string) => ({ format: 1, attempt, harness: "synth", nativeRef: "chat-123", producer: "synth-launch 1.0" });
@@ -156,5 +157,71 @@ describe("a community harness whose launcher can reopen a reported conversation"
     const presets = scratch("harness-presets-");
     writeFileSync(join(presets, "synth.yaml"), `${PRESET.replace("launch_result: true\n", "")}resume: true\n`);
     expect(loadCommunityHarnessPreset("synth", presets)).toMatchObject({ ok: false, message: expect.stringContaining("resume needs launch_result: true or names_conversation: true") });
+  });
+});
+
+describe("community run authority", () => {
+  it.each([true, false])("binds the launch-result attempt and finalizes exact readiness=%s", async ready => {
+    let runId: string | undefined;
+    const dispatched = vi.fn(), finish = vi.fn(async (_ok: boolean) => {});
+    const runnerGrants: RunnerGrantIssuer = async (_binding, runtime, attempt, runner) => {
+      expect([runtime, runner]).toEqual(["synth", 1]); runId = attempt;
+      return { grantId: "test-grant", generation: "generation", wrap: command => command, dispatched, finish };
+    };
+    const f = seat(ready ? (attempt) => { expect(attempt).toBe(runId); return good(attempt); } : undefined,
+      `${PRESET}runner: true\n`, runnerGrants);
+    expect((await f.app.launchHarness(binding, { name: "w@r" })).ok).toBe(ready);
+    expect(runId).toBeTruthy();
+    expect(dispatched).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(ready);
+  });
+
+  it("allocates and revokes an attempt when the launch-result folder is unavailable", async () => {
+    const finish = vi.fn(async (_ok: boolean) => {});
+    const issue = vi.fn(async (_binding, _runtime, _runId, _runner) => ({ grantId: "test-grant", generation: "generation", wrap: (command: string) => command, dispatched: () => {}, finish }));
+    const f = seat(undefined, `${PRESET}runner: true\n`, issue);
+    rmSync(f.root, { recursive: true });
+    writeFileSync(f.root, "blocked");
+    expect((await f.app.launchHarness(binding, { name: "w@r" })).ok).toBe(false);
+    expect(issue.mock.calls[0]?.[2]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+});
+
+it("finalizes its exact community grant when post-dispatch standing refuses", async () => {
+  const finish = vi.fn(async (_ok: boolean) => {});
+  const f = seat(good, `${PRESET}runner: true\n`, async () => ({ grantId: "refused", generation: "generation", wrap: command => command,
+    dispatched: () => { throw new Error("binding changed"); }, finish }));
+  expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+  expect(f.sendShellCommand).toHaveBeenCalledOnce();
+  expect(finish).toHaveBeenCalledWith(false);
+});
+
+
+describe("community reporting grants are optional to native launch", () => {
+  it("retries only its original command when the optional grant wrapper cannot be staged", async () => {
+    const finish = vi.fn(async () => {}), dispatched = vi.fn();
+    const issue: RunnerGrantIssuer = async () => ({ grantId: "own", generation: "g", wrap: command => `private-wrapper ${command}`, dispatched, finish });
+    const f = seat(good, `${PRESET}runner: true\n`, issue);
+    f.sendShellCommand.mockImplementationOnce(async () => ({ ok: false, code: "launch_path_too_long", message: "not dispatched" }) as never);
+    expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+    expect(f.sendShellCommand).toHaveBeenCalledTimes(2);
+    expect(f.sendShellCommand.mock.calls[0]![1]).toBe(`private-wrapper ${f.sendShellCommand.mock.calls[1]![1]}`);
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+
+  it.each(["setup", "activation"] as const)("preserves one dispatched native launch when grant %s fails", async failure => {
+    const finish = vi.fn(async () => {});
+    const issue: RunnerGrantIssuer = async () => {
+      if (failure === "setup") throw new Error("credential environment unavailable");
+      return { grantId: "affected", generation: "g", wrap: command => command,
+        dispatched: () => { throw new Error("activation failed after send"); }, finish };
+    };
+    const f = seat(good, `${PRESET}runner: true\n`, issue);
+    expect(await f.app.launchHarness(binding, { name: "w@r" })).toMatchObject({ ok: true, resumeToken: "chat-123" });
+    expect(f.sendShellCommand).toHaveBeenCalledOnce();
+    expect(f.sendShellCommand.mock.calls[0]![1]).not.toContain("OPENRIG_RUN_ID=");
+    if (failure === "activation") expect(finish).toHaveBeenCalledWith(false);
   });
 });

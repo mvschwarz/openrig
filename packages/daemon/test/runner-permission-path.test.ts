@@ -1,3 +1,4 @@
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 // A runner seat's answered permission path, through the real activity routes, queue, Mission Control answer route,
 // activity store and seat grant. The chosen person's one offered option reaches only that live request; nothing else
 // ever reads as an answer. No model, Slack or terminal is involved.
@@ -463,6 +464,30 @@ describe("a runner seat's answered permission path", () => {
       expect(await f.submit({ requestId: "9" }, otherGrant.token)).toMatchObject({ status: 403, body: { code: "activity_grant_wrong_seat" } });
       if (guest) expect(await f.submit({ requestId: "10" })).toMatchObject({ status: 401 });
     }
+  });
+
+  it.each([false, true])("refuses unverified grant reads and writes without changing the live ask, then recovers (guest=%s)", async guest => {
+    const f = fixture({ guest });
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.runner.id, SEAT);
+    const session = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.runner.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "launch", run: {
+      runId: "permission-run", sessionId: session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const askId = String((await f.submit({}, grant.token)).body.askId);
+    const before = f.queueRepo.getById(askId);
+    const events = f.db.prepare("SELECT COUNT(*) AS n FROM events").get();
+    const read = vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("observation unavailable"); });
+    try {
+      for (const reply of [await f.read(askId, 0, grant.token), await f.withdraw(askId, "turn_ended", grant.token),
+        await f.submit({ requestId: "unverified-new" }, grant.token)]) {
+        expect(reply).toMatchObject({ status: 409, body: { code: "activity_grant_unverified", retryable: true } });
+      }
+      expect(f.queueRepo.getById(askId)).toEqual(before);
+      expect(f.db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(events);
+      expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+    } finally { read.mockRestore(); }
+    expect(await f.read(askId, 0, grant.token)).toMatchObject({ status: 200, body: { state: "pending" } });
+    expect(f.grants.standing(grant.grantId)).toBe("current");
   });
 
   it("serves the real guest listener's app for a seat grant, and never for the install token", async () => {

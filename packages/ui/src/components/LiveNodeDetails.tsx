@@ -244,6 +244,14 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
           Copy resume command
         </button>
       )}
+      {data.resumeCommandLabel && (
+        <span
+          data-testid="detail-resume-command-label"
+          className="self-center font-mono text-[9px] text-on-surface-variant"
+        >
+          {data.resumeCommandLabel}
+        </span>
+      )}
     </div>
   );
 }
