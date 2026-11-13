@@ -3001,7 +3001,7 @@ describe("RestoreOrchestrator", () => {
   // attempt's own identity, and carries the notice's report. Seats not positively left as shells aren't handed over.
   it("hands the seats a restore left as bare shells to the notice, with the attempt's identity, and carries its report", async () => {
     const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
-    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-x", seats: ["dev-moved@r"] }], unrouted: [] };
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-x", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
     const notice = vi.fn(async () => report);
     const orch = createOrchestrator({ harnessNotStartedNotice: notice });
     const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
@@ -3012,12 +3012,26 @@ describe("RestoreOrchestrator", () => {
     expect(notice).toHaveBeenCalledTimes(1);
     expect(notice).toHaveBeenCalledWith(expect.objectContaining({
       attempt: expect.stringMatching(/^restore attempt \d+$/),
-      seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved" }],
+      seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
     }));
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
-  it("keeps the restore's result when the notice can't be recorded, with a warning", async () => {
+  it("carries a partial notice report, and its warnings join the restore's", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [], unrouted: [{ seat: "dev-moved@r", outcome: "none", reason: "no parent" }],
+      warnings: ["The notice to lead@r for dev-moved@r wasn't recorded (queue refused it)."] };
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => report });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.warnings).toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
+  });
+
+  it("keeps the restore's result when the notice itself throws, with a warning", async () => {
     const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     const orch = createOrchestrator({ harnessNotStartedNotice: async () => { throw new Error("queue unavailable"); } });
     const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });

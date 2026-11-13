@@ -270,7 +270,7 @@ export interface RestoreOrchestratorDeps {
    *  missing saved marker is reported, never guessed. */
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
   /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
-  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string }> }) => Promise<HarnessNotStartedReport>;
+  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
 export class RestoreOrchestrator {
@@ -1699,13 +1699,17 @@ export class RestoreOrchestrator {
     return true;
   }
 
-  /** The notice for the seats an attempt positively left as bare shells. A failure to send it is a warning: it never
-   *  changes or blocks the attempt's own result. Seats not positively left as shells stay in the roll call. */
+  /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
+   *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
+   *  positively left as shells stay in the roll call. */
   private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
-    const seats = results.filter((n) => n.stage === "harness_not_started").map(({ nodeId, logicalId }) => ({ nodeId, logicalId }));
+    const seats = results.filter((n) => n.stage === "harness_not_started")
+      .map(({ nodeId, logicalId, error }) => ({ nodeId, logicalId, ...(error ? { cause: error } : {}) }));
     if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
     try {
-      return await this.harnessNotStartedNotice({ rigId, attempt, seats });
+      const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
+      for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
+      return report;
     } catch (err) {
       warnings.push(`Restore: the notice for the seats left as a bare shell wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
       return undefined;
