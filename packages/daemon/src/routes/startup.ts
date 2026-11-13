@@ -1,3 +1,7 @@
+import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
+import { reserveOperation, validOperationId } from "../domain/operation-correlation.js";
+import { seatRuntimeHome } from "../domain/seat-runtime-home.js";
+import type { ContextUsageStore } from "../domain/context-usage-store.js";
 // The TUI's selection/consent boundary. State comes from existing repositories;
 // effects remain owned by kernel materialization, restore, and seat lifecycle.
 import { Hono, type Context } from "hono";
@@ -74,7 +78,7 @@ function sharedHistoryDeps(c: Context) {
     restoreOrchestrator: dep<RestoreOrchestrator>(c, "restoreOrchestrator") };
 }
 
-type HistoryRefs = { snapshotId: string; historySessionId: string };
+type HistoryRefs = { snapshotId: string; historySessionId: string; retained?: true };
 type SelectedState = { review: string; native: string } | { permissionUnavailable: true };
 
 /** The captured locator must still name the registry's same native history.
@@ -112,7 +116,9 @@ function selectedFacts(c: Context, rigId: string, nodeId: string, refs: HistoryR
   const rig = repo(c).getRig(rigId);
   const node = rig?.nodes.find(item => item.id === nodeId);
   if (!rig || !node) return null;
-  const snapshot = currentRestoreSnapshot(repo(c).db, dep<SnapshotRepository>(c, "snapshotRepo"), rig, nodeId);
+  const retained = refs.retained ? dep<SnapshotRepository>(c, "snapshotRepo").selectRestoreUsable(rigId, refs.snapshotId) : null;
+  const snapshot = refs.retained ? (retained?.ok ? retained.snapshot : null)
+    : currentRestoreSnapshot(repo(c).db, dep<SnapshotRepository>(c, "snapshotRepo"), rig, nodeId);
   if (!snapshot || snapshot.id !== refs.snapshotId) return null;
   return { rig, node, snapshot };
 }
@@ -287,11 +293,12 @@ function redactDiagnostic(value: string | null | undefined, tokens: readonly str
 
 // The list/validate contract supplies both references. This review adds the
 // consent revision for precisely one captured row, without native preparation.
-startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
+async function reviewSelectedHistory(c: Context, retained = false) {
   const query = new URL(c.req.url).searchParams;
   const refs = selectedRefs(Object.fromEntries(query.entries()));
   if (!refs || [...query.keys()].length !== 2) return c.json({ ok: false, code: "invalid_request", message: "Supply snapshotId and historySessionId from the history list." }, 400);
-  const rigId = c.req.param("rigId"), nodeId = c.req.param("nodeId");
+  if (retained) refs.retained = true;
+  const rigId = c.req.param("rigId")!, nodeId = c.req.param("nodeId")!;
   const selection = listSharedHistories(sharedHistoryDeps(c), rigId, nodeId, refs);
   if (!selection.ok) return c.json(selection, selection.code === "seat_unavailable" ? 404 : 409);
   const facts = selectedFacts(c, rigId, nodeId, refs);
@@ -312,34 +319,93 @@ startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
   try { permission = selectedPermissionFacts(c, rigId, nodeId, facts.node.runtime ?? ""); }
   catch { return c.json({ ok: false, code: "permission_unavailable", message: "The selected seat's saved permission choice needs repair before launch." }, 409); }
   const effort = readSeatEffort(repo(c).db, nodeId);
-  return c.json({ ok: true, contract: "startup-history.v1", rigId, nodeId, logicalId: facts.node.logicalId,
+  let home: ReturnType<typeof seatRuntimeHome> = {};
+  if (retained && (facts.node.runtime === "claude-code" || facts.node.runtime === "codex")) {
+    try { home = seatRuntimeHome(repo(c).db, nodeId, facts.node.runtime); }
+    catch { return c.json({ ok: false, partial: true, code: "account_home_unavailable", message: "The current selected runtime home could not be resolved." }, 409); }
+  }
+  return c.json({ ok: true, contract: "startup-history.v1", ...(retained ? { intent: "resume-original" } : {}), rigId, nodeId, logicalId: facts.node.logicalId,
     snapshotId: refs.snapshotId, historySessionId: refs.historySessionId, history: selection.histories[0],
     forecast, observed: { state: observed.state, sessionName: observed.sessionName },
-    settingsSource: { model: { value: capturedNode?.model ?? null, source: "snapshot" },
-      effort: { value: effort?.choice ?? capturedNode?.effort ?? null,
-        source: effort?.choice ? "saved_choice" : "snapshot" },
+    settingsSource: { model: { value: retained ? facts.node.model : capturedNode?.model ?? null, source: retained ? "current_node" : "snapshot" },
+      ...(retained ? { cwd: { value: facts.node.cwd, source: "current_node" },
+        accountHome: { value: home.home ?? (facts.node.runtime === "codex" ? process.env.CODEX_HOME : process.env.CLAUDE_CONFIG_DIR) ?? null,
+          source: home.source ?? ((facts.node.runtime === "codex" ? process.env.CODEX_HOME : process.env.CLAUDE_CONFIG_DIR) ? "daemon_environment" : "native_default"), authentication: "unconfirmed" } } : {}),
+      effort: { value: retained ? effort?.effective ?? null : effort?.choice ?? capturedNode?.effort ?? null,
+        source: retained ? effort?.source ?? "runtime_default" : effort?.choice ? "saved_choice" : "snapshot" },
       permission,
       codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" } },
     revision: state.review, mutated: false });
-});
+ }
+startupRoutes.get("/:rigId/nodes/:nodeId", c => reviewSelectedHistory(c));
+startupRoutes.get("/:rigId/nodes/:nodeId/original", c => reviewSelectedHistory(c, true));
 
-startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
+async function applySelectedHistory(c: Context, original = false) {
   if (new URL(c.req.url).search) return c.json({ ok: false, code: "invalid_request", message: "Apply takes no query fields." }, 400);
-  const refs = selectedRefs(await c.req.json().catch(() => null), true);
+  const body = await c.req.json().catch(() => null);
+  let expected: ExpectedConversation | undefined;
+  if (original) {
+    if (!body || typeof body.operationId !== "string" || !validOperationId(body.operationId))
+      return c.json({ ok: false, code: "invalid_request", message: "An operationId UUID is required for original-only resume." }, 400);
+    try { expected = expectedConversation(body.expectedOriginal); }
+    catch { return c.json({ ok: false, code: "invalid_request", message: "Supply the banked expectedOriginal identity." }, 400); }
+  }
+  const refs = selectedRefs(original && body ? { action: body.action, snapshotId: body.snapshotId,
+    historySessionId: body.historySessionId, revision: body.revision } : body, true);
   if (!refs) return c.json({ ok: false, code: "invalid_request", message: "Apply requires action resume, snapshotId, historySessionId and the selected review revision." }, 400);
-  const rigId = c.req.param("rigId"), nodeId = c.req.param("nodeId");
+  const rigId = c.req.param("rigId")!, nodeId = c.req.param("nodeId")!;
+  if (original) refs.retained = true;
   return exclusive(c, nodeId, async () => {
+    let identityIssue: { code: string; detail: string } | null = null;
+    const partial = (code: string, message: string) => c.json({ ok: false, partial: true, code, message,
+      ...(identityIssue ? { identityEvidence: identityIssue } : {}),
+      operationId: body.operationId, rigId, nodeId, snapshotId: refs.snapshotId, historySessionId: refs.historySessionId }, 409);
+    const matchesRunning = async () => {
+      if (!expected || expected.nodeId !== nodeId) return false;
+      try {
+        const found = await resolveExpectedConversation(expected, sessions(c), tmux(c), dep<ContextUsageStore | undefined>(c, "contextUsageStore"));
+        found.assertCurrent(); identityIssue = null; return true;
+      } catch (error) {
+        identityIssue = { code: (error as { code?: string }).code ?? "expected_identity_unavailable",
+          detail: redactDiagnostic(error instanceof Error ? error.message : String(error), expected ? [expected.nativeId] : []) ?? "Current native identity could not be read." };
+        return false;
+      }
+    };
+    let originalOperation: ReturnType<typeof reserveOperation> | undefined;
+    if (original) {
+      const target = repo(c).getRig(rigId)?.nodes.find(node => node.id === nodeId);
+      if (!target || expected!.nodeId !== nodeId || target.runtime !== expected!.runtime)
+        return partial("original_changed", "The selected rig, node or runtime differs from the banked original.");
+      const operation = originalOperation = reserveOperation(repo(c).db, body.operationId, "seat.resume-original", [rigId, nodeId],
+        JSON.stringify({ ...refs, revision: body.revision, expectedOriginal: expected }));
+      if (operation.state === "conflict" || operation.state === "invalid" || operation.state === "absent")
+        return partial("operation_conflict", "The operation ID selects different input.");
+      if (operation.state === "fresh") operation.recordCreated(rigId, nodeId);
+    }
     const selection = listSharedHistories(sharedHistoryDeps(c), rigId, nodeId, refs);
-    if (!selection.ok) return c.json(selection, selection.code === "seat_unavailable" ? 404 : 409);
+    if (!selection.ok) return original ? partial(selection.code, selection.message) : c.json(selection, selection.code === "seat_unavailable" ? 404 : 409);
     const facts = selectedFacts(c, rigId, nodeId, refs);
     const state = facts && selectedState(c, rigId, nodeId, refs, facts.snapshot);
-    if (state && "permissionUnavailable" in state) return c.json({ ok: false, code: "permission_unavailable",
-      message: "The selected seat's saved permission choice needs repair before launch." }, 409);
-    if (!facts || !state || refs.revision !== state.review) return c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed. Refresh the review." }, 409);
+    if (original) {
+      const captured = facts?.snapshot.data.sessions.find(row => row.nodeId === nodeId && row.id === refs.historySessionId);
+      if (!captured || captured.resumeToken !== expected!.nativeId || facts?.node.runtime !== expected!.runtime)
+        return partial("original_changed", "The retained source does not establish the expected original conversation.");
+      if (await matchesRunning()) return c.json({ ok: true, code: "already_running_original", operationId: body.operationId, rigId, nodeId, nativeEffect: false });
+      // A persisted operation is never dispatched twice, including after restart or an uncertain effect.
+      if (originalOperation?.state === "replay") return partial("operation_unconfirmed", "The original-only operation is recorded but its current native outcome is unconfirmed. Inspect this seat; no second launch was attempted.");
+    }
+    if (state && "permissionUnavailable" in state) return original
+      ? partial("permission_unavailable", "The selected seat's current permission choice could not be resolved.")
+      : c.json({ ok: false, code: "permission_unavailable", message: "The selected seat's saved permission choice needs repair before launch." }, 409);
+    if (!facts || !state || refs.revision !== state.review) return original ? partial("selection_changed", "The selected seat or history changed. Refresh the review.") : c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed. Refresh the review." }, 409);
     const observed = await observeSeat(c, facts.rig, facts.node);
-    if (observed.state !== "stopped") return c.json({ ok: false, code: observed.state, message: "The selected seat is running or its terminal state is uncertain. No resume was started." }, 409);
-    const prerequisites = await defaultProbeRuntimes();
-    if ((facts.node.runtime === "codex" ? prerequisites.codex : prerequisites.claudeCode) !== "ok") return c.json({ ok: false, code: "provider_prerequisite", message: "The selected provider is unavailable or unauthenticated. No resume was started." }, 409);
+    if (observed.state !== "stopped") return original ? partial(observed.state, "The current occupant is not established as the expected original. It was left untouched.") : c.json({ ok: false, code: observed.state, message: "The selected seat is running or its terminal state is uncertain. No resume was started." }, 409);
+    // The ordinary path keeps its daemon-account prerequisite. Original-only resume uses
+    // the selected seat home at the existing native adapter; no daemon login is represented as its account proof.
+    if (!original) {
+      const prerequisites = await defaultProbeRuntimes();
+      if ((facts.node.runtime === "codex" ? prerequisites.codex : prerequisites.claudeCode) !== "ok") return c.json({ ok: false, code: "provider_prerequisite", message: "The selected provider is unavailable or unauthenticated. No resume was started." }, 409);
+    }
     const beforeEffect = () => {
       const again = listSharedHistories(sharedHistoryDeps(c), rigId, nodeId, refs);
       const current = selectedFacts(c, rigId, nodeId, refs);
@@ -351,7 +417,8 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
     const beforeNative = (resultSessionId?: string, bindingId?: string) => {
       const rig = repo(c).getRig(rigId);
       if (!rig?.nodes.some(node => node.id === nodeId && node.logicalId === facts.node.logicalId)) return false;
-      if (dep<SnapshotRepository>(c, "snapshotRepo").findLatestRestoreUsable(rigId)?.id !== refs.snapshotId) return false;
+      if (!refs.retained && dep<SnapshotRepository>(c, "snapshotRepo").findLatestRestoreUsable(rigId)?.id !== refs.snapshotId) return false;
+      if (refs.retained && !dep<SnapshotRepository>(c, "snapshotRepo").selectRestoreUsable(rigId, refs.snapshotId).ok) return false;
       const current = selectedState(c, rigId, nodeId, refs, facts.snapshot);
       if (!current || !("native" in current) || current.native !== state.native) return false;
       if (!resultSessionId) return true;
@@ -371,20 +438,26 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
       const running = repo(c).db.prepare("SELECT id FROM sessions WHERE node_id = ? AND status = 'running'").all(nodeId);
       return running.length === 0;
     };
-    const result = await dep<RestoreOrchestrator>(c, "restoreOrchestrator").launchSingleNode(rigId, facts.node.logicalId, {
+    let result: Awaited<ReturnType<RestoreOrchestrator["launchSingleNode"]>>;
+    try { result = await dep<RestoreOrchestrator>(c, "restoreOrchestrator").launchSingleNode(rigId, facts.node.logicalId, {
       snapshotId: refs.snapshotId, adapters: dep<Record<string, RuntimeAdapter>>(c, "runtimeAdapters"), fsOps: { exists: existsSync },
-      selectedHistory: { nodeId, historySessionId: refs.historySessionId, beforeEffect, beforeRegistration, beforeNative },
-    });
+      selectedHistory: { nodeId, historySessionId: refs.historySessionId, beforeEffect, beforeRegistration, beforeNative, ...(original ? { currentChoices: true as const } : {}) },
+    }); } catch (error) {
+      if (!original) throw error;
+      return partial("operation_unconfirmed", "The original-only effect did not return a confirmed result. Reconcile this operation and seat before retrying.");
+    }
     const outcome = result.launched?.[0];
     const ok = result.ok && outcome?.status === "resumed" && outcome.sourceSessionId === refs.historySessionId
-      && !!outcome.resultSessionId && !!launchedBindingId && beforeNative(outcome.resultSessionId, launchedBindingId);
+      && !!outcome.resultSessionId && !!launchedBindingId && beforeNative(outcome.resultSessionId, launchedBindingId)
+      && (!original || await matchesRunning() && beforeNative(outcome.resultSessionId, launchedBindingId));
     const tokens = new Set<string>(facts.snapshot.data.sessions.filter(row => row.nodeId === nodeId)
       .map(row => row.resumeToken).filter((token): token is string => !!token));
     for (const row of repo(c).db.prepare("SELECT resume_token FROM sessions WHERE node_id = ?").all(nodeId) as Array<{ resume_token: string | null }>) {
       if (row.resume_token) tokens.add(row.resume_token);
     }
     const diagnosticTokens = [...tokens];
-    const response = { ok, rigId, nodeId, snapshotId: refs.snapshotId, historySessionId: refs.historySessionId,
+    const response = { ok, ...(original ? { partial: !ok, operationId: body.operationId,
+      ...(identityIssue ? { identityEvidence: identityIssue } : {}) } : {}), rigId, nodeId, snapshotId: refs.snapshotId, historySessionId: refs.historySessionId,
       code: !ok && outcome?.status === "resumed" ? "resume_unconfirmed" : outcome?.status ?? result.code ?? "resume_unconfirmed",
       sourceSessionId: refs.historySessionId, resultSessionId: outcome?.resultSessionId ?? null,
       message: redactDiagnostic(outcome?.error ?? result.message ?? (ok ? "Selected native history resumed and joined." : "Selected resume was not confirmed; inspect this seat before retrying."), diagnosticTokens),
@@ -392,7 +465,9 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
       attentionEvidence: redactDiagnostic(outcome?.attentionEvidence, diagnosticTokens) };
     return c.json(response, ok ? 200 : 409);
   });
-});
+ }
+startupRoutes.post("/:rigId/nodes/:nodeId", c => applySelectedHistory(c));
+startupRoutes.post("/:rigId/nodes/:nodeId/original", c => applySelectedHistory(c, true));
 
 startupRoutes.post("/:rigId/:logicalId", async (c) => {
   const rig = repo(c).getRig(c.req.param("rigId"));

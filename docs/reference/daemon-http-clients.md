@@ -266,3 +266,39 @@ With `needs-me.read` supported:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+
+
+## Resume one banked original conversation
+
+The opt-in original-only operation reuses `startup-history.v1`. It targets one exact rig and node,
+with a retained snapshot and captured history. Platform boot enrollment remains an operator step.
+These routes use the existing terminal bearer token.
+
+1. Read `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`.
+   The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
+   It returns `revision`, the selected history and current model, effort, cwd, permission and runtime-home
+   provenance. `accountHome.authentication: "unconfirmed"` means that the home selection is configuration,
+   not proof of an authenticated account.
+2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
+   `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
+   `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
+   Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
+
+The operation keeps the current selected launch choices. Its original-only native effect uses the retained
+history and existing selected-history ownership checks. A positively established matching original already
+running returns `code: "already_running_original"` and `nativeEffect: false`. A confirmed resume returns
+`code: "resumed"`, with `sourceSessionId`, `resultSessionId` and `operationId`.
+
+An unavailable source, changed selection, different occupant, restoring-only result or unconfirmed native
+identity returns a partial result. Existing occupants stay in place. This selected operation never substitutes
+a fresh conversation. Its current-original check needs the existing qualified occupant, pane and native-record
+evidence; a stored resume token by itself is insufficient. A legacy named history that cannot establish the
+banked native identity remains partial.
+
+Retain the operation ID after a timeout. Repeating that same request first reconciles current native identity;
+it reports a matching running original or `operation_unconfirmed`, and never dispatches that operation again.
+The correlation survives daemon restart. An operation ID reused with different input returns
+`operation_conflict`. Inspect the recorded operation and seat before selecting any new attempt.
+
+A source-level fixture pass establishes the tested ownership, selection and reporting paths. Actual native
+conversation usefulness and authenticated-account continuity need a qualified runtime observation.

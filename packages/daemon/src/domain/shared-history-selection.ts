@@ -40,14 +40,16 @@ export function listSharedHistories(
   deps: { rigRepo: RigRepository; snapshotRepo: SnapshotRepository; restoreOrchestrator: RestoreOrchestrator },
   rigId: string,
   nodeId: string,
-  selection?: { snapshotId: string; historySessionId: string },
+  selection?: { snapshotId: string; historySessionId: string; retained?: true },
 ): SharedHistoryResult {
   const rig = deps.rigRepo.getRig(rigId);
   const node = rig?.nodes.find((entry) => entry.id === nodeId);
   if (!rig || !node) return seatUnavailable();
   const archived = deps.rigRepo.db.prepare("SELECT archived_at FROM rigs WHERE id=?").get(rigId) as { archived_at: string | null } | undefined;
   if (archived?.archived_at) return seatUnavailable();
-  const snapshot = currentRestoreSnapshot(deps.rigRepo.db, deps.snapshotRepo, rig, node.id);
+  const retained = selection?.retained ? deps.snapshotRepo.selectRestoreUsable(rigId, selection.snapshotId) : null;
+  const snapshot = selection?.retained ? (retained?.ok ? retained.snapshot : null)
+    : currentRestoreSnapshot(deps.rigRepo.db, deps.snapshotRepo, rig, node.id);
   if (!snapshot || !HISTORY_REF_RE.test(snapshot.id) || snapshot.data.rig.id !== rigId) return sourceUnavailable();
   // A same-name replacement, omitted roster member, or runtime switch is not
   // the same saved seat. Never borrow a captured row from another node.
