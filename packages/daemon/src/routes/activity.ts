@@ -366,7 +366,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     if (!grant?.runId) return c.json({ ok: false, code: "run_grant_required", error: "Observation reports require their run-bound credential." }, 403);
     const result = store.recordRunnerObservation(grant, body);
     if (!result.ok) return c.json(result, result.code === "runner_observation_conflict" ? 409
-      : result.code === "runner_observation_unavailable" ? 409 : 400);
+      : result.code === "runner_observation_unavailable" || result.code === "runner_observation_unverified" ? 409 : 400);
     return c.json(result);
   }
 

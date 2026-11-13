@@ -30,9 +30,12 @@ export function modelObservation(value: unknown, running = true): ModelObservati
 }
 
 export function formatModelObservation(value: ModelObservation): string {
+  // Escape only the human display, following seat's terminal JSON convention; wire identifiers stay exact.
+  const model = value.model?.replace(/\p{Cf}/gu,
+    character => character.split("").map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")) ?? value.model;
   return value.status === "observed"
     ? value.source === "runner_reported"
-      ? `${value.model} (runner-reported; sample ${value.observedAt})`
-      : `${value.model} (${value.source}; native record ${value.observedAt})`
+      ? `${model} (runner-reported; sample ${value.observedAt})`
+      : `${model} (${value.source}; native record ${value.observedAt})`
     : `UNKNOWN (${value.reason})`;
 }

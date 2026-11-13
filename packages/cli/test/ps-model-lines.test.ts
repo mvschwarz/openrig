@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { modelLines } from "../src/commands/ps.js";
+import { modelObservation } from "../src/lib/model-observation.js";
+import { compactNodeProjection, modelLines } from "../src/commands/ps.js";
 
 // #1680: a runtime without a model reader gets one summary line, not one UNKNOWN line per seat.
 describe("rig ps — model lines", () => {
@@ -22,6 +23,16 @@ describe("rig ps — model lines", () => {
     const lines = modelLines([seat("runner@k", "synth", "configured", { status: "observed", model: "provider/会話?model=1", source: "runner_reported",
       observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null })] as never);
     expect(lines).toEqual(["Model (runner@k): configured configured; last observed provider/会話?model=1 (runner-reported; sample 2026-10-21T10:00:00Z)"]);
+  });
+
+  it("escapes format characters only when rendering a runner model, retaining exact wire values", () => {
+    const model = "provider/会話\u202Emodel\u200Djoiner\u{E0001}";
+    const raw = { status: "observed", model, source: "runner_reported", observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null };
+    const node = seat("runner@k", "synth", "configured", raw), [line] = modelLines([node] as never);
+    expect(line).toContain("provider/会話\\u202emodel\\u200djoiner\\udb40\\udc01 (runner-reported;");
+    expect(line).not.toMatch(/\p{Cf}/u);
+    expect(modelObservation(raw).model).toBe(model);
+    expect(compactNodeProjection([node] as never)[0]!.modelObservation).toEqual([model, "runner_reported", raw.observedAt]);
   });
 
   it("keeps one line per seat for a lone seat, and for seats whose runtime has a model reader", () => {

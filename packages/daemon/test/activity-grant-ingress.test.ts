@@ -424,6 +424,42 @@ describe("credential-bound observation-only reports", () => {
     expect(f.reports()).toHaveLength(1);
   });
 
+  it.each(["unverified", "failed read"])("returns retryable domain uncertainty for an %s standing after route admission", async kind => {
+    const f = runner(), body = f.report(1, { model: { id: "model" }, context: { inputTokens: 11 } });
+    const record = f.store.recordRunnerObservation.bind(f.store);
+    const fault = vi.spyOn(f.store, "recordRunnerObservation").mockImplementation((grant, input) => {
+      const prepare = f.db.prepare.bind(f.db);
+      const read = kind === "unverified"
+        ? vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("binding read unavailable"); })
+        : vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+          if (sql === "PRAGMA table_info(activity_grants)") throw new Error("standing read unavailable");
+          return prepare(sql);
+        }) as typeof f.db.prepare);
+      try { return record(grant, input); } finally { read.mockRestore(); }
+    });
+    try {
+      expect(await f.post(f.grant.token, body)).toMatchObject({ status: 409, body: { code: "runner_observation_unverified", retryable: true } });
+      expect(f.reports()).toHaveLength(0);
+      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+    } finally { fault.mockRestore(); }
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it.each(["pending", "stale", "revoked"])("distinguishes a %s run when recording an observation", kind => {
+    const f = runner(), body = f.report(1, { model: { id: "model" } });
+    if (kind === "pending") f.db.prepare("UPDATE activity_grants SET activated_at=NULL WHERE grant_id=?").run(f.grant.grantId);
+    if (kind === "stale") f.db.prepare("UPDATE bindings SET tmux_pane='%2' WHERE node_id=?").run(f.guest.id);
+    if (kind === "revoked") f.grants.revoke({ grantId: f.grant.grantId }, "positive stop");
+    expect(f.store.recordRunnerObservation(f.grant, body)).toMatchObject(kind === "pending"
+      ? { ok: false, code: "runner_observation_unverified", retryable: true }
+      : { ok: false, code: "runner_observation_unavailable" });
+    expect(f.reports()).toHaveLength(0);
+    expect(f.grants.get(f.grant.grantId)?.revokedAt !== null).toBe(kind === "revoked");
+  });
+
   it("retains one authenticated report with a stable receipt and no fabricated activity or identity", async () => {
     const f = runner();
     const body = f.report(1, { model: { id: "provider/model" }, context: { usedTokens: 10 } });
@@ -455,8 +491,6 @@ describe("credential-bound observation-only reports", () => {
     { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 70 } },
     { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 50.001 } }, { model: { id: "" } },
     { session: { nativeRef: "with spaces" } }, { model: { id: "model", source: "verified" } },
-    { model: { id: "model\u202Ehidden" } }, { model: { id: "model\u200Djoiner" } },
-    { session: { nativeRef: "session\u2066hidden" } }, { session: { nativeRef: "session\u200Cjoiner" } },
     { context: {} }, {}, [], null,
   ])("refuses an invalid whole observation object without effects: %j", async observations => {
     const f = runner();
@@ -466,18 +500,30 @@ describe("credential-bound observation-only reports", () => {
     expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
   });
 
-  it("keeps Pi observation references inside the same format-character boundary", async () => {
+  it.each(["\u202E", "\u200D", "\u200C", "\u2066"])("retains format characters in observations without losing valid counts: %j", async format => {
+    const f = runner();
+    const observations = { model: { id: `model${format}spelling` }, session: { nativeRef: `session${format}reference` }, context: { inputTokens: 11 } };
+    const body = f.report(1, observations), first = await f.post(f.grant.token, body);
+    expect(first.status).toBe(200);
+    expect(await f.post(f.grant.token, body)).toEqual(first);
+    expect(JSON.parse(f.reports()[0]!.payload).observations).toEqual(observations);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: observations.session.nativeRef });
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 }).report?.observations.model?.id).toBe(observations.model.id);
+  });
+
+  it("accepts format characters in Pi session paths without losing valid counts", async () => {
     const f = runner();
     f.db.prepare("UPDATE nodes SET runtime='pi' WHERE id=?").run(f.guest.id);
     f.sessions.recordCommunityHarnessSelection(f.row.id, "pi", "pi-rpc");
     const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core launch",
       run: { runId: "pi-observation", sessionId: f.row.id, binding: { ...f.grant.binding!, runtime: "pi", runner: 2 } } });
     expect(f.grants.activate(grant.grantId)).toBe(true);
-    const body = { ...f.report(1, { session: { nativeRef: "/tmp/pi-\u202Ehidden.jsonl" } }), runId: grant.runId };
-    expect((await f.post(grant.token, body)).status).toBe(400);
-    expect(f.reports()).toHaveLength(0);
-    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
-    expect((await f.post(grant.token, { ...body, observations: { session: { nativeRef: "/tmp/pi-visible.jsonl" } } })).status).toBe(200);
+    const observations = { session: { nativeRef: "/tmp/pi-\u200Djoiner.jsonl" }, context: { inputTokens: 11 } };
+    const body = { ...f.report(1, observations), runId: grant.runId }, first = await f.post(grant.token, body);
+    expect(first.status).toBe(200);
+    expect(await f.post(grant.token, body)).toEqual(first);
+    expect(JSON.parse(f.reports()[0]!.payload).observations).toEqual(observations);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: observations.session.nativeRef });
   });
 
   it("requires actual bound authority, run ID, sequence and time; preserves legacy hook behavior", async () => {

@@ -64,6 +64,21 @@ describe("formatEventPayload (Phase 3 bounce-fix A3)", () => {
     expect(result).toContain("{");
   });
 
+  it("makes format characters in runner session references visible without changing the payload", () => {
+    const payload = { sessionId: "会話\u200c\u200d\u202e\u{e0001}" };
+    const original = payload.sessionId;
+    expect(formatEventPayload(payload)).toBe("sessionId=会話\\u200c\\u200d\\u202e\\udb40\\udc01");
+    expect(payload.sessionId).toBe(original);
+  });
+
+  it("escapes format characters in observation model JSON and message previews", () => {
+    const payload = { observations: { model: { id: "模型\u200d\u202e" } } };
+    const model = payload.observations.model.id;
+    expect(formatEventPayload(payload)).toContain("模型\\u200d\\u202e");
+    expect(formatEventPayload({ summary: model })).toBe("模型\\u200d\\u202e");
+    expect(payload.observations.model.id).toBe(model);
+  });
+
   it("returns '—' for null/undefined/non-object", () => {
     expect(formatEventPayload(null)).toBe("—");
     expect(formatEventPayload(undefined)).toBe("—");

@@ -44,7 +44,8 @@ export type RecordHookActivityResult =
 
 export type RunnerObservationReceipt = Pick<RunnerObservation, "runId" | "family" | "sequence" | "receivedAt"> & { eventSeq: number };
 export type RecordRunnerObservationResult = { ok: true; observation: RunnerObservationReceipt }
-  | { ok: false; code: "invalid_runner_observation" | "runner_observation_conflict" | "runner_observation_unavailable"; error: string };
+  | { ok: false; code: "invalid_runner_observation" | "runner_observation_conflict" | "runner_observation_unavailable"; error: string }
+  | { ok: false; code: "runner_observation_unverified"; retryable: true; error: string };
 export type RunnerObservationRead = { report: RunnerObservation | null;
   reason: null | "no_data" | "binding_changed" | "binding_unverified" | "stale" | "sample_time_invalid" | "session_mismatch" };
 
@@ -216,7 +217,11 @@ export class AgentActivityStore {
       family: report.family, sequence: report.sequence, receivedAt: report.receivedAt, eventSeq });
     return this.eventBus.withNotifyEnvelope(register => {
       const grants = new ActivityGrantStore(this.db);
-      if (grants.standing(grant.grantId) !== "current") return { ok: false, code: "runner_observation_unavailable", error: "The bound runner is unavailable." };
+      let standing: ReturnType<ActivityGrantStore["standing"]> = "unverified";
+      try { standing = grants.standing(grant.grantId); } catch { /* A failed standing read is uncertainty, not revocation. */ }
+      if (standing === "unverified" || standing === "pending") return { ok: false, code: "runner_observation_unverified", retryable: true,
+        error: "This runner observation's bound run couldn't be verified now; retry verification; nothing was recorded." };
+      if (standing !== "current") return { ok: false, code: "runner_observation_unavailable", error: "The bound runner is unavailable." };
       const session = this.db.prepare(`SELECT s.id AS sessionId, n.rig_id AS rigId FROM sessions s JOIN nodes n ON n.id=s.node_id
         WHERE s.node_id=? ORDER BY s.id DESC LIMIT 1`).get(grant.nodeId) as { sessionId: string; rigId: string } | undefined;
       if (!session) return { ok: false, code: "runner_observation_unavailable", error: "The bound session is unavailable." };
@@ -662,9 +667,8 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
   if (raw.session !== undefined) {
     if (!object(raw.session) || !only(raw.session, ["nativeRef"])) return null;
     const ref = raw.session.nativeRef;
-    if (typeof ref !== "string" || /\p{Cf}/u.test(ref)) return null;
     if (grant.binding?.runtime === "pi" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
-      const valid = validateSessionFileFormat(ref);
+      const valid = validateSessionFileFormat(ref, "Pi", { allowFormatCharacters: true });
       if (!valid.ok) return null;
       out.session = { nativeRef: valid.token };
     } else {
@@ -673,7 +677,7 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
     }
   }
   if (raw.model !== undefined) {
-    if (!object(raw.model) || !only(raw.model, ["id"]) || !usableCommunityNativeRef(raw.model.id) || /\p{Cf}/u.test(raw.model.id)) return null;
+    if (!object(raw.model) || !only(raw.model, ["id"]) || !usableCommunityNativeRef(raw.model.id)) return null;
     out.model = { id: raw.model.id };
   }
   if (raw.context !== undefined) {

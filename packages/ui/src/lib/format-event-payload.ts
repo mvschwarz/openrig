@@ -25,6 +25,9 @@ const NOISE_KEYS = new Set([
 ]);
 
 function shorten(s: string, max = 40): string {
+  // Make format controls visible at presentation only; event identity and payload bytes stay unchanged.
+  s = s.replace(/\p{Cf}/gu, character => character.split("")
+    .map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
   if (s.length <= max) return s;
   // Back off one unit rather than cut an emoji's surrogate pair in half.
   const last = s.charCodeAt(max - 2);

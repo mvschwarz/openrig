@@ -171,12 +171,18 @@ not an inferred context occupancy (`availability: unknown`, `reason: window_capa
 `usedTokens/windowTokens` pair or explicit percentage supplies reported occupancy. The current context reader
 uses accepted events, rechecking run/binding, sequence and the existing ten-minute freshness policy; it never
 revives a runner sample from the context cache. Community model reads use the same current-report boundary.
-Printed observation model IDs and session references must not contain Unicode format characters (`\p{Cf}`),
-including bidi formatting and zero-width joiners; visible Unicode remains supported where the existing format permits.
+Observation model IDs and session references retain Unicode format characters (`\p{Cf}`), including bidi formatting,
+zero-width joiners and non-joiners, where the existing identifier/path format permits. CLI/UI displays escape these
+characters visibly in human CLI model output and UI event previews; stored values, JSON/API payloads and identity
+comparisons retain the original spelling. Observation Pi paths opt into format characters without changing ordinary
+launch/resume validation; their absolute-path, traversal, length and `.jsonl` checks remain.
 Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
 readers retain their evidence paths and labels. Omitted components retain their own sample times.
 An unreadable binding or report is unknown (`binding_unverified`), not evidence of replacement. The grant and
-existing receipt remain intact; retrying after verification recovers the same accepted receipt.
+existing receipt remain intact; retrying after verification recovers the same accepted receipt. A standing that becomes
+unverified during observation admission, including a failed standing read, returns retryable `409 runner_observation_unverified`.
+`runner_observation_unavailable` remains for a positively stale/revoked run or no bound session; invalid reports and
+conflicting sequence reuse retain their existing refusal codes. No refusal revokes credentials or fabricates observed state.
 
 Report changed components rather than repeating unchanged high-rate samples. Retry the same report with its original
 sequence, timestamp and payload. If unchanged facts must remain current, renew them deliberately with a new sequence
