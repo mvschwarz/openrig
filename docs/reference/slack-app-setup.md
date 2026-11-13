@@ -18,6 +18,7 @@ create it in.
 rig slack manifest          # the manifest as YAML
 rig slack manifest --url    # Slack's create-app link with the manifest prefilled
 rig slack manifest --json   # the manifest, its scopes and events, and why each scope is requested
+rig slack manifest --private-channel  # opt in to private-channel scopes and message.groups
 ```
 
 The TUI shows the same link on the Connections page while Slack is not configured. Neither the
@@ -111,17 +112,28 @@ not request direct-message or private-channel access.
 
 ### Using a private channel
 
-The connector doesn't check whether a channel is public or private, so a private channel can be
-the default channel or a mapped one once the app can read it. OpenRig doesn't test this setup. In
-the app's settings:
+The public-channel manifest is still the default. To create an app that can read private channels,
+use `rig slack manifest --private-channel` (or add `--url` or `--json`). It adds the bot scopes
+`groups:history` and `groups:read` and the `message.groups` event; the default manifest adds none of
+these. Review the private-channel manifest in Slack, reinstall the app, and invite it to each
+private default or mapped channel. This manifest and verify diagnostic do not prove that live
+Slack delivery will work.
 
-1. Under **OAuth & Permissions**, add the bot scopes `groups:history` (read messages in private
-   channels the app is in) and `groups:read` (read a private channel's details; `rig slack verify`
-   needs it to confirm the app is a member).
-2. Under **Event Subscriptions**, subscribe to the bot event `message.groups`.
-3. Reinstall the app to the workspace, then invite it to the private channel.
-4. To have `rig slack verify` require the new scopes too, run
-   `rig slack setup --required-scopes chat:write,channels:history,channels:read,groups:history,groups:read`.
+`rig slack verify` uses its existing `conversations.info` lookup. For a channel Slack identifies as
+private, it reports the missing private-channel scopes when the grant header is available and
+points to `rig slack manifest --private-channel`. This is diagnostic only: it does not change
+existing readiness or exit behavior. With `--json`, each `member` includes `isPrivate` (`true`,
+`false`, or `null` when privacy is unavailable) and `privateScopes` with `status` (`not-applicable`,
+`unknown`, `missing`, or `complete`) and a `missing` list. A failed or malformed privacy lookup is
+unknown, never evidence that a channel is public; an unavailable grant header also leaves the
+private-scope status unknown.
+
+If you explicitly want `rig slack verify` to include these scopes in its configured baseline, use
+the existing `--required-scopes` option:
+
+```sh
+rig slack setup --required-scopes chat:write,channels:history,channels:read,groups:history,groups:read
+```
 
 Direct messages are not supported.
 

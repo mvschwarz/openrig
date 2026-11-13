@@ -124,14 +124,14 @@ describe("rig slack channel-map", () => {
 
 describe("rig slack verify with a channel map", () => {
   // Membership answers per channel; everything else is a granted-scope auth.test.
-  const slack = (members: Record<string, boolean>, infoChannels: string[]) => async (url: string) => {
+  const slack = (members: Record<string, boolean>, infoChannels: string[], privacy: Record<string, boolean> = {}) => async (url: string) => {
     const target = new URL(url);
     if (target.pathname.endsWith("/auth.test")) {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json", "x-oauth-scopes": DEFAULT_CONFIG.requiredScopes.join(", ") } });
     }
     const channel = target.searchParams.get("channel") ?? "";
     infoChannels.push(channel);
-    return new Response(JSON.stringify({ ok: true, channel: { is_member: members[channel] ?? false, name: `name-${channel}` } }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, channel: { is_member: members[channel] ?? false, name: `name-${channel}`, ...(Object.hasOwn(privacy, channel) ? { is_private: privacy[channel] } : {}) } }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const map = [{ match: "my-rig", channel: "C0EXAMPLE1" }, { match: "other-rig", channel: "C0EXAMPLE1" }, { match: "pr@my-rig", channel: "C0EXAMPLE2" }];
 
@@ -145,6 +145,21 @@ describe("rig slack verify with a channel map", () => {
     expect(logs).toContain("✓ channel member (name-C0EXAMPLE1) for my-rig, other-rig");
     expect(logs).toContain("✓ channel member (name-C0EXAMPLE2) for pr@my-rig");
     expect(logs.at(-1)).toBe("READY");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it("diagnoses a known private mapped channel without changing readiness or request count", async () => {
+    vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-local-fixture-only");
+    const { logs, run } = setup(map);
+    const asked: string[] = [];
+    await run(["verify", "--json"], slack({ C0DEFAULT: true, C0EXAMPLE1: true, C0EXAMPLE2: true }, asked,
+      { C0DEFAULT: false, C0EXAMPLE1: true, C0EXAMPLE2: false }) as never);
+    const out = JSON.parse(logs[0]!);
+    expect(asked).toEqual(["C0DEFAULT", "C0EXAMPLE1", "C0EXAMPLE2"]);
+    expect(out.ready).toBe(true);
+    expect(out.member).toMatchObject({ isPrivate: false, privateScopes: { status: "not-applicable", missing: [] } });
+    expect(out.channels[1].member).toMatchObject({ isPrivate: true, privateScopes: { status: "missing", missing: ["groups:history", "groups:read"] } });
+    expect(out.channels[2].member).toMatchObject({ isPrivate: false, privateScopes: { status: "not-applicable", missing: [] } });
     expect(process.exitCode ?? 0).toBe(0);
   });
 

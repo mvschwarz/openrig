@@ -26,6 +26,12 @@ function offline(overrides: Partial<SlackDeps> = {}): { deps: SlackDeps; logs: s
   };
 }
 const run = (deps: SlackDeps, argv: string[]) => slackCommand(deps).parseAsync(["node", "slack", ...argv]);
+const runWithExitOverride = (deps: SlackDeps, argv: string[]) => {
+  const command = slackCommand(deps);
+  command.exitOverride();
+  command.commands.find((candidate) => candidate.name() === "manifest")!.exitOverride();
+  return command.parseAsync(["node", "slack", ...argv]);
+};
 
 describe("rig slack manifest (offline)", () => {
   it("prints the shipped manifest as YAML from the real surface", async () => {
@@ -56,6 +62,32 @@ describe("rig slack manifest (offline)", () => {
     for (const f of FEATURE_SCOPES) expect(out.why[f.scope]).toContain("not checked by verify");
   });
 
+  it("keeps the opt-in private manifest offline in YAML, URL and JSON forms", async () => {
+    const yaml = offline();
+    await runWithExitOverride(yaml.deps, ["manifest", "--private-channel"]);
+    const privateBundle = (buildSlackAppManifest as (...args: unknown[]) => ReturnType<typeof buildSlackAppManifest>)(undefined, { privateChannel: true });
+    expect(yaml.logs).toEqual([privateBundle.yaml.trimEnd()]);
+    expect(parse(yaml.logs[0]!)).toEqual(privateBundle.manifest);
+
+    const url = offline();
+    await runWithExitOverride(url.deps, ["manifest", "--private-channel", "--url"]);
+    const prefix = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
+    expect(url.logs[0]!.startsWith(prefix)).toBe(true);
+    expect(decodeURIComponent(url.logs[0]!.slice(prefix.length))).toBe(privateBundle.yaml);
+
+    const json = offline();
+    await runWithExitOverride(json.deps, ["manifest", "--private-channel", "--json"]);
+    const out = JSON.parse(json.logs[0]!);
+    expect(out.manifest).toEqual(privateBundle.manifest);
+    expect(out.scopes).toEqual(privateBundle.scopes);
+    expect(out.events).toEqual(privateBundle.events);
+    expect(out.scopes).toEqual(expect.arrayContaining(["groups:history", "groups:read"]));
+    expect(out.events).toContain("message.groups");
+    expect(out.why["groups:history"]).not.toBe("unexplained");
+    expect(out.why["groups:read"]).not.toBe("unexplained");
+    for (const scope of ["groups:history", "groups:read"]) expect(out.why[scope]).toContain("rig slack manifest --private-channel");
+  });
+
   it("help routes to the setup doc and states verify checks only the baseline", () => {
     const { deps } = offline();
     const manifest = slackCommand(deps).commands.find((c) => c.name() === "manifest")!;
@@ -80,8 +112,9 @@ describe("next-step routing names `rig slack manifest` first", () => {
     resolveSecret: () => null,
     checkEnvFilePermissions: () => null,
     verifyScopes: async () => ({ ok: true, granted: [], missing: [] }),
-    verifyChannelMembership: async () => ({ ok: true, isMember: true }),
+    verifyChannelMembership: async () => ({ ok: true, isMember: true, isPrivate: null }),
     buildSlackAppManifest, FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES,
+    PRIVATE_CHANNEL_SCOPES: ["groups:history", "groups:read"],
   });
 
   it("status, unconfigured: text and JSON both name the manifest step", async () => {
