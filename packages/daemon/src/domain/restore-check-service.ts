@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
+import { freshSeatLaunchCommand } from "./active-occupant.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -192,6 +193,16 @@ export interface NodeInventoryEntry {
   tmuxAttachCommand: string | null;
   latestError: string | null;
   cwd?: string | null;
+  /** The seat's recorded restore choice and resume token (the inventory carries them). */
+  restorePolicy?: string | null;
+  resumeType?: string | null;
+  resumeToken?: string | null;
+}
+
+/** The restore's own resume rule: a seat with a resume token, a resume type and the resume policy resumes. */
+function seatResumes(node: NodeInventoryEntry): boolean {
+  return !!node.resumeToken && !!node.resumeType && node.resumeType !== "none" && node.runtime !== "terminal"
+    && (node.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
 }
 
 export interface RestoreCheckDeps {
@@ -365,7 +376,7 @@ export class RestoreCheckService {
         // are not skipping (full, --ready/includeReady, or a non-ready seat).
         const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
 
-        const startupContextCheck = this.checkStartupContext(node);
+        const startupContextCheck = this.checkStartupContext(node, rig.name);
         if ("unknownChecks" in startupContextCheck) {
           return this.buildUnknown([
             ...checks,
@@ -897,7 +908,7 @@ export class RestoreCheckService {
     };
   }
 
-  private checkStartupContext(node: NodeInventoryEntry): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
+  private checkStartupContext(node: NodeInventoryEntry, rigName: string): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.startup-context`;
     const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
@@ -908,6 +919,8 @@ export class RestoreCheckService {
           check,
           runningReady,
           `Startup context cannot be inspected because node id is missing for ${session}`,
+          node.logicalId,
+          rigName,
         ),
       };
     }
@@ -925,9 +938,25 @@ export class RestoreCheckService {
           }],
         };
       case "missing":
+        // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore resumes
+        // it with an empty plan, as it does any resume (a resume replays no startup context), and names the gap.
+        if (seatResumes(node)) {
+          return {
+            check: {
+              check,
+              status: "yellow",
+              evidence: `${probe.evidence}. Restore resumes ${session}'s saved conversation with no startup files, actions or managed guidance put back, and names this gap.`,
+              remediation: `Nothing is needed to restore it. To record startup context, start it fresh from its spec, in a new conversation: ${freshSeatLaunchCommand(node.logicalId, rigName)}`,
+              remediationSafe: false,
+            },
+          };
+        }
+        return {
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, node.logicalId, rigName),
+        };
       case "malformed":
         return {
-          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence),
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, node.logicalId, rigName),
         };
       case "ok":
         break;
@@ -1008,12 +1037,14 @@ export class RestoreCheckService {
     check: string,
     runningReady: boolean,
     evidence: string,
+    logicalId: string,
+    rigName: string,
   ): CheckEntry {
     return {
       check,
       status: runningReady ? "yellow" : "red",
       evidence,
-      remediation: "Recreate the seat startup context from the rig or agent spec before trusting replay inputs",
+      remediation: `Start the seat fresh from its spec, which records its startup context in a new conversation: ${freshSeatLaunchCommand(logicalId, rigName)}`,
       remediationSafe: false,
     };
   }

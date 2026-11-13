@@ -51,6 +51,7 @@ import type {
   Session,
   Checkpoint,
   RestoreSnapshotSelection,
+  NodeStartupSnapshot,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -2044,6 +2045,17 @@ export class RestoreOrchestrator {
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
+    // A seat that only ever resumed or was attached (attach, adopt, reconcile-session, a set resume token) has a resume
+    // token but no saved startup context. A resume replays none anyway (replayContained), so it resumes with an empty
+    // plan and the restore names the gap, rather than stopping on data the resume doesn't use. Guidance, activity hooks
+    // and the guidance record still read the saved context only, so nothing is put back or recorded for this seat.
+    const resumeWithoutContext = isPodAware && !startupCtx && replayContained && startupRuntime !== null && startupRuntime !== "terminal";
+    const replayCtx: NodeStartupSnapshot | null = startupCtx
+      ?? (resumeWithoutContext ? { runtime: startupRuntime!, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } : null);
+    if (resumeWithoutContext && startupAdapter && launchResult) {
+      warnings?.push(`Restore: ${node.logicalId}: no saved startup context, so it resumed its saved conversation with no startup files, actions or managed guidance put back.`);
+      activityHookGaps?.push("startup_context: no saved startup context; the seat resumed with an empty plan.");
+    }
     // New compute has no retained context filesystem. Restore the saved file selection, never conversation actions.
     const restoreEnvironmentContext = replayContained && !!startupAdapter?.environment && !!data.environmentBindingsByNode?.[node.id];
 
@@ -2056,13 +2068,14 @@ export class RestoreOrchestrator {
       && baseStatus !== "resumed"
       && startupRuntime !== null
       && startupRuntime !== "terminal"
-      && (!startupCtx || !startupAdapter)
+      && (!replayCtx || !startupAdapter)
     ) {
       // A deliberate fresh launch with no captured startup context is the
       // never-occupied-seat case from #49. The restore launcher has already
       // created a shell, so remove that provisional session before handing the
-      // seat to the normal recipe-backed launch path. Resume requests stay on
-      // the fail-closed path below: no durable context means no safe resume.
+      // seat to the normal recipe-backed launch path. A resume with a token
+      // goes on with an empty plan (replayCtx above); a resume without one stays
+      // on the fail-closed path below: no durable context means no safe resume.
       if (!startupCtx && !resumeRequested && this.freshLaunch) {
         // Keep the usable provisional shell when the callback exists but its
         // recipe/member inputs are unavailable. A callback being present alone
@@ -2099,23 +2112,23 @@ export class RestoreOrchestrator {
           };
         }
       }
-      const cause = startupCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
+      const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
     }
 
     // Attempt restore-safe startup replay if context available
-    if (data.nodeStartupContext && opts?.adapters && launchResult) {
-      if (startupCtx) {
-        const adapter = seatAdapter(opts.adapters, startupCtx.runtime, session?.communityHarness);
+    if ((data.nodeStartupContext || replayCtx) && opts?.adapters && launchResult) {
+      if (replayCtx) {
+        const adapter = seatAdapter(opts.adapters, replayCtx.runtime, session?.communityHarness);
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
+          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : replayCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
-          const sourceActions = replayContained ? [] : startupCtx.startupActions;
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(replayCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
+          const sourceActions = replayContained ? [] : replayCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
               warnings?.push(`Restore: missing projection entry ${e.absolutePath} (skipped)`);
@@ -2153,7 +2166,7 @@ export class RestoreOrchestrator {
           // it is, an edited one is named, and a missing one whose recorded source is gone or has changed is not put back
           // with today's bytes. Only the rest is projected or installed. Nothing is re-resolved from today's spec. Native
           // resume replays nothing (sourceEntries is empty). The whole selection stays in the saved startup context.
-          const seatSkills = (startupCtx.runtime === "claude-code" || startupCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
+          const seatSkills = (replayCtx.runtime === "claude-code" || replayCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
           let replaySkip: { entryIds: Set<string>; files: Set<string> } | undefined;
           if (seatSkills) {
             const replay = seatSkillReplay({ entries: filteredEntries, files: filteredFiles, paths: seatSkills,
@@ -2164,7 +2177,7 @@ export class RestoreOrchestrator {
 
           // Build fresh projection plan (all safe_projection; replaySkip says which seat skills are left alone)
           const plan: import("./projection-planner.js").ProjectionPlan = {
-            runtime: startupCtx.runtime,
+            runtime: replayCtx.runtime,
             cwd: launchCwd,
             entries: filteredEntries.map((e) => ({
               ...e,
@@ -2181,7 +2194,7 @@ export class RestoreOrchestrator {
           const binding = {
             ...launchResult.binding,
             // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
-            guidanceFile: startupCtx.guidanceFile ?? null,
+            guidanceFile: replayCtx.guidanceFile ?? null,
             // #3039: the resumed launch carries the guidance chosen above, so startup doesn't ask again and the adapter queues it.
             ...(launchGuidance ? { guidanceLaunchInstructions: true as const } : {}),
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
