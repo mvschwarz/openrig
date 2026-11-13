@@ -525,6 +525,8 @@ export class WorkflowProjector {
         }
       }
 
+      if (resolvedNextOwner) assertBoundWorkflowTarget(resolvedNextOwner);
+
       // 2. R1 fix (guard blocker 1): close the current packet via Phase A's
       // QueueRepository.updateWithinTransaction. This validates closure
       // (Phase A hot-potato strict-rejection invariants), persists closure
@@ -1106,6 +1108,7 @@ export class WorkflowProjector {
         if (!owner) {
           throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
         }
+        assertBoundWorkflowTarget(owner);
         return { step, gate, owner, packetId: newQitemId() };
       });
 
@@ -1485,6 +1488,17 @@ function resolveRoleOnBoundRig(
       candidates: result.disqualified,
     },
   );
+}
+
+/** A spec placeholder is not an absent seat. Keep the shipped unbound-target
+ * refusal before a workflow creates a packet or closes its current frontier. */
+export function assertBoundWorkflowTarget(target: string): void {
+  const at = target.indexOf("@");
+  if (at >= 0 && target.slice(at + 1).includes("{rig}")) {
+    throw new QueueRepositoryError("unknown_destination_rig",
+      `Workflow target ${target} still contains an unexpanded {rig} template. Bind a rig with --rig <name>, or use a concrete destination.`,
+      { destinationSession: target });
+  }
 }
 
 /**
