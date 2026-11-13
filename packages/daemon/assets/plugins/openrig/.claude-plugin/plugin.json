@@ -1,6 +1,6 @@
 {
   "name": "openrig",
-  "version": "0.1.0",
+  "version": "0.7.15",
   "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
   "author": {
     "name": "Mike Schwarz",
