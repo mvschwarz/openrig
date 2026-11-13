@@ -54,7 +54,7 @@ function line(b: Binding): string {
  *  another OpenRig hub), see where each connection stands, and disconnect one. */
 export function networkCommand(depsOverride?: NetworkDeps): Command {
   const cmd = new Command("network")
-    .description("Connect selected local seats to a remote hub, see their status, and disconnect them");
+    .description("Connect selected local seats to a remote hub, see their status, and disconnect them. Experimental and unsupported: use it only if you choose to, at your own risk");
   const getDeps = (): NetworkDeps => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   const client = async () => {
@@ -157,7 +157,7 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
         const b = raw as unknown as Binding;
         if (b.accountRemoval === "confirmed") return `Disconnected ${line(b)}\nThe account stopped listing ${b.participantName}, which revokes it there.`;
         if (b.accountRemoval) return `Disconnected ${line(b)}`;
-        return `Disconnected ${line(b)}\nRemove the participant on the hub too, so the account stops listing it.`;
+        return `Disconnected ${line(b)}\nRemove the participant on the hub too: until then, the hub still lists it.`;
       });
     });
 

@@ -8,6 +8,8 @@ with one grant per participant. The network connector puts one selected local se
 The connector opens no port: your daemon makes every connection outward, and the hub never connects to your machine. Work the hub
 sends that participant runs on your seat, under your accounts, and the result goes back to the hub item.
 
+**The network connector is experimental and unsupported.** Use it only if you choose to, at your own risk.
+
 ## Enroll in an account, then connect by name
 
 When your hub is an account's network, enroll this daemon once with the one-time code its page shows, then connect
