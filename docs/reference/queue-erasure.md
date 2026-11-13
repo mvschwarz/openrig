@@ -63,6 +63,14 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 - **When nothing of the rig is left,** the record becomes a completion receipt: the rig's name is cleared, and its id, the membership digest and the time stay. An identical rerun, after a lost response say, still verifies and reports the same clean result, with `rig.completedAt`. The receipt is kept for good. It holds no content.
 - **A removed rig's id that was never verified** with this membership erases nothing keyed by it. Those records are counted under `rig.left`, the name-bound tables are listed under `rig.unknown`, and the run isn't clean.
 
+**An account rig that never had a member** (no assistant ever connected) has no members to name. Give an empty members file (or `[]`) with `--rig`. It's accepted only when this daemon can show the rig never had a session:
+- no session on any of its nodes;
+- no event of the rig, or of its nodes, that names a session;
+- no node removed from it, since a node's sessions are deleted with it;
+- no earlier erasure that recorded members for it.
+
+Otherwise it's refused (`erase_rig_mismatch`, `erase_rig_had_sessions` or `erase_rig_history_unknown`), and nothing is erased. The run then erases the rig's records as a members run does and records the rig with no members. So once the rig is removed, the same command completes as above. A removed rig is accepted with no members only on that record.
+
 **Retention windows** (`rig config set …`, read at the daily sweep and at daemon start):
 
 | Setting | Default | Effect |
@@ -127,9 +135,11 @@ The command prints one JSON report (`--json` makes it a single line):
 |---|---|
 | `erase_scope_required` | no scope named |
 | `erase_scope_conflict` | more than one scope |
-| `erase_members_invalid` | an empty list, or names with surrounding spaces |
+| `erase_members_invalid` | an empty list without `--rig`, or names with surrounding spaces |
 | `erase_rig_invalid` | a rig without `--members`, or an empty rig id |
 | `erase_rig_mismatch` | the rig exists, and its sessions and the members don't match both ways |
+| `erase_rig_had_sessions` | an empty members list, and the rig's events name a session, or an earlier erasure recorded members for it |
+| `erase_rig_history_unknown` | an empty members list, and a node was removed from the rig, or the rig is removed and no earlier run recorded it with no members |
 | `erase_ids_invalid` | an empty ids list, or ids with surrounding spaces |
 | `erase_action_invalid` | an action other than `delete` or `scrub` |
 | `erase_routine_off` | both windows are `0` |

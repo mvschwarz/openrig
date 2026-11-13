@@ -756,8 +756,11 @@ export function queueRoutes(): Hono {
       return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
     }
     if (body.members !== undefined) {
-      const members = exactList(body.members);
-      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      // An empty list, given with rig, is an account rig that never had a member; the erasure checks the rig's history.
+      const members = Array.isArray(body.members) && body.members.length === 0 && typeof body.rig === "string" ? [] : exactList(body.members);
+      if (!members) {
+        return refuse("erase_members_invalid", "members must be a non-empty list of exact session names, or [] with rig for an account rig that never had a member.");
+      }
       scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
     } else if (body.ids !== undefined) {
       // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.

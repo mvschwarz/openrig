@@ -494,6 +494,96 @@ describe("round 1 controls", () => {
   });
 });
 
+// An account rig that never had an assistant connect has no members to name. It's erased with members [] and its rig,
+// but only when this database can show the rig never had a session.
+describe("account deletion of a rig that never had a member", () => {
+  const RIG = "rig-empty-id";
+  const erase = (apply = true) => eraseQueue(db, { scope: { kind: "members", members: [], rig: RIG }, apply, nowIso: NOW });
+  beforeEach(() => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'n-empty'), ('rig-else-id', 'n-else')").run(RIG);
+    const bus = new EventBus(db);
+    bus.emit({ type: "rig.imported", rigId: RIG, specName: "secret-empty-spec", specVersion: "1" } as never);
+    bus.emit({ type: "node.launched", rigId: "rig-else-id", nodeId: "node-x", logicalId: "x.other", sessionName: OUT } as never);
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, data) VALUES ('snap-empty', ?, 'periodic', '{\"seat\":\"secret-empty-snapshot\"}')").run(RIG);
+  });
+
+  it.each([["no nodes", false], ["a node that was never launched", true]] as const)("with %s, erases clean, and the run after its removal completes", async (_label, node) => {
+    if (node) db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-idle', ?, 'idle.one')").run(RIG);
+    const dry = await erase(false);
+    expect(dry).toMatchObject({ applied: false, rig: { found: true, verified: true } });
+    expect(everything()).toContain("secret-empty-snapshot");
+    const first = await erase();
+    expect(first).toMatchObject({ complete: true, clean: true, qitems: [], rig: { id: RIG, found: true, verified: true, erased: { snapshots: 1 } } });
+    expect(everything()).not.toContain("secret-empty-spec");
+    expect(everything()).not.toContain("secret-empty-snapshot");
+    expect(payloads()).toContain(`"sessionName":"${OUT}"`);
+    // The rig is removed, and its removal writes under the rig's id; the same run then erases that and completes.
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "rig.deleted", rigId: RIG } as never);
+    const after = await erase();
+    expect(after).toMatchObject({ clean: true, rig: { found: false, verified: true, erased: { events: 1 }, completedAt: NOW } });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+    expect(await erase()).toMatchObject({ clean: true, rig: { found: false, verified: true, completedAt: NOW, unknown: [] } });
+  });
+
+  it.each([
+    ["has a session now", () => {
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-s', ?, 's.one')").run(RIG);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-s', 'node-s', 's-one@n-empty', 'exited')").run();
+    }, "erase_rig_mismatch"],
+    ["has an event naming a session", () => {
+      new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-gone", logicalId: "g.one", sessionName: "g-one@n-empty" } as never);
+    }, "erase_rig_had_sessions"],
+    ["has a node's event naming a session", () => {
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-e', ?, 'e.one')").run(RIG);
+      db.prepare("INSERT INTO events (node_id, type, payload) VALUES ('node-e', 'node.startup_failed', ?)").run(JSON.stringify({ type: "node.startup_failed", sessionId: "sess-e" }));
+    }, "erase_rig_had_sessions"],
+    ["had a node removed", () => {
+      new EventBus(db).emit({ type: "node.removed", rigId: RIG, nodeId: "node-r" } as never);
+    }, "erase_rig_history_unknown"],
+    ["was erased before with members", () => {
+      db.prepare("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES (?, 'n-empty', 'digest-of-other-members', ?)").run(RIG, NOW);
+    }, "erase_rig_had_sessions"],
+  ] as const)("refuses a rig that %s, and erases nothing", async (_label, seed, code) => {
+    seed();
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code });
+    await expect(erase()).rejects.toMatchObject({ code });
+    expect(everything()).toBe(before);
+  });
+
+  it("refuses a removed rig no earlier run recorded with no members, and members [] without a rig", async () => {
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    const before = everything();
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_history_unknown" });
+    db.prepare("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES (?, 'n-empty', 'digest-of-other-members', ?)").run(RIG, NOW);
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_history_unknown" });
+    db.prepare("DELETE FROM queue_erased_rigs WHERE rig_id = ?").run(RIG);
+    expect(everything()).toBe(before);
+    await expect(eraseQueue(db, { scope: { kind: "members", members: [] }, apply: true, nowIso: NOW })).rejects.toMatchObject({ code: "erase_members_invalid" });
+  });
+
+  it("the route takes members [] only with a rig", async () => {
+    const hono = new Hono();
+    hono.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
+      await next();
+    });
+    hono.route("/api/queue", queueRoutes());
+    const post = async (body: unknown) => {
+      const res = await hono.request("/api/queue/erase", {
+        method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "ops-admin@n-ops" }, body: JSON.stringify(body),
+      });
+      return [res.status, await res.json()] as const;
+    };
+    expect(await post({ members: [] })).toMatchObject([400, { error: "erase_members_invalid" }]);
+    expect(await post({ members: [], rig: "rig-nobody-id" })).toMatchObject([400, { error: "erase_rig_history_unknown" }]);
+    expect(await post({ members: [], rig: RIG, apply: true })).toMatchObject([200, { clean: true, rig: { id: RIG, found: true, verified: true } }]);
+  });
+});
+
 describe("round 1 controls: the account rig after removal, and a restore across a close", () => {
   const RIG = "rig-r1-id";
   beforeEach(() => {

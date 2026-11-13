@@ -20,7 +20,8 @@ import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
  * Scope is exact. Account deletion takes the account's recorded membership (exact session names): a row between two
  * members, or between a member and OpenRig, is deleted, whatever its state; a row with one member endpoint and the
  * other outside the account is reported as mixed and left untouched. Named with the account's rig, it also removes
- * the rig's own records that outlive the rig. Routine
+ * the rig's own records that outlive the rig. An empty membership is accepted only with the rig, for an account rig
+ * that never had a session (refuseUnlessNeverHadSession). Routine
  * retention touches only closed rows (done, canceled, denied, handed-off; never failed or open work), aged from the
  * start of their final closed state. A row a workflow still references is reported, never erased.
  *
@@ -337,6 +338,26 @@ function membersDigest(members: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...new Set(members)].sort())).digest("hex");
 }
 
+/** An account rig is erased with no members only when it never had a session, shown from what this database keeps: no
+ *  session on its nodes (the both-ways membership check), no event of the rig or its nodes naming one, no node removed
+ *  from it (a node's sessions are deleted with it), and no earlier erasure that recorded members for it. Anything less
+ *  is refused: a delete doesn't guess. */
+function refuseUnlessNeverHadSession(db: Database.Database, rigId: string, rigName: string): void {
+  const named = db.prepare(`SELECT 1 FROM events WHERE (rig_id = @rig OR node_id IN (SELECT id FROM nodes WHERE rig_id = @rig))
+      AND (instr(payload, '"sessionName"') > 0 OR instr(payload, '"sessionId"') > 0) LIMIT 1`).get({ rig: rigId });
+  if (named !== undefined) {
+    throw new EraseRefusal("erase_rig_had_sessions", `Rig ${rigName}'s events name a session, so it had members. Name them.`);
+  }
+  if (db.prepare("SELECT 1 FROM events WHERE rig_id = ? AND type = 'node.removed' LIMIT 1").get(rigId) !== undefined) {
+    throw new EraseRefusal("erase_rig_history_unknown",
+      `A node was removed from rig ${rigName}, and its sessions went with it, so it can't be shown that the rig never had a session.`);
+  }
+  const kept = db.prepare("SELECT members_digest AS digest FROM queue_erased_rigs WHERE rig_id = ?").get(rigId) as { digest: string } | undefined;
+  if (kept !== undefined && kept.digest !== membersDigest([])) {
+    throw new EraseRefusal("erase_rig_had_sessions", `An earlier erasure recorded members for rig ${rigName}. Name them.`);
+  }
+}
+
 type BatchPlan = {
   rows: Candidate[];
   absent: string[];
@@ -397,6 +418,9 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   // members included), and every session of it is a member. A rig already removed is verified only by the record an
   // earlier run kept with this membership.
   let rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null } | null = null;
+  if (scope.kind === "members" && scope.members.length === 0 && scope.rig === undefined) {
+    throw new EraseRefusal("erase_members_invalid", "An empty members list names an account rig that never had a member: give its rig.");
+  }
   if (scope.kind === "members" && scope.rig !== undefined) {
     const name = (db.prepare("SELECT name FROM rigs WHERE id = ?").get(scope.rig) as { name: string } | undefined)?.name ?? null;
     if (name !== null) {
@@ -410,11 +434,17 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           unlisted.length > 0 ? `Rig ${name} has sessions the members don't list: ${unlisted.join(", ")}.` : "",
         ].filter(Boolean).join(" "));
       }
+      if (scope.members.length === 0) refuseUnlessNeverHadSession(db, scope.rig, name);
       rig = { id: scope.rig, name, found: true, verified: true, completedAt: null };
     } else {
       const kept = db.prepare(`SELECT rig_name AS name, members_digest AS digest, completed_at AS completedAt
           FROM queue_erased_rigs WHERE rig_id = ?`).get(scope.rig) as { name: string; digest: string; completedAt: string | null } | undefined;
       const verified = kept !== undefined && kept.digest === membersDigest(scope.members);
+      // With no members, a removed rig is erased only on an earlier run's record that it had none.
+      if (scope.members.length === 0 && !verified) {
+        throw new EraseRefusal("erase_rig_history_unknown",
+          `Rig ${scope.rig} isn't on this daemon, and no earlier erasure recorded it with no members, so it can't be shown that it never had a session.`);
+      }
       rig = { id: scope.rig, name: verified && kept.name !== "" ? kept.name : null, found: false, verified,
         completedAt: verified ? kept.completedAt : null };
     }
