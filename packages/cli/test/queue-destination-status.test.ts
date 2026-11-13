@@ -66,6 +66,16 @@ describe("queue create destination status is advice beside a durable row", () =>
     if (saved.sender === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.sender;
   });
 
+  it("a normal create keeps missing-target work when its nudge cannot resolve", async () => {
+    await queueCommand(deps).parseAsync(["create", "--destination", "worker@status-missing", "--body", "keep normal work", "--summary", "fixture", "--json"], { from: "user" });
+    expect(process.exitCode).not.toBe(1);
+    const output = JSON.parse(stdout.mock.calls.map(call => call.join(" ")).join("\n"));
+    const row = output.created ?? output;
+    expect(daemon.deps.queueRepo.getById(row.qitemId)).toMatchObject({ destinationSession: "worker@status-missing", body: "keep normal work" });
+    expect(output.advisories[0].status).toBe("missing");
+    await vi.waitFor(() => expect(daemon.deps.queueRepo.getById(row.qitemId)?.lastNudgeResult).toBeTruthy());
+  });
+
   it.each(["worker@new-team@host", "retired"])("quotes recorded successor %s and keeps the original destination", async owner => {
     const ledger = join(rosterRoot, "topology", "FORWARDING.md");
     writeFileSync(ledger, '| old address | new owner (or "retired") | date | decided by |\n| --- | --- | --- | --- |\n'
@@ -100,8 +110,10 @@ describe("queue create destination status is advice beside a durable row", () =>
       ["worker@status-unknown", "unknown", "unknown"],
     ])("keeps %s and reports %s, json=" + json, async (destination, status, message) => {
       if (status === "hosted") expect(daemon.deps.queueRepo.isHostedMember(destination)).toBe(true);
-      if (status === "unknown") vi.spyOn(daemon.deps.rigRepo, "findUnarchivedRigsByName")
-        .mockImplementation(() => { throw new Error("fixture registry unavailable"); });
+      if (status === "unknown") {
+        vi.spyOn(daemon.deps.rigRepo, "findUnarchivedRigsByName").mockImplementation(() => { throw new Error("fixture registry unavailable"); });
+        vi.spyOn(daemon.deps.rigRepo, "findRigsByName").mockImplementation(() => { throw new Error("fixture receiver registry unavailable"); });
+      }
       await queueCommand(deps).parseAsync(["create", "--destination", destination, "--body", "keep this work",
         "--summary", "status fixture", "--no-nudge", ...(json ? ["--json"] : [])], { from: "user" });
       expect(process.exitCode, "status must not refuse the create").not.toBe(1);

@@ -1,20 +1,12 @@
-// The queue's production destination check: which session refs a queue row may be addressed to. Startup wires it into
-// QueueRepository as validateRig; anything that must know whether a row would be accepted, without writing one, uses the
-// same check (QueueRepository.acceptsDestination).
+// The existing topology-backed destination preflight, used when choosing a receiver.
+// Recording canonical work is separate: absence must not prevent keeping the row.
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { LoadResult } from "./gateway/human-registry.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 
-// PL-004 Phase A revision (R1): topology-backed validateRig.
-// Canonical addresses remain recordable when topology is missing or unavailable.
-// Destination observation is advice after persistence, not admission authority.
-// Bare ids without `@` are also rejected
-// (no canonical rig binding).
-// OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
-// parse contract — human-seat classification BEFORE parse. The greedy
-// first-@ spelling remains intact; local topology does not authorize or
-// rewrite canonical destination addresses.
+// Human and external admission still use their registered-address rules.
+// Bare ids without a canonical rig binding remain outside this address contract.
 export function makeTopologyDestinationCheck(deps: {
   findRigsByName: (name: string) => unknown[];
   loadHumanRegistry: () => LoadResult;
@@ -39,6 +31,11 @@ export function makeTopologyDestinationCheck(deps: {
     }
     if (isHumanSeatSessionRef(sessionRef)) return true;
     if (parsed.kind !== "canonical") return false;
-    return true;
+    return deps.findRigsByName(parsed.rig).length > 0;
   };
+}
+
+/** Keep canonical work even before its topology exists; retain the other admission rules. */
+export function makeQueueRecordingCheck(topologyCheck: (sessionRef: string) => boolean): (sessionRef: string) => boolean {
+  return sessionRef => parseSessionName(sessionRef).kind === "canonical" || topologyCheck(sessionRef);
 }

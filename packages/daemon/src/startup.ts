@@ -36,7 +36,7 @@ import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
-import { makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./domain/gateway/human-registry.js";
 import { readRosters } from "./domain/rosters.js";
 import { recordedSuccessorNotice } from "./domain/destination-successor.js";
@@ -511,6 +511,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // attachTransport().
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
+    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),
     destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
