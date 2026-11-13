@@ -2135,6 +2135,10 @@ export class RestoreOrchestrator {
       const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
+      // The launcher registered this pane's shell as a running session. Mark it, with the stage that says no harness
+      // started, so nothing counts a bare shell as a running seat. Nothing is stopped.
+      this.sessionRegistry.updateStartupStatus(launchResult.session.id, "attention_required");
+      this.eventBus.emit({ type: "node.startup_failed", rigId, nodeId: node.id, error, sessionId: launchResult.session.id, stage: "harness_not_started" });
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
     }
 

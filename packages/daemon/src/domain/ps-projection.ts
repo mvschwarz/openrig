@@ -135,6 +135,9 @@ export function deriveRigLifecycleFromInventory(
  */
 export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
   if (node.sessionStatus !== "running") return false;
+  // Positive evidence that no harness started: restore left the pane as a bare shell (its own marker). Other
+  // attention, such as an identity question or a chooser prompt, is a live seat and still counts as running.
+  if (node.startupStatus === "attention_required" && node.latestErrorStage === "harness_not_started") return false;
   if (identityVerdictConfirmsExecutorStopped(node.identityVerdict)) return false;
   return true;
 }
