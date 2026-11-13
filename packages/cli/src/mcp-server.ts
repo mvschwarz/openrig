@@ -632,12 +632,23 @@ export const MEMBER_WORKFLOW = [
 
 // Short guidance a client may show the model (the server's MCP instructions). An external caller's connection asks the
 // team for work and isn't one of its members, so it isn't given the member workflow.
-const SHARED_INSTRUCTIONS = [
-  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
-  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
-  "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
-  "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-];
+/** The paragraphs every seat's connection shares, naming a tool only where `has` says the connection offers it. A local or
+ *  authenticated member is offered every tool named here; an external grant is offered only the ones its grant names. */
+function sharedInstructions(has: (tool: string) => boolean): string[] {
+  const finding = [has("rig_whoami") ? "rig_whoami shows which, and whether the caller is authenticated" : "",
+    has("rig_team") ? "rig_team shows a rig's seats and its lead" : ""].filter(Boolean).join("; ");
+  const showing = "rig_queue_show, which names the next item when the work was handed on";
+  const handing = has("rig_queue_create")
+    ? `To hand work to a seat, use rig_queue_create and keep its qitemId${has("rig_queue_show") ? `; read the answer later with ${showing}` : ""}. `
+    : has("rig_queue_show") ? `Read an item's answer with ${showing}. ` : "";
+  return [
+    `This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant${finding ? ` (${finding})` : ""}. The daemon attributes this server's writes to that seat.`,
+    `${handing}${has("rig_queue_handoff") ? "To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. " : ""}Queue items are durable: they outlive this conversation and this server.`,
+    "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+    `A question reserved for a person is theirs to answer: don't answer it on their behalf.${has("rig_queue_decide") ? " rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one." : ""}`,
+  ];
+}
+const SHARED_INSTRUCTIONS = sharedInstructions(() => true);
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
@@ -671,15 +682,18 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
   "To answer one, show the person the question and its options as rig_question_list gives them. Then pass rig_question_answer its qitemId, the revision you showed, and either the options they chose or exactly what they typed, with no label or words of your own. If the question changed, show them the new one; if it was already answered or closed, say so. It's recorded as their answer, given through this connection. A question reserved for a person is theirs to answer, never yours.",
 ].join("\n");
 
-/** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
-const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
-  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.",
-].join("\n");
+/** For an external grant that names claim and update: how it works the items addressed to it, messages included. It names
+ *  only the tools that grant offers. */
+function externalInboxInstructions(tools: ReadonlySet<string>): string {
+  return [...sharedInstructions((tool) => tools.has(tool)),
+    `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
+  ].join("\n");
+}
 
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external);
-  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS
+  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }

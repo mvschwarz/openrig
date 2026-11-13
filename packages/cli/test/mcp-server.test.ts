@@ -882,6 +882,37 @@ describe("MCP Server", () => {
     await server.close();
   });
 
+  it.each([
+    ["a full inbox grant", { queue: ["create", "show", "list", "claim", "update"], team: ["list"] }],
+    ["a narrow inbox grant", { queue: ["claim", "update"] }],
+  ])("%s's instructions name only tools its connection offers", async (_label, objects) => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    const offered = new Set((await external.listTools()).tools.map((tool) => tool.name));
+    const named = [...new Set(instructions.match(/\brig_[a-z_]+/g) ?? [])];
+    expect(instructions).toContain("claim it (rig_queue_claim)");
+    expect(named.filter((tool) => !offered.has(tool))).toEqual([]);
+    expect(instructions).not.toMatch(/rig_whoami|rig_queue_handoff|rig_queue_decide/);
+    expect(instructions.includes("rig_team")).toBe(offered.has("rig_team"));
+    await external.close();
+    await server.close();
+  });
+
+  it("a member's instructions keep every shared paragraph word for word", async () => {
+    const instructions = mcpClient.getInstructions() ?? "";
+    for (const paragraph of [
+      "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
+      "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
+      "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+      "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
+    ]) expect(instructions).toContain(paragraph);
+  });
+
   it("shows a connected assistant's person plain titles and openings, keeping each tool's rules and hints", async () => {
     // What a person sees: each tool's title and the first sentence of its description.
     const plain: Record<string, [title: string, sentence: string]> = {
