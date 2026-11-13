@@ -149,7 +149,7 @@ export class PassiveCeremonySource implements HealthObservationSource {
       if (!first) throw new Error("health_passive_episode_start_unavailable");
       const boundaries = this.closedBoundaries(lineageId);
       const cuts = boundaries.map((b) => b.transitionId);
-      let familyIds: string[] | undefined;
+      let familyIds: string[] | null | undefined;   // null: the family is over the member limit
       // Each closed segment keeps the end of the disposition that closed it: a disposition recorded
       // before #2762 may cut at a transition that no longer counts, so its id is not the segment's last.
       const segments: Array<{ segment: typeof transitions; endedAt?: string }> = [];
@@ -166,12 +166,18 @@ export class PassiveCeremonySource implements HealthObservationSource {
         // A resumed episode is named by the first raw transition after its cut, not the first counted one,
         // so a change to what counts never renames an open episode or orphans its diagnosis. The opener is read
         // from the full history, as closedBoundaries reads the cuts: it is often an older, non-counting transition
-        // that leaves the rolling window first, and the window then would name the episode anew (#3192 review).
+        // that leaves the rolling window first, and the window then would name the episode anew (#3192 review). The
+        // full history is the live and the archived transitions, as for the cuts: retention may archive the opener.
         const cut = cuts.filter((c) => c < segmentFirst.transitionId).at(-1);
-        if (cut !== undefined) familyIds ??= this.familyOf(lineageId);
+        if (cut !== undefined && familyIds === undefined) {
+          try { familyIds = this.familyOf(lineageId); } catch (error) {
+            // Only this family falls back to the window's first transition; the other families are still read.
+            if ((error as Error).message !== "health_passive_family_member_limit") throw error;
+            familyIds = null;
+          }
+        }
         const opener = cut === undefined ? undefined
-          : this.queue.db.prepare(`SELECT transition_id AS transitionId, ts FROM queue_transitions WHERE qitem_id IN (${familyIds!.map(() => "?").join(",")}) AND transition_id > ? ORDER BY transition_id LIMIT 1`)
-            .get(...familyIds!, cut) as { transitionId: number; ts: string } | undefined ?? segmentFirst;
+          : (familyIds ? this.queue.transitionLog.firstAfter(familyIds, cut) : undefined) ?? segmentFirst;
         const episodeStartedAt = opener?.ts ?? first.ts;
         const episodeKey = opener ? `${lineageId}:${opener.transitionId}` : lineageId;
         const measuredEnd = endedAt ?? now;
@@ -195,6 +201,7 @@ export class PassiveCeremonySource implements HealthObservationSource {
         if (resolved?.posture === "unknown") missingFacts.push("scope identity unresolved: " + resolved.reason);
         if (Date.parse(episodeStartedAt) < Date.parse(start)) missingFacts.push("lineage begins before retained observation window; full interval unavailable");
         if (new Set(slices).size > 1) missingFacts.push("handoff family crosses slice identities; product boundary unresolved");
+        if (cut !== undefined && familyIds === null) missingFacts.push("handoff family exceeds 1000 members; the resumed episode is named by its first transition in the retained window, so it may be renamed when that transition ages out");
         if (receipt && receipt.result.basis !== basis) missingFacts.push("normal evidence changed since the attributed assessment; reassess the current basis");
         if (receipt?.evidenceChanged) missingFacts.push("assessment evidence changed or became unavailable");
         const assessment = receipt ? { result: receipt.result, actor: receipt.actor, at: receipt.at, transitionId: receipt.transitionId, identityProvenance: receipt.identityProvenance } : undefined;

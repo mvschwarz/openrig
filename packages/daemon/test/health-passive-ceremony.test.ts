@@ -529,3 +529,47 @@ it("#3192 review: the opener is found in a dormant member of the family, not onl
   expect(actions.map((a) => a.action)).not.toContain("create");
   expect(t.service.list()).toHaveLength(diagnoses);
 });
+
+it("#3192 review: a family over the member limit names its resumed episode from the window, says so, and is still read", async () => {
+  const t = await setup();
+  const first = t.projection.list().records[0]!;
+  const id0 = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.dispose(id0, t.assessment("false-positive"));
+  // 1001 dormant children under the root: the family walk stops at its limit.
+  t.db.exec("CREATE TEMP TABLE kid AS SELECT * FROM queue_items WHERE qitem_id = 'root'");
+  const rename = t.db.prepare("UPDATE kid SET qitem_id = ?, handed_off_from = 'root'");
+  const copy = t.db.prepare("INSERT INTO queue_items SELECT * FROM kid");
+  for (let i = 0; i < 1001; i++) { rename.run(`kid-${i}`); copy.run(); }
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  for (let i = 0; i < 20; i++) insert.run("root", `2026-09-06T12:00:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-06T12:01:00.000Z");
+  const resumed = t.projection.list().records.filter((r) => r.id !== first.id);
+  expect(resumed).toHaveLength(1);
+  expect(resumed[0]!.ceremony!.missingFacts).toContainEqual(expect.stringContaining("exceeds 1000 members"));
+});
+
+it("#3192 review: the opener is read from the archive when retention moved the member that opened the episode", async () => {
+  const t = await setup();
+  const first = t.projection.list().records[0]!;
+  const id0 = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.dispose(id0, t.assessment("false-positive"));
+  await t.queue.create({ qitemId: "child", sourceSession: "builder@rig", destinationSession: "owner@rig", body: "Part", tags: ["mission:mission", "slice:slice-1"], nudge: false });
+  t.db.prepare("UPDATE queue_items SET handed_off_from = ? WHERE qitem_id = ?").run("root", "child");
+  t.db.prepare("UPDATE queue_transitions SET ts = ?, actor_session = ? WHERE qitem_id = ?").run("2026-09-05T12:02:00.000Z", "daemon@kernel", "child");
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  for (let i = 0; i < 20; i++) insert.run("root", `2026-09-06T12:00:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-06T12:01:00.000Z");
+  const resumed = t.projection.list().records.filter((r) => r.id !== first.id);
+  expect(resumed).toHaveLength(1);
+  expect((await t.service.evaluate("system:health", true)).actions).toContainEqual(expect.objectContaining({ findingId: resumed[0]!.id, action: "create" }));
+  const diagnoses = t.service.list().length;
+  // Retention moves the opening member's transitions to the archive (the queue row itself stays), as queue-retention does.
+  t.db.prepare(`INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at)
+    SELECT transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, ? FROM queue_transitions WHERE qitem_id = ?`).run("2026-09-06T12:04:00.000Z", "child");
+  t.db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ?").run("child");
+  t.time("2026-09-06T12:05:00.000Z");
+  expect(t.projection.list().records.filter((r) => r.id !== first.id).map((r) => r.id)).toEqual([resumed[0]!.id]);
+  const { actions } = await t.service.evaluate("system:health", true);
+  expect(actions.map((a) => a.action)).not.toContain("create");
+  expect(t.service.list()).toHaveLength(diagnoses);
+});
