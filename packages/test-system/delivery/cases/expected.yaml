@@ -1,8 +1,8 @@
 # Delivery conformance suite: expected results (owner: quality-lead@v-openrig-build)
-# Written 2026-11-12 after 07:11Z for Builder A's S2 harness (dev60-planner relay, qitem-20261112-d60p-suite-author-core-a).
+# Written 2026-11-12 for Builder A's S2 harness.
 # Every expectation comes from a SHIPPED contract, cited in `contract:`. A case with no stated contract is marked
-# `contract: NONE` and is a finding for its owner, not a guess. Case IDs and procedures are the Lab's (CASES.md,
-# /Users/admin/.openrig/private/lab-connection-measurements-20261112/CASES.md); this file gives the outcome to judge.
+# `contract: NONE` and is a finding for its owner, not a guess. Case IDs and procedures come from the delivery
+# measurement case list, kept outside this repository; this file gives the outcome to judge.
 #
 # Judging rules for every case:
 #   - Results: PASS, FAIL or NOT RUN, with an evidence level per cell:
@@ -23,7 +23,7 @@
 #     The shipped modes are SIX (docs/reference/seat-delivery.md, identical at 0.7.12 3cdc0e6c and 0.7.13 551e6c06):
 #     off (default), draft-aware, openrig-urgent, urgent-only, sends-only, hold. A terminal member (runtime: terminal)
 #     defaults to sends-only. ~~"Opted-in modes are `draft-aware` and `hold`."~~ was incomplete (quality-lead's error,
-#     corrected 11-12 16:4xZ at S3; preimage expected.yaml.pre-s3-20261112T1640, ee270870).
+#     corrected 2026-11-12 at S3; the earlier text is kept outside this repository).
 #   - An ordinary send is ENVELOPED: its first typed line is `From: <sender>` (daemon pane-envelope.ts:125;
 #     routes/transport.ts:26). Only `--raw` and `--dangerously-interact` (which implies --raw) type exact text with no
 #     envelope (`rig send --help`). Delivered-byte comparisons are of the envelope as OpenRig wrote it (its wireSha256).
@@ -40,7 +40,7 @@ program_transforms:
     versions_observed: ["2.1.322"]
     rewrite: "each pasted TAB (U+0009) arrives at the model as four spaces (U+0020 x4)"
     inverse_check: "replacing each such 4-space run at the original TAB offsets restores OpenRig's own wireSha256 exactly"
-    evidence: "Builder A, S2 head d18fb4a, D15 Claude: OpenRig wrote 406 B, the model received 409 B, and the restored bytes equal wireSha256 b218d7c4… (delivery-suite-s2-d18fb4a-run.tgz; Quality confirms the inverse on the tarball when Rig lands it on Build)"
+    evidence: "S2 harness at d18fb4a, D15 Claude: OpenRig wrote 406 B, the model received 409 B, and the restored bytes equal OpenRig's own wireSha256 (run archive retained outside this repository)"
     user_effect: "text a person or agent sends to a Claude Code seat loses its tabs (tab-indented code, Makefile recipes, TSV). It's a content limit to disclose, not a lost or duplicated message"
     owner_finding: "docs: seat-delivery.md should say it (desk). Whether OpenRig should route around it is a product question for the desk, not a suite rule"
 
@@ -91,7 +91,7 @@ cases:
       - "footer: Claude context hint ('~Nk uncached · /clear to start fresh')"
       - "footer: Claude auto-update failure, full wording and the width-clipped form ('… npm i -g @anthropic-ai/claude-c…'), at 80x24"
     contract: "#2933, #2942, #3016/#2948 (0.7.13); 0.7.9 #2437/#2442 nothing replayed; 0.7.12 #2515 finding: clearing a draft is not automatic delivery"
-    note: "0.7.12 S02/D3 NOT MET this exact cell with the clipped footer (dev50-qa D3-IDLE-PANE-ROWS.json 830aa6b4); 0.7.12 = baseline, 0.7.13 = expected fixed"
+    note: "0.7.12 S02/D3 NOT MET this exact cell with the clipped footer (retained idle-pane evidence from that run); 0.7.12 = baseline, 0.7.13 = expected fixed"
 
   D08:
     title: tmux copy mode
@@ -210,4 +210,4 @@ later:
   D10: "retry after an uncertain timeout: unconfirmed/indeterminate is never resent blind; reconcile first; no duplicate (0.7.9 #2509, #2505/#2507; 0.7.2 cross-host reconcile by id)"
   D12: "managed /compact with a typed draft: the input box is checked first; typed/unreadable input holds the step (0.7.7 #2347; #2799 compaction draft defaults)"
   D16: "usage/rate-limit: Claude's account usage-limit dialog is likely NOT RUN on a stand-in (A's limit); a stand-in 429/overloaded error is a separate cell, judged by: no loss, no blind resend"
-  D25: "native route off / unarmed / fallback: typing stays the default and the fallback (decision-20261111-1140, -1636 (1)); the Lab's M3 pilot (52cf2777) is the first data point for Codex's queue route"
+  D25: "native route off / unarmed / fallback: typing stays the default and the fallback (the project's 2026-11-11 delivery-route decisions); an early pilot is the first data point for Codex's queue route"
