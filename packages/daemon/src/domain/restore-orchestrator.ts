@@ -2,7 +2,8 @@ import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./clau
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
-import { leftAttachedReason } from "./restore-plan-preview.js";
+import { leftAttachedReason, restorePermissionSeat } from "./restore-plan-preview.js";
+import { planRestorePermission, type RestorePermissionPreview } from "./permission-account.js";
 import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
@@ -215,7 +216,8 @@ export interface NarrowLaunchResult {
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
-  targetNodes?: Array<{ nodeId: string; logicalId: string }>;
+  /** In a plan, each target's `permission`: what this launch will start it with (absent for a seat it leaves attached). */
+  targetNodes?: Array<{ nodeId: string; logicalId: string; permission?: RestorePermissionPreview }>;
   unmatchedIds?: string[];
   warnings?: string[];
   snapshotSelection?: RestoreSnapshotSelection;
@@ -623,7 +625,17 @@ export class RestoreOrchestrator {
       snapshotSelection: selected.selection,
       targetNodes: intendedNodes
         .filter((node) => targetIds.has(node.logicalId))
-        .map((node) => ({ nodeId: node.id, logicalId: node.logicalId })),
+        .map((node) => {
+          // The permission this launch will start the seat with: restore's own posture rule through the launch's resolver.
+          const live = rig.nodes.find((candidate) => candidate.logicalId === node.logicalId);
+          if (live && seatProcessOwner(resolveSeatKind(live.binding?.attachmentType)) === "external") {
+            return { nodeId: node.id, logicalId: node.logicalId };
+          }
+          const seat = restorePermissionSeat(rig.rig.name, live ?? { id: node.id, logicalId: node.logicalId, runtime: node.runtime ?? null },
+            selected.snapshot, node.id);
+          return { nodeId: node.id, logicalId: node.logicalId,
+            permission: planRestorePermission(this.db, { ...seat, restorePosture: () => this.resolveRestorePosture(seat.nodeId, rigId) }) };
+        }),
       unmatchedIds: logicalIds.filter((id) => !targetIds.has(id) && !targetNodeIds.has(id)),
       nonTargetEffects,
     };

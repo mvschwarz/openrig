@@ -14,6 +14,7 @@ import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibilit
 import type Database from "better-sqlite3";
 import { resolveActiveSnapshotSession, deriveRehydrateOccupantsByNode, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
+import type { RestorePermissionPreview } from "./permission-account.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { communityLaunchOnlyRestoreReason, effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts } from "./restore-policy.js";
@@ -56,6 +57,9 @@ export interface RestorePlanPreviewNode {
   /** A runtime prompt the operator should expect at restore (Claude session
    *  picker, Codex auth/update) — a forecast, not an incidental surprise. */
   runtimePrompt?: string;
+  /** The permission restore will start this seat with, and where it comes from, when the caller can read it (planned,
+   *  not observed). Absent for a seat restore leaves attached. */
+  permission?: RestorePermissionPreview;
 }
 
 export interface RestorePlanPreview {
@@ -283,6 +287,31 @@ export function capturedPreviewSessionRows(snapshot: Snapshot): PreviewSessionRo
  * Forecast per-seat restore actions from current inventory and saved occupancy.
  * Report token state and guidance without launching or changing any sessions.
  */
+/** One seat's facts for a restore permission plan, from the snapshot restore reads: whether restore takes its pod-aware
+ *  path (the saved node's pod) and finds saved startup context (keyed by the saved node, as restore keys it), and the
+ *  runtime that context names. Undefined when there's no saved node to read them from. */
+export interface RestorePermissionSeat {
+  nodeId: string;
+  logicalId: string;
+  seat: string;
+  runtime: string | null;
+  podAware?: boolean;
+  startupContext?: boolean;
+}
+
+export function restorePermissionSeat(rigName: string, node: { id: string; logicalId: string; runtime: string | null; binding?: { tmuxSession: string | null } | null },
+  snapshot: Snapshot | null, savedNodeId: string): RestorePermissionSeat {
+  const saved = snapshot?.data.nodes?.find((entry) => entry.logicalId === node.logicalId);
+  const startup = saved ? snapshot?.data.nodeStartupContext?.[savedNodeId] : undefined;
+  return {
+    nodeId: node.id,
+    logicalId: node.logicalId,
+    seat: node.binding?.tmuxSession ?? `${node.logicalId.replace(".", "-")}@${rigName}`,
+    runtime: startup?.runtime ?? node.runtime,
+    ...(saved ? { podAware: !!saved.podId, startupContext: !!startup } : {}),
+  };
+}
+
 export function buildRestorePlanPreview(
   rig: RigWithRelations,
   snapshot: Snapshot | null,
@@ -291,6 +320,8 @@ export function buildRestorePlanPreview(
   nowMs: number = Date.now(),
   recorded: Record<string, string | null> = {},
   selectedHistory?: { nodeId: string; historySessionId: string },
+  /** Plans a seat's restore permission (planRestorePermission); omitted, the preview carries none. */
+  permissionOf?: (seat: RestorePermissionSeat) => RestorePermissionPreview,
 ): RestorePlanPreview {
   // OPR.0.5.7.1 — the relation the resolution consumes: the snapshot's own
   // when previewing a snapshot; for the live no-snapshot case, the SAME
@@ -350,6 +381,7 @@ export function buildRestorePlanPreview(
       // A terminal has no token to find and relaunches fresh on its own.
       freshRequired: attached || stoppedCurrent || runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing" && !isOrdinaryTerminalSeat(seat),
       ...(runtimePrompt ? { runtimePrompt } : {}),
+      ...(permissionOf && !attached ? { permission: permissionOf(restorePermissionSeat(rig.rig.name, node, snapshot, savedNodeId)) } : {}),
     };
   });
   return {

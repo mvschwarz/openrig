@@ -309,6 +309,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+    // Each target carries the permission this launch will start it with, from restore's own posture rule.
+    expect(result.targetNodes?.[0]?.permission?.summary).toEqual(expect.any(String));
   });
 
   it("plans single-node subset by node id with nonTargetMode unchanged (#887)", () => {

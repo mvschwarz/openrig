@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildRestorePlanPreview, collectPreviewSessionRows, type PreviewSessionRow } from "../src/domain/restore-plan-preview.js";
+import { buildRestorePlanPreview, collectPreviewSessionRows, type PreviewSessionRow, type RestorePermissionSeat } from "../src/domain/restore-plan-preview.js";
 import type { RigWithRelations, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -252,5 +252,45 @@ describe("FR-6 live path — DB → collectPreviewSessionRows → plan state", (
     expect(p.nodes[0]!.tokenState).toBe("stale");
     expect(p.mutated).toBe(false);
     db.close();
+  });
+});
+
+describe("restore plan permission per seat", () => {
+  const snapshotOf = (nodes: Array<{ id: string; logicalId: string; runtime: string; podId: string | null }>, startup: Record<string, { runtime: string }>) =>
+    ({ id: "snap", kind: "manual", createdAt: "now", data: {
+      nodes, sessions: [row("n1")], activeSessionIdByNode: { n1: "s-n1" }, nodeStartupContext: startup,
+    } } as unknown as Snapshot);
+
+  it("asks for each seat restore launches, with the facts restore reads from the snapshot, and none for an attached seat", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code" }, { id: "n2", logicalId: "dev.qa", runtime: "codex" },
+      { id: "n3", logicalId: "dev.old", runtime: "claude-code" }]);
+    (rig.nodes[1] as unknown as { binding: unknown }).binding = { attachmentType: "external_cli", externalSessionName: "qa-cli", tmuxSession: null };
+    const snapshot = snapshotOf([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code", podId: "pod-1" },
+      { id: "n2", logicalId: "dev.qa", runtime: "codex", podId: "pod-1" }, { id: "n3", logicalId: "dev.old", runtime: "claude-code", podId: null }],
+    { n1: { runtime: "codex" } });
+    const seen: RestorePermissionSeat[] = [];
+    const preview = buildRestorePlanPreview(rig, snapshot, [row("n1")], undefined, NOW, {}, undefined, (seat) => {
+      seen.push(seat);
+      return { basis: "unknown", runtime: seat.runtime, summary: `planned ${seat.logicalId}` };
+    });
+    // The runtime restore starts n1 with is its saved startup context's, as restore's own adapter choice reads it.
+    expect(seen).toEqual([
+      { nodeId: "n1", logicalId: "dev.impl", seat: "dev-impl@test-rig", runtime: "codex", podAware: true, startupContext: true },
+      { nodeId: "n3", logicalId: "dev.old", seat: "dev-old@test-rig", runtime: "claude-code", podAware: false, startupContext: false },
+    ]);
+    expect(preview.nodes.map((n) => n.permission?.summary)).toEqual(["planned dev.impl", undefined, "planned dev.old"]);
+  });
+
+  it("carries no permission when the caller doesn't plan one, so the other plan callers are unchanged", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code" }]);
+    const preview = buildRestorePlanPreview(rig, snapshotOf([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code", podId: "pod-1" }], {}), [row("n1")], undefined, NOW);
+    expect(preview.nodes[0]).not.toHaveProperty("permission");
+  });
+
+  it("leaves the path facts unset for a seat no saved snapshot names", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code" }]);
+    const seen: RestorePermissionSeat[] = [];
+    buildRestorePlanPreview(rig, null, [row("n1")], undefined, NOW, {}, undefined, (seat) => { seen.push(seat); return { basis: "unknown", runtime: null, summary: "x" }; });
+    expect(seen).toEqual([{ nodeId: "n1", logicalId: "dev.impl", seat: "dev-impl@test-rig", runtime: "claude-code" }]);
   });
 });

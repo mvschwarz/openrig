@@ -245,6 +245,8 @@ describe("up --existing keeps proved current stops", () => {
     expect(preview.status).toBe(200); expect(applied.status).toBe(200);
     expect(plan.nodes[0].intendedAction).toBe(fresh ? "fresh-primed" : "awaiting-decision");
     expect(result.nodes[0].status).toBe(plan.nodes[0].intendedAction);
+    // The plan shows the permission restore will start the seat with, and stays read-only (total_changes above).
+    expect(plan.nodes[0].permission?.summary).toEqual(expect.any(String));
     if (!fresh) {
       const command = "rig seat launch 'dev.worker@stopped-review' --fresh --reason";
       expect(plan.nodes[0].reason).toContain(command);

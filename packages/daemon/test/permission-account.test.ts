@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
-import { planPermissionAccount } from "../src/domain/permission-account.js";
+import { planPermissionAccount, planRestorePermission } from "../src/domain/permission-account.js";
+import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../src/adapters/kernel-authority.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -147,5 +148,58 @@ describe("the planned permission account", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.status.permissions).toMatchObject({ selectionState: "inherit", nativeEffect: "unverified", account: { basis: "planned", runtime: "claude-code" } });
+  });
+});
+
+// After a reboot a seat came back in a mode the person didn't expect. The plan previews now show, per seat, the permission
+// restore will start it with: restore's own posture through the launch's resolver, with no precedence change.
+describe("a seat's planned permission on restore", () => {
+  const inputs = (nodeId: string, restorePosture: () => "floor" | "full_bypass" | "auto") =>
+    ({ nodeId, seat: "dev-builder@workshop", runtime: "claude-code", restorePosture, podAware: true, startupContext: true });
+
+  it("starts from the posture restore re-reads, not the cached one a fresh launch uses", () => {
+    const { db, rigRepo, node } = seat("claude-code");
+    attach(rigRepo, db, node.id, "builtin:yolo", "full_bypass");
+    const restored = planRestorePermission(db, inputs(node.id, () => "floor"), env);
+    const fresh = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", env);
+    expect(fresh.nativeArgument).toBe(claudePostureFlag(env, "full_bypass", undefined));
+    expect(restored).toMatchObject({ basis: "planned", source: "member_policy", nativeArgument: claudePostureFlag(env, "floor", undefined) });
+    expect(restored.summary.startsWith("On restore: ")).toBe(true);
+    expect(fresh.summary.startsWith("Next launch: ")).toBe(true);
+  });
+
+  it("keeps the seat's own choice ahead of restore's posture, as the launch does", () => {
+    const { db, rigRepo, node } = seat("claude-code");
+    attach(rigRepo, db, node.id, "builtin:yolo", "full_bypass");
+    new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "person@host", "after the reboot");
+    const restored = planRestorePermission(db, inputs(node.id, () => "full_bypass"), env);
+    expect(restored).toMatchObject({ basis: "planned", source: "explicit", nativeArgument: "--permission-mode auto",
+      explicit: { mode: "auto", actor: "person@host", reason: "after the reboot" }, overrides: ["member policy builtin:yolo"] });
+  });
+
+  it("reads unknown, with restore's own reason, when restore would refuse the seat's permission facts", () => {
+    const { db, node } = seat("claude-code");
+    new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "plan" }, "person@host", "review");
+    const restored = planRestorePermission(db, { ...inputs(node.id, () => "floor"), runtime: "codex" }, env);
+    expect(restored.basis).toBe("unknown");
+    expect(restored.summary).toContain("Seat runtime changed since permission selection");
+  });
+
+  it.each([
+    [{ podAware: false }, "runtime from its resume token"],
+    [{ podAware: true, startupContext: false }, "no saved startup context"],
+    [{ podAware: undefined, startupContext: undefined }, "No saved snapshot names this seat"],
+  ])("names the restore path it can't settle (%o)", (path, words) => {
+    const { db, node } = seat("claude-code");
+    const restored = planRestorePermission(db, { ...inputs(node.id, () => "floor"), ...path }, env);
+    expect(restored.basis === "planned" ? restored.unknown.join(" ") : "").toContain(words);
+  });
+
+  it("adds no path note for a pod seat with saved startup context, the path restore's posture is exact for", () => {
+    const { db, node } = seat("claude-code");
+    const restored = planRestorePermission(db, inputs(node.id, () => "floor"), env);
+    const notes = restored.basis === "planned" ? restored.unknown.join(" ") : "";
+    expect(notes).toContain("This is the plan for restoring this seat");
+    for (const words of ["resume token", "startup context", "No saved snapshot"]) expect(notes).not.toContain(words);
   });
 });

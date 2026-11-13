@@ -122,6 +122,8 @@ describe("rig launch --seats", () => {
           ok: true,
           planOnly: true,
           snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          targetNodes: [{ nodeId: "n-1", logicalId: "dev.driver",
+            permission: { basis: "planned", summary: "On restore: --permission-mode acceptEdits, from OpenRig's team default (no policy or seat choice is recorded)." } }],
           nonTargetEffects: {
             mode: "detach_and_hold",
             reason: "operator hold",
@@ -144,6 +146,8 @@ describe("rig launch --seats", () => {
       undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    // Each target and the permission this launch will start it with.
+    expect(logs.join("\n")).toContain("Targets:\n  dev.driver: On restore: --permission-mode acceptEdits, from OpenRig's team default");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
     expect(process.exitCode).toBeUndefined();
   });
