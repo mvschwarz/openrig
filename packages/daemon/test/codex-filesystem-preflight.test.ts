@@ -188,6 +188,23 @@ describe("root deny refinements", () => {
   });
 });
 
+describe("minimal coverage without an authored root rule", () => {
+  it.each(["/Users/x/.ssh/key", "/users/x/.ssh/key", "/HOME/x/.ssh/key"])("refuses an uncovered user-data read at %s", key => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { [key]: "read" });
+    const result = decide(read);
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining(JSON.stringify(key)) });
+    if (!result.ok) expect(result.error).toContain("Fix:");
+  });
+
+  it("keeps an unexpanded system read unverified and names its key", () => {
+    const key = "/opt/x";
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { [key]: "read" });
+    expect(decide(read)).toMatchObject({ ok: true, verified: false, reason: expect.stringContaining(JSON.stringify(key)) });
+  });
+});
+
 describe("Codex seat filesystem verifier reader boundary", () => {
   it.each([["env", "CODEX_HOME=/other"], ["custom-wrapper"]])("reports a launch wrapper without certifying a different configuration %#", async launchWrapper => {
     vi.mocked(readCodexConfiguration).mockClear();

@@ -75,7 +75,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     const denyAncestor = root !== undefined && root !== path.sep && rules[root] === "deny";
     // Codex 0.167.2's Linux/macOS minimal defaults are system paths, not
     // these user-data roots. Other minimal coverage stays unexpanded.
-    const outsideMinimal = literalAbsolute(key) && /^\/(?:home|Users)(?:\/|$)/.test(key);
+    const outsideMinimal = literalAbsolute(key) && /^\/(?:home|Users)(?:\/|$)/i.test(key);
     const possibleCoverage = extraAccess !== undefined && !denyAncestor
       && (!isAccess(ancestorAccess) || accessRank[extraAccess] > accessRank[ancestorAccess])
       && (authoredAmbiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
@@ -91,7 +91,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     if (Object.keys(rules).some(rule => !literalAbsolute(rule) && rule !== ":minimal")) return undefined;
     // :minimal read cannot grant write; its native read coverage is not
     // enumerated here, so extra reads outside a literal ancestor stay unknown.
-    if (rules[":minimal"] != null) return rules[":minimal"] === "read" ? "read" : undefined;
+    if (rules[":minimal"] != null && !outsideMinimal) return rules[":minimal"] === "read" ? "read" : undefined;
     return "deny";
   };
   const checks: CodexFilesystemDecision[] = [];
@@ -105,7 +105,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
       "Remove the conflicting lower-layer grant, or deliberately update the agent's codex_permissions to the intended access.");
     if (!(key in authored) && value === "read" && expected === "read" && !Object.keys(authored).some(root =>
       root === ":root" || (literalAbsolute(root) && literalAbsolute(key) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep)))) {
-      checks.push(unknown("Native minimal read coverage could not be compared"));
+      checks.push(unknown(`Filesystem rule ${JSON.stringify(key)}: native minimal read coverage could not be compared.`));
     }
   }
   for (const [key, access] of Object.entries(authored)) {
