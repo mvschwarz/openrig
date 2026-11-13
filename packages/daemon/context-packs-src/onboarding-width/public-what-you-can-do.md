@@ -356,7 +356,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   are off by default: `rig slack setup --unfurl on` turns them back on from the connector's next
   rewire, and `rig slack status` shows the mode. When the arrival note is recorded before the
   answer is routed, an answer to a reply in an older thread posts back into that thread; a failed
-  note write, or a notification posted before the note is recorded, posts it top-level.
+  note write posts it top-level; a notification posted before the note is recorded can also lead
+  to a top-level answer.
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
@@ -805,7 +806,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
-  `nodes.inventory.terminal_work`). These records are written after a slow call completes; a
+  `nodes.inventory.terminal_work`). These nodes records are written after a slow call completes; a
   missing record doesn't rule out unfinished work or work outside those steps.
   On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
   own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
