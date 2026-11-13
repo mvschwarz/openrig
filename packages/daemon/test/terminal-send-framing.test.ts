@@ -131,6 +131,16 @@ describe("terminal-runtime send framing", () => {
     expect(f.executions).toEqual([{ status: 0, stdout: OUTPUT, stderr: "" }]);
   });
 
+  it("sends exact text to a terminal whose physical session has a different name", async () => {
+    const f = fixture("terminal", false);
+    f.registry.updateBinding(f.node.id, { tmuxSession: "shell-physical" });
+    db.prepare("UPDATE sessions SET session_name = ? WHERE id = ?").run("shell-physical", f.session.id);
+    const original = wrapSendBody("operator@framing", f.name, BODY);
+    const result = await f.transport.send(f.name, original, { exactText: BODY });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(f.pasted).toEqual([BODY]);
+  });
+
   it("direct HTTP explicit interaction keeps text when exactText is also supplied", async () => {
     const f = fixture("terminal", false);
     const app = new Hono();

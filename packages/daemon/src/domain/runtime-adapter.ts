@@ -256,6 +256,9 @@ export interface RuntimeAdapter {
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
+  /** Check launch preconditions before an in-place handover ends the predecessor.
+   * A concrete conflict refuses; an inconclusive check may allow launch with a warning. */
+  preflightLaunch?(binding: NodeBinding): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
   /** The file an adapter's project() writes for a skill when it lives outside
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */

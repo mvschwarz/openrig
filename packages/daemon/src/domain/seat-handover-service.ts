@@ -550,7 +550,9 @@ export class SeatHandoverService {
       if (permissionOverride.codexPermissions) {
         // Saved envelopes retain ordinary launch additions; only an observed predecessor
         // policy uses the exact carry path. Describe policy, not an observed native delta.
-        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+        const directoryPolicy = "filesystem" in permissionOverride.codexPermissions
+          ? "with its explicit filesystem policy and no additional writable directory grants"
+          : permissionOverride.codexPermissions.sandbox === "workspace-write"
           ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
           : "without additional writable directory grants, as on a read-only fresh launch";
         permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
@@ -670,7 +672,9 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+        guidance: launch.code === "successor_preflight_failed"
+          ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
     }
 
@@ -838,7 +842,7 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       startedWithoutRequired,
-      launchWarnings: coreCopyNotes,
+      launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
       // #2861 item 2: finalization can still fail once the successor is ready in the respawned pane.
       recordFailure: (failureCode) => RECOVERABLE_FINALIZE_CODES.has(failureCode) && this.recordUnadoptedSuccessor({ node,
