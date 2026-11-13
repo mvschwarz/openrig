@@ -94,7 +94,8 @@ export class PiCompactionService {
 
     const attemptId = this.newAttemptId();
     const launchId = prior?.launchId ?? null;
-    const previous = this.requested.get(seat.sessionName) ?? this.savedRequest(seat.sessionName);
+    const saved = this.savedRequest(seat.sessionName);
+    const previous = this.requested.get(seat.sessionName) ?? (saved && this.sameLaunch(saved.launchId, prior) ? saved : null);
     // Record the pending attempt BEFORE awaiting the send: a second caller sees it
     // in flight, and a refusal before any input restores what was current before it.
     this.remember(seat, attemptId, launchId);

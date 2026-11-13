@@ -329,6 +329,25 @@ describe("PiCompactionService", () => {
     }
   });
 
+  it("never restores a saved request from another launch when a retry is refused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-compaction-other-launch-"));
+    try {
+      const store = new PiCompactionRequestStore(join(dir, "requests"));
+      store.set(seat.sessionName, { nodeId: seat.nodeId, attemptId: "attempt-A", launchId: "launch-a",
+        submittedAt: new Date(start).toISOString() });
+      // The sidecar now identifies launch B; the saved request is launch A's.
+      const f = fixture({ sidecar: { ready: true, launchId: "launch-b", updatedAt: "now" }, requestStore: store,
+        send: async () => ({ ok: true, sent: false, outcome: "retained", reason: "typing_guard_enabled" }) });
+      expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+      expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "held" });
+      // The stale request is dropped, not restored: launch B has no request.
+      expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+      expect(store.get(seat.sessionName)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reads a saved request as uncertain when the status file is missing", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-compaction-missing-status-"));
     try {
