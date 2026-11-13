@@ -613,8 +613,8 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
     runProduction(out);
     const helpSource = readFileSync(join(REPO, "docs/reference/help.md"), "utf8");
     const refDir = join(out, "reference");
-    assert.deepEqual(readdirSync(refDir).sort(), ["acp-agents.md", "getting-started.md", "instance-layout.md", "manifest.yaml", "rig-spec.md", "tmux-servers.md", "whats-new.md"]);
-    for (const f of ["acp-agents.md", "getting-started.md", "instance-layout.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]) {
+    assert.deepEqual(readdirSync(refDir).sort(), ["acp-agents.md", "getting-started.md", "instance-layout.md", "manifest.yaml", "product-journey-sdlc.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]);
+    for (const f of ["acp-agents.md", "getting-started.md", "instance-layout.md", "product-journey-sdlc.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]) {
       assert.ok(!lstatSync(join(refDir, f)).isSymbolicLink(), `${f} ships as a real file`);
       assert.equal(readFileSync(join(refDir, f), "utf8"), readFileSync(join(REPO, "docs/reference", f), "utf8"));
     }
@@ -634,6 +634,8 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
     const acpAddresses = [...acpHelp.matchAll(/rig context get (reference\/[^`\s]+)/g)].map((m) => m[1]);
     assert.deepEqual(acpAddresses, ["reference/acp-agents.md", "reference/acp-agents.md#openrig-as-an-agent-in-acp-apps"]);
     assert.deepEqual(await unresolvedAddresses(app, acpAddresses), []);
+    // Role guidance names its authority lookup by this address (#3193).
+    assert.deepEqual(await unresolvedAddresses(app, ["reference/product-journey-sdlc.md#resolve-the-selected-path"]), []);
     // The daemon's tmux control mode log line and `rig doctor`'s tmux_control_mode fix name their guide the same way.
     const tmuxAddresses = ["packages/daemon/src/adapters/tmux-control.ts", "packages/cli/src/commands/doctor.ts"]
       .flatMap((file) => [...readFileSync(join(REPO, file), "utf8").matchAll(/rig context get (reference\/[\w.#/-]+)/g)].map((m) => m[1]));
