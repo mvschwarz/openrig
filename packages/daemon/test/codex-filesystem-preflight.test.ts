@@ -199,6 +199,18 @@ describe("compatible policies and inconclusive reads", () => {
       .toMatchObject({ ok: true, verified: false });
   });
 
+  it("leaves an extra absolute rule unverified when a native selector may cover it", () => {
+    const own = { ...permissions, filesystem: { ":root": "read", ":tmpdir": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/tmp/child": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+    const literal = { ...permissions, filesystem: { ":root": "read", "/work": "write" } } satisfies CodexFilesystemPermissions;
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...literal.filesystem, "/outside": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: literal, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false });
+  });
+
   it.each(["default_permissions", "approval_policy"])("reports absent or null %s without inventing a conflict", key => {
     for (const value of [undefined, null]) {
       const read = config();

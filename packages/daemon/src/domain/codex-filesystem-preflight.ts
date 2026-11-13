@@ -64,6 +64,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     // native expansion remains Codex's job, not another policy engine here.
     const possibleCoverage = extraAccess !== undefined && accessRank[extraAccess] > accessRank[rootAccess]
       && (ambiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
+        && (nativeSelectors.has(key) || literalHomePath(key) || !literalAbsolute(rule))
         && isAccess(access) && accessRank[access] >= accessRank[extraAccess]));
     if (nativeSelectors.has(key)) return key !== ":root" && possibleCoverage ? undefined : rootAccess;
     if (!literalAbsolute(key) && !literalHomePath(key)) return undefined;
@@ -71,7 +72,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
       .sort((a, b) => b.length - a.length);
     const root = ancestors[0];
     if (root) return isAccess(rules[root]) ? rules[root] : undefined;
-    if (literalHomePath(key) && possibleCoverage) return undefined;
+    if (key !== path.sep && possibleCoverage) return undefined;
     if (isAccess(fullRoot)) return fullRoot;
     if (literalHomePath(key)) return "deny";
     if (Object.keys(rules).some(rule => !literalAbsolute(rule) && rule !== ":minimal")) return undefined;
