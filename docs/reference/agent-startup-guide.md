@@ -307,7 +307,10 @@ second sample, a few seconds later, finds the same foreground, the refusal says 
 it again only once the pane shows a waiting wrapper has started Claude (a wrapper still starting, which the second
 sample sees exec Claude or start it, is proven). A
 `/clear` in the successor before the recovery is followed: the conversation it adopts is the one Claude's own session
-file for that process names, when it is newer than the process. Then it commits
+file for that process names, when it is newer than the process, even when that is the retiring occupant's conversation
+or a fork parent's. The result says so; a fork successor on its parent's or the retiring occupant's conversation is
+reported as no distinct fork (`forkId: "none"`, continuity `resumed`), and the parent seat is left as it was: both seats
+then name the same conversation, so restoring both opens it twice. Then it commits
 the handover with the occupant generation the attempt reserved, so the successor's identity hooks are accepted from
 then on. It types nothing into the pane, and a packet the failed handover didn't deliver is not delivered: the result
 says so, and a rebuild whose priming never arrived is recorded as fresh. Anything it can't prove, such as another

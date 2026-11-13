@@ -173,7 +173,7 @@ interface SeatHandoverMutationResult {
   warnings?: string[];
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
@@ -391,11 +391,17 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
-    console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
-    if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
+    if (result.sourceOutcome.forkId === "none") {
+      // #3044: a recovered fork successor on its parent's or the retiring occupant's conversation is not a distinct fork.
+      console.log(`Fork of ${result.sourceOutcome.forkedFrom}: no distinct fork. ${result.sourceOutcome.limit ?? ""}`.trim());
+    } else {
+      console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
+      if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
+    }
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
-    console.log("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
+    // #3044: a recovered rebuild successor on the retiring occupant's conversation resumed it (the warning says so).
+    if (result.currentStatus?.continuityOutcome !== "resumed") console.log("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
     if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
     if (outcome.model) {
       console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
@@ -427,7 +433,8 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       // live successor agent.
       console.log("The captured startup context (restore packet) was delivered to the successor.");
     }
-    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+    // #3044: a recovered successor on the retiring occupant's conversation resumed it (the result's warning says so).
+    if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
     // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
     if (result.source.mode === "rebuild") {
@@ -441,7 +448,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
       console.log("Check the successor's screen before sending the context again; it may already be working on it.");
     }
-    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+    if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.source.mode === "fork") {
     console.log("No packet delivery: fork context rides the native conversation itself.");
   } else {

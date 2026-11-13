@@ -559,11 +559,125 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       expect(state()).toEqual(before);
     });
 
-    it("keeps the launch's conversation when the file names the retiring occupant's", async () => {
+    it("records the retiring occupant's conversation when the successor holds it, and says so", async () => {
       await failedHandover();
       pidFile({ name: SEAT, sessionId: previousToken });
-      expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
-      expect(resumeTarget()).toBe(successorToken);
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+      // The resume target is the conversation the proven process is on, not the launch's id it no longer holds.
+      expect(resumeTarget()).toBe(previousToken);
+      expect(db.prepare("SELECT status, resume_token FROM sessions WHERE id = ?").get(sessionId))
+        .toEqual({ status: "superseded", resume_token: previousToken });
+      expect(result.result.warnings).toEqual([expect.stringContaining("the retiring occupant's conversation")]);
+      // It resumed an existing conversation: not recorded as a fresh or rebuilt one.
+      expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+    });
+
+    describe("a fork whose parent is a live seat", () => {
+      const PARENT = "dev-parent@seat-rig";
+      const parentToken = "44444444-4444-4444-8444-444444444444";
+      let parentNodeId: string;
+      let parentSessionId: string;
+      beforeEach(() => {
+        const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+        parentNodeId = rigRepo.addNode(rigId, "dev.parent", { runtime: "claude-code", cwd: "/project" }).id;
+        const parent = sessionRegistry.registerSession(parentNodeId, PARENT);
+        sessionRegistry.updateStatus(parent.id, "running");
+        sessionRegistry.updateStartupStatus(parent.id, "ready", "2026-11-09T12:00:00Z");
+        sessionRegistry.updateBinding(parentNodeId, { tmuxSession: PARENT, tmuxPane: "%5" });
+        sessionRegistry.updateResumeToken(parent.id, "claude_id", parentToken, "hook");
+        parentSessionId = parent.id;
+      });
+      const parentState = () => ({
+        session: db.prepare("SELECT status, resume_token, resume_type, resume_provenance FROM sessions WHERE id = ?").get(parentSessionId),
+        node: db.prepare("SELECT tmux_session, tmux_pane FROM bindings WHERE node_id = ?").get(parentNodeId),
+        tenure: sessionRegistry.currentOccupantTenure(parentNodeId),
+      });
+      /** A fork handover that fails after its successor is ready (a live owner's claim on the pane, as in #2861 item
+       *  2), whose owner then goes, so the attempt is left to recover. */
+      async function failedFork(source = `fork:${PARENT}`): Promise<void> {
+        nativeAt = 0;
+        const otherRig = rigRepo.createRig("other-rig");
+        const owner = rigRepo.addNode(otherRig.id, "dev.owner", { runtime: "claude-code", cwd: "/other" });
+        const ownerSession = sessionRegistry.registerSession(owner.id, "dev-owner@other-rig");
+        sessionRegistry.updateStatus(ownerSession.id, "running");
+        const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: SEAT, tmuxPane: "%9", runtimeHint: "claude-code", confidence: "high" });
+        discoveryRepo.markClaimed(row.id, owner.id);
+        const result = await service().handover({ seatRef: SEAT, source, reason: "context-wall" });
+        expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+        expect(openHandoverAttempt(db, nodeId)).toMatchObject({ failedStep: "finalize", sourceOutcome: { mode: "fork", forkId: "captured" } });
+        sessionRegistry.updateStatus(ownerSession.id, "exited");
+        rigRepo.archiveRig(otherRig.id);
+      }
+
+      it("records the parent's conversation the successor holds, reports it is not a distinct fork, and leaves the parent as it was", async () => {
+        await failedFork();
+        pidFile({ name: SEAT, sessionId: parentToken });
+        const parentBefore = parentState();
+        const before = inputs();
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        expect(result).toMatchObject({ ok: true });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(parentToken);
+        // Not a distinct fork: the outcome says the successor is on its parent's conversation, on the result and in the
+        // durable handover record.
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+          limit: expect.stringContaining(`its fork parent ${PARENT}`) });
+        expect((result.result.sourceOutcome as { limit: string }).limit).toContain("restoring both opens it twice");
+        expect(result.result.warnings).toBeUndefined();   // said once, in the outcome
+        const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+        expect(JSON.parse(events.at(-1)!.payload)).toMatchObject({ sourceOutcome: { mode: "fork", forkId: "none" } });
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        // The parent's binding, session and occupant are unchanged, and nothing was killed or respawned in either pane.
+        expect(parentState()).toEqual(parentBefore);
+        expect(inputs()).toEqual(before);
+      });
+
+      it("records a distinct fork conversation as a captured fork, as before", async () => {
+        await failedFork();
+        pidFile({ name: SEAT, sessionId: otherToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(otherToken);
+        expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: PARENT, forkId: "captured" });
+        expect(result.result.warnings).toBeUndefined();
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "forked" });
+      });
+
+      it("records the conversation of a fork whose parent can't be resolved again, saying it was not compared", async () => {
+        await failedFork();
+        db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(parentNodeId);   // the parent no longer resolves
+        pidFile({ name: SEAT, sessionId: otherToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(otherToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("could not be resolved again") });
+        expect(result.result.warnings).toEqual([expect.stringContaining("could not be resolved again")]);
+      });
+
+      // A fork of the seat itself: its parent is the retiring occupant. The seat's live context row may already name the
+      // successor's own conversation, so the parent is the retiree's recorded one, never that row (lenses on #3044).
+      it("a fork of the seat itself on a distinct conversation stays a captured fork, even when the seat's context row names it", async () => {
+        await failedFork(`fork:${SEAT}`);
+        db.prepare("INSERT INTO context_usage (node_id, session_id, session_name) VALUES (?, ?, ?)").run(nodeId, otherToken, SEAT);
+        pidFile({ name: SEAT, sessionId: otherToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(otherToken);
+        expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: SEAT, forkId: "captured" });
+        expect(result.result.warnings).toBeUndefined();
+      });
+
+      it("a fork of the seat itself on the retiring occupant's conversation reports no distinct fork", async () => {
+        await failedFork(`fork:${SEAT}`);
+        pidFile({ name: SEAT, sessionId: previousToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(previousToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "none",
+          limit: expect.stringContaining(`the retiring occupant's conversation, the one its fork parent ${SEAT} was on`) });
+      });
     });
 
     it.each([

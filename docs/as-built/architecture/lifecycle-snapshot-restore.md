@@ -319,7 +319,11 @@ cited here by number with the code that carries them):
   samples, unchanged PID, with the launch's executable as readiness has it),
   takes the conversation that process holds now from Claude's
   `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
-  does; a `/clear` rotates it), then commits through the same `commit()` with
+  does; a `/clear` rotates it) as the seat's resume target, even when it is the
+  retiring occupant's or a fork parent's (`recoveredConversation`: the result
+  says so, and a fork on its parent's conversation reports `forkId: "none"`,
+  not a distinct fork; the token is written to the successor's session row only,
+  so the parent's binding and process are untouched), then commits through the same `commit()` with
   the reserved generation (rolled back if it doesn't register). A classic
   launch (one not in a native Claude permission mode: the `floor` and
   `full_bypass` postures included) records no executable, so a Claude a `#!`

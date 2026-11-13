@@ -8,7 +8,7 @@ import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
-import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
+import { SessionAddressConflict, savedSessionName, type SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -122,7 +122,7 @@ export interface SeatHandoverMutationResult {
    *  declared addresses were gaps, and (when the chain is empty) the named
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity;
         model?: { requested: string | null; predecessorCompared: false } };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
@@ -903,7 +903,8 @@ export class SeatHandoverService {
     // Proven: the pane's process is the attempt's launch. It is committed through the same path as any handover, with
     // the generation the failed handover reserved for it (and passed in its env).
     const parsed = parseHandoverSource(attempt.sourceRaw);
-    const currentToken = proof.currentToken ? this.recoveredCurrentToken(proof.currentToken, parsed.ok ? parsed.source : null, attempt, node.runtime) : null;
+    // #3044 2nd review: the conversation the proven successor holds now is the resume target, whosever it also is.
+    const held = proof.currentToken ? this.recoveredConversation(proof.currentToken, parsed.ok ? parsed.source : null, attempt, node.runtime) : null;
     const reportedSource: SeatHandoverSource = parsed.ok ? parsed.source : { mode: "fresh", ref: null, raw: attempt.sourceRaw, defaulted: false };
     // The pane's discovery row, as the launch would have left it; a row this revives goes back to vanished on a refusal.
     const priorDiscovery = this.discoveryRepo.getByTmuxIdentity(attempt.canonicalSession, attempt.pane);
@@ -916,8 +917,13 @@ export class SeatHandoverService {
     });
     const revived = !priorDiscovery || priorDiscovery.status === "vanished";
     // The outcome the failed handover recorded (a rebuild's primed set, as executed then), else a fork's, rebuilt.
-    const sourceOutcome: SeatHandoverMutationResult["sourceOutcome"] = attempt.sourceOutcome ?? (reportedSource.mode === "fork"
+    const launchOutcome: SeatHandoverMutationResult["sourceOutcome"] = attempt.sourceOutcome ?? (reportedSource.mode === "fork"
       ? { mode: "fork", forkedFrom: reportedSource.ref ?? attempt.canonicalSession, forkId: "captured" } : undefined);
+    // A fork successor on a conversation that is not its own fork (its parent's, or the retiring occupant's) reports no
+    // distinct fork; one whose parent can't be resolved again keeps its launch's outcome, with the limit said.
+    const sourceOutcome: SeatHandoverMutationResult["sourceOutcome"] = held?.forkRef && held.shared
+      ? { mode: "fork", forkedFrom: held.forkRef, forkId: "none", limit: held.note }
+      : held?.forkRef && held.note && launchOutcome?.mode === "fork" ? { ...launchOutcome, limit: held.note } : launchOutcome;
     return this.finalizeWithDiscovered({
       seatRef: input.seatRef,
       status: statusResult.status,
@@ -933,16 +939,20 @@ export class SeatHandoverService {
       departingProcess: attempt.departingProcess,
       // #3044 review S2: the conversation the proven process holds now (a /clear rotates it; its SessionStart was held
       // back), else the one its launch named.
-      launchToken: currentToken
-        ? { token: currentToken, resumeType: "claude_id" }
+      launchToken: held
+        ? { token: held.token, resumeType: "claude_id" }
         : { token: attempt.resumeToken!, ...(attempt.resumeType ? { resumeType: attempt.resumeType } : {}) },
+      // The note is said once: in the fork outcome when it carries it, else as a warning.
+      ...(held?.note && !(held.forkRef && held.shared) ? { launchWarnings: [held.note] } : {}),
       occupantGeneration: attempt.successorGeneration,
       appliedLaunch: attempt.appliedLaunch,
       sourceOutcome,
       launchAdditionNotes: attempt.launchAdditionNotes,
       startedWithoutRequired: attempt.startedWithoutRequired,
       cleanup: revived ? async () => { this.discoveryRepo.markVanished([discovered.id]); } : null,
-      recovered: { attempt },
+      // A successor on an existing conversation (the retiring occupant's or its fork parent's) resumed it: neither a
+      // fresh, a rebuilt nor a distinct forked one.
+      recovered: { attempt, ...(held?.shared ? { continuity: "resumed" as const } : {}) },
     });
   }
 
@@ -1043,20 +1053,39 @@ export class SeatHandoverService {
     }
   }
 
-  /** #3044 review: the conversation the proven successor holds now is adopted only as its own: never the retiring
-   *  occupant's, nor a fork's parent (the same rule as successorLaunchToken); a fork whose parent can't be resolved
-   *  again keeps the launch's own id. */
-  private recoveredCurrentToken(current: string, source: SeatHandoverSource | null, attempt: SeatHandoverAttempt, runtime: string | null): string | null {
-    let forkSource: { value: string } | null = null;
-    if (source?.mode === "fork") {
-      const fork = this.resolveForkSource(source.ref ?? attempt.canonicalSession, runtime);
-      if (!fork.ok) return null;
-      forkSource = { value: fork.nativeId };
-    }
+  /** #3044 2nd review: the conversation the proven successor holds now (read from its own session file) is what it
+   *  resumes, so it is recorded even when it is not its own: the retiring occupant's, or its fork parent's. The result
+   *  says so, and a fork on such a conversation is not reported as a distinct fork. Nothing of the parent or of the
+   *  retiring occupant changes: the token is written to the successor's own session row only. A fork of the seat itself
+   *  has the retiring occupant as its parent, so its conversation is compared with the retiree's recorded one, never
+   *  re-resolved from the seat's live context row, which by now may name the successor's own. */
+  private recoveredConversation(current: string, source: SeatHandoverSource | null, attempt: SeatHandoverAttempt, runtime: string | null):
+    { token: string; shared?: "retiring_occupant" | "fork_parent"; forkRef?: string; note?: string } {
     const retiree = (this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(attempt.predecessorSessionId) as
       { resume_token: string | null } | undefined)?.resume_token?.trim() || null;
-    if (current === retiree) return null;
-    return this.successorLaunchToken(forkSource, current, "claude_id", attempt.predecessorSessionId)?.token ?? null;
+    const forkRef = source?.mode === "fork" ? source.ref ?? attempt.canonicalSession : null;
+    // The ref as the fork resolved it (a derived seat address included, as discoverResumeToken reads it).
+    const forkSession = forkRef === null ? null : savedSessionName(this.db, forkRef);
+    const selfFork = forkSession !== null && (forkSession === attempt.canonicalSession || (this.db.prepare(
+      "SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(forkSession) as { node_id: string } | undefined)?.node_id === attempt.nodeId);
+    const target = "That conversation is recorded as the seat's resume target: the one the process is on now, not the one its launch named.";
+    if (current === retiree) {
+      return { token: current, shared: "retiring_occupant", ...(forkRef ? { forkRef } : {}), note: !forkRef
+        ? `The successor holds the retiring occupant's conversation. ${target}`
+        : selfFork
+          ? `No distinct fork was recovered: the successor holds the retiring occupant's conversation, the one its fork parent ${forkRef} was on. ${target}`
+          : `No distinct fork was recovered: the successor holds the retiring occupant's conversation, not a fork of ${forkRef}. ${target}` };
+    }
+    if (forkRef && !selfFork) {
+      const fork = this.resolveForkSource(forkRef, runtime);
+      if (!fork.ok) {
+        return { token: current, forkRef, note: `The successor's conversation is recorded as the seat's resume target, but its fork parent ${forkRef} could not be resolved again, so it was not checked that this conversation is distinct from the parent's.` };
+      }
+      if (fork.nativeId === current) {
+        return { token: current, shared: "fork_parent", forkRef, note: `No distinct fork was recovered: the successor holds the conversation of its fork parent ${forkRef}. ${target} ${forkRef} keeps its own binding and its process, so both seats now name the same conversation: a restore of either resumes it, and restoring both opens it twice.` };
+      }
+    }
+    return { token: current };
   }
 
   /** The successor's own resume token from its launch: a fork's is never its parent's (the fork source) nor the retiring
@@ -1167,7 +1196,7 @@ export class SeatHandoverService {
     /** #2861 item 2: records the failed attempt of a composer-launched successor (returns whether it was recorded). */
     recordFailure?: (failureCode: string) => boolean;
     /** #2985: this finalization adopts the running successor of a failed handover (`--recover`). */
-    recovered?: { attempt: SeatHandoverAttempt };
+    recovered?: { attempt: SeatHandoverAttempt; continuity?: "resumed" };
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
@@ -1658,7 +1687,7 @@ export class SeatHandoverService {
       launchAdditionNotes?: string[];
       startedWithoutRequired?: string[];
       /** #2985: the commit adopts the running successor of this failed attempt (`--recover`). */
-      recovered?: { attempt: SeatHandoverAttempt };
+      recovered?: { attempt: SeatHandoverAttempt; continuity?: "resumed" };
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -1752,10 +1781,10 @@ export class SeatHandoverService {
       // (the startup-orchestrator set): fresh->fresh, fork->forked,
       // rebuild->rebuilt; discovered stays null (continuity unknown to us).
       // #2985: an adopted rebuild successor whose priming packet never reached it is a fresh conversation.
-      const continuityOutcome = input.reportedSource.mode === "fresh" ? "fresh"
+      const continuityOutcome = input.recovered?.continuity ?? (input.reportedSource.mode === "fresh" ? "fresh"
         : input.reportedSource.mode === "fork" ? "forked"
         : input.reportedSource.mode === "rebuild" ? (input.recovered?.attempt.contextDelivery === "not_sent" ? "fresh" : "rebuilt")
-        : null;
+        : null);
       this.db.prepare(`
         UPDATE nodes SET
           occupant_lifecycle = 'active',
