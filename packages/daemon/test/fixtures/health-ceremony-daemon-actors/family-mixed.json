@@ -1,0 +1,50 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family mixed). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "mixed",
+  "lineageId": "qitem-20261111014734-d87546b4",
+  "now": "2026-11-11T02:16:38.753Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "qitem-20261111014734-d87546b4",
+      "handedOffFrom": null,
+      "sourceSession": "daemon@kernel",
+      "destinationSession": "qualidade-qa-s6@fabrica",
+      "tags": [
+        "wake-escalation",
+        "wake-escalation:coordenacao-coord-2@fabrica",
+        "recovery-for:qitem-20261111011541-dbdc4f53",
+        "mission:family-mixed"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 176433,
+      "qitemId": "qitem-20261111014734-d87546b4",
+      "ts": "2026-11-11T01:47:34.191Z",
+      "state": "pending",
+      "actorSession": "daemon@kernel",
+      "transitionNote": "created",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 177190,
+      "qitemId": "qitem-20261111014734-d87546b4",
+      "ts": "2026-11-11T02:16:02.712Z",
+      "state": "pending",
+      "actorSession": "system:queue-fallback",
+      "transitionNote": "fallback-routed: qualidade-qa-s5@fabrica → qualidade-qa-s6@fabrica (seat pool 01M7370FNT20116YKCYXXBXTGR: qualidade-qa-s5@fabrica had not taken it; qualidade-qa-s6@fabrica was free)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 177214,
+      "qitemId": "qitem-20261111014734-d87546b4",
+      "ts": "2026-11-11T02:16:38.753Z",
+      "state": "done",
+      "actorSession": "qualidade-qa-s6@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

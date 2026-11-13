@@ -142,7 +142,9 @@ const LONG_RUNNING_TIMEOUT_MS = 45_000;
 export function downCommand(depsOverride?: DownDeps): Command {
   const cmd = new Command("down").description("Tear down a rig")
     .addHelpText("after", `
-rig down stops every agent in the rig: their sessions end, and any work in progress stops with them.
+rig down stops every agent OpenRig started in the rig: their sessions end, and any work in progress stops
+with them. For a community harness only its pane stops: its own processes may keep running, and rig down
+names it. A session OpenRig didn't start (adopted, bound or discovered) is left running, and rig down names it.
 Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With

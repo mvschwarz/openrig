@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import type { DaemonClient } from "./client.js";
+import { tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
 
 export interface TmuxAttachment {
   session: string;
@@ -86,7 +87,8 @@ export function attachTmux(target: TmuxAttachment): Promise<number> {
     const env = { ...process.env };
     delete env.TMUX;
     delete env.TMUX_PANE;
-    const child = spawn("tmux", [...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`],
+    const command = tmuxServerStartCommand("tmux", [...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`]);
+    const child = spawn(command.file, command.args,
       { stdio: "inherit", env, windowsHide: true });
     child.once("error", reject);
     child.once("exit", code => resolve(code ?? 1));

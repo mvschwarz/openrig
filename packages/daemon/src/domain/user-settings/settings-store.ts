@@ -842,18 +842,26 @@ function coerceValue(key: SettingsValidKey, raw: string, workspaceRoot: string):
 // in `set()`. Lockstep with cli/src/config-store.ts KEY_CONSTRAINTS so the
 // daemon's HTTP write surface (/api/config POST) rejects the same input
 // the CLI rejects.
+/** What a validator can say about the values it accepts, kept on the validator itself so it cannot drift from it. */
+interface ConstraintMeta { choices?: readonly string[]; format?: string }
+type KeyConstraint = ((raw: string, coerced: string | number | boolean) => void) & { meta?: ConstraintMeta };
+function described(meta: ConstraintMeta, check: (raw: string, coerced: string | number | boolean) => void): KeyConstraint {
+  return Object.assign(check, { meta });
+}
+/** A closed list of accepted strings: the list is both what is enforced and what the browser view reports. */
+function choiceConstraint(choices: readonly string[], message: (raw: string) => string, trim = false): KeyConstraint {
+  return described({ choices }, (raw) => {
+    if (!choices.includes(trim ? (raw ?? "").trim() : raw)) throw new Error(message(raw));
+  });
+}
+const PROVIDER_SELECTED_CHOICES: readonly string[] = ["", "claude", "codex", "claude,codex", "codex,claude"];
+
 function positiveIntegerConstraint(key: string) {
   return (raw: string, coerced: string | number | boolean): void => {
     if (!/^\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced <= 0) {
       throw new Error(`Invalid value for ${key}: must be a positive integer, got "${raw}"`);
     }
   };
-}
-
-function wakeHumanRungConstraint(raw: string): void {
-  if (raw !== "always" && raw !== "explicit-only") {
-    throw new Error(`Invalid value for queue.wake_human_rung: must be "always" or "explicit-only", got "${raw}"`);
-  }
 }
 
 function percentageConstraint(key: string) {
@@ -868,15 +876,10 @@ function percentageConstraint(key: string) {
   };
 }
 
-const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
-  "terminal.tmux_server": (raw) => {
-    if (raw !== "inherit" && raw !== "isolated") {
-      throw new Error(`Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`);
-    }
-  },
-  "daemon.db_conflict": (raw) => {
-    if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
-  },
+const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, KeyConstraint>> = {
+  "terminal.tmux_server": choiceConstraint(["inherit", "isolated"],
+    (raw) => `Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`),
+  "daemon.db_conflict": choiceConstraint(["warn", "stop"], () => "daemon.db_conflict must be warn or stop"),
   "daemon.seat_poll_interval_ms": (raw, value) => {
     // Startup-only: the seat pollers read it once when the daemon starts. Only slower than the 1 s default, up to the
     // ceiling the structural observation's expiry allows (seat-activity-service.ts MAX_SEAT_POLL_INTERVAL_MS).
@@ -884,9 +887,8 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
       throw new Error("Invalid daemon.seat_poll_interval_ms: must be a whole number of milliseconds in [1000, 2000]");
     }
   },
-  "transport.draft_delivery": (raw) => {
-    if (raw !== "refuse" && raw !== "deliver") throw new Error(`Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`);
-  },
+  "transport.draft_delivery": choiceConstraint(["refuse", "deliver"],
+    (raw) => `Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`),
   "transcripts.lines": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
       throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
@@ -928,37 +930,34 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
       throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
     }
   },
-  "ui.timezone": (_raw, value) => {
+  "ui.timezone": described({ format: "iana-timezone" }, (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();
       new Intl.DateTimeFormat("en-US", { timeZone: value });
     } catch { throw new Error("Invalid ui.timezone: use an IANA timezone such as America/Los_Angeles or Europe/London"); }
-  },
+  }),
   "health.context_pressure.warning_percent": percentageConstraint("health.context_pressure.warning_percent"),
   "health.context_pressure.critical_percent": percentageConstraint("health.context_pressure.critical_percent"),
   "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
   "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),
-  "policies.idle_gate_qitem.auto_register": (raw) => {
-    const v = (raw ?? "").trim();
-    if (v !== "off" && v !== "all") {
-      throw new Error(`Invalid value for policies.idle_gate_qitem.auto_register: must be "off" or "all", got "${raw}"`);
-    }
-  },
+  "policies.idle_gate_qitem.auto_register": choiceConstraint(["off", "all"],
+    (raw) => `Invalid value for policies.idle_gate_qitem.auto_register: must be "off" or "all", got "${raw}"`, true),
   // Policy threshold: integer in [1, 100]. Documented contract from
   // slice 27 README. parseInt's permissive coercion ("80abc" → 80;
   // "80.5" → 80) is not safe for a key the daemon's compaction trigger
   // reads at every poll tick; runtime validator rejects what the
   // contract forbids per banked feedback_static_gates_mirror_runtime_validators.
-  "provider.selected": (_raw, value) => {
-    if (typeof value !== "string" || !/^(|claude|codex|claude,codex|codex,claude)$/.test(value)) {
+  // Checks the typed value too: a config.json array would otherwise pass as its String() form.
+  "provider.selected": described({ choices: PROVIDER_SELECTED_CHOICES }, (_raw, value) => {
+    if (typeof value !== "string" || !PROVIDER_SELECTED_CHOICES.includes(value)) {
       throw new Error("Invalid provider.selected: use claude, codex, claude,codex, or an empty string for no recorded choice");
     }
-  },
-  "policies.claude_compaction.preparation_root": (_raw, value) => {
+  }),
+  "policies.claude_compaction.preparation_root": described({ format: "absolute-path-or-empty" }, (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid policies.claude_compaction.preparation_root: use an absolute path or an empty string for the default");
     }
-  },
+  }),
   "policies.claude_compaction.threshold_percent": (raw, coerced) => {
     const trimmed = (raw ?? "").trim();
     if (!/^-?\d+$/.test(trimmed)) {
@@ -1049,12 +1048,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
     }
   },
   // Empty (the default) keeps no erasure ledger; otherwise an absolute file path, kept outside the backed-up data.
-  "retention.erasure_ledger": (raw) => {
+  "retention.erasure_ledger": described({ format: "absolute-path-or-empty" }, (raw) => {
     const value = (raw ?? "").trim();
     if (value !== "" && !value.startsWith("/")) {
       throw new Error(`Invalid value for retention.erasure_ledger: must be empty or an absolute file path, got "${raw}"`);
     }
-  },
+  }),
   "retention.watchdog_keep_per_job": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
       throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
@@ -1070,12 +1069,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
       throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
     }
   },
-  "stream.intake": (raw) => {
+  "stream.intake": described({ format: "queue.worker, off, or member@rig" }, (raw) => {
     const val = (raw ?? "").trim();
     if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
       throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
-  },
+  }),
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
@@ -1089,18 +1088,19 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "queue.wake_retry_cap": positiveIntegerConstraint("queue.wake_retry_cap"),
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
-  "queue.wake_human_rung": wakeHumanRungConstraint,
-  "decisions.template_dir": (_raw, value) => {
+  "queue.wake_human_rung": choiceConstraint(["always", "explicit-only"],
+    (raw) => `Invalid value for queue.wake_human_rung: must be "always" or "explicit-only", got "${raw}"`),
+  "decisions.template_dir": described({ format: "absolute-path-or-empty" }, (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
     }
-  },
+  }),
   // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
-  "acp.to": (_raw, value) => {
+  "acp.to": described({ format: "member@rig-or-empty" }, (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
       throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
     }
-  },
+  }),
 };
 
 function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: string | number | boolean): void {
@@ -1124,6 +1124,58 @@ function validateTypedFileValue(key: SettingsValidKey, value: string | number | 
   if (!check) return;
   const raw = typeof value === "string" ? value : String(value);
   check(raw, value);
+}
+
+/** What the browser view reports about a key's values, read from the rules that govern it. */
+export interface SettingKeyDescription {
+  /** Whether POST and DELETE /api/config/:key accept this key. */
+  writeRoute: boolean;
+  type?: "boolean" | "integer" | "string" | "enum";
+  choices?: string[];
+  range?: { min?: number; max?: number };
+  format?: string;
+}
+
+const ACCEPTED_INTEGER_LIMIT = Number.MAX_SAFE_INTEGER;
+
+/** The interval of whole numbers a key's validator accepts, found by asking the validator itself; a side it does not bound is left out. */
+function acceptedIntegerRange(key: SettingsValidKey, start: number): { min?: number; max?: number } | undefined {
+  const check = KEY_CONSTRAINTS[key];
+  if (!check) return undefined;
+  const accepts = (n: number): boolean => {
+    try { check(String(n), n); return true; } catch { return false; }
+  };
+  if (!accepts(start)) return undefined;
+  const range: { min?: number; max?: number } = {};
+  if (!accepts(ACCEPTED_INTEGER_LIMIT)) {
+    let lo = start, hi = ACCEPTED_INTEGER_LIMIT;
+    while (hi - lo > 1) { const mid = Math.floor(lo + (hi - lo) / 2); if (accepts(mid)) lo = mid; else hi = mid; }
+    range.max = lo;
+  }
+  if (!accepts(-ACCEPTED_INTEGER_LIMIT)) {
+    let lo = -ACCEPTED_INTEGER_LIMIT, hi = start;
+    while (hi - lo > 1) { const mid = Math.floor(lo + (hi - lo) / 2); if (accepts(mid)) hi = mid; else lo = mid; }
+    range.min = hi;
+  }
+  return range.min === undefined && range.max === undefined ? undefined : range;
+}
+
+/** Derived from coerceValue (the type), KEY_CONSTRAINTS (choices, format, range) and the key grammar (write route); no second list. */
+export function describeSettingKey(key: string): SettingKeyDescription {
+  if (parseFeedHostSubscriptionKey(key)) return { writeRoute: true, type: "boolean" };
+  if (!isSettingsValidKey(key)) return { writeRoute: false };
+  const fallback = getDefaultValue(key, "");
+  const meta = KEY_CONSTRAINTS[key]?.meta;
+  const out: SettingKeyDescription = { writeRoute: true };
+  if (typeof fallback === "boolean") out.type = "boolean";
+  else if (typeof fallback === "number") {
+    out.type = "integer";
+    const range = acceptedIntegerRange(key, fallback);
+    if (range) out.range = range;
+  } else out.type = meta?.choices ? "enum" : "string";
+  if (meta?.choices) out.choices = [...meta.choices];
+  if (meta?.format) out.format = meta.format;
+  return out;
 }
 
 /**

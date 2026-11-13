@@ -15,7 +15,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
-import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
@@ -2463,57 +2463,13 @@ export class RestoreOrchestrator {
    *   3. Nothing attached (or a resolution error) → EXPLICIT "floor" — the locked
    *      minimum-floor absence contract; never undefined/env-delegation for managed seats.
    */
-  /** Pure, read-only policy resolution shared with selected startup review. */
+  /** Pure, read-only policy resolution shared with selected startup review and node-inventory display. */
   resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | "auto" {
-    try {
-      const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
-      if (prov) {
-        // Guard-F3: the resolver swallows read errors internally (advisory floor), so the
-        // fallback must be decided BEFORE re-resolution: probe readability of the persisted
-        // resolvedTarget first — readable → REOPEN + re-derive (the ruling); unreadable /
-        // invalid → the PERSISTED posture carries (restart-stable), never a silent floor.
-        if (prov.origin === "custom" && prov.declaringDir && prov.resolvedTarget) {
-          const ref = prov.nodeRef ?? this.rigRepo.getRigPermissionPolicy(rigId);
-          if (ref) {
-            let content: string | null = null;
-            try { content = readFileSync(prov.resolvedTarget, "utf-8"); } catch { content = null; }
-            if (content !== null) {
-              const body = content;
-              const rederived = resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
-                readFile: () => body,
-              });
-              // Guard round-2: trust the re-derivation ONLY when content resolution
-              // genuinely succeeded with usable semantics (parse OK + valid flag
-              // contract) — readable-but-malformed/unusable carries the PERSISTED
-              // posture, exactly like unreadable. Advisory only; no enforcement.
-              if (rederived.contentResolved) return rederived.launchPosture;
-            }
-          }
-        }
-        return prov.launchPosture;
-      }
-      // Guard-F1: no node provenance (organic claim/self-attach seats) → the PERSISTED
-      // rig-level attachment is authoritative — same readable-probe discipline; NEVER
-      // resolve the raw relative rig ref against this process's cwd.
-      const rigProv = this.rigRepo.getRigPolicyProvenance(rigId);
-      if (rigProv) {
-        if (rigProv.origin === "custom" && rigProv.declaringDir && rigProv.resolvedTarget && rigProv.rigRef) {
-          let content: string | null = null;
-          try { content = readFileSync(rigProv.resolvedTarget, "utf-8"); } catch { content = null; }
-          if (content !== null) {
-            const body = content;
-            const rederived = resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
-              readFile: () => body,
-            });
-            if (rederived.contentResolved) return rederived.launchPosture; // same rule as node-level
-          }
-        }
-        return rigProv.launchPosture;
-      }
-    } catch { /* posture resolution must never block a restore */ }
-    // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked
-    // minimum floor, explicitly — never undefined (which would delegate to ambient YOLO).
-    return "floor";
+    return resolvePersistedRestorePosture({
+      getNodeProvenance: () => this.rigRepo.getNodePolicyProvenance(nodeId),
+      getFallbackRigRef: () => this.rigRepo.getRigPermissionPolicy(rigId),
+      getRigProvenance: () => this.rigRepo.getRigPolicyProvenance(rigId),
+    }) as "floor" | "full_bypass" | "auto";
   }
 
   /** The live seat's current model: `rig seat set-model` saves it on the live node after the snapshot, and every
@@ -2682,6 +2638,7 @@ export class RestoreOrchestrator {
         ...(launchWrapper?.length ? ([launchWrapper] as const) : []),
       );
       if (result.ok) {
+        for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }

@@ -4,7 +4,7 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 /**
  * #2985 / #2861: the record of a handover that failed after its successor was launched in the respawned pane, so
- * `rig seat handover <seat> --recover` can adopt that successor if it is running. Table: 165_seat_handover_attempts.
+ * `rig seat handover <seat> --recover` can adopt that successor if it is running. Table: 167_seat_handover_attempts.
  * The resume token is the session id the daemon generated for the successor's launch; it is never logged, never put in
  * an event, and never returned to a caller.
  */

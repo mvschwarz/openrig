@@ -308,7 +308,7 @@ cited here by number with the code that carries them):
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
 - **Seat handover recovery** (#2985, #2861) — a handover that fails after
   the in-place respawn with its Claude successor launched records the attempt
-  in `seat_handover_attempts` (migration 165; `seat-handover-attempts.ts`):
+  in `seat_handover_attempts` (migration 167; `seat-handover-attempts.ts`):
   the generation it reserved, the pane, the session id it generated for
   the launch and its frozen executable (a `#!` script or not, #2341).
   `rig seat handover <seat> --recover --reason <reason>` calls

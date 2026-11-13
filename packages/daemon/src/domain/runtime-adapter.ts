@@ -115,6 +115,8 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "login_required",
   "mcp_gate",
   "bypass_consent_gate",
+  // Claude's gated-grants backstop (#2820 item 2): approving the folder's pre-approved tool permissions is the person's call.
+  "claude_gated_grants_gate",
   // Claude's resume chooser or picker waits for a person to choose a conversation; startup stops waiting and says so.
   "claude_resume_selection_prompt",
   // Codex auth refusal (stored OAuth token can no longer be refreshed).
@@ -145,7 +147,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
+export type HarnessLaunchResult = {
+  /** Non-secret issuance ID for exact cleanup by later Core readiness owners. Never the token. */
+  activityGrantId?: string;
+  firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
   /** A community launcher that opts in was handed the seat's declared model as OPENRIG_MODEL: "confirmed" when the launch
    *  command's send succeeded, "uncertain" when typing began and the send then failed. Never proof of the model that runs. */
   modelInput?: { model: string; dispatch: "confirmed" | "uncertain" } } & (

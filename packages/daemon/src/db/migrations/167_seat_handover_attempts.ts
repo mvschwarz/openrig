@@ -11,7 +11,7 @@ import type { Migration } from "../migrate.js";
  * attempt keeps no resume token.
  */
 export const seatHandoverAttemptsSchema: Migration = {
-  name: "165_seat_handover_attempts.sql",
+  name: "167_seat_handover_attempts.sql",
   sql: `
     CREATE TABLE seat_handover_attempts (
       id TEXT PRIMARY KEY,

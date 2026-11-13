@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
@@ -993,6 +994,32 @@ describe("SeatHandoverService", () => {
     expect(typeof generation).toBe("string");
     expect(generation.length).toBeGreaterThan(0);
     expect(generation).not.toBe(retiringGen); // the SWAP identity is the successor tenure, not the retiree
+  });
+
+  it.each(["notification", "transaction"])("keeps the committed successor grant and cleans only a failed transaction: %s", async failure => {
+    const { node } = seedSeat({ runtime: "codex" });
+    const grants = new ActivityGrantStore(db);
+    let grantId: string | undefined;
+    launchHarness.mockImplementation(async (binding) => {
+      const grant = grants.issue({ nodeId: node.id, generation: binding.launchGeneration!, issuedBy: "launch", run: {
+        runId: "successor", binding: { runtime: "codex", runner: 0, pane: binding.tmuxPane!, panePid: 101 } } });
+      grantId = grant.grantId;
+      return { ok: true, activityGrantId: grantId, resumeToken: "codex-launch-tok", resumeType: "codex_id" };
+    });
+    if (failure === "notification") declareOccupantSwap.mockImplementation(() => { throw new Error("oracle notification failed"); });
+    else vi.spyOn(eventBus, "persistWithinTransaction").mockImplementationOnce(() => { throw new Error("transaction failed"); });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "notification-failure-proof", source: "fresh" });
+    expect(grantId).toBeDefined();
+    if (failure === "transaction") {
+      expect(result).toMatchObject({ ok: false, code: "handover_commit_failed" });
+      expect(grants.standing(grantId!)).toBe("revoked");
+      expect(declareOccupantSwap).not.toHaveBeenCalled();
+      return;
+    }
+    expect(result.ok).toBe(true);
+    expect(grants.standing(grantId!)).toBe("current");
+    expect(db.prepare("SELECT handover_result FROM nodes WHERE id = ?").get(node.id)).toEqual({ handover_result: "complete" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'seat.handover_completed'").get()).toEqual({ n: 1 });
   });
 
   it("S19: a handover that fails before commit never declares a swap (no phantom swap events)", async () => {

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
 import { terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
@@ -43,7 +44,17 @@ export function defaultWindowDeps(): WindowDeps {
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
-    exec: async (file, args, timeoutMs = 10_000) => (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
+    exec: async (file, args, timeoutMs = 10_000) => {
+      const command = path.basename(file) === "tmux" ? tmuxServerStartCommand(file, args) : { file, args };
+      try {
+        const result = await run(command.file, command.args, { env, encoding: "utf8", timeout: timeoutMs });
+        reportTmuxServerLimit(result.stderr);
+        return result.stdout;
+      } catch (error) {
+        reportTmuxServerLimit((error as { stderr?: unknown }).stderr);
+        throw error;
+      }
+    },
     launch: (file, args) => new Promise((resolve, reject) => {
       const child = spawn(file, args, { env, detached: true, stdio: "ignore" });
       child.once("error", reject);

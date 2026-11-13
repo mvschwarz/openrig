@@ -710,7 +710,7 @@ export class SeatHandoverService {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
         // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
         // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         const failedToken = this.successorLaunchToken(forkSource, launch.resumeToken, launch.resumeType, latestSession.id);
         const recorded = this.recordUnadoptedSuccessor({ node, latestSession, occupantGeneration, predecessorGeneration,
           sourceRaw: parsed.source.raw, reason, operator, pane: launch.tmuxPane, launchToken: failedToken,
@@ -794,7 +794,7 @@ export class SeatHandoverService {
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
         // binding unchanged, seat re-wakeable — never a false complete.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         const recorded = this.recordUnadoptedSuccessor({ node, latestSession, occupantGeneration, predecessorGeneration,
           sourceRaw: parsed.source.raw, reason, operator, pane: launch.tmuxPane, launchToken,
           contextDelivery: "unconfirmed", departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
@@ -839,7 +839,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: coreCopyNotes,
-      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
       // #2861 item 2: finalization can still fail once the successor is ready in the respawned pane.
       recordFailure: (failureCode) => RECOVERABLE_FINALIZE_CODES.has(failureCode) && this.recordUnadoptedSuccessor({ node,
         latestSession, occupantGeneration, predecessorGeneration, sourceRaw: parsed.source.raw, reason, operator,
@@ -1812,10 +1812,6 @@ export class SeatHandoverService {
         };
       }
       committed = outcome;
-      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
-      // oracle sees the swap as its own event, keyed by the durable node id, identified
-      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
-      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
     } catch (err) {
       if (err instanceof RecoveryAttemptSuperseded && input.recovered) {
         closeHandoverAttempt(this.db, input.recovered.attempt.id, "abandoned", "another occupant took the seat during the recovery");
@@ -1829,6 +1825,16 @@ export class SeatHandoverService {
         message: `Seat handover commit failed: ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Inspect daemon logs and retry after the seat state is consistent.",
       };
+    }
+
+    // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+    // oracle sees the swap as its own event, keyed by the durable node id, identified
+    // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+    try {
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+    } catch (err) {
+      // A notification failure cannot roll back the committed binding or abandon its grant.
+      console.warn(`Seat activity swap notification failed: ${err instanceof Error ? err.name : typeof err}`);
     }
 
     this.eventBus.notifySubscribers(committed.event);

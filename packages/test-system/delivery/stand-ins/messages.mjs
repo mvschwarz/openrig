@@ -7,9 +7,13 @@
 import { pathToFileURL } from "node:url";
 import { fillMarker, runCli, splitChunks, sse, startStandIn } from "./core.mjs";
 
-/** The request's last turn: what the person (or OpenRig, typing for them) sent, or a tool's result. */
+/** The request's last turn: what the person (or OpenRig, typing for them) sent, or a tool's result. Claude Code
+ *  2.1.322 was seen sending its environment as a `system` message after that turn, so trailing ones are skipped. */
 export function messagesTurnOf(body) {
-  const last = Array.isArray(body?.messages) ? body.messages.at(-1) : null;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  let end = messages.length;
+  while (end > 0 && messages[end - 1]?.role === "system") end -= 1;
+  const last = end > 0 ? messages[end - 1] : null;
   if (!last || last.role !== "user") return { kind: "other", text: "", parts: [] };
   if (typeof last.content === "string") return { kind: "user", text: last.content, parts: [{ text: last.content, source: "text" }] };
   // Every piece, in order. A message typed while a tool ran can sit beside the tool_result blocks in the same turn.
@@ -88,7 +92,15 @@ function other(req, res, body, url) {
   return false;
 }
 
-export const messagesProtocol = { path: "/v1/messages", turnOf: messagesTurnOf, userTurns: messagesUserTurns, answer, other };
+/** Claude Code names its session in metadata.user_id, a JSON string holding session_id. */
+export function messagesDescribe(body) {
+  let thread = null;
+  try { thread = JSON.parse(body?.metadata?.user_id ?? "null")?.session_id ?? null; } catch { thread = null; }
+  const format = body?.output_config?.format ?? body?.output_format;
+  return { thread, tools: Array.isArray(body?.tools) ? body.tools.length : 0, structuredOutput: format?.type === "json_schema" };
+}
+
+export const messagesProtocol = { path: "/v1/messages", turnOf: messagesTurnOf, userTurns: messagesUserTurns, describe: messagesDescribe, answer, other };
 
 /** Start the Claude Code stand-in; see core.mjs for the options and the script format. */
 export function startMessagesStandIn(options) {
