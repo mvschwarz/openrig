@@ -4,8 +4,9 @@ import type { Migration } from "../migrate.js";
  * #2985 / #2861: a handover that fails after the in-place respawn, with its successor launched, records the attempt
  * here, so `rig seat handover <seat> --recover` can later adopt that successor if it is running. The row keeps what
  * the failed handover alone knew: the generation it reserved for the successor (passed in its env), the pane it
- * respawned, and the session id the daemon generated for the successor's launch (the same class of value as
- * sessions.resume_token: never logged, never in an event). The predecessor's generation and session say which
+ * respawned, the session id the daemon generated for the successor's launch (the same class of value as
+ * sessions.resume_token: never logged, never in an event), and the source's execution outcome it produced (a rebuild's
+ * primed set), which the recovery reports as is. The predecessor's generation and session say which
  * occupant the attempt replaced; once a launch or another handover holds the seat, the attempt is stale. At most one
  * open attempt per seat: a later failure abandons the earlier one, and a later committed handover closes it. A closed
  * attempt keeps no resume token.
@@ -34,6 +35,9 @@ export const seatHandoverAttemptsSchema: Migration = {
       launch_notes_json TEXT,
       started_without_required_json TEXT,
       applied_launch_json TEXT,
+      -- The source's execution outcome the failed handover produced (a rebuild's primed set, gaps and empty-chain reason),
+      -- reported as is by the recovery that adopts it. JSON, or NULL.
+      source_outcome_json TEXT,
       -- The launch's frozen executable (#2341: the realpath it ran) and whether it is a #! script, as the Claude adapter's
       -- readiness proves a wrapper launch with them; NULL and 0 for a classic launch.
       executable TEXT,

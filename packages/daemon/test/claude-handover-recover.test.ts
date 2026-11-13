@@ -97,7 +97,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   const WRAPPER = "/home/user/.local/bin/claude-wrap";
   let managedLaunch: { executable: string; executableIsScript: boolean } | null;
 
-  function service(): SeatHandoverService {
+  function service(extra: Partial<ConstructorParameters<typeof SeatHandoverService>[0]> = {}): SeatHandoverService {
     const listProcesses = () => paneProcesses();
     const fsError = () => { throw new Error("unexpected filesystem access"); };
     const managed = managedLaunch ? { claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`,
@@ -114,6 +114,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       predecessorRecapResolver: (() => ({ unavailableReason: "test: no record" })) as never, readinessTimeoutMs: 30_000,
       listProcesses,
       sleep: async ms => { elapsed += ms; vi.setSystemTime(startedAtMs + elapsed); },
+      ...extra,
     });
   }
 
@@ -438,6 +439,43 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(failed.guidance).toMatch(/^If the successor is running there, adopt it .* --recover --reason/);
     expect(failed.guidance).toContain("do not retry the handover; it ends the running successor");
     expect(failed.guidance!.replace("do not retry the handover", "")).not.toMatch(/retr/i);
+  });
+
+  // #3044 CodeRabbit: a rebuild that fails at finalize already executed its priming; the recovery reports that outcome,
+  // as recorded with the attempt, on the result and on seat.handover_completed.
+  it("a recovered rebuild keeps the rebuild outcome its failed handover recorded", async () => {
+    nativeAt = 0;
+    beforeFinalize(() => {
+      vi.spyOn(sessionRegistry, "registerClaimedSession").mockImplementationOnce(() => { throw new Error("boom"); });
+    });
+    const failed = await service().handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
+    expect(failed).toMatchObject({ ok: false, code: "handover_commit_failed" });
+    const expected = { mode: "rebuild", primedArtifacts: [], gaps: [], emptyChainReason: "no rebuild priming resolver wired on this daemon" };
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+    expect(result.result.sourceOutcome).toEqual(expected);
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0]!.payload).sourceOutcome).toEqual(expected);
+  });
+
+  // The outcome is the one the failed handover executed, not recomputed at recovery: the artifact it primed with is
+  // gone by then, and the recovered result still names it.
+  it("a recovered rebuild reports the artifacts it primed with even when they are gone at recovery", async () => {
+    nativeAt = 0;
+    let exists = true;
+    const deps = { rebuildPrimingResolver: () => ({ artifacts: [{ address: "/project/a.md", label: "a" }] }),
+      rebuildArtifactExists: () => exists };
+    beforeFinalize(() => {
+      vi.spyOn(sessionRegistry, "registerClaimedSession").mockImplementationOnce(() => { throw new Error("boom"); });
+    });
+    const failed = await service(deps).handover({ seatRef: SEAT, source: "rebuild", reason: "context-wall" });
+    expect(failed).toMatchObject({ ok: false, code: "handover_commit_failed" });
+    exists = false;
+    const result = await service(deps).recover({ seatRef: SEAT, reason: "adopt" });
+    if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+    expect(result.result.sourceOutcome).toMatchObject({ mode: "rebuild",
+      primedArtifacts: [expect.objectContaining({ address: "/project/a.md" })] });
   });
 
   it.each([

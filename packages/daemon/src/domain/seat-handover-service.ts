@@ -799,7 +799,7 @@ export class SeatHandoverService {
           sourceRaw: parsed.source.raw, reason, operator, pane: launch.tmuxPane, launchToken,
           contextDelivery: "unconfirmed", departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
           launchAdditionNotes, startedWithoutRequired, appliedLaunch: launch.appliedLaunch ?? null,
-          launchedExecutable: launch.launchedExecutable ?? null, failedStep: "deliver-rebuild-priming", failureCode: "context_delivery_failed" });
+          launchedExecutable: launch.launchedExecutable ?? null, sourceOutcome, failedStep: "deliver-rebuild-priming", failureCode: "context_delivery_failed" });
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -847,7 +847,7 @@ export class SeatHandoverService {
         contextDelivery: contextDelivered ? "delivered" : restorePacket?.status === "unconfirmed" ? "unconfirmed" : "not_sent",
         departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
         launchAdditionNotes, startedWithoutRequired, appliedLaunch: launch.appliedLaunch ?? null,
-        launchedExecutable: launch.launchedExecutable ?? null, failedStep: "finalize", failureCode }),
+        launchedExecutable: launch.launchedExecutable ?? null, sourceOutcome, failedStep: "finalize", failureCode }),
     });
   }
 
@@ -915,8 +915,9 @@ export class SeatHandoverService {
       cwd: node.cwd ?? undefined,
     });
     const revived = !priorDiscovery || priorDiscovery.status === "vanished";
-    const sourceOutcome: SeatHandoverMutationResult["sourceOutcome"] = reportedSource.mode === "fork"
-      ? { mode: "fork", forkedFrom: reportedSource.ref ?? attempt.canonicalSession, forkId: "captured" } : undefined;
+    // The outcome the failed handover recorded (a rebuild's primed set, as executed then), else a fork's, rebuilt.
+    const sourceOutcome: SeatHandoverMutationResult["sourceOutcome"] = attempt.sourceOutcome ?? (reportedSource.mode === "fork"
+      ? { mode: "fork", forkedFrom: reportedSource.ref ?? attempt.canonicalSession, forkId: "captured" } : undefined);
     return this.finalizeWithDiscovered({
       seatRef: input.seatRef,
       status: statusResult.status,
@@ -1080,7 +1081,7 @@ export class SeatHandoverService {
     launchToken: { token: string; resumeType?: string } | null; contextDelivery: SeatHandoverAttempt["contextDelivery"];
     departingProcess: "ended-graceful" | "ended-forced"; launchAdditionNotes: string[]; startedWithoutRequired: string[];
     appliedLaunch: AppliedLaunchObservation | null; launchedExecutable: { path: string; isScript: boolean } | null;
-    failedStep: string; failureCode: string;
+    sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"]; failedStep: string; failureCode: string;
   }): boolean {
     // Only what `--recover` can adopt is recorded (and offered): a Claude successor whose launch named its session id.
     if (!input.occupantGeneration || input.node.runtime !== "claude-code" || !input.launchToken?.token) return false;
@@ -1092,7 +1093,7 @@ export class SeatHandoverService {
         resumeType: input.launchToken.resumeType ?? null, resumeToken: input.launchToken.token,
         contextDelivery: input.contextDelivery, departingProcess: input.departingProcess,
         launchAdditionNotes: input.launchAdditionNotes, startedWithoutRequired: input.startedWithoutRequired,
-        appliedLaunch: input.appliedLaunch, executable: input.launchedExecutable?.path ?? null,
+        appliedLaunch: input.appliedLaunch, sourceOutcome: input.sourceOutcome ?? null, executable: input.launchedExecutable?.path ?? null,
         executableIsScript: input.launchedExecutable?.isScript === true, failedStep: input.failedStep, failureCode: input.failureCode,
       });
       return true;

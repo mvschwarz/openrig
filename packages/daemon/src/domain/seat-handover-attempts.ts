@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
+import type { SeatHandoverMutationResult } from "./seat-handover-service.js";
 
 /**
  * #2985 / #2861: the record of a handover that failed after its successor was launched in the respawned pane, so
@@ -28,6 +29,8 @@ export interface SeatHandoverAttempt {
   launchAdditionNotes: string[];
   startedWithoutRequired: string[];
   appliedLaunch: AppliedLaunchObservation | null;
+  /** The source's execution outcome the failed handover produced (a rebuild's primed set), reported by the recovery. */
+  sourceOutcome: SeatHandoverMutationResult["sourceOutcome"] | null;
   /** #3044 review S1: the launch's frozen executable and whether it is a #! script (#2341), so the recovery proves a
    *  wrapper launch the way the adapter's readiness does; null and false for a classic launch. */
   executable: string | null;
@@ -42,7 +45,7 @@ interface AttemptRow {
   successor_generation: string; predecessor_generation: string | null; predecessor_session_id: string;
   source_raw: string; reason: string; operator: string | null; resume_type: string | null; resume_token: string | null;
   context_delivery: "delivered" | "unconfirmed" | "not_sent"; launch_notes_json: string | null;
-  started_without_required_json: string | null; applied_launch_json: string | null; executable: string | null;
+  started_without_required_json: string | null; applied_launch_json: string | null; source_outcome_json: string | null; executable: string | null;
   executable_is_script: number; departing_process: "ended-graceful" | "ended-forced"; failed_step: string; failure_code: string;
   created_at: string;
 }
@@ -58,6 +61,11 @@ function parseApplied(json: string | null): AppliedLaunchObservation | null {
   try { return JSON.parse(json) as AppliedLaunchObservation; } catch { return null; }
 }
 
+function parseOutcome(json: string | null): SeatHandoverMutationResult["sourceOutcome"] | null {
+  if (!json) return null;
+  try { return JSON.parse(json) as SeatHandoverMutationResult["sourceOutcome"]; } catch { return null; }
+}
+
 function fromRow(row: AttemptRow): SeatHandoverAttempt {
   return {
     id: row.id, nodeId: row.node_id, canonicalSession: row.canonical_session, pane: row.pane, runtime: row.runtime,
@@ -66,6 +74,7 @@ function fromRow(row: AttemptRow): SeatHandoverAttempt {
     resumeType: row.resume_type, resumeToken: row.resume_token, contextDelivery: row.context_delivery,
     departingProcess: row.departing_process, launchAdditionNotes: parseList(row.launch_notes_json),
     startedWithoutRequired: parseList(row.started_without_required_json), appliedLaunch: parseApplied(row.applied_launch_json),
+    sourceOutcome: parseOutcome(row.source_outcome_json),
     executable: row.executable, executableIsScript: row.executable_is_script === 1, failedStep: row.failed_step, failureCode: row.failure_code, createdAt: row.created_at,
   };
 }
@@ -78,15 +87,16 @@ export function recordFailedHandoverAttempt(db: Database.Database, attempt: Omit
     abandonOpenHandoverAttempt(db, attempt.nodeId, "a later handover of this seat failed too");
     db.prepare(`INSERT INTO seat_handover_attempts (id, node_id, canonical_session, pane, runtime, successor_generation,
       predecessor_generation, predecessor_session_id, source_raw, reason, operator, resume_type, resume_token,
-      context_delivery, launch_notes_json, started_without_required_json, applied_launch_json, executable,
+      context_delivery, launch_notes_json, started_without_required_json, applied_launch_json, source_outcome_json, executable,
       executable_is_script, departing_process, failed_step, failure_code)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, attempt.nodeId, attempt.canonicalSession, attempt.pane, attempt.runtime, attempt.successorGeneration,
       attempt.predecessorGeneration, attempt.predecessorSessionId, attempt.sourceRaw, attempt.reason, attempt.operator,
       attempt.resumeType, attempt.resumeToken, attempt.contextDelivery,
       attempt.launchAdditionNotes.length ? JSON.stringify(attempt.launchAdditionNotes) : null,
       attempt.startedWithoutRequired.length ? JSON.stringify(attempt.startedWithoutRequired) : null,
-      attempt.appliedLaunch ? JSON.stringify(attempt.appliedLaunch) : null, attempt.executable,
+      attempt.appliedLaunch ? JSON.stringify(attempt.appliedLaunch) : null,
+      attempt.sourceOutcome ? JSON.stringify(attempt.sourceOutcome) : null, attempt.executable,
       attempt.executableIsScript ? 1 : 0, attempt.departingProcess,
       attempt.failedStep, attempt.failureCode);
   })();
