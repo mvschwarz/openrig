@@ -68,8 +68,11 @@ for (const json of [false, true]) {
       expect(body.hint).toBe(`Queue item "${id}" was not found on daemon "selected-host".\n`
         + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(id)} --full --json\n`
         + `Or name that host: rig queue show ${shellQuote(id)} --host <host-id> --full --json`);
-      expect(calls).toHaveLength(2);
-      expect(calls[1]).toEqual({ path: "/healthz", options: { timeoutMs: 1_000 } });
+      // A note's update first reads the row's transitions (read-only), so its read-back can prove the note is new.
+      const preflight = verb === "update" ? 1 : 0;
+      expect(calls).toHaveLength(2 + preflight);
+      if (preflight) expect(calls[0]!.path).toBe(`/api/queue/${id}/transitions`);
+      expect(calls[1 + preflight]).toEqual({ path: "/healthz", options: { timeoutMs: 1_000 } });
       expect(calls.some(c => c.path.includes("/hosts"))).toBe(false);
     });
   });
@@ -106,6 +109,8 @@ it("quotes the supplied ID without guessing a host or suggesting a write replay"
   const body = JSON.parse(output.join("\n"));
   expect(body.hint).toContain(`rig queue show ${shellQuote(supplied)} --full --json`);
   expect(body.hint).not.toContain("queue update");
-  expect(calls[0]?.path).toBe(`/api/queue/${encodeURIComponent(supplied)}/update`);
+  expect(calls.slice(0, 2).map((c) => c.path)).toEqual([
+    `/api/queue/${encodeURIComponent(supplied)}/transitions`, `/api/queue/${encodeURIComponent(supplied)}/update`,
+  ]);
   expect(process.exitCode).toBe(1);
 });
