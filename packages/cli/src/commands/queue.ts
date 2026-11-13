@@ -463,6 +463,19 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
   return !full && compactOutputEnabled() ? ctx : null;
 }
 
+/** A handoff whose answer was lost (no answer in time, a lost connection, or an unreadable response) may have committed.
+ *  Its error names the source row to read before any retry, on the daemon the command used, and where a successor would
+ *  be. Nothing here says the handoff failed, names a successor id, or asks for the handoff to be repeated. */
+function withHandoffRecovery(error: unknown, qitemId: string, hostId: string | undefined): unknown {
+  if (!(error instanceof DaemonConnectionError || error instanceof DaemonResponseError)) return error;
+  const remote = remoteHostOf(hostId);
+  error.message += ` Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
+    + `rig queue show ${shellQuote(qitemId)} --full --json. A handed-off row names its successor`
+    + (remote ? `, which lives on host ${shellQuote(remote)}.` : ".")
+    + " A row that still reads open doesn't show the handoff failed: it may still commit.";
+  return error;
+}
+
 /** A `--host` id that may name another daemon. Empty and `local` never do; one that
  *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
 function remoteHostOf(hostId: string | undefined): string | undefined {
@@ -1687,7 +1700,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
@@ -1789,7 +1802,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {

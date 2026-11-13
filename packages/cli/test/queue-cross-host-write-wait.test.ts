@@ -100,4 +100,26 @@ describe("cross-host queue writes wait for the daemon's answer", () => {
     expect(all).toContain("The write outcome is INDETERMINATE");
     expect(all).toMatch(/repeat the same create with --id 'qitem-\d{14}-[0-9a-f]{16}'/);
   });
+
+  // A handoff's lost answer leaves the source row, on the daemon the command used, as the thing to read: its successor is
+  // named there once recorded. The error never names a successor id, says the handoff failed, or asks to repeat it.
+  for (const verb of ["handoff", "handoff-and-complete"] as const) {
+    for (const [where, to, successor] of [
+      ["to another host", "dev@rig-b@vps-b", "A handed-off row names its successor, which lives on host 'vps-b'."],
+      ["on this daemon", "dev@rig-b", "A handed-off row names its successor."],
+    ] as const) {
+      it(`a ${verb} ${where} that gets no answer in time names the source row to read before any retry`, async () => {
+        let thrown: unknown;
+        await run([verb, "qitem-src-1", "--to", to, "--summary", "s"],
+          [new DaemonTimeoutError(`Request to http://localhost:7433/api/queue/qitem-src-1/${verb} timed out after 15000ms`)])
+          .catch((e: unknown) => { thrown = e; });
+        expect(thrown).toBeInstanceOf(DaemonTimeoutError);
+        const message = (thrown as Error).message;
+        expect(message).toContain("Before any retry, read source row qitem-src-1 at the same endpoint and OPENRIG_HOME: rig queue show 'qitem-src-1' --full --json.");
+        expect(message).toContain(successor);
+        expect(message).toContain("doesn't show the handoff failed");
+        expect(message).not.toMatch(/--id|repeat the/);
+      });
+    }
+  }
 });
