@@ -137,6 +137,7 @@ describe("RestoreOrchestrator", () => {
       error?: string;
       warnings?: string[];
     }>;
+    harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -150,6 +151,7 @@ describe("RestoreOrchestrator", () => {
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
+      harnessNotStartedNotice: opts?.harnessNotStartedNotice,
     });
   }
 
@@ -2993,6 +2995,38 @@ describe("RestoreOrchestrator", () => {
     const failure = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
       .get(result.result.nodes[0]!.nodeId) as { payload: string };
     expect(JSON.parse(failure.payload)).toMatchObject({ stage: "harness_not_started", error: "Harness not started: no startup context for dev.moved." });
+  });
+
+  // An attempt that positively leaves a seat as a bare shell hands that seat to the grouped notice once, under the
+  // attempt's own identity, and carries the notice's report. Seats not positively left as shells aren't handed over.
+  it("hands the seats a restore left as bare shells to the notice, with the attempt's identity, and carries its report", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-x", seats: ["dev-moved@r"] }], unrouted: [] };
+    const notice = vi.fn(async () => report);
+    const orch = createOrchestrator({ harnessNotStartedNotice: notice });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved" }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+  });
+
+  it("keeps the restore's result when the notice can't be recorded, with a warning", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => { throw new Error("queue unavailable"); } });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toBeUndefined();
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
