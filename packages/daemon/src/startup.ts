@@ -14,7 +14,7 @@ import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
-import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
+import { SeatDeliveryGuard, resolveExternalCliOccupant, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
 import { seatCodexCorePluginDir, vendoredCorePluginDir } from "./domain/claude-core-plugin-env.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
 import { HealthPolicyStore } from "./domain/health-policy.js";
@@ -2378,8 +2378,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
       // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts. Read by the
       // seat the name addresses, not the newest row with that name: an archived generation of the same
-      // seat can hold a newer one, and a context watchdog would then read that node's telemetry.
-      resolveTargetGeneration: (s) => resolveGuardTarget(db, s)?.occupant ?? null,
+      // seat can hold a newer one, and a context watchdog would then read that node's telemetry. An external-CLI seat
+      // addressed by its external session name, which the guard's address rules don't match, reads its own.
+      resolveTargetGeneration: (s) => { const target = resolveGuardTarget(db, s); return target ? target.occupant ?? null : resolveExternalCliOccupant(db, s); },
       targetNameCarried: (s) => sessionRegistry.currentOccupantGenerationForSession(s) !== null,
       // Issue #1180 — sampled context use for token/percent context watchdogs,
       // generation-guarded against a predecessor's frozen telemetry.

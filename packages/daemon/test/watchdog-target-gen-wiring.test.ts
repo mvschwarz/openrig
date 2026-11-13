@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { resolveExternalCliOccupant, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 // GHOST-STAGE (i-c) WIRING PIN. The fire-time target-generation gate in WatchdogPolicyEngine is INERT
 // unless startup injects the REAL live-generation resolver — with resolveTargetGeneration absent the
@@ -18,7 +18,7 @@ describe("(i-c) wiring pin — startup injects the real target-generation resolv
   );
 
   it("passes resolveTargetGeneration to the WatchdogPolicyEngine, wired to the live occupant-generation", () => {
-    expect(src).toMatch(/resolveTargetGeneration:\s*\(s\)\s*=>\s*resolveGuardTarget\(db,\s*s\)\?\.occupant\s*\?\?\s*null/);
+    expect(src).toMatch(/resolveTargetGeneration:\s*\(s\)\s*=>\s*\{\s*const target = resolveGuardTarget\(db,\s*s\);\s*return target \? target\.occupant \?\? null : resolveExternalCliOccupant\(db,\s*s\);\s*\}/);
     // Without it a context watch on an ambiguous name ends for good instead of measuring again once it resolves.
     expect(src).toMatch(/targetNameCarried:\s*\(s\)\s*=>\s*sessionRegistry\.currentOccupantGenerationForSession\(s\)\s*!==\s*null/);
   });
@@ -66,6 +66,24 @@ describe("the watchdog's target generation is the addressed seat's, not the newe
     start(node.id);
     expect(resolveGuardTarget(db, SEAT)?.occupant).toBe(generation(node.id));
     expect(sessions.currentOccupantGenerationForSession(SEAT)).toBe(generation(node.id));
+    db.close();
+  });
+
+  it("reads an external-CLI seat's own generation when its watch names the external session", () => {
+    const { db, rigs, sessions, generation } = seed();
+    const NAME = "work-term@seat-rig";
+    const rig = rigs.createRig("seat-rig");
+    const node = rigs.addNode(rig.id, "dev.ext", { runtime: "codex" });
+    // As self-attach records an external-CLI seat: the session and the binding carry the external name, no tmux session.
+    sessions.updateStatus(sessions.registerSession(node.id, NAME).id, "running");
+    sessions.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: NAME });
+    // The guard's address rules don't match an external session name; the watchdog's fallback does.
+    expect(resolveGuardTarget(db, NAME)).toBeNull();
+    expect(resolveExternalCliOccupant(db, NAME)).toBe(generation(node.id));
+    // A second unarchived external binding with that name: neither seat is read.
+    const other = rigs.addNode(rig.id, "dev.ext2", { runtime: "codex" });
+    sessions.updateBinding(other.id, { attachmentType: "external_cli", externalSessionName: NAME });
+    expect(resolveExternalCliOccupant(db, NAME)).toBeNull();
     db.close();
   });
 

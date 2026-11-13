@@ -608,3 +608,12 @@ export function resolveGuardTarget(db: Database.Database, name: string): GuardTa
   const { archivedAt: _archivedAt, physicalName: _physicalName, logicalId: _logicalId, rigName: _rigName, latestStatus: _latestStatus, ...target } = pool[0]!;
   return target;
 }
+
+/** An external-CLI seat's newest occupant generation by its external session name, which resolveGuardTarget's address
+ *  rules don't match: the one unarchived external_cli binding with that name, else null (none or several). */
+export function resolveExternalCliOccupant(db: Database.Database, name: string): string | null {
+  const rows = db.prepare(`SELECT (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=b.node_id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
+    FROM bindings b JOIN nodes n ON n.id=b.node_id JOIN rigs r ON r.id=n.rig_id
+    WHERE b.attachment_type='external_cli' AND b.external_session_name=? AND r.archived_at IS NULL`).all(name) as Array<{ occupant: string | null }>;
+  return rows.length === 1 ? rows[0]!.occupant : null;
+}
