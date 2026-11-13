@@ -122,6 +122,17 @@ describe("render response integrity — 3-part error + honest exit, never daemon
   beforeEach(() => { vi.stubEnv("OPENRIG_SESSION_NAME", "harness@rig"); process.exitCode = undefined; });
   afterEach(() => { vi.unstubAllEnvs(); });
 
+  it("an unresolved queue actor stays nonzero when a wrapper pipes stdout", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    vi.stubEnv("TMUX_PANE", "");
+    const { exitCode } = await runCli(
+      ["queue", "update", "qitem-x", "--state", "in-progress", "--json"],
+      depsThrowing(new Error("daemon must not be contacted")),
+    );
+    expect(exitCode).toBe(1);
+  });
+
   it("bad-response renders fact/consequence/action JSON with nonzero exit (json)", async () => {
     const err = new DaemonResponseError(502, "<html>502 Bad Gateway</html>");
     const { out, exitCode } = await runCli(

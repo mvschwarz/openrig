@@ -513,6 +513,17 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
 
 describe("script-safety integration (the compiled front door)", () => {
   const cliEntry = join(__dirname, "..", "dist", "index.js");
+  it.skipIf(!existsSync(cliEntry))("an unresolved queue actor stays nonzero through a pipe with pipefail", () => {
+    const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-o", "pipefail", "-c",
+      'env -u OPENRIG_SESSION_NAME -u RIGGED_SESSION_NAME -u TMUX_PANE "$NODE" "$CLI" queue update qitem-pipe-proof --state in-progress --json 2>&1 | cat'], {
+      timeout: 5000,
+      encoding: "utf-8",
+      env: { ...process.env, NODE: process.execPath, CLI: cliEntry },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("OPENRIG_SESSION_NAME is not set");
+  });
+
   it.skipIf(!existsSync(cliEntry))("`echo x | rig` returns usage fast — no hang (exit code preserves today's clean-help baseline)", () => {
     const started = Date.now();
     const result = spawnSync(process.execPath, [cliEntry], {

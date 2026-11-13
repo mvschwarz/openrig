@@ -44,7 +44,32 @@ function makeDeps(opts?: {
         get: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
           const route = routes[`GET ${path}`];
-          return (Array.isArray(route) ? route.shift() : route) ?? { status: 200, data: {} };
+          if (route) return Array.isArray(route) ? route.shift() : route;
+          const transitionMatch = /^\/api\/queue\/([^/]+)\/transitions$/.exec(path);
+          if (transitionMatch) {
+            const qitemId = decodeURIComponent(transitionMatch[1]!);
+            const update = [...calls].reverse().find((call) => call.method === "POST"
+              && call.path === `/api/queue/${encodeURIComponent(qitemId)}/update`);
+            const transitionNote = update?.body && typeof update.body === "object"
+              ? (update.body as { transitionNote?: unknown }).transitionNote
+              : undefined;
+            return { status: 200, data: [
+              { transitionId: 1, transitionNote: null },
+              ...(typeof transitionNote === "string" ? [{ transitionId: 2, transitionNote }] : []),
+            ] };
+          }
+          const match = /^\/api\/queue\/([^/]+)$/.exec(path);
+          if (match) {
+            const qitemId = decodeURIComponent(match[1]!);
+            const update = [...calls].reverse().find((call) => call.method === "POST"
+              && call.path === `/api/queue/${encodeURIComponent(qitemId)}/update`);
+            if (update?.body && typeof update.body === "object") {
+              const body = Object.fromEntries(Object.entries(update.body as Record<string, unknown>)
+                .filter(([key, value]) => value !== undefined && !["transitionNote", "actorSession", "reopen"].includes(key)));
+              return { status: 200, data: { qitemId, ...body } };
+            }
+          }
+          return { status: 200, data: {} };
         }),
         getText: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
@@ -83,6 +108,7 @@ describe("rig queue CLI", () => {
     // AMBIENT OPENRIG_SESSION_NAME (which masked the env-less break in a managed runner). Per-test stubs
     // that need a specific seat override this.
     vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
+    vi.stubEnv("TMUX_PANE", "");
     logs = [];
     errors = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
@@ -1203,6 +1229,37 @@ describe("rig queue CLI", () => {
       evidenceRef: undefined,
       transitionNote: "audit bytes",
     });
+    expect(calls.some((c) => c.method === "GET" && c.path === "/api/queue/qitem-note")).toBe(true);
+  });
+
+  it("update reports success only after canonical read-back matches the requested state", async () => {
+    const row = { qitemId: "qitem-verified", state: "in-progress", summary: "working" };
+    const { deps, calls } = makeDeps({ routes: {
+      "POST /api/queue/qitem-verified/update": { status: 200, data: { qitemId: "qitem-verified", state: "in-progress" } },
+      "GET /api/queue/qitem-verified": { status: 200, data: row },
+    } });
+    await createProgram({ queueDeps: deps }).parseAsync([
+      "node", "rig", "queue", "update", "qitem-verified", "--state", "in-progress", "--summary", "working", "--json",
+    ]);
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "POST /api/queue/qitem-verified/update",
+      "GET /api/queue/qitem-verified",
+    ]);
+    expect(JSON.parse(logs.at(-1)!)).toMatchObject(row);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("update fails closed when canonical read-back does not contain the requested state", async () => {
+    const { deps } = makeDeps({ routes: {
+      "POST /api/queue/qitem-mismatch/update": { status: 200, data: { qitemId: "qitem-mismatch", state: "in-progress" } },
+      "GET /api/queue/qitem-mismatch": { status: 200, data: { qitemId: "qitem-mismatch", state: "pending" } },
+    } });
+    await createProgram({ queueDeps: deps }).parseAsync([
+      "node", "rig", "queue", "update", "qitem-mismatch", "--state", "in-progress", "--json",
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(errors.at(-1)!)).toMatchObject({ error: "queue_update_readback_failed" });
+    expect(logs).toEqual([]);
   });
 
   it("update forwards an explicitly accepted closure deadline without a state change", async () => {

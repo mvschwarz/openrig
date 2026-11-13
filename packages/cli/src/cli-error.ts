@@ -177,6 +177,10 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
 
   try {
     await program.parseAsync(argv);
+    if (typeof process.exitCode === "number" && process.exitCode !== 0) {
+      exit(process.exitCode);
+      return process.exitCode;
+    }
     return 0;
   } catch (e) {
     if (isCleanCommanderExit(e)) return 0;

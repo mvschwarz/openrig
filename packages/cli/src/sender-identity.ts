@@ -1,20 +1,39 @@
 import { readOpenRigEnv } from "./openrig-compat.js";
+import { execFileSync } from "node:child_process";
+
+export type TmuxIdentityReader = (pane: string, option: string) => string | undefined;
+
+const readTmuxIdentity: TmuxIdentityReader = (pane, option) => {
+  try {
+    const value = execFileSync("tmux", ["show-option", "-v", "-t", pane, option], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return value || undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 /**
  * The seat identity a CLI dispatch is attributed to — the SAME value the
  * DaemonClient stamps as `X-OpenRig-Session` (the P18 chokepoint), from which
- * the daemon DERIVES the actor / rendered `From:`. `--from` is deprecated and
- * ignored: origin is the seat env, never a caller-supplied body claim. Returns
- * `undefined` when the seat is unresolvable — the caller then delivers-and-labels
- * with `SENDER_FALLBACK` (never a refusal, never a forged actor).
+ * the daemon DERIVES the actor / rendered `From:`. The process seat env wins;
+ * a reconciled managed pane's `@rigged_session_name` repairs a live process
+ * that predates its env binding. Caller-supplied body claims never become a
+ * seat. Returns `undefined` when neither managed source resolves.
  */
-export function resolveSenderSession(): string | undefined {
-  return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+export function resolveSenderSession(tmuxReader: TmuxIdentityReader = readTmuxIdentity): string | undefined {
+  const env = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  if (env) return env;
+  const pane = process.env.TMUX_PANE?.trim();
+  if (!pane) return undefined;
+  return tmuxReader(pane, "@rigged_session_name")?.trim() || undefined;
 }
 
 /**
  * The session-less fall-open marker for an unattributable CLI dispatch. P18 (deletion atom) REVERSES A1's
- * seat-boundary refusal: an env-less `rig send`/`broadcast` now DELIVERS carrying this HONEST label rather
+ * seat-boundary refusal: an unresolved `rig send`/`broadcast` now DELIVERS carrying this HONEST label rather
  * than refusing, because the daemon half delivers-and-labels the header-absent write (no downstream 401) —
  * unverified is labelled unknown, never laundered to verified.
  *
