@@ -12,6 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { projectSliceHeader, projectSliceScope, type ScopeFsDeps, type SliceScopeDetail } from "../domain/scope/scope-view-projection.js";
+import { aggregateFleetScopes, type LocalScopesCounts } from "../domain/hosts/fleet-scopes.js";
+import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 
 const realFs: ScopeFsDeps = {
   readBytes: p => { try { return fs.readFileSync(p); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; } },
@@ -132,6 +134,49 @@ export function scopesRoutes(): Hono {
     const content = realFs.readFile(p);
     // The narrative DISPLAY (plan atom 3): raw artifact bytes; explicitly not a data source.
     return content !== null ? c.json({ path: p, content }) : c.json({ error: "narrative_not_found" }, 404);
+  });
+
+
+  // #3093 first increment — the FLEET PROJECTS READ-VIEW (read-only, additive).
+  // The local leg is the SAME counts projection `?counts=1` serves; each registered
+  // HTTP host contributes its own rows, host-attributed, beside per-host status.
+  // The local routes above are untouched.
+  app.get("/fleet", async (c) => {
+    const r = rootOf(c);
+    if ("error" in r) return r.error;
+    const selected = selectedProject(c);
+    const listLocalScopes = (): LocalScopesCounts => {
+      const missionNames = realFs.listDir(r.root).filter((e) => realFs.isDirectory(path.join(r.root, e)));
+      const missions = missionNames.map((name) => {
+        try {
+          if (selected) projectMission(selected, name);
+          const dir = path.join(r.root, name);
+          const rows: Record<string, unknown>[] = [];
+          for (const s of realFs.listDir(path.join(dir, "slices")).filter((s) => realFs.isDirectory(path.join(dir, "slices", s)))) {
+            let sourcePath: string | undefined;
+            try {
+              if (selected) sourcePath = workSource(selected.root, path.join(dir, "slices", s), false);
+              const header = projectSliceHeader(realFs, path.join(dir, "slices", s));
+              if (header) {
+                const { content: _content, fm: _fm, ...row } = header;
+                rows.push({ ...row, ...(sourcePath ? { sourcePath } : {}) });
+              }
+            } catch (err) {
+              rows.push({ dirName: s, id: null, displayName: s, error: (err as Error).message, status: null, stage: null, locks: { spec: null, delivery: null }, ...(sourcePath ? { sourcePath } : {}) });
+            }
+          }
+          return { mission: name, slices: rows };
+        } catch (err) { return { mission: name, slices: [], error: (err as Error).message }; }
+      });
+      return { project: selected?.id ?? null, missions };
+    };
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    const payload = await aggregateFleetScopes({
+      listLocalScopes,
+      loadRegistry: registryLoader,
+      fetchImpl: c.get("remoteFetchImpl" as never) as typeof fetch | undefined,
+    });
+    return c.json(payload);
   });
 
   return app;
