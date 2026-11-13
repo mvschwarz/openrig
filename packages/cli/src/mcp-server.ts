@@ -651,11 +651,35 @@ function sharedInstructions(has: (tool: string) => boolean): string[] {
 const SHARED_INSTRUCTIONS = sharedInstructions(() => true);
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 
+/** For a connection that relays a person's request to another assistant (an external caller, or the front door): which one
+ *  they mean is theirs to say when more than one fits, never inferred from the agent's own history. The listing steps need
+ *  rig_team, so a connection without it is told only to ask. Pickup is said only where it's true: another connected
+ *  assistant waits for its person; on the front door, a running team seat is woken, and one sent to anyway waits until it's
+ *  back. A member, which works items, isn't given it. */
+function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
+  if (!canList) {
+    return "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+  }
+  return [
+    "Before sending a request to another assistant, list the team's members.",
+    "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out.",
+    "Don't pick from your own history or memory.",
+    "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
+    "If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.",
+    ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
+    "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
+    ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
+    "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
+    "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.",
+  ].join(" ");
+}
+
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v2";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
@@ -693,8 +717,11 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external);
-  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
+  const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+  // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
+  const instructions = tools.has("rig_queue_create")
+    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), false)}` : workflow;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
@@ -1689,7 +1716,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
-        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
+        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
