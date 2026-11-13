@@ -334,6 +334,10 @@ export interface ClearAttentionResult {
   detail?: string;
   previousError?: string | null;
   clearedClasses?: ("startup_status" | "restore_outcome" | "pane_identity" | "needs_input_hook")[];
+  /** A full restore's attention acknowledged on the person's word: recovery stays unproven, for the reason named. */
+  acknowledgment?: { attemptId: number; from: "failed" | "attention_required"; unproven: AcknowledgedUnproven;
+    /** The pane identity couldn't be proven either: that class stays, and only live evidence clears it. */
+    paneIdentity?: "unverified" };
   derivedEvidence?: {
     source: string;
     kind?: string;
@@ -347,6 +351,10 @@ export interface ClearAttentionResult {
     paneState?: "usable";
   };
 }
+
+/** What the strict reconciler couldn't show when a person acknowledged a full restore's attention: its code and detail,
+ *  and the native screen it read when it read one. */
+type AcknowledgedUnproven = { code: string; detail: string; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence };
 
 export interface SendVerifyFn {
   (sessionName: string, text: string, opts?: { verify?: boolean }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
@@ -394,13 +402,25 @@ interface ClearAttentionDeps {
   >;
 }
 
-const IDENTITY_RECOVERY_GUIDANCE = "--reason cannot bypass this attention class. If the recorded native token needs correction and you know the actual token, use rig seat set-resume-token <session> --token-stdin --reason <explanation>, then rerun rig seat clear-attention <session> to check the live evidence. Setting a token or stopping/relaunching the seat alone does not prove continuity.";
+const TOKEN_CORRECTION_GUIDANCE = "If the recorded native token needs correction and you know the actual token, use rig seat set-resume-token <session> --token-stdin --reason <explanation>, then rerun rig seat clear-attention <session> to check the live evidence. Setting a token or stopping/relaunching the seat alone does not prove continuity.";
+const IDENTITY_RECOVERY_GUIDANCE = `--reason cannot bypass this attention class. ${TOKEN_CORRECTION_GUIDANCE}`;
+const FULL_RESTORE_GUIDANCE = `If you've checked the seat yourself, --reason "<what you saw>" acknowledges this attention without claiming the conversation resumed, and reports what stays unproven. ${TOKEN_CORRECTION_GUIDANCE}`;
+
+/** A pane-identity verdict that positively shows another process or no pane, as opposed to one that couldn't prove which. */
+function positiveIdentityFailure(verdict: SeatIdentityVerdict | null): boolean {
+  return verdict !== null && !(verdict.verdict === "mismatch" && verdict.reason === "process_identity_ambiguous");
+}
 
 const POSITIVE_STATES = new Set(["running", "idle"]);
 type DerivedAttentionOutcome = {
   status: "failed" | "attention_required";
   source: "restore.completed" | "restore.subset_completed";
+  /** The full restore's attempt (its restore.started seq), or the subset completion's own seq. */
+  attemptSeq: number;
   assistedStartupAttemptId?: number;
+  /** A person acknowledged this full-restore attempt's attention for this session: it no longer asks for attention,
+   *  but its recovery is still unproven, so a later strict proof can still settle it. */
+  acknowledged?: true;
 };
 
 export class SeatAttentionReconciler {
@@ -459,7 +479,9 @@ export class SeatAttentionReconciler {
     }
 
     const startupClassActive = session.startupStatus === "attention_required" || session.startupStatus === "failed";
-    const derivedOutcome = this.getDerivedAttentionOutcome(session);
+    const derived = this.getDerivedAttentionOutcome(session);
+    // An acknowledged full-restore outcome no longer asks for attention; its recovery stays unproven.
+    const derivedOutcome = derived?.acknowledged ? null : derived;
     const identityClassActive = this.getActiveIdentityVerdict(session, sessionName);
 
     // The latest runtime hook still says the seat waits on a person (an approval, a picker, an elicitation) and nothing
@@ -494,8 +516,20 @@ export class SeatAttentionReconciler {
     // and appends the attempt-scoped reconciliation event. Subset restores do
     // not have a restore.started receipt and retain their established path.
     if (derivedOutcome?.source === "restore.completed" && assistedRestore === undefined) {
+      // With --reason, an outcome the reconciler can't settle is acknowledged for the subject the person addressed.
+      // The check below awaits native reads, so record that subject first and compare it after.
+      const subject = opts?.reason ? this.restoreAckSubject(sessionName) : null;
+      const acknowledge = (unproven: AcknowledgedUnproven) => opts?.reason
+        ? this.acknowledgeFullRestore({ session, sessionName, outcome: derivedOutcome, reason: opts.reason, subject, unproven,
+          startupClassActive, hook, hookClassActive, previousError })
+        : null;
+      const unacknowledged = (why: string | null) => why
+        ? `Not acknowledged: ${why}.`
+        : positiveIdentityFailure(identityClassActive) ? IDENTITY_RECOVERY_GUIDANCE : FULL_RESTORE_GUIDANCE;
       const reconcile = this.deps.reconcileRestoreOutcome;
       if (!reconcile) {
+        const acknowledged = acknowledge({ code: "strict_reconciler_unavailable", detail: "the strict restore reconciler is unavailable" });
+        if (acknowledged && typeof acknowledged !== "string") return acknowledged;
         eventBus.emit({
           type: "seat.attention_clear_refused",
           rigId: session.rigId,
@@ -508,11 +542,13 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: `Uncleared attention class restore_outcome (full restore): strict restore reconciler is unavailable. ${IDENTITY_RECOVERY_GUIDANCE}`,
+          detail: `Uncleared attention class restore_outcome (full restore): strict restore reconciler is unavailable. ${unacknowledged(acknowledged)}`,
         };
       }
       const restored = await reconcile(session.rigId, session.nodeId);
       if (!restored.ok) {
+        const acknowledged = acknowledge({ code: restored.code, detail: restored.detail, ...(restored.probe ? { probe: restored.probe } : {}) });
+        if (acknowledged && typeof acknowledged !== "string") return acknowledged;
         eventBus.emit({
           type: "seat.attention_clear_refused",
           rigId: session.rigId,
@@ -527,7 +563,7 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: `Uncleared attention class restore_outcome (full restore): ${restored.code}: ${restored.detail}. ${IDENTITY_RECOVERY_GUIDANCE}`,
+          detail: `Uncleared attention class restore_outcome (full restore): ${restored.code}: ${restored.detail}. ${unacknowledged(acknowledged)}`,
         };
       }
 
@@ -720,6 +756,83 @@ export class SeatAttentionReconciler {
         ? `Latest activity: state='${activity.state}', stale=${activity.stale ?? false}, reason='${activity.reason}' -- not positive evidence; send-verify also not confirmed`
         : "No recent agent activity found; send-verify also not confirmed"}. --reason can acknowledge this attention; acknowledgment does not prove resumed continuity.`,
     };
+  }
+
+  /** Root's fail-open acknowledgement (#2473): the person's --reason acknowledges a full restore's attention that the
+   *  strict reconciler couldn't settle, and never records a recovery. It covers only the subject the person addressed,
+   *  so a positive mismatch (the pane identity check, a binding that disagrees with the latest session) or a subject
+   *  that changed while the reconciler checked is not acknowledged. Returns the result, or why it wasn't acknowledged. */
+  private acknowledgeFullRestore(input: {
+    session: { id: string; nodeId: string; rigId: string; runtime: string | null; startupStatus: string; latestError: string | null };
+    sessionName: string;
+    outcome: DerivedAttentionOutcome;
+    reason: string;
+    subject: string | null;
+    unproven: AcknowledgedUnproven;
+    startupClassActive: boolean;
+    hook: AgentActivity | null;
+    hookClassActive: boolean;
+    previousError: string | null;
+  }): ClearAttentionResult | string {
+    const { session, sessionName, outcome, reason } = input;
+    // Read after the check, which records the identity evidence it reads. An identity it couldn't prove is inability to
+    // inspect, not a replacement: that class stays as it is, and the restore's attention is still acknowledged.
+    const current = this.findLatestSessionByName(sessionName);
+    const identity = current ? this.getActiveIdentityVerdict(current, sessionName) : null;
+    if (positiveIdentityFailure(identity)) return `the pane identity is positively mismatched or missing. ${IDENTITY_RECOVERY_GUIDANCE}`;
+    if (input.unproven.code === "binding_mismatch") {
+      return "the seat's binding disagrees with its latest session, so OpenRig can't tell which occupant this acknowledges";
+    }
+    if (input.subject === null || this.restoreAckSubject(sessionName) !== input.subject) {
+      return "the seat changed while it was checked (a newer occupant, binding or token, or a restore that includes it); rerun clear-attention for its current attention";
+    }
+    const { sessionRegistry, eventBus } = this.deps;
+    eventBus.emit({ type: "restore.outcome_acknowledged", rigId: session.rigId, nodeId: session.nodeId, attemptId: outcome.attemptSeq,
+      from: outcome.status, sessionId: session.id, reason, unproven: input.unproven });
+    const clearedClasses: NonNullable<ClearAttentionResult["clearedClasses"]> = ["restore_outcome"];
+    const evidence = { kind: "restore_outcome_acknowledged", state: outcome.status, reason };
+    if (input.hookClassActive && input.hook) {
+      this.clearWaitingHook(session, sessionName, input.hook, reason);
+      clearedClasses.push("needs_input_hook");
+    }
+    if (input.startupClassActive) {
+      sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
+      eventBus.emit({ type: "seat.attention_cleared", rigId: session.rigId, nodeId: session.nodeId, sessionName,
+        from: session.startupStatus, to: "ready", clearedBy: "operator_attestation", evidence, reason, previousError: input.previousError });
+      clearedClasses.push("startup_status");
+    }
+    return { ok: true, code: "cleared", from: session.startupStatus, to: "ready", clearedBy: "operator_attestation", evidence, reason,
+      previousError: input.previousError, clearedClasses,
+      acknowledgment: { attemptId: outcome.attemptSeq, from: outcome.status, unproven: input.unproven,
+        ...(identity ? { paneIdentity: "unverified" as const } : {}) } };
+  }
+
+  /** What an acknowledgement addresses, read fresh: the latest session (a newer occupant is a new row), its token, the
+   *  node's bound session, its full-restore outcome and attempt, and the newest later restore start that may include
+   *  the node: the strict reconciler's own current-subject recheck, with the start narrowed to this node. A start whose
+   *  recorded roster leaves the node out doesn't change its subject; every current start records its roster, and one
+   *  that can't be read counts as including it. The pane isn't compared: the strict check's identity step can rebind
+   *  it, and a mismatched pane is the identity class's to judge. Null when there's no full-restore outcome. */
+  private restoreAckSubject(sessionName: string): string | null {
+    const session = this.findLatestSessionByName(sessionName);
+    if (!session || !this.deps.db) return null;
+    const outcome = this.getDerivedAttentionOutcome(session);
+    if (outcome?.source !== "restore.completed") return null;
+    const db = this.deps.db;
+    const binding = db.prepare("SELECT tmux_session FROM bindings WHERE node_id = ?").get(session.nodeId) as
+      { tmux_session: string | null } | undefined;
+    // Starts carry no node: read them as the outcome query does, through the node/type index.
+    const starts = db.prepare(
+      "SELECT seq, payload FROM events WHERE node_id IS NULL AND type = 'restore.started' AND +rig_id = ? AND seq > ? ORDER BY seq DESC",
+    ).all(session.rigId, outcome.attemptSeq) as { seq: number; payload: string }[];
+    const including = starts.find((start) => {
+      try {
+        const roster = JSON.parse(start.payload)?.intendedRoster;
+        return !Array.isArray(roster) || roster.some((node: { nodeId?: unknown } | null) => node?.nodeId === session.nodeId);
+      } catch { return true; }
+    });
+    return JSON.stringify([session.id, session.resumeToken, binding?.tmux_session ?? null, outcome.status, outcome.attemptSeq,
+      including?.seq ?? null]);
   }
 
   /** Records the operator's word that the prompt the latest hook named is gone, as the "prompt cleared" hook the activity
@@ -918,13 +1031,32 @@ export class SeatAttentionReconciler {
           // Native identity failures and unrelated/stale community failures still require strict reconciliation.
           const assisted = source === "restore.completed" && communityHarnessOf(session.communityHarness, session.runtime)
             && this.assistedStartupInAttempt(session, attemptSeq, row.seq);
-          return { status: "attention_required", source, ...(assisted ? { assistedStartupAttemptId: attemptSeq } : {}) };
+          if (assisted) return { status: "attention_required", source, attemptSeq, assistedStartupAttemptId: attemptSeq };
+          return { status: "attention_required", source, attemptSeq,
+            ...(source === "restore.completed" && this.acknowledged(session, attemptSeq, "attention_required") ? { acknowledged: true as const } : {}) };
         }
-        if (n.status === "failed" && session.sessionStatus === "running") return { status: "failed", source };
+        if (n.status === "failed" && session.sessionStatus === "running") {
+          return { status: "failed", source, attemptSeq,
+            ...(source === "restore.completed" && this.acknowledged(session, attemptSeq, "failed") ? { acknowledged: true as const } : {}) };
+        }
         return null;
       } catch { continue; }
     }
     return null;
+  }
+
+  /** Whether this session's person acknowledged this full-restore attempt's outcome. The node's latest
+   *  acknowledgement, through the node/type index. */
+  private acknowledged(session: { id: string; nodeId: string; rigId: string }, attemptSeq: number,
+    status: "failed" | "attention_required"): boolean {
+    const row = this.deps.db!.prepare(
+      "SELECT payload FROM events WHERE node_id = ? AND type = 'restore.outcome_acknowledged' ORDER BY seq DESC LIMIT 1",
+    ).get(session.nodeId) as { payload: string } | undefined;
+    if (!row) return false;
+    try {
+      const ack = JSON.parse(row.payload);
+      return ack.rigId === session.rigId && ack.attemptId === attemptSeq && ack.from === status && ack.sessionId === session.id;
+    } catch { return false; }
   }
 
   private assistedStartupInAttempt(session: { id: string; nodeId: string }, attemptId: number, completedSeq: number): boolean {

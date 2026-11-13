@@ -106,5 +106,21 @@ it.each(["valid", "unknown path", "wrong token", "no token", "PID reused", "logi
     }
     expect(db.prepare("SELECT * FROM events WHERE type IN ('restore.started', 'restore.completed')").all()).toEqual(historical);
     expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+    if (mode !== "valid") {
+      // #2473: --reason acknowledges what the live check couldn't settle, and nothing records a resume. An identity it
+      // couldn't prove keeps its own class.
+      const again = new Command().exitOverride().addCommand(seatCommand({ lifecycleDeps, clientFactory }));
+      await again.parseAsync(["node", "rig", "seat", "clear-attention", name, "--reason", "checked the pane myself"]);
+      const line = String(output.mock.calls.at(-1)?.[0]);
+      expect(line.startsWith(`Acknowledged ${name}'s full-restore attention (attempt ${attempt.seq}, failed): recovery not proven (`)).toBe(true);
+      const unverified = ["unknown path", "wrong token", "PID reused"].includes(mode);
+      expect(line.endsWith("only live evidence clears that.")).toBe(unverified);
+      expect(getNodeInventory(db, rig.id)[0]).toMatchObject({ restoreOutcome: "failed", continuityOutcome: "failed",
+        restoreAcknowledgment: { attemptId: attempt.seq, reason: "checked the pane myself" } });
+      if (!unverified) expect(getNodeInventory(db, rig.id)[0]?.lifecycleState).toBe("running");
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(0);
+      expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'restore.outcome_acknowledged'").get()).toEqual({ n: 1 });
+      expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+    }
   } finally { db.close(); }
 });

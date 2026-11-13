@@ -665,7 +665,7 @@ describe("SeatAttentionReconciler", () => {
     ["a previous restore attempt", "assisted_startup", true, false],
     ["another startup failure", "readiness_check", false, false],
     ["another occupant", "assisted_startup", false, true],
-  ] as const)("doesn't acknowledge full-restore attention from %s as this seat's assisted startup", async (_case, stage, oldAttempt, otherOccupant) => {
+  ] as const)("doesn't settle full-restore attention from %s as this seat's assisted startup; --reason only acknowledges it", async (_case, stage, oldAttempt, otherOccupant) => {
     const { rigId, nodeId, sessionId } = seedAttentionSeat("assisted-control", "worker@assisted-control");
     sessionRegistry.updateStatus(sessionId, "running");
     db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(nodeId);
@@ -681,14 +681,19 @@ describe("SeatAttentionReconciler", () => {
     } });
     const strict = vi.fn(async () => ({ ok: false as const, code: "runtime_unsupported", detail: "Not an assisted startup acknowledgement." }));
     const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
-    expect(await checked.clearAttention("worker@assisted-control", { reason: "Checked startup" })).toMatchObject({ ok: false });
+    expect(await checked.clearAttention("worker@assisted-control", { reason: "Checked startup" })).toMatchObject({ ok: true,
+      clearedBy: "operator_attestation", clearedClasses: ["restore_outcome", "startup_status"],
+      acknowledgment: { from: "attention_required", unproven: { code: "runtime_unsupported" } } });
     expect(strict).toHaveBeenCalledTimes(1);
-    expect(db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(sessionId)).toEqual({ startup_status: "attention_required" });
+    // Acknowledged on the person's word, never recorded as a recovery.
     expect(db.prepare("SELECT seq FROM events WHERE type='restore.outcome_reconciled'").all()).toEqual([]);
+    expect(db.prepare("SELECT count(*) AS n FROM events WHERE type='restore.outcome_acknowledged'").get()).toEqual({ n: 1 });
+    expect(JSON.parse((db.prepare("SELECT payload FROM events WHERE type='seat.attention_cleared'").get() as { payload: string }).payload))
+      .toMatchObject({ clearedBy: "operator_attestation", evidence: { kind: "restore_outcome_acknowledged" }, reason: "Checked startup" });
   });
 
-  it("OPR.0.5.9.14: refuses derived-class clear without strict evidence even with operator attestation", async () => {
-    const { rigId, nodeId, sessionId } = seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
+  it("acknowledges, never recovers, a full restore when the strict reconciler is unavailable (#2473)", async () => {
+    const { rigId, nodeId, sessionId, attemptId } = seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
     const before = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();
     const sendVerify = vi.fn(async () => ({ ok: true }));
     const capture = vi.fn(async (sessionName: string) => ({ ok: true, sessionName, content: "fixture" }));
@@ -696,17 +701,28 @@ describe("SeatAttentionReconciler", () => {
       sessionRegistry, eventBus, agentActivityStore: activityStore, db, sendVerify, capture,
     });
 
-    const result = await derivedReconciler.clearAttention("worker@r-derived-refuse", { reason: "operator verified" });
-
-    expect(result.ok).toBe(false);
-    expect(result.code).toBe("not_demonstrably_responsive");
-    expect(result.detail).toContain("strict restore reconciler is unavailable");
+    const unproven = { code: "strict_reconciler_unavailable", detail: "the strict restore reconciler is unavailable" };
+    const refused = await derivedReconciler.clearAttention("worker@r-derived-refuse");
+    expect(refused).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+    expect(refused.detail).toContain("strict restore reconciler is unavailable");
     const refusals = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_clear_refused'").all() as { payload: string }[];
     expect(refusals).toHaveLength(1);
     expect(JSON.parse(refusals[0]!.payload)).toEqual({
       type: "seat.attention_clear_refused", rigId, nodeId, sessionId,
       sessionName: "worker@r-derived-refuse", attentionClass: "restore_outcome", code: "strict_reconciler_unavailable",
     });
+
+    const result = await derivedReconciler.clearAttention("worker@r-derived-refuse", { reason: "operator verified" });
+
+    expect(result).toMatchObject({ ok: true, code: "cleared", clearedBy: "operator_attestation", clearedClasses: ["restore_outcome"],
+      acknowledgment: { attemptId, from: "failed", unproven } });
+    expect(db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_clear_refused'").all()).toHaveLength(1);
+    expect((db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_acknowledged'").all() as { payload: string }[])
+      .map((row) => JSON.parse(row.payload))).toEqual([{ type: "restore.outcome_acknowledged", rigId, nodeId, attemptId, from: "failed",
+      sessionId, reason: "operator verified", unproven }]);
+    // The failed outcome and its continuity stand; only the attention is acknowledged.
+    expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "failed", continuityOutcome: "failed", lifecycleState: "running",
+      restoreAcknowledgment: { attemptId, reason: "operator verified", unproven } });
     expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all()).toEqual(before);
     expect(db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_cleared'").all()).toHaveLength(0);
     expect(sendVerify).not.toHaveBeenCalled();
@@ -767,17 +783,21 @@ describe("SeatAttentionReconciler", () => {
       expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
     });
 
-    it("a fresh launch that needed attention still needs the strict reconciler", async () => {
+    it("a fresh launch that needed attention still needs the strict reconciler; --reason then acknowledges it", async () => {
       const { rigId, nodeId } = seedDerivedAttentionSeat("r-116-unready", "worker@r-116-unready");
       launchFreshOccupant(rigId, nodeId, "worker@r-116-unready", "attention_required");
       const { strict, fenced } = refusingStrictReconciler();
 
+      expect(await fenced.clearAttention("worker@r-116-unready")).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+
       const result = await fenced.clearAttention("worker@r-116-unready", { reason: "operator verified" });
 
-      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
-      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      expect(result).toMatchObject({ ok: true, acknowledgment: { from: "failed", unproven: { code: "no_attempt_proof" } } });
+      expect(strict).toHaveBeenCalledTimes(2);
       expect(reconciledEvents()).toHaveLength(0);
-      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "running" });
     });
 
     it("a restore attempt started after the fresh launch still needs the strict reconciler", async () => {
@@ -839,10 +859,12 @@ describe("SeatAttentionReconciler", () => {
         evidence: { source: "operator_attestation" } });
       const { strict, fenced } = refusingStrictReconciler();
 
-      const result = await fenced.clearAttention("worker@r-116-zero-ack", { reason: "operator verified" });
-
-      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(await fenced.clearAttention("worker@r-116-zero-ack")).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
       expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      // --reason now acknowledges it as unproven: still no recovery beside the legacy zero-ID row.
+      expect(await fenced.clearAttention("worker@r-116-zero-ack", { reason: "operator verified" }))
+        .toMatchObject({ ok: true, acknowledgment: { from: "attention_required", unproven: { code: "no_attempt_proof" } } });
+      expect(reconciledEvents()).toHaveLength(1);
     });
   });
 
@@ -917,7 +939,7 @@ describe("SeatAttentionReconciler", () => {
     expect(result.derivedEvidence).toMatchObject({ source: "restore_runtime_truth", attemptId });
   });
 
-  it("OPR.0.5.9.14: refuses a non-running derived outcome when strict live lineage is absent", async () => {
+  it("OPR.0.5.9.14: a non-running derived outcome without strict live lineage is only acknowledged, never recovered", async () => {
     const rig = rigRepo.createRig("r-nonrun-attn");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "worker@r-nonrun-attn");
@@ -943,10 +965,13 @@ describe("SeatAttentionReconciler", () => {
       }),
     });
 
+    const refused = await nonrunReconciler.clearAttention("worker@r-nonrun-attn");
+    expect(refused.ok).toBe(false);
+    expect(refused.detail).toContain("tmux_session_missing");
+
     const result = await nonrunReconciler.clearAttention("worker@r-nonrun-attn", { reason: "manually verified" });
 
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("tmux_session_missing");
+    expect(result).toMatchObject({ ok: true, acknowledgment: { from: "attention_required", unproven: { code: "tmux_session_missing" } } });
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
     expect(events).toHaveLength(0);
   });

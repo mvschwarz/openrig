@@ -4792,7 +4792,7 @@ describe("RestoreOrchestrator", () => {
         agentActivityStore: new AgentActivityStore({ db, eventBus }),
         reconcileRestoreOutcome: (rigId, nodeId) => restore.reconcileNodeRuntimeTruth(rigId, nodeId),
       });
-      const result = await reconciler.clearAttention(seeded.sessionName, { reason: "operator explanation" });
+      const result = await reconciler.clearAttention(seeded.sessionName);
       expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive",
         detail: expect.stringContaining("pane_not_usable: Pane state is failed (login_required)") });
       const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_clear_refused'").all() as { payload: string }[];
@@ -4807,6 +4807,15 @@ describe("RestoreOrchestrator", () => {
       });
       expect(events[0]!.payload).not.toContain("fixture-private");
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(before);
+      expect(db.prepare("SELECT * FROM events WHERE type IN ('restore.outcome_reconciled', 'seat.attention_cleared')").all()).toHaveLength(0);
+      // #2473: with the person's reason the attention is acknowledged, and the same native screen evidence is kept on it.
+      captured = false;
+      const acknowledged = await reconciler.clearAttention(seeded.sessionName, { reason: "operator explanation" });
+      expect(acknowledged).toMatchObject({ ok: true, acknowledgment: { attemptId: attempt.seq, from: "attention_required",
+        unproven: { code: "pane_not_usable", probe: JSON.parse(events[0]!.payload).probe } } });
+      const acks = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_acknowledged'").all() as { payload: string }[];
+      expect(acks.map((row) => JSON.parse(row.payload).unproven.probe)).toEqual([JSON.parse(events[0]!.payload).probe]);
+      expect(acks[0]!.payload).not.toContain("fixture-private");
       expect(db.prepare("SELECT * FROM events WHERE type IN ('restore.outcome_reconciled', 'seat.attention_cleared')").all()).toHaveLength(0);
       expect(tmux.sendText).not.toHaveBeenCalled();
       expect(tmux.sendKeys).not.toHaveBeenCalled();
