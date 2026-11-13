@@ -688,7 +688,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
         expect(resumeTarget()).toBe(previousToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "none",
-          limit: expect.stringContaining(`the retiring occupant's conversation, the one its fork parent ${SEAT} was on`) });
+          limit: expect.stringContaining(`the retiring occupant's conversation, the one its fork of ${SEAT} started from`) });
         expect(result.result.warnings).toBeUndefined();
         expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
       });
@@ -764,6 +764,20 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
           expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("could not be read from its process") });
           expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "forked" });
         });
+        // The retiree's recorded R is the parent's too: a successor on it is no distinct fork, whatever the argv names.
+        it.each([
+          ["the argv naming P", P],
+          ["no parent in the argv", null],
+        ])("the successor on the retiree's recorded R, %s: no distinct fork", async (_name, argvParent) => {
+          await failedFork(`fork:${SEAT}`, argvParent);
+          pidFile({ name: SEAT, sessionId: previousToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(previousToken);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "none",
+            limit: expect.stringContaining("the retiring occupant's conversation, the one recorded for it") });
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
       });
 
       // SH5: the parent moved to another conversation after the launch (a /clear): the successor still on the one the
@@ -777,6 +791,20 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         expect(resumeTarget()).toBe(parentToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
           limit: expect.stringContaining(`was on when the fork was launched (${PARENT} has moved on since)`) });
+      });
+
+      it("the same with a parent that can't be resolved again: no distinct fork, and whether the parent moved was not checked", async () => {
+        await failedFork();
+        db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(parentNodeId);   // the parent no longer resolves
+        pidFile({ name: SEAT, sessionId: parentToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(parentToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+        const limit = (result.result.sourceOutcome as { limit: string }).limit;
+        expect(limit).toContain(`could not be resolved again, so whether it is still on it was not checked`);
+        expect(limit).not.toContain("has moved on since");
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
       });
 
       // SH6: the retiring occupant's conversation in a fork of another seat whose parent is elsewhere (X2), or can't be

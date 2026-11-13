@@ -1065,10 +1065,11 @@ export class SeatHandoverService {
    *  resumes, so it is recorded even when it is not its own: the retiring occupant's, or its fork parent's. The result
    *  says so, and a fork on such a conversation is not reported as a distinct fork. Nothing of the parent or of the
    *  retiring occupant changes: the token is written to the successor's own session row only.
-   *  The parent of a fork of another seat is that seat's conversation now (resolved again). A fork of the seat itself has
-   *  the retiring occupant as its parent: the conversation its launch forked from, as the proven process's argv names it
-   *  (launchForkParent), else the retiree's recorded one; never re-resolved from the seat's live context row, which by
-   *  now may name the successor's own. A parent that can't be established is said, never taken as distinct. */
+   *  The parent of a fork of another seat is that seat's conversation now (resolved again), and the one it was on when
+   *  the fork was launched (launchForkParent: the proven process's argv). A fork of the seat itself has the retiring
+   *  occupant as its parent: a successor on the conversation its launch forked from (launchForkParent) or on the
+   *  retiree's recorded one is no distinct fork; the seat's live context row, which by now may name the successor's own,
+   *  is never read. A parent that can't be established is said, never taken as distinct. */
   private recoveredConversation(current: string, source: SeatHandoverSource | null, attempt: SeatHandoverAttempt,
     runtime: string | null, launchForkParent: string | null):
     { token: string; shared?: "retiring_occupant" | "fork_parent"; forkRef?: string; note?: string } {
@@ -1090,7 +1091,8 @@ export class SeatHandoverService {
     if (selfFork) {
       // Its parent is the retiring occupant: the conversation the launch forked from, or the one recorded for it.
       if (current === launchForkParent || ofRetiree) {
-        return { token: current, shared: "retiring_occupant", forkRef, note: `No distinct fork was recovered: the successor holds the retiring occupant's conversation, the one its fork parent ${forkRef} was on. ${target}` };
+        const which = current === launchForkParent ? `the one its fork of ${forkRef} started from` : "the one recorded for it";
+        return { token: current, shared: "retiring_occupant", forkRef, note: `No distinct fork was recovered: the successor holds the retiring occupant's conversation, ${which}. ${target}` };
       }
       return launchForkParent ? { token: current } : { token: current, forkRef, note: notChecked };
     }
@@ -1099,7 +1101,9 @@ export class SeatHandoverService {
       return { token: current, shared: "fork_parent", forkRef, note: `No distinct fork was recovered: the successor holds the conversation of its fork parent ${forkRef}${ofRetiree ? ", which is also the retiring occupant's" : ""}. ${target} ${forkRef} keeps its own binding and its process, so both seats now name the same conversation: a restore of either resumes it, and restoring both opens it twice.` };
     }
     if (current === launchForkParent) {
-      return { token: current, shared: "fork_parent", forkRef, note: `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef} was on when the fork was launched (${forkRef} has moved on since). ${target}` };
+      return { token: current, shared: "fork_parent", forkRef, note: fork.ok
+        ? `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef} was on when the fork was launched (${forkRef} has moved on since). ${target}`
+        : `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef} was on when the fork was launched; ${forkRef} could not be resolved again, so whether it is still on it was not checked. ${target}` };
     }
     if (ofRetiree) {
       return { token: current, shared: "retiring_occupant", forkRef, note: fork.ok

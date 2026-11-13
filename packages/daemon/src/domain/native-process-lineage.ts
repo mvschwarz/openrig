@@ -336,10 +336,11 @@ function claudeSessionToken(args: string[]): string | null {
 }
 
 /** #3044: the conversation a Claude fork launch forked from: the `--resume` of a command line that also carries
- *  `--fork-session`, read by the same parser as its identity; null when it is no fork or can't be parsed. */
+ *  `--fork-session` and the fork's own `--session-id`, read by the same parser as its identity; null when it is no
+ *  fork the identity proof accepts or can't be parsed. */
 export function claudeCommandForkParent(command: string): string | null {
   const parsed = claudeArgvIds(tokens(command).slice(1));
-  return parsed?.fork ? parsed.ids.resume : null;
+  return parsed?.fork && parsed.ids["session-id"] !== null ? parsed.ids.resume : null;
 }
 
 function claudeArgvIds(args: string[]): { ids: ClaudeArgvIds; fork: boolean } | null {
