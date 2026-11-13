@@ -10,7 +10,7 @@ import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
-import { readRosters } from "./commands/roster.js";
+import { readRosters, rosterTeamName, teamPhrase } from "./commands/roster.js";
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
@@ -150,8 +150,12 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
 /** A rig's hosted member: a tool that lives outside a terminal (an assistant, a bot) and reaches the team over this server
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
-type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown";
-  presence: HostedPresence };
+type HostedMember = { session: string; label?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null;
+  activity: "unknown"; presence?: HostedPresence };
+
+/** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
+ *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
+type SeatRosterEntry = { label?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; presence?: HostedPresence };
 
 /** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
  *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
@@ -178,36 +182,42 @@ function newestWake(rows: unknown, seat: string): HostedPresence["lastWake"] {
 
 const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may be missing.";
 
-/** The roster members marked hosted, on this host, whose seat is in this rig and isn't one of its nodes. A roster folder that
- *  doesn't exist means none. One that can't be inspected or read, or a host id that isn't known yet, is said, never read as
- *  none. The note stays generic (a scoped caller doesn't see other rosters' names or errors); the detail goes to this
- *  server's log. */
+/** The roster members on this host whose seat is in this rig: those marked hosted that aren't one of its nodes, and the
+ *  entries of its node seats (by seat). A roster folder that doesn't exist means none. One that can't be inspected or
+ *  read, or a host id that isn't known yet, is said, never read as none. The note stays generic (a scoped caller doesn't
+ *  see other rosters' names or errors); the detail goes to this server's log. presenceOf gives null for a seat whose
+ *  presence isn't shown (an external caller's own), and that entry has none. */
 async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
-  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence>): Promise<{ members: HostedMember[]; note?: string }> {
+  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence | null>):
+  Promise<{ members: HostedMember[]; seats: Map<string, SeatRosterEntry>; note?: string }> {
+  const seats = new Map<string, SeatRosterEntry>();
   try {
     statSync(folder);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [], seats };
     console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(error as Error).message}`);
-    return { members: [], note: ROSTERS_INCOMPLETE };
+    return { members: [], seats, note: ROSTERS_INCOMPLETE };
   }
   const { rosters, warnings } = readRosters(folder);
   if (warnings.length > 0) console.error(`rig_team: ${warnings.join("; ")}`);
   const unread = warnings.length > 0 ? { note: ROSTERS_INCOMPLETE } : {};
   const candidates = rosters.flatMap((roster) => roster.members
-    .filter((member) => member.hosted === true && member.seat.endsWith(`@${rigName}`) && !nodeSeats.has(member.seat))
+    .filter((member) => nodeSeats.has(member.seat) || (member.hosted === true && member.seat.endsWith(`@${rigName}`)))
     .map((member) => ({ roster: roster.id, member })));
-  if (candidates.length === 0) return { members: [], ...unread };
+  if (candidates.length === 0) return { members: [], seats, ...unread };
   const host = await selfHostId();
-  if (!host) return { members: [], note: "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  if (!host) return { members: [], seats, note: "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
   // A seat in two rosters is one member: the first roster (by file name) supplies its entry.
   const members = new Map<string, HostedMember>();
   for (const { roster, member } of candidates) {
-    if (member.host !== host || members.has(member.seat)) continue;
-    members.set(member.seat, { session: member.seat, roster, capabilities: member.capabilities, useWhen: member.use_when,
-      caveat: member.caveat ?? null, pane: null, activity: "unknown", presence: await presenceOf(member.seat) });
+    if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
+    const entry = { ...(member.label ? { label: member.label } : {}), roster, capabilities: member.capabilities, useWhen: member.use_when,
+      caveat: member.caveat ?? null };
+    const presence = await presenceOf(member.seat);
+    if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
+    else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
   }
-  return { members: [...members.values()], ...unread };
+  return { members: [...members.values()], seats, ...unread };
 }
 
 type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
@@ -1645,7 +1655,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
           const rows = res.data.filter((row) => scope.item(row));
-          return mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
+          // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list.
+          const inbox = access?.external && (owned || mine) && !destination && !source && !state && tags.length === 0 && !since && !handedOffFrom;
+          if (!inbox || rows.length > 0) return result;
+          const message = `No requests are addressed to you on ${teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? ""))} yet.`;
+          return { ...result, content: [...result.content, { type: "text", text: message }], structuredContent: { ...result.structuredContent, message } };
         }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
@@ -1835,7 +1851,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
@@ -1892,6 +1908,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
             ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
           async (seat) => {
+            // An external caller's own seat is listed so it can see its address, without a line about its own activity.
+            if (access?.external && seat === seatOf()) return null;
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
             // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
@@ -1899,7 +1917,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
           });
-        return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
+        // A node seat on a roster carries its authored entry and presence; a seat on none is as the daemon reports it.
+        const seats = (view.seats as Array<Record<string, unknown>>).map((seat) => {
+          const entry = hosted.seats.get(seat.session as string) ?? hosted.seats.get(`${String(seat.logicalId).replace(".", "-")}@${rigName}`);
+          return entry ? { ...seat, ...entry } : seat;
+        });
+        // The name the person knows the team by, where its network roster names it; otherwise the rig's own fields.
+        const displayName = rosterTeamName(rostersFolder(), rigName);
+        const rigView = { ...(view.rig as Record<string, unknown>), ...(displayName ? { displayName } : {}) };
+        return mapResult({ status: 200, data: { ...view, rig: rigView, seats, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

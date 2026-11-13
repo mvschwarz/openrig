@@ -89,6 +89,8 @@ labelled observation.
 
 A member marked `"hosted": true` is a hosted member: a tool outside the terminal that reaches the team over MCP, with no node or pane.
 `rig_team` lists it with its capabilities and caveat, no pane and activity unknown, unless its seat is one of the rig's nodes.
+A node seat on a roster keeps its own `rig_team` entry, with that entry's capabilities, `use_when`, caveat and presence
+added, so an assistant can see a disconnected seat for what it is. A seat on no roster reads as before.
 `show` and `find` say it's hosted rather than unmatched. See [Hosted members](hosted-members.md).
 Its entry can declare `wake.webhook`, the secret names for a trigger OpenRig rings when work lands for it
 (see [Ring it when work lands](hosted-members.md#ring-it-when-work-lands)).
@@ -97,3 +99,14 @@ an hourly schedule is `60`), or `check_in_on_request: true` when it checks in on
 its person set up, not something OpenRig observes. With neither, its check-in status reads unknown: OpenRig doesn't
 assume a cadence. A value that can't be used doesn't stop the roster loading: that member's check-in
 status reads unknown, with the reason. See [Check-in status](hosted-members.md#check-in-status).
+
+Any member can declare a `label`: how the person knows it, which an assistant can say back, such as
+`"claude (Sam's assistant, invited)"`. It's plain text of at most 200 characters, with no control characters or angle
+brackets. A label that breaks those rules doesn't stop the roster loading: it's ignored, and the member is named by its
+seat as before.
+
+The roster at `rosters/network-<rig>.json` names that rig's team: `rig_team` reports its `name` as `rig.displayName`,
+beside the rig's own name. When an external caller's inbox is empty, `rig_queue_list` adds a line its assistant can
+repeat, such as `No requests are addressed to you on the team "Sam's team" yet.` If the owner hasn't named the team, the
+name is `Your OpenRig team`, and the line says `on your OpenRig team`. Without that roster, there's no display name, and
+the line says `on your OpenRig team`.

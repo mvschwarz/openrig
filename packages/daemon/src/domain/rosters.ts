@@ -35,6 +35,11 @@ export interface RosterMember extends Reference {
   /** Why an authored `check_in_minutes` can't be used. The roster still loads; the member's check-in status reads
    *  unknown with this reason. */
   check_in_problem?: string;
+  /** How the person knows this member, for an assistant to say back ("claude (Sam's assistant, invited)"): plain text,
+   *  at most 200 characters. */
+  label?: string;
+  /** Why an authored `label` isn't used. The roster still loads, and the member is named by its seat as before. */
+  label_problem?: string;
 }
 export interface Roster {
   version: 1;
@@ -62,6 +67,18 @@ function parseWake(value: unknown): RosterWake {
     ...(hook.secrets_env_file === undefined ? {} : { secrets_env_file: hook.secrets_env_file as string }) } };
 }
 
+/** The most a member's label may hold. */
+export const MEMBER_LABEL_MAX = 200;
+
+/** Why a label can't be used, or null. It's text an assistant repeats to a person, so no markup or control characters. */
+function labelProblem(label: unknown): string | null {
+  if (typeof label !== "string" || !label.trim()) return "label isn't non-empty text";
+  if ([...label].length > MEMBER_LABEL_MAX) return `label is longer than ${MEMBER_LABEL_MAX} characters`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f<>]/.test(label)) return "label holds a control character or an angle bracket";
+  return null;
+}
+
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
 export function parseRoster(value: unknown): Roster {
   if (!object(value) || value.version !== 1 || !reference(value.curator) ||
@@ -82,14 +99,28 @@ export function parseRoster(value: unknown): Roster {
           : onRequest === true && cadence !== undefined ? "it states both check_in_minutes and check_in_on_request"
             : cadence !== undefined && (!Number.isInteger(cadence) || (cadence as number) <= 0) ? `check_in_minutes ${JSON.stringify(cadence)} isn't a positive whole number of minutes`
               : null;
+    // A label that can't be used never stops the roster loading either: the member is named by its seat instead.
+    const badLabel = m.label === undefined ? null : labelProblem(m.label);
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
       ...(cadenceProblem ? { check_in_problem: cadenceProblem }
-        : { ...(cadence === undefined ? {} : { check_in_minutes: cadence as number }), ...(onRequest === true ? { check_in_on_request: true as const } : {}) }) };
+        : { ...(cadence === undefined ? {} : { check_in_minutes: cadence as number }), ...(onRequest === true ? { check_in_on_request: true as const } : {}) }),
+      ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
+}
+
+function readRosterFile(file: string): Roster {
+  let fd: number | undefined;
+  try {
+    // Inspect the opened target before reading; NONBLOCK also handles a FIFO
+    // without waiting for a writer. Regular-file symlinks remain readable.
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) throw new Error("Not a regular file; skipped");
+    return parseRoster(JSON.parse(readFileSync(fd, "utf8")));
+  } finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function readRosters(folder: string): { rosters: Roster[]; warnings: string[] } {
@@ -98,17 +129,23 @@ export function readRosters(folder: string): { rosters: Roster[]; warnings: stri
   try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
   catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
   for (const name of names) {
-    let fd: number | undefined;
-    try {
-      // Inspect the opened target before reading; NONBLOCK also handles a FIFO
-      // without waiting for a writer. Regular-file symlinks remain readable.
-      fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NONBLOCK);
-      if (!fstatSync(fd).isFile()) throw new Error("Not a regular file; skipped");
-      rosters.push(parseRoster(JSON.parse(readFileSync(fd, "utf8"))));
-    } catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
-    finally { if (fd !== undefined) closeSync(fd); }
+    try { rosters.push(readRosterFile(join(folder, name))); }
+    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
   }
   return { rosters, warnings };
+}
+
+/** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, which is
+ *  "Your OpenRig team" when its owner hasn't named it. Null when there's no such roster, or it can't be read. */
+export function rosterTeamName(folder: string, rig: string): string | null {
+  if (!rig || /[\\/\0]|^\.\.?$/.test(rig)) return null;
+  try { return readRosterFile(join(folder, `network-${rig}.json`)).name; } catch { return null; }
+}
+
+/** The team's name as a result line says it: quoted when its owner named it, else "your OpenRig team". */
+export const UNNAMED_TEAM = "Your OpenRig team";
+export function teamPhrase(name: string | null): string {
+  return name && name !== UNNAMED_TEAM ? `the team "${name}"` : "your OpenRig team";
 }
 
 /** The wake declared for a hosted member at this address on this host, or null (not hosted, no trigger, or
