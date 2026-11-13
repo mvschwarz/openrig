@@ -442,6 +442,9 @@ export class RestoreOrchestrator {
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
+          .filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:

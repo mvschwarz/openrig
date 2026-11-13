@@ -208,8 +208,8 @@ curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/i
 
 The same command without `--dry-run`,
 `curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
-latest published `@openrig/cli` with `npm install -g`,
-runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
+present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
 `FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
 `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
@@ -308,11 +308,12 @@ team. `rig daemon start --no-kernel` is for automation or an explicit request to
 omit the kernel; it leaves you without that operator.
 
 On a fresh instance, explicit daemon startup chooses the kernel variant from
-successful native auth probes: Claude alone, Codex alone, or both. It starts the
-kernel in the background without a project starter. An absent unused provider is
-fine; if both accounts are authenticated, the kernel uses both even when your
-later project uses just one. A request to use only one provider for everything
-is a separate choice.
+the providers selected by `rig setup --providers` that pass native auth probes:
+Claude alone, Codex alone, or both. If no choice was recorded, it considers every
+signed-in provider. `OPENRIG_PROVIDER_SELECTED` in the daemon's environment
+overrides the saved choice. It starts the kernel in the background without a
+project starter. An absent unused provider is fine. The kernel choice and a
+later project's provider choice are separate.
 
 `/api/kernel/status` retains the chosen template (`rig.yaml`,
 `rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and

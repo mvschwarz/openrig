@@ -177,6 +177,7 @@ export interface RestoreCheckOpts {
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
 
 export interface NodeInventoryEntry {
+  codexConfigProfile?: string | null;
   nodeId?: string | null;
   rigId: string;
   rigName: string;
@@ -489,6 +490,8 @@ export class RestoreCheckService {
         fsOps: { exists: this.deps.exists },
         servicesRecord: input.servicesRecord,
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries(inventory.filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       // The membership restore itself uses: the snapshot's roster, or a pre-roster snapshot's own nodes.
       const roster = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((entry) => entry.nodeId));

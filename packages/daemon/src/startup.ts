@@ -116,7 +116,7 @@ import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contra
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
-import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
+import { observeClaudePaneStartedAt, listNativeProcessesOrThrow, listNativeProcesses } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport, inspectComposerInput, draftDeliveryAllows, readDraftDeliverySetting } from "./domain/session-transport.js";
@@ -1417,7 +1417,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // #421 — the pane's current Claude process start time; a sidecar sampled earlier is not this
   // process's, so capture and null-fill skip it.
   const claudeProcessStartedAt = (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter });
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt, codexHome: configuredCodexHome,
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt,
+    claudeStartedAtForPass: (pass) => (sessionName) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter,
+      listProcesses: pass.lister(listNativeProcessesOrThrow, listNativeProcesses) }), codexHome: configuredCodexHome,
     seatHome: (nodeId, runtime) => seatRuntimeHome(db, nodeId, runtime).home });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
