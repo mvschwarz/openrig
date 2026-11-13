@@ -667,33 +667,44 @@ describe("account deletion of a rig that never had a member", () => {
     expect(exists("g-host")).toBe(true);
   });
 
-  it("the route reads a host by this daemon's id and its host registry", async () => {
-    await row("g-host", "helper@n-empty@remote-host", OUT, [{ state: "done", daysAgo: 2 }]);
-    const post = async (hosts: Array<Record<string, unknown>>) => {
-      const hono = new Hono();
-      hono.use("*", async (c, next) => {
-        c.set("db" as never, db as never);
-        c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
-        c.set("hostRegistryLoader" as never, (() => ({ ok: true, registry: { hosts } })) as never);
-        await next();
-      });
-      hono.route("/api/queue", queueRoutes());
+  // The route's reading, for a never-member erase only: another host is proved by a registered entry with an established
+  // identity (declared, or an eligible learned binding) that differs from this daemon's known id. Anything less refuses.
+  const HOST_URL = "http://127.0.0.1:9";
+  it.each([
+    ["no known id for this daemon, even beside a declared host", null, "remote-host",
+      [{ id: "remote-host", hostId: "remote-host", transport: "http", url: HOST_URL }], {}, 400],
+    ["this daemon's own id", "this-host", "this-host", [], {}, 400],
+    ["an unregistered host", "this-host", "nowhere", [], {}, 400],
+    ["an alias known only by its label", "this-host", "desk", [{ id: "desk", transport: "http", url: HOST_URL }], {}, 400],
+    ["an alias learned as this daemon", "this-host", "desk", [{ id: "desk", transport: "http", url: HOST_URL }],
+      { desk: { hostId: "this-host", observedUrl: HOST_URL } }, 400],
+    ["a host declared as another", "this-host", "remote-host",
+      [{ id: "remote-host", hostId: "remote-host", transport: "http", url: HOST_URL }], {}, 200],
+    ["a host learned as another", "this-host", "vps-b", [{ id: "b", transport: "http", url: HOST_URL }],
+      { b: { hostId: "vps-b", observedUrl: HOST_URL } }, 200],
+  ] as const)("the route reads a host-qualified address at the rig by its host: %s", async (_label, self, host, hosts, bindings, status) => {
+    await row("g-host", `helper@n-empty@${host}`, OUT, [{ state: "done", daysAgo: 2 }]);
+    const hono = new Hono();
+    hono.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
+      c.set("hostRegistryLoader" as never, (() => ({ ok: true, registry: { hosts } })) as never);
+      c.set("hostBindingsLoader" as never, (() => ({ version: 1, bindings })) as never);
+      await next();
+    });
+    hono.route("/api/queue", queueRoutes());
+    setSelfHostId(self);
+    try {
       const res = await hono.request("/api/queue/erase", {
         method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "ops-admin@n-ops" },
         body: JSON.stringify({ members: [], rig: RIG }),
       });
-      return [res.status, await res.json()] as const;
-    };
-    const remote = { id: "remote-host", transport: "http", url: "http://127.0.0.1:9" };
-    expect(await post([])).toMatchObject([400, { error: "erase_rig_had_sessions" }]);
-    setSelfHostId("remote-host");
-    try {
-      expect(await post([remote])).toMatchObject([400, { error: "erase_rig_had_sessions" }]);
+      expect(res.status).toBe(status);
+      expect(await res.json()).toMatchObject(status === 200 ? { applied: false, rig: { found: true, verified: true } } : { error: "erase_rig_had_sessions" });
     } finally {
       setSelfHostId(null);
     }
-    expect(await post([{ id: "alias", hostId: "remote-host", transport: "http", url: "http://127.0.0.1:9" }]))
-      .toMatchObject([200, { applied: false, rig: { found: true, verified: true } }]);
+    expect(exists("g-host")).toBe(true);
   });
 
   it("refuses a removed rig no earlier run recorded with no members, and members [] without a rig", async () => {

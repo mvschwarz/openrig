@@ -68,7 +68,7 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 - no event of the rig, or of its nodes, that names a session;
 - no node removed from it, since a node's sessions are deleted with it;
 - no record under an address at the rig in queue rows and their transitions, inbox and outbox entries, stream items, inbox check-ins, stream reader actions and subscriptions, or chatroom posts. A grant-service caller or a hosted member works with no session row, and this is where it shows. Name those seats instead. These are the tables the check reads; it reads no others;
-  - an address at the rig is `<name>@<rig>`, or `<name>@<rig>@<host>` where the host is this one. One whose host is another registered host names that host's rig, so it doesn't count and isn't erased. One whose host can't be resolved counts;
+  - an address at the rig is `<name>@<rig>`, or `<name>@<rig>@<host>` where the host is this one. One whose host is shown to be another host names that host's rig, so it doesn't count and isn't erased. Shown means a registered entry whose host id is declared, or learned at its current URL, and differs from this daemon's own id. Anything else counts, including an entry known only by its name, or a daemon whose own id isn't known;
 - no earlier erasure that recorded members for it.
 
 Otherwise it's refused (`erase_rig_mismatch`, `erase_rig_had_sessions` or `erase_rig_history_unknown`), and nothing is erased. The run then erases the rig's records as a members run does and records the rig with no members. So once the rig is removed, the same command completes as above.

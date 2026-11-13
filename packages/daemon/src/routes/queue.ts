@@ -798,17 +798,29 @@ export function queueRoutes(): Hono {
       }
       scope = { kind: "routine", contentDays, metadataDays };
     }
-    // Whose host a host-qualified address at the rig names, for a never-member erase: this one (its own id, or a
-    // registered entry carrying it), another registered host, or neither, which counts as this rig's (unknown refuses).
+    // Whose host a host-qualified address at the rig names, for a never-member erase. Another host is proved only by a
+    // registered entry whose identity is established (declared, or a learned binding still eligible) and differs from this
+    // daemon's known id. This daemon's id, or an entry established as it, is this host. Anything else (an entry known only
+    // by its label, or no known id for this daemon) is unknown, which refuses. Routing is unchanged.
     const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
-    let registry: ReturnType<typeof loadHostRegistry> | undefined;
+    const bindingsLoader =
+      (c.get("hostBindingsLoader" as never) as (() => ReturnType<typeof loadLearnedHostBindings>) | undefined) ?? loadLearnedHostBindings;
+    let hosts: { registry: Parameters<typeof eligibleQueueBindings>[0]; learned: ReturnType<typeof eligibleQueueBindings> } | null | undefined;
     const classifyHost = (host: string): HostClass => {
       const self = getSelfHostId();
       if (resolvesToLocalHost(host, self)) return "self";
-      const loaded = (registry ??= registryLoader());
-      const match = loaded.ok ? resolveHost(loaded.registry, host) : undefined;
-      if (!match?.ok) return "unknown";
-      return self !== null && match.host.hostId === self ? "self" : "other";
+      if (self === null) return "unknown";
+      if (hosts === undefined) {
+        const reg = registryLoader();
+        hosts = reg.ok ? { registry: reg.registry, learned: eligibleQueueBindings(reg.registry, bindingsLoader()) } : null;
+      }
+      const known = hosts;
+      if (!known) return "unknown";
+      const match = resolveHost(known.registry, host, known.learned);
+      if (!match.ok) return "unknown";
+      const identity = match.host.hostId ?? known.learned[match.host.id]?.hostId;
+      if (identity === undefined) return "unknown";
+      return identity === self ? "self" : "other";
     };
     try {
       const ledger = settings?.resolveOne("retention.erasure_ledger").value;
