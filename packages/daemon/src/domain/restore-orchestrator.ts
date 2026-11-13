@@ -1823,7 +1823,8 @@ export class RestoreOrchestrator {
     // runtime and write Claude hooks into another agent's working folder
     // (with a saved context, the compatibility gate already stops that
     // mismatch), and a pod-aware agent must get no write from this recovery
-    // at all — it still ends at the "Harness not started" gate, unchanged.
+    // at all. With no saved context and a resume token, restore tries its resume
+    // on an empty plan (replayCtx below), still without this recovery.
     const activityAdapter = opts?.adapters?.["claude-code"];
     const recoveryRuntime = startupCtx?.runtime
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
@@ -2046,15 +2047,16 @@ export class RestoreOrchestrator {
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
     // A seat that only ever resumed or was attached (attach, adopt, reconcile-session, a set resume token) has a resume
-    // token but no saved startup context. A resume replays none anyway (replayContained), so it resumes with an empty
-    // plan and the restore names the gap, rather than stopping on data the resume doesn't use. Guidance, activity hooks
-    // and the guidance record still read the saved context only, so nothing is put back or recorded for this seat.
+    // token but no saved startup context. A resume replays none anyway (replayContained), so restore tries the resume
+    // with an empty plan and names the gap, rather than stopping on data the resume doesn't use. Guidance, activity hooks
+    // and the guidance record read the saved context only, so no guidance is put back and no startup context is written
+    // for this seat; the adapter's ordinary bootstrap and the seat's existing skill restoration still run, as on any resume.
     const resumeWithoutContext = isPodAware && !startupCtx && replayContained && startupRuntime !== null && startupRuntime !== "terminal";
     const replayCtx: NodeStartupSnapshot | null = startupCtx
       ?? (resumeWithoutContext ? { runtime: startupRuntime!, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } : null);
     if (resumeWithoutContext && startupAdapter && launchResult) {
-      warnings?.push(`Restore: ${node.logicalId}: no saved startup context, so it resumed its saved conversation with no startup files, actions or managed guidance put back.`);
-      activityHookGaps?.push("startup_context: no saved startup context; the seat resumed with an empty plan.");
+      warnings?.push(`Restore: ${node.logicalId}: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.`);
+      activityHookGaps?.push("startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan.");
     }
     // New compute has no retained context filesystem. Restore the saved file selection, never conversation actions.
     const restoreEnvironmentContext = replayContained && !!startupAdapter?.environment && !!data.environmentBindingsByNode?.[node.id];

@@ -938,15 +938,16 @@ export class RestoreCheckService {
           }],
         };
       case "missing":
-        // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore resumes
-        // it with an empty plan, as it does any resume (a resume replays no startup context), and names the gap.
+        // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore tries its
+        // saved conversation without replaying a saved startup plan, as on any resume (a resume replays no startup context).
+        // A pod-aware seat's restore names the gap; a legacy seat's resume path is unchanged and names none.
         if (seatResumes(node)) {
           return {
             check: {
               check,
               status: "yellow",
-              evidence: `${probe.evidence}. Restore resumes ${session}'s saved conversation with no startup files, actions or managed guidance put back, and names this gap.`,
-              remediation: `Nothing is needed to restore it. To record startup context, start it fresh from its spec, in a new conversation: ${freshSeatLaunchCommand(node.logicalId, rigName)}`,
+              evidence: `${probe.evidence}. Restore tries ${session}'s saved conversation without replaying a saved startup plan${node.podId ? ", and names this gap" : ""}.`,
+              remediation: `No startup-context repair is needed to restore it. To record startup context, start it fresh from its spec, in a new conversation: ${freshSeatLaunchCommand(node.logicalId, rigName)}`,
               remediationSafe: false,
             },
           };

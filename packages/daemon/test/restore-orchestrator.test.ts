@@ -2875,12 +2875,34 @@ describe("RestoreOrchestrator", () => {
     expect({ status: node0.status, error: node0.error?.replaceAll("test-rig", "saved-rig") }).toEqual({ status: savedNode.status, error: savedNode.error });
     expect(savedNode.restoreGaps).toBeUndefined();
     if (runtime === "claude-code") expect(node0.status).toBe("resumed");
-    expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; the seat resumed with an empty plan."]);
-    expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so it resumed its saved conversation with no startup files, actions or managed guidance put back.");
+    expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."]);
+    expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
     // Nothing is replayed or projected, and no startup context is written for it.
     for (const [plan] of adapter.project.mock.calls as unknown as Array<[{ entries: unknown[] }]>) expect(plan.entries).toEqual([]);
     for (const [files] of adapter.deliverStartup.mock.calls as unknown as Array<[unknown[]]>) expect(files).toEqual([]);
     expect(db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(node.id)).toBeUndefined();
+  });
+
+  // The gap is named before the resume's outcome is known, so it never claims one: a resume that finds no conversation,
+  // or fails, keeps the same attempt-neutral words and its own status.
+  it.each([
+    ["finds no conversation", { ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const }, "awaiting-decision"],
+    ["fails to start", { ok: false as const, error: "Claude resume failed: the harness exited" }, "failed"],
+  ] as const)("with no saved startup context, a resume that %s keeps its status and claims no resume", async (_label, launch, status) => {
+    const token = "00000000-0000-4000-8000-0000000ba5e1";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    adapter.launchHarness.mockResolvedValueOnce(launch as never);
+    const result = await createOrchestrator({ listProcesses: nativeLineage("claude-code", token) }).restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node0 = result.result.nodes[0]!;
+    expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
+    expect(node0.status).toBe(status);
+    expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."]);
+    expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
+    expect([...(node0.restoreGaps ?? []), ...result.result.warnings].filter((line) => line.includes("startup context"))
+      .some((line) => /\bresumed\b/.test(line))).toBe(false);
   });
 
   it("with no saved startup context, a seat with no resume token still waits for a decision, and starts no harness", async () => {

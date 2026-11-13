@@ -167,12 +167,12 @@ describe("restore-check current-state eligibility correction", () => {
 
   // A seat that only ever resumed or was attached has no saved startup context. With a resume token, restore resumes it
   // with an empty plan; eligibility and restore-check follow the same rule.
-  function seedMoved(name: string, token: boolean) {
+  function seedMoved(name: string, token: boolean, pod = true) {
     const { rigRepo, sessionRegistry, db } = setup;
     const rig = rigRepo.createRig(name);
-    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run(`pod-${name}`, rig.id, "Dev");
-    const node = rigRepo.addNode(rig.id, "dev.moved", { runtime: "codex", cwd: home, podId: `pod-${name}` });
-    const session = sessionRegistry.registerSession(node.id, `dev-moved@${name}`);
+    if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run(`pod-${name}`, rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, pod ? "dev.moved" : "moved", { runtime: "codex", cwd: home, ...(pod ? { podId: `pod-${name}` } : {}) });
+    const session = sessionRegistry.registerSession(node.id, pod ? `dev-moved@${name}` : `moved@${name}`);
     sessionRegistry.updateStatus(session.id, "stopped");
     if (token) db.prepare("UPDATE sessions SET resume_type='codex_id',resume_token='fixture-codex-token' WHERE id=?").run(session.id);
     return rig;
@@ -184,9 +184,17 @@ describe("restore-check current-state eligibility correction", () => {
     const rig = seedMoved("moved", true);
     expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!)).toEqual({ ok: true, blockers: [] });
     const ctx = startupContextCheck(await check(rig.name));
-    expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore resumes dev-moved@moved's saved conversation") });
-    expect(ctx.remediation).toContain("Nothing is needed to restore it.");
+    expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore tries dev-moved@moved's saved conversation without replaying a saved startup plan, and names this gap.") });
+    expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
     expect(ctx.remediation).toContain("rig seat launch 'dev.moved@moved' --fresh");
+  });
+
+  it("a legacy seat with a resume token and no saved startup context reads yellow without promising a named gap", async () => {
+    const rig = seedMoved("legacy-moved", true, false);
+    const ctx = startupContextCheck(await check(rig.name));
+    expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("without replaying a saved startup plan.") });
+    expect(ctx.evidence).not.toContain("names this gap");
+    expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
   });
 
   it("without a resume token the seat stays blocked, and restore-check names a supported command instead of 'recreate'", async () => {
