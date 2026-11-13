@@ -1,3 +1,4 @@
+import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
@@ -355,7 +356,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       allowConflict: allowDbConflict });
   for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
+  const endMigrations = beginStartupPhase("migrations");
   migrate(db, ALL_MIGRATIONS);
+  const migrationsTiming = endMigrations();
 
   // 51-09 increment 1 — establish the daemon's durable self-host identity at
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
@@ -395,6 +398,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     : new SlowOpRecorder({
         logPath: nodePath.join(OPENRIG_HOME, "logs", "slow-operations.jsonl"),
       }));
+  // The migration interval ends before recorder setup; submit it only once the
+  // normal nonblocking sink exists. A failed pre-recorder boot has no record.
+  recordStartupPhase(slowOpRecorder, migrationsTiming);
   configureSyncSiteRecorder(slowOpRecorder);
   // Instrumentation wiring is observe-only: neither a throwing registration
   // call nor a throwing callback body (streamStore.emit) may abort createDaemon
@@ -866,6 +872,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Reconcile all managed rigs — marks stale sessions as detached.
   // Capture aggregate counts and log a compact summary so cold-start truth
   // repair is visible in daemon output instead of silently swallowed.
+  const endReconciliation = beginStartupPhase("reconciliation");
   const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
@@ -909,6 +916,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // eslint-disable-next-line no-console
     console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} unseen=${reconcileUnseen} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
+
+  recordStartupPhase(slowOpRecorder, endReconciliation());
 
   // Transcript rotators are process-local. Reattach them after lifecycle
   // reconciliation so surviving tmux sessions keep ingesting across daemon
@@ -1050,6 +1059,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
+  const endManagedPlugins = beginStartupPhase("managed_plugins");
   // plugin-primitive Phase 3a slice 3.2 — vendor openrig-core plugin to
   // ~/.openrig/plugins/openrig-core/ on first launch. Auto-fetch from
   // github.com/mvschwarz/openrig-plugins is best-effort + 404-tolerant
@@ -1112,6 +1122,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (err) {
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
+
+  recordStartupPhase(slowOpRecorder, endManagedPlugins());
 
   // PL-014: one daemon-scoped ContextPackLibraryService backs the
   // delivery-free /api/context-packs list/sync/compose/read/delete/preview/pieces
