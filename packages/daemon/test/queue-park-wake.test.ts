@@ -20,6 +20,7 @@ import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { diagnoseSeatParked } from "../src/domain/parked-query.js";
 
 // S03 R25 RED-FIRST fixture: this is the contract shape migration 073 will ship.
 // Keeping the table local in the RED commit lets every behavior fail on its own
@@ -1387,6 +1388,28 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       ref: blocker.qitemId,
     }));
     expect(repo.getParkWakeStatus(row.qitemId)).not.toHaveProperty("expiresAt");
+  });
+
+  it("recognizes custom-ID blockers on new and existing parks without hiding missing blockers", async () => {
+    const blocker = await repo.create({ qitemId: "named-work", sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const row = await item();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId, transitionNote: "wait" });
+    expect(wakes(row.qitemId)).toEqual([expect.objectContaining({ wake_kind: "blocker", wake_ref: "named-work" })]);
+    // Simulate the pre-fix park: blocked_on was persisted without an arm.
+    db.prepare("DELETE FROM queue_transition_wakes WHERE qitem_id = ?").run(row.qitemId);
+    const diagnose = () => diagnoseSeatParked({
+      getSeatState: () => ({ activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "test", changedAt: null }) as never,
+      listOpenObligations: () => ({ rows: [{ qitemId: row.qitemId, state: "blocked" }], limit: 500 }),
+      getParkWake: (id) => repo.getParkWakeStatus(id),
+    }, { seatNodeId: "seat", sessionName: "worker@rig" });
+    expect(diagnose().parked).toBe(false);
+    expect(diagnose().obligations.held[0]?.wake).toMatchObject({ kind: "blocker", ref: "named-work", live: true });
+    db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = ?").run(blocker.qitemId);
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    expect(diagnose().parked).toBe(true);
+    db.prepare("UPDATE queue_items SET state = 'pending' WHERE qitem_id = ?").run(blocker.qitemId);
+    repo.update({ qitemId: blocker.qitemId, actorSession: "peer@rig", state: "done", closureReason: "no-follow-on", transitionNote: "complete" });
+    expect(repo.getById(row.qitemId)?.state).toBe("pending");
   });
 
   it("negative control: a wakeless park still succeeds and records no invented wake", async () => {

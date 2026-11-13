@@ -3844,7 +3844,8 @@ export class QueueRepository {
       // start explicitly; it also gives the row's wake a real "last check" time.
       jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
-    } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
+    } else if (input.state === "blocked" && effectiveBlockedOn && effectiveBlockedOn !== input.qitemId && !isHumanPark
+      && (effectiveBlockedOn.startsWith("qitem-") || isBlockerLive(this.getById(effectiveBlockedOn)?.state ?? ""))) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
     }
 
