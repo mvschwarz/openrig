@@ -2113,7 +2113,7 @@ export class QueueRepository {
     // command line (it carries the row's summary), and nothing there can claim the row. So nothing
     // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
     // retries come back here and type nothing before it escalates.
-    if (isBoundTerminalSeat(this.db, destinationSession)) {
+    if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physicalSessionName(this.db, destinationSession))) {
       return {
         classified: "failed",
         nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
