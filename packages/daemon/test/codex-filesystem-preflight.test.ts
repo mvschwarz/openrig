@@ -135,3 +135,58 @@ describe("Codex seat filesystem verifier reader boundary", () => {
     });
   });
 });
+
+describe("compatible policies and inconclusive reads", () => {
+  it("accepts inert legacy settings, a model-only profile and harmless descriptions", () => {
+    const read = config();
+    Object.assign(read.config, { sandbox_mode: "read-only", sandbox_workspace_write: { network_access: true }, profile: "model-only" });
+    read.config.permissions["openrig-seat"].description = "description only";
+    expect(decide(read)).toEqual({ ok: true, verified: true });
+  });
+
+  it("treats every null profile field as absent, including future fields", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"], { futureProfile: null });
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { futureFilesystem: null });
+    Object.assign(read.config.permissions["openrig-seat"].network, { futureNetwork: null });
+    expect(decide(read)).toEqual({ ok: true, verified: true });
+  });
+
+  it("accepts a narrower filesystem policy and redundant subpath grants", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { "/work": "read", "/work/child": "read" });
+    expect(decide(read)).toEqual({ ok: true, verified: true });
+  });
+
+  it("accepts matching managed selection and allowlists", () => {
+    expect(decide(config(), { requirements: { defaultPermissions: "openrig-seat",
+      allowedPermissionProfiles: { "openrig-seat": true }, allowedApprovalPolicies: ["on-request", "never"],
+      allowedSandboxModes: ["read-only"] } })).toEqual({ ok: true, verified: true });
+  });
+
+  it.each([
+    { configRead: null, requirementsRead: { requirements: null } },
+    { configRead: config(), requirementsRead: { requirements: [] } },
+    { configRead: config(), requirementsRead: { requirements: { futureManagedPolicy: true } } },
+  ])("reports an unreadable shape or unknown requirement without refusing %#", request => {
+    expect(decideCodexFilesystemPolicy({ permissions, ...request })).toMatchObject({ ok: true, verified: false, reason: expect.any(String) });
+  });
+
+  it.each(["future-access", { read: ["/nested"] }])("reports unfamiliar filesystem representation without refusing %j", access => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { "/work/hidden": access });
+    expect(decide(read)).toMatchObject({ ok: true, verified: false });
+  });
+
+  it("still refuses a concrete extra write grant alongside an unfamiliar representation", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { "/poison": "write", "/future": { read: ["/nested"] } });
+    expect(decide(read)).toMatchObject({ ok: false });
+  });
+
+  it("reports a reader timeout without dropping or replacing the invocation policy", async () => {
+    vi.mocked(readCodexConfiguration).mockResolvedValueOnce({ ok: false, reason: "native read timed out" });
+    expect(await verifyCodexFilesystemPolicy({ permissions, cwd: "/work", codexHome: "/account" }))
+      .toMatchObject({ ok: true, verified: false, reason: expect.stringContaining("timed out") });
+  });
+});

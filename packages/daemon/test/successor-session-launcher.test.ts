@@ -63,6 +63,44 @@ describe("SuccessorSessionLauncher", () => {
     });
   }
 
+  it.each([false, true])("leaves the predecessor untouched when launch preflight refuses or throws (throws: %s)", async throws => {
+    const preflightLaunch = vi.fn(async () => {
+      if (throws) throw new Error("preflight unavailable");
+      return { ok: false as const, error: "policy conflicts with the successor" };
+    });
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    const onReplacementStarted = vi.fn();
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig", onReplacementStarted });
+    expect(result).toMatchObject({ ok: false, code: "successor_preflight_failed", replacementStarted: false });
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+    expect(onReplacementStarted).not.toHaveBeenCalled();
+  });
+
+  it("preflights the same binding it launches and retains an inconclusive-policy warning", async () => {
+    const preflightLaunch = vi.fn(async () => ({ ok: true as const, warnings: ["policy not verified: native read timed out"] }));
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    signalPaneProcess.mockImplementation(async () => {
+      expect(preflightLaunch).toHaveBeenCalledTimes(1);
+      return { ok: true };
+    });
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w",
+      codexPermissions: { approval: "never", filesystem: { ":minimal": "read" } } },
+      departingSessionName: "dev-impl@rig", occupantGeneration: "successor-generation" });
+    expect(result).toMatchObject({ ok: true, warnings: ["policy not verified: native read timed out"] });
+    expect(preflightLaunch.mock.calls[0]?.[0]).toBe(launchHarness.mock.calls[0]?.[0]);
+  });
+
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({
       node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast", REGION: "eu" } },

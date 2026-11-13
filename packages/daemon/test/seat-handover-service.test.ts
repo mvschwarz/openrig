@@ -1280,6 +1280,65 @@ describe("SeatHandoverService", () => {
     expect(binding.codexPermissions).toEqual(own);
   });
 
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])(
+    "keeps the predecessor running when filesystem preflight refuses before %s handover", async source => {
+      const { node, sessionId } = seedSeat();
+      if (!sessionId) throw new Error("fixture requires a current session");
+      sessionRegistry.updateResumeToken(sessionId, "native-thread", "codex_id");
+      const own = { approval: "never", filesystem: { ":minimal": "read", "/project": "write" } };
+      db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+      const before = sessionRegistry.getBindingForNode(node.id);
+      const verifyFilesystemPolicy = vi.fn(async () => ({ ok: false as const, error: "native policy refuses successor" }));
+      const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+        fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, listFiles: () => [] } });
+      const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+        tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+      expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source, reason: "check successor policy" }))
+        .toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringContaining("native policy") });
+      expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ codexHome: "/seat-home", cwd: "/project" }));
+      expect(signalPaneProcess).not.toHaveBeenCalled();
+      expect(respawnPane).not.toHaveBeenCalled();
+      expect(killSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getBindingForNode(node.id)).toEqual(before);
+    });
+
+  it("checks the saved filesystem policy before signaling the predecessor and then hands over", async () => {
+    const { node } = seedSeat();
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
+      .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
+    const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: true as const }));
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy });
+    vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
+    vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
+    signalPaneProcess.mockImplementation(async () => {
+      expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
+      return { ok: true };
+    });
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+    expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source: "fresh", reason: "check successor policy" }))
+      .toMatchObject({ ok: true });
+    expect(signalPaneProcess).toHaveBeenCalledTimes(1);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues handover with the authored policy when native verification is inconclusive", async () => {
+    const { node } = seedSeat();
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
+      .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
+    const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: false as const, reason: "native read timed out" }));
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy });
+    vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
+    vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+    expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "keep authored policy" }))
+      .toMatchObject({ ok: true });
+    expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
+    expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({ codexPermissions: { filesystem: { ":minimal": "read" } } });
+    expect(signalPaneProcess).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["observed", "unverified"] as const)("rebuild keeps saved-envelope launch additions when predecessor permissions are %s", async state => {
     const { node } = seedSeat({ codexConfigProfile: "locked" });
     const own = { sandbox: "workspace-write", approval: "on-request", writable_roots: ["/shared/state"],
