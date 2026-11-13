@@ -11,6 +11,7 @@ const seat = (over: Partial<Node>): Node => ({
 // The daemon's served verdict when the pane's process contradicts the seat (seat-identity-reconciler.ts).
 const shellCheck = (observedCommand: string) =>
   ({ verdict: "mismatch", reason: "process_identity_mismatch", evidence: { observedCommand } });
+const ambiguousCheck = { ...shellCheck("zsh"), reason: "process_identity_ambiguous" };
 const hook = (state: "running" | "idle" | "needs_input" | "unknown", extra: Record<string, unknown> = {}) =>
   ({ state, reason: "hook", evidenceSource: "runtime_hook", sampledAt: "2026-11-13T22:00:00.000Z", evidence: null, ...extra });
 
@@ -24,9 +25,13 @@ describe("the node summary's roll call", () => {
     ["a session tmux reports missing, which the daemon serves as detached", { sessionStatus: "detached", identityVerdict: { verdict: "pane_missing", reason: "session_missing" } }, "sessionMissing"],
     ["the identity check seeing a shell, with a recent hook", { startupStatus: "attention_required", identityVerdict: shellCheck("zsh"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "bareShell"],
     ["the identity check seeing a login shell, with no hook", { startupStatus: "attention_required", identityVerdict: shellCheck("-bash") }, "bareShell"],
-    ["an ambiguous identity check", { startupStatus: "attention_required", identityVerdict: { ...shellCheck("zsh"), reason: "process_identity_ambiguous" } }, "unknown"],
-    ["another agent in the pane", { startupStatus: "attention_required", identityVerdict: shellCheck("codex") }, "unknown"],
-    ["an identity check tmux couldn't answer", { identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable" } }, "unknown"],
+    ["an ambiguous identity check, with no hook", { startupStatus: "attention_required", identityVerdict: ambiguousCheck }, "unknown"],
+    ["an ambiguous identity check, with a fresh hook", { startupStatus: "attention_required", identityVerdict: ambiguousCheck, agentActivity: hook("running") }, "agentRunningConversationUnproven"],
+    ["another agent in the pane, with no hook", { startupStatus: "attention_required", identityVerdict: shellCheck("codex") }, "unknown"],
+    ["another agent in the pane, with a fresh hook and a resume", { startupStatus: "attention_required", identityVerdict: shellCheck("codex"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "unknown"],
+    ["an identity check tmux couldn't answer, with no hook", { identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable" } }, "unknown"],
+    ["an identity check tmux couldn't answer, with a fresh hook and a resume", { identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable" }, agentActivity: hook("idle"), continuityOutcome: "resumed" }, "originalConversation"],
+    ["a Codex seat's unavailable check, with a fresh hook", { runtime: "codex", startupStatus: "attention_required", identityVerdict: { verdict: "mismatch", reason: "tmux_unavailable" }, agentActivity: hook("idle") }, "agentRunningConversationUnproven"],
     ["a live session with no agent evidence", {}, "unknown"],
     ["a pane heuristic, not a hook", { agentActivity: { ...hook("running"), evidenceSource: "pane_heuristic" } }, "unknown"],
     ["a stale hook report", { agentActivity: hook("idle", { stale: true }), continuityOutcome: "resumed" }, "unknown"],
@@ -34,6 +39,12 @@ describe("the node summary's roll call", () => {
     ["a hook reporting unknown", { agentActivity: hook("unknown") }, "unknown"],
   ] as const)("reads %s", (_label, over, bucket) => {
     expect(rollCallBucket(seat(over as Partial<Node>))).toBe(bucket);
+  });
+
+  it("says in each bucket's evidence how identity evidence weighs against a hook", () => {
+    expect(ROLL_CALL_EVIDENCE.unknown).toContain("different agent than the seat's, which conflicts with any hook report");
+    expect(ROLL_CALL_EVIDENCE.originalConversation).toContain("An ambiguous or unavailable identity check doesn't outweigh the hook");
+    expect(ROLL_CALL_EVIDENCE.agentRunningConversationUnproven).toContain("An ambiguous or unavailable identity check doesn't outweigh the hook");
   });
 
   it("counts agent seats only, names them, and says what each bucket counts", () => {
