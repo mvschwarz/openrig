@@ -440,6 +440,9 @@ export class RestoreOrchestrator {
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
+          .filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
