@@ -121,18 +121,19 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
     if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
-    // Check for ambiguity first
-    // Observation is best effort and never decides whether supported transport
-    // runs. A missing pane is not evidence that a hosted queue reader is missing.
-    let destinationStatus: QueueDestinationAdvisory | undefined;
-    try {
-      destinationStatus = (c.get("queueRepo" as never) as QueueRepository | undefined)?.destinationAdvisory(body.session) ?? undefined;
-    } catch {
-      destinationStatus = { code: "destination_status", status: "unknown", destinationSession: body.session,
-        availableDestinations: [], message: "Destination status unknown: registry lookup unavailable." };
-    }
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) {
+      // Status is best-effort teaching only after transport finds no receiver.
+      // Resolved and ambiguous sends never read the roster or human registry.
+      let destinationStatus: QueueDestinationAdvisory | undefined;
+      if (resolved.code === "not_found") {
+        try {
+          destinationStatus = (c.get("queueRepo" as never) as QueueRepository | undefined)?.destinationAdvisory(body.session) ?? undefined;
+        } catch {
+          destinationStatus = { code: "destination_status", status: "unknown", destinationSession: body.session,
+            availableDestinations: [], message: "Destination status unknown: registry lookup unavailable." };
+        }
+      }
       if (resolved.code === "not_found" && destinationStatus
         && ["missing", "archived", "hosted", "unknown"].includes(destinationStatus.status ?? "")
         && !expectedIdentity && !body.submitOnly && !body.typeWithoutChecking) {
@@ -199,7 +200,6 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // The seat's own agent typing into its own terminal is told apart where the sender is known: it's treated like any
     // agent's message, and recorded as its own.
     const self = !!derivedActor && resolved.sessions.length === 1 && resolved.sessions[0]!.sessionName === derivedActor;
-    if (destinationStatus) Object.assign(result, { destinationStatus });
     if (self) Object.assign(result, { fromDestinationSeat: true });
     if (result.outcome === "retained") return c.json(result);
 

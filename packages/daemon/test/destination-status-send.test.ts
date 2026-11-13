@@ -23,19 +23,20 @@ describe("send destination status preserves the message without forwarding", () 
         : status === "unknown" ? "Destination status unknown: registry unavailable."
         : status === "archived" ? "Rig status-target is archived; no live seat by this name."
         : "No live seat by this name on this daemon." };
+    const destinationAdvisory = vi.fn(() => advisory);
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("db" as never, db as never);
       c.set("sessionTransport" as never, transport as never);
       c.set("outboxHandler" as never, outbox as never);
-      c.set("queueRepo" as never, { destinationAdvisory: () => advisory } as never);
+      c.set("queueRepo" as never, { destinationAdvisory } as never);
       await next();
     });
     app.route("/api/transport", transportRoutes());
     const post = (extra: Record<string, unknown> = {}) => app.request("/api/transport/send", { method: "POST", headers: {
       "Content-Type": "application/json", "X-OpenRig-Session": "sender@status-source",
     }, body: JSON.stringify({ session: destination, text: "keep this message", exactText: "keep this message", ...extra }) });
-    return { db, outbox, destination, send, post, advisory, transport };
+    return { db, outbox, destination, send, post, advisory, transport, destinationAdvisory };
   }
 
   it.each(["missing", "archived", "hosted", "unknown"] as const)("records a %s target without claiming delivery", async status => {
@@ -48,6 +49,18 @@ describe("send destination status preserves the message without forwarding", () 
     expect(body.outboxIds).toHaveLength(1);
     expect(f.outbox.getById(body.outboxIds[0])).toMatchObject({ destinationSession: f.destination,
       body: "keep this message", deliveryState: "failed", deliveredAt: null });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ambiguous resolution without consulting destination registries or recording a send", async () => {
+    const f = fixture("unknown", false);
+    f.transport.resolveSessions.mockResolvedValue({ ok: false, code: "ambiguous", error: "Two seats resolved" } as never);
+    const record = vi.spyOn(f.outbox, "record");
+    const response = await f.post();
+    expect(response.status).toBe(409);
+    expect(await response.json()).not.toHaveProperty("destinationStatus");
+    expect(f.destinationAdvisory).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     expect(f.send).not.toHaveBeenCalled();
   });
 
@@ -77,8 +90,9 @@ describe("send destination status preserves the message without forwarding", () 
     const f = fixture(status, true);
     const response = await f.post(); const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body).toMatchObject({ ok: true, sent: true,
-      destinationStatus: expect.objectContaining({ status, message: f.advisory.message }) });
+    expect(body).toMatchObject({ ok: true, sent: true });
+    expect(body).not.toHaveProperty("destinationStatus");
+    expect(f.destinationAdvisory).not.toHaveBeenCalled();
     expect(f.send).toHaveBeenCalledWith(f.destination, "keep this message", expect.anything());
   });
 });

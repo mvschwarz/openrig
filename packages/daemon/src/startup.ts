@@ -451,32 +451,41 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return readRosters(folder).warnings.length > 0;
     };
     try {
+      // Physical spelling can belong to a different rig from its suffix (restore
+      // preserves pinned names). Check registered and current binding names first.
+      const exact = db.prepare(`SELECT DISTINCT node_id FROM (
+        SELECT s.node_id FROM sessions s JOIN nodes n ON n.id = s.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE s.session_name = ? AND r.archived_at IS NULL
+        UNION ALL
+        SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE b.tmux_session = ? AND r.archived_at IS NULL
+      ) LIMIT 2`).all(sessionRef, sessionRef) as Array<{ node_id: string }>;
+      if (exact.length === 1) return null;
+      if (exact.length > 1) return status("unknown", `${sessionRef}: destination status unknown; multiple local seats have this exact address.`);
+      const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
+      // Logical membership is also a cheap local query. Known seats need no
+      // synchronous hosted-roster or human-registry reads.
+      for (const rig of rigs) {
+        if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
+          CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
+            WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
+            THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
+          END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+      }
       // The callback runs after QueueRepository construction. A hosted member is
       // a valid queue reader even when it has no pane or wake trigger.
       if (queueRepoInstance.isHostedMember(sessionRef)) {
-        return status("hosted", `${sessionRef} is a hosted member; it reads the queue when its owner starts a session. No pane is required.`);
+        return status("hosted", `${sessionRef} is a hosted member; it reads the queue when its owner starts a session. No pane is required. Send work as a queue item.`);
       }
       const humans = loadHumanRegistry();
       if (humans.ok && resolveRegisteredHumanAddress(sessionRef, humans.entities)) return null;
-      const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
       if (rigs.length === 0) {
         if ((!humans.ok && humans.noHumans !== true) || rosterUnavailable()) return status("unknown", `${sessionRef}: destination status unknown; a destination registry is unavailable.`);
         const archived = db.prepare(`SELECT archived_at FROM rigs WHERE name = ? AND archived_at IS NOT NULL
           ORDER BY created_at DESC LIMIT 1`).get(parsed.rig) as { archived_at: string } | undefined;
         return archived
           ? status("archived", `Rig ${parsed.rig} is archived since ${archived.archived_at}; no live seat by this name on this daemon. The row keeps the exact destination.`)
-          : status("missing", `No local rig ${parsed.rig}; no live seat by this name on this daemon. The row keeps the exact destination.`);
-      }
-      // Membership needs only registered names and logical seat coordinates,
-      // not the full ps projection (snapshots, activity and lifecycle history).
-      for (const rig of rigs) {
-        if (db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id
-          WHERE n.rig_id = ? AND s.session_name = ? LIMIT 1`).get(rig.id, sessionRef)) return null;
-        if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
-          CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
-            WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
-            THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
-          END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+          : status("missing", `No local rig ${parsed.rig}; no live seat by this name on this daemon. The row keeps the exact destination. If this names another host, pass --host.`);
       }
       const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
         FROM nodes n LEFT JOIN sessions s ON s.id =

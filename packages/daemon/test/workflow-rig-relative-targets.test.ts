@@ -432,18 +432,18 @@ ${steps}`;
     expect(entryDestination(body.instance.instanceId)).toBe("ops-watcher@rig-b");
   });
 
-  it.each(UNBOUND)("an unbound start whose selected entry target is member@{rig} is still 400 unknown_destination_rig with %s, and nothing is created", async (_label, defaultRig) => {
+  it.each(UNBOUND)("an unbound start records the literal member@{rig} with %s without claiming a receiver", async (_label, defaultRig) => {
     const instances = count("workflow_instances");
     const packets = count("queue_items");
     const { status, body } = await start(withDefault(ENTRY_RIG_RELATIVE, defaultRig));
-    expect(status).toBe(400);
-    expect(body.error).toBe("unknown_destination_rig");
-    expect(body.message).toContain("ops-watcher@{rig}");
-    expect(count("workflow_instances")).toBe(instances);
-    expect(count("queue_items")).toBe(packets);
+    expect(status).toBe(201);
+    expect(count("workflow_instances")).toBe(instances + 1);
+    expect(count("queue_items")).toBe(packets + 1);
+    expect(entryDestination(body.instance.instanceId)).toBe("ops-watcher@{rig}");
+    expect(daemon.deps.queueRepo!.acceptsDestination("ops-watcher@{rig}")).toBe(false);
   });
 
-  it("an unbound later hop that selects member@{rig} fails at its own hop, with main's error", async () => {
+  it("an unbound later hop records its literal member@{rig} without rebinding the target", async () => {
     const yaml = specYaml("start-later-hop", `    watcher:
       preferred_targets:
         - ops-watcher@rig-a
@@ -476,8 +476,9 @@ ${steps}`;
         resultNote: "next",
       }),
     });
-    expect(res.status).toBe(400);
-    expect((await res.json() as { error: string }).error).toBe("unknown_destination_rig");
+    expect(res.status).toBe(200);
+    expect(entryDestination(started.body.instance.instanceId)).toBe("ops-finisher@{rig}");
+    expect(daemon.deps.queueRepo!.acceptsDestination("ops-finisher@{rig}")).toBe(false);
   });
 
   describe("only a trailing @{rig} is the form", () => {
@@ -494,13 +495,14 @@ ${steps}`;
 
     // `prefix-rig-b` is registered, so replacing `{rig}` inside the rig name would reach it.
     it.each([["bound", { targetRig: "rig-b" }], ["unbound", {}]])(
-      "a partial rig name stays literal and is refused as on main (%s): ops-watcher@prefix-{rig}",
+      "a partial rig name stays literal and is recorded without a receiver (%s): ops-watcher@prefix-{rig}",
       async (_label, extra) => {
         const instances = count("workflow_instances");
         const { status, body } = await start(specYaml("start-partial-rig", roles("ops-watcher@prefix-{rig}")), extra);
-        expect(status).toBe(400);
-        expect(body.error).toBe("unknown_destination_rig");
-        expect(count("workflow_instances")).toBe(instances);
+        expect(status).toBe(201);
+        expect(count("workflow_instances")).toBe(instances + 1);
+        expect(entryDestination(body.instance.instanceId)).toBe("ops-watcher@prefix-{rig}");
+        expect(daemon.deps.queueRepo!.acceptsDestination("ops-watcher@prefix-{rig}")).toBe(false);
       },
     );
   });
