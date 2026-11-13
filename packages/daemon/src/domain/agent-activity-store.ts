@@ -244,8 +244,10 @@ export class AgentActivityStore {
         const row = this.db.prepare("SELECT session_name,resume_token FROM sessions WHERE id=?").get(session.sessionId) as
           { session_name: string; resume_token: string | null };
         // Known Core references are never replaced or re-verified by a runner claim, including matching repeats.
-        if (!row.resume_token) {
-          const runtime = grant.binding!.runtime;
+        const runtime = grant.binding!.runtime;
+        const sessionFile = runtime === "pi" || grant.binding!.runner === AGENT_RUNNER_HOSTED_PI_RPC;
+        // Reporting a path is not authority to persist a token the owning adapter cannot resume.
+        if (!row.resume_token && (!sessionFile || validateSessionFileFormat(observations.session.nativeRef).ok)) {
           const resumeType = runtime === "pi" ? "pi_session_file" : `community:${runtime}`;
           new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef);
           register(this.eventBus.persistWithinTransaction({ type: "agent.session_identity", rigId: session.rigId,

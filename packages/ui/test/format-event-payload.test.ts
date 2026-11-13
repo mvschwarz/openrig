@@ -79,6 +79,12 @@ describe("formatEventPayload (Phase 3 bounce-fix A3)", () => {
     expect(payload.observations.model.id).toBe(model);
   });
 
+  it.each(["\u007f", "\u0085", "\u009b", "\u2028", "\u2029", "\u034f", "\ufe0f"])("escapes terminal controls and default-ignorables in event previews: %j", character => {
+    const payload = { summary: `model${character}spelling` };
+    expect(formatEventPayload(payload)).toBe(`model\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}spelling`);
+    expect(payload.summary).toBe(`model${character}spelling`);
+  });
+
   it("returns '—' for null/undefined/non-object", () => {
     expect(formatEventPayload(null)).toBe("—");
     expect(formatEventPayload(undefined)).toBe("—");

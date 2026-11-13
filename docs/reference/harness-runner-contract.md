@@ -173,7 +173,9 @@ uses accepted events, rechecking run/binding, sequence and the existing ten-minu
 revives a runner sample from the context cache. Community model reads use the same current-report boundary.
 Observation model IDs and session references retain Unicode format characters (`\p{Cf}`), including bidi formatting,
 zero-width joiners and non-joiners, where the existing identifier/path format permits. CLI/UI displays escape these
-characters visibly in human CLI model output and UI event previews; stored values, JSON/API payloads and identity
+characters visibly in human CLI model output and UI event previews. These display boundaries use the existing terminal
+JSON escape set: DEL/C1 controls, format characters, line/paragraph separators and default-ignorable code points.
+Stored values, JSON/API payloads and identity
 comparisons retain the original spelling. Observation Pi paths opt into format characters without changing ordinary
 launch/resume validation; their absolute-path, traversal, length and `.jsonl` checks remain.
 Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
@@ -191,7 +193,10 @@ stale. This reduces unnecessary event growth, but does not bound retention or wo
 physical pruning of observation events is provided.
 
 A fresh current session component can fill an absent resume reference through the existing report-only
-persistence path with `launcher` provenance, below Core scrape/adoption evidence. It emits the existing session-identity event once after
+persistence path with `launcher` provenance, below Core scrape/adoption evidence. Pi and Pi-based community references
+are promoted only if the adapter's default session-file check accepts them. A reference outside that resume format stays
+in the accepted observation, with model/context facts and its receipt intact, but writes no resume token or identity event.
+Generic community harnesses retain their pass-through reference behavior. A promoted reference emits the existing session-identity event once after
 commit; it does not stamp independent verification or resumability. A known conflicting Core reference stays
 unchanged and makes current observations unknown. A retry returns its original receipt without repeating
 identity effects. Community process identity remains unconfirmed without independent Core evidence.
