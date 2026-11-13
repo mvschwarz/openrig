@@ -1487,12 +1487,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const view = externalView(scope);
         // An unknown sender has no return address, so it says how to follow the task.
         const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
-          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}.` } } } : res;
+          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""}.` } } } : res;
         return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying, and retry only with that same qitemId.`;
-        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown" } };
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown", ...(target.remote && target.name ? { host: target.name } : {}) } };
       }
     },
   );
@@ -2310,7 +2310,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
-        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown" } };
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown", ...(target.remote && target.name ? { host: target.name } : {}) } };
       }
     },
   );

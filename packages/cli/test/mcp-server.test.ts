@@ -1824,6 +1824,34 @@ describe("MCP host routing", () => {
       }, tool, args);
       expect(result.isError, tool).toBe(true);
       expect((result.content as Array<{ text: string }>)[0]?.text, tool).toContain("and host unipc");
+      expect(result.structuredContent, tool).toMatchObject({ outcome: "unknown", host: "unipc" });
     }
+  });
+
+  it("a local unknown-outcome receipt carries no host", async () => {
+    const local = mockClient();
+    vi.mocked(local.post).mockRejectedValueOnce(new Error("connection reset"));
+    const result = await run(local, {}, "rig_queue_handoff", { qitemId: "qitem-1", to: "qa@team" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ outcome: "unknown" });
+    expect(result.structuredContent).not.toHaveProperty("host");
+    expect((result.content as Array<{ text: string }>)[0]?.text).not.toContain("host");
+  });
+
+  it("a remote create with no return address names the host in its follow-up", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    dropUnfilledSeat();
+    onTestFinished(() => { vi.unstubAllEnvs(); });
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Review the diff." });
+
+    expect(result.isError).toBeFalsy();
+    const unknownSender = (result.structuredContent as { unknownSender?: { followUp?: string } } | undefined)?.unknownSender;
+    expect(unknownSender?.followUp).toContain("and host unipc");
   });
 });
