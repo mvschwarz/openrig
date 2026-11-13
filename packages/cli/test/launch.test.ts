@@ -564,4 +564,28 @@ describe("rig launch --seats", () => {
     expect(errors.some((l) => l.includes("Unmatched") && l.includes("typo.seat"))).toBe(true);
     expect(process.exitCode).toBe(1);
   });
+
+  it("reports a --seats name more than one seat answers to, beside the seats it launched", async () => {
+    const message = "\"dev-driver\" matches more than one seat in rig \"rig-1\": dev.driver (dev-driver@rig-1), ops.other (dev-driver). Name one by its logical id.";
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 201,
+        data: {
+          ok: true,
+          launched: [{ nodeId: "n2", logicalId: "dev.guard", status: "fresh" }],
+          held: [],
+          alreadyRunning: [],
+          failedTargets: [],
+          ambiguousSeats: [{ seat: "dev-driver", candidates: [{ logicalId: "dev.driver", sessionName: "dev-driver@rig-1" }, { logicalId: "ops.other", sessionName: "dev-driver" }], message }],
+        },
+      },
+    });
+
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "--seats", "dev-driver,dev.guard"]);
+
+    expect(logs.some((l) => l.includes("Launched: dev.guard"))).toBe(true);
+    expect(errors).toContain(message);
+    expect(process.exitCode).toBe(1);
+  });
 });

@@ -394,8 +394,9 @@ export class SeatDeliveryGuard {
     return acquire(0);
   }
 
-  /** One custody lease taken inside lifecycle's sorted pass, as custody() takes each of its own. A target that changed
-   *  while waiting refuses the whole operation before any effect, as a lifecycle lease's would. */
+  /** One custody lease taken inside lifecycle's sorted pass. Its target is read when the pass reaches this seat, as
+   *  lifecycle's own leases are, not up front the way custody() reads every target before waiting. A target that changed
+   *  while waiting on this seat refuses the whole operation before any effect, as a lifecycle lease's would. */
   private async custodyInPass<T>(id: string, next: () => Promise<T>): Promise<T> {
     if (this.ownsCustody(id)) return next();
     const target = this.target(id);

@@ -469,20 +469,31 @@ describe("Session routes", () => {
   });
 
   // `rig launch <rig> <seat>` and `--seats` also take a seat's session name, resolved from the rig's own inventory.
+  // Both seats can start fresh: each has its startup context and a fresh restore policy, and the route has adapters.
   async function namedSeatsRig(name: string) {
-    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { wireRuntimeAdapters: true });
     const rig = rigRepo.createRig(name);
     const pod = new PodRepository(db).createPod(rig.id, "dev", "Development");
     const driver = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });
     const guard = rigRepo.addNode(rig.id, "dev.guard", { runtime: "codex", podId: pod.id });
     const { SnapshotRepository } = await import("../src/domain/snapshot-repository.js");
     new SnapshotRepository(db).createSnapshot(rig.id, "manual", {
-      rig: { id: rig.id, name }, nodes: [driver, guard], sessions: [], edges: [], checkpoints: {},
+      rig: { id: rig.id, name }, nodes: [driver, guard], edges: [], checkpoints: {},
+      sessions: [
+        { id: "s1", nodeId: driver.id, sessionName: `dev-driver@${name}`, status: "running", resumeType: "claude-native", resumeToken: "t1", restorePolicy: "relaunch_fresh" },
+        { id: "s2", nodeId: guard.id, sessionName: `dev-guard@${name}`, status: "running", resumeType: "codex-native", resumeToken: "t2", restorePolicy: "relaunch_fresh" },
+      ],
+      nodeStartupContext: {
+        [driver.id]: { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" },
+        [guard.id]: { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "codex" },
+      },
     } as any);
-    const plan = (seats: string[]) => app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seats, plan: true }),
+    const subset = (seats: string[], plan: boolean) => app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seats, plan }),
     });
-    return { app, rig, rigRepo, sessionRegistry, plan };
+    const plan = (seats: string[]) => subset(seats, true);
+    const launch = (seats: string[]) => subset(seats, false);
+    return { app, rig, rigRepo, sessionRegistry, driver, guard, plan, launch };
   }
 
   it.each(["dev-driver", "dev-driver@named-rig"])("POST .../nodes/launch-subset takes the session name %s for its seat", async (ref) => {
@@ -492,18 +503,53 @@ describe("Session routes", () => {
     expect(await res.json()).toMatchObject({ ok: true, targetNodes: [{ logicalId: "dev.driver" }] });
   });
 
-  it("POST .../nodes/launch-subset explains a session name that more than one seat answers to, and launches nothing", async () => {
-    const { rig, rigRepo, sessionRegistry, plan } = await namedSeatsRig("shared-name-rig");
-    // Registration now refuses this address; a session recorded before that check can still carry it.
+  it("POST .../nodes/:ref/launch starts a seat named by its session name", async () => {
+    const { app, rig } = await namedSeatsRig("single-name-rig");
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev-driver/launch`, { method: "POST" });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ ok: true, logicalId: "dev.driver", launched: [{ logicalId: "dev.driver" }] });
+  });
+
+  it("POST .../nodes/launch-subset takes an adopted seat's raw session name", async () => {
+    const { sessionRegistry, guard, plan } = await namedSeatsRig("adopted-name-rig");
+    sessionRegistry.registerClaimedSession(guard.id, "my-existing-claude");
+    const res = await plan(["my-existing-claude"]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, targetNodes: [{ logicalId: "dev.guard" }], unmatchedIds: [] });
+  });
+
+  it("POST .../nodes/launch-subset counts an adopted raw name that another seat's shorthand also matches as ambiguous", async () => {
+    const { rig, rigRepo, sessionRegistry, plan } = await namedSeatsRig("raw-collision-rig");
     const other = rigRepo.addNode(rig.id, "ops.other", { runtime: "claude-code" });
-    const session = sessionRegistry.registerSession(other.id, "ops-other@shared-name-rig");
-    db.prepare("UPDATE sessions SET session_name = ? WHERE id = ?").run("dev-driver@shared-name-rig", session.id);
+    sessionRegistry.registerClaimedSession(other.id, "dev-driver");
     const res = await plan(["dev-driver"]);
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body).toMatchObject({ ok: false, code: "seat_ambiguous" });
-    expect(body.error).toContain("dev.driver (dev-driver@shared-name-rig)");
-    expect(body.error).toContain("ops.other (dev-driver@shared-name-rig)");
+    expect(body.ambiguousSeats).toEqual([expect.objectContaining({
+      seat: "dev-driver",
+      candidates: expect.arrayContaining([
+        { logicalId: "dev.driver", sessionName: "dev-driver@raw-collision-rig" },
+        { logicalId: "ops.other", sessionName: "dev-driver" },
+      ]),
+    })]);
+  });
+
+  it("POST .../nodes/launch-subset launches the other seats and reports a name more than one seat answers to", async () => {
+    const { rig, rigRepo, sessionRegistry, launch } = await namedSeatsRig("shared-name-rig");
+    // Registration now refuses this address; a session recorded before that check can still carry it.
+    const other = rigRepo.addNode(rig.id, "ops.other", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(other.id, "ops-other@shared-name-rig");
+    db.prepare("UPDATE sessions SET session_name = ? WHERE id = ?").run("dev-driver@shared-name-rig", session.id);
+    const res = await launch(["dev-driver", "dev.guard"]);
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.launched.map((node: { logicalId: string }) => node.logicalId)).toEqual(["dev.guard"]);
+    expect(body.unmatchedIds).toBeUndefined();
+    expect(body.ambiguousSeats).toHaveLength(1);
+    expect(body.ambiguousSeats[0]).toMatchObject({ seat: "dev-driver" });
+    expect(body.ambiguousSeats[0].candidates.map((candidate: { logicalId: string }) => candidate.logicalId).sort()).toEqual(["dev.driver", "ops.other"]);
+    expect(body.ambiguousSeats[0].message).toContain("Name one by its logical id.");
   });
 
   it("POST .../launch for a seat no name matches is still 404, and names the rig's seats", async () => {
