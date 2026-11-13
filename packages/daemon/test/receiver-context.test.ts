@@ -5,7 +5,7 @@ describe("what a receiving agent reads to act on a person's answer", () => {
   it("names the person to ask back, and never the unattributed terminal actor", () => {
     const route = askBackRoute("sarah@external", "human@host", "request q-1");
     expect(route).toContain("ask them back with an ask to sarah@external that names request q-1: rig queue create --destination sarah@external");
-    expect(route).toContain("A row to human@host names no person: it notifies no one and only waits on Steering and in the Feed, so don't ask them back there.");
+    expect(route).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
   });
 
   it("with no registered person to ask back: says so once, keeps the request and the answer waiting, and names the ways through", () => {

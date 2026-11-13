@@ -669,7 +669,7 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(handed.body).toContain(`- **Who's who:** ${SEAT} is the agent asking to run the tool; ${asked} is the person it asked; human@host answered.`);
     expect(handed.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
     expect(handed.body).toContain(`ask them back with an ask to ${asked} that names request ${askId}`);
-    expect(handed.body).toContain("A row to human@host names no person: it notifies no one and only waits on Steering and in the Feed, so don't ask them back there.");
+    expect(handed.body).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
     expect(handed.body).toContain("Closing this item without deciding permits nothing");
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);

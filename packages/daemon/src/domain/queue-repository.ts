@@ -2579,7 +2579,7 @@ export class QueueRepository {
   }
 
   /** The registered person an address names, so an ask back reaches them; null for anyone else, the unattributed
-   *  terminal actor included (a person address, but a row there notifies no one and only waits on Steering and in the Feed). */
+   *  terminal actor included (a person address, but a row there asks no one; it waits on Steering and in the Feed, and OpenRig reports it as undeliverable). */
   reachablePerson(address: string | null | undefined): string | null {
     if (!address || address === UNATTRIBUTED_ACTOR) return null;
     const registry = this.loadHumanRegistryFn();

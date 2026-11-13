@@ -27,7 +27,7 @@ A person can also bind to a local bridge adapter using a `relay` binding:
 (see [Gateway Relay Reference](gateway-relay.md) for endpoint, secret provisioning, and custody architecture).
 `human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
 These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions. A row addressed to
-`human@host` names no person: it notifies no one and only waits on Steering and in the Feed. To reply to a person, use
+`human@host` names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To reply to a person, use
 their registered address:
 `rig queue create --destination <their address> --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
 substituting your summary, evidence path and reply. A reply destination doesn't identify

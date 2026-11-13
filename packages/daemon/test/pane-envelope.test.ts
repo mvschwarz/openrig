@@ -22,11 +22,11 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     expect(out).toContain('↩ Reply: rig send driver-3@my-rig "..."');
   });
 
-  // An answer typed at this machine is recorded as human@host, which names nobody: a reply there notifies no one and only
-  // waits on Steering and in the Feed, so its reply hint says so and points to the person's registered address.
+  // An answer typed at this machine is recorded as human@host, which names nobody: a reply there asks no one, waits on
+  // Steering and in the Feed, and OpenRig reports it as undeliverable, so its reply hint says so and points to the person's registered address.
   it.each(["human@host", "human@host@host-origin"])("never points %s's reply at the unattributed address", (sender) => {
     const last = wrapPaneEnvelope(sender, "driver@rig", "Answered.").split("\n").at(-1);
-    expect(last).toBe(`↩ ${sender} names no person: a reply there notifies no one and only waits on Steering and in the Feed. To ask the person back, use their registered address (rig gateway human list lists who's registered).`);
+    expect(last).toBe(`↩ ${sender} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`);
     expect(last).not.toContain("rig queue create");
   });
 

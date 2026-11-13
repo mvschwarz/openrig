@@ -82,7 +82,7 @@ describe("the primary user acts on anyone's ask, unattributed, on that person's 
     expect(reply.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
     expect(reply.body).toContain("don't ask them to confirm it");
     expect(reply.body).toContain(`ask them back with an ask to sarah@external that names ${sarahs.qitemId}: rig queue create --destination sarah@external`);
-    expect(reply.body).toContain("A row to human@host names no person: it notifies no one and only waits on Steering and in the Feed, so don't ask them back there.");
+    expect(reply.body).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
     expect(humanAnswerText(reply.body)).toBe("Ship it");
   });
 
