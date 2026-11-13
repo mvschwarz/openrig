@@ -651,16 +651,30 @@ function sharedInstructions(has: (tool: string) => boolean): string[] {
 const SHARED_INSTRUCTIONS = sharedInstructions(() => true);
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 
-/** For a connection that relays a person's request (an external caller, or the front door): which seat they mean is theirs
- *  to say when more than one fits, never inferred from the agent's own history. A member, which works items, isn't given it. */
-const ASK_WHICH_SEAT = "If more than one seat could be the one the person means, ask which; don't choose from your own history.";
+/** For a connection that relays a person's request to another assistant (an external caller, or the front door): which one
+ *  they mean is theirs to say when more than one fits, never inferred from the agent's own history. The listing steps need
+ *  rig_team, so a connection without it is told only to ask. Pickup is said only where it's true: another connected
+ *  assistant waits for its person, and the front door's team seats are woken. A member, which works items, isn't given it. */
+function askWhichAssistant(canList: boolean, pickup: "connected-assistant" | "woken" | null): string {
+  const picked = pickup === "connected-assistant"
+    ? "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up."
+    : pickup === "woken" ? "When you send, tell your person <name> will pick it up on its own." : "";
+  const sentences = canList
+    ? ["Before sending a request to another assistant, list the team's members.",
+      "If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory.",
+      "If the list says the chosen one isn't connected, say so before sending and ask whether to send it anyway.",
+      picked, "If your person names one clearly, or says to send it anyway, go ahead."]
+    : ["If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory.",
+      picked, "If your person names one clearly, go ahead."];
+  return sentences.filter(Boolean).join(" ");
+}
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
 export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
-  ASK_WHICH_SEAT,
+  askWhichAssistant(true, "woken"),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
@@ -671,7 +685,7 @@ const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].jo
 const EXTERNAL_PURPOSE = "This connection links you to the person's OpenRig team, AI agents who do work for them. Give the team a task with rig_queue_create and keep its qitemId; read its progress and answer with rig_queue_show; list your requests with rig_queue_list; read files it attached with rig_artifact_read. The work carries on after this chat ends.";
 const EXTERNAL_HOW = [
   "This connection acts as the caller its grant names, and the team records your requests as that caller's. Use only the tools this connection offers.",
-  `To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant. ${ASK_WHICH_SEAT}`,
+  "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
   "Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
   "rig_artifact_read reads within the shared roots and items this connection may reach.",
 ];
@@ -691,7 +705,6 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
  *  only the tools that grant offers. */
 function externalInboxInstructions(tools: ReadonlySet<string>): string {
   return [...sharedInstructions((tool) => tools.has(tool)),
-    ...(tools.has("rig_queue_create") ? [ASK_WHICH_SEAT] : []),
     `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
   ].join("\n");
 }
@@ -699,8 +712,11 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external);
-  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
+  const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+  // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
+  const instructions = tools.has("rig_queue_create")
+    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), tools.has("rig_team") ? "connected-assistant" : null)}` : workflow;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
