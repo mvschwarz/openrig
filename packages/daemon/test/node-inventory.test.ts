@@ -997,6 +997,42 @@ describe("Node Inventory Projection", () => {
 
       expect(agent()).toMatchObject({ restoreOutcome: "operator_recovered" });
     });
+
+    // A completed handover, a discovered successor included, puts a new occupant in the seat: an earlier restore's resumed
+    // conversation isn't this occupant's, though the restore keeps its outcome.
+    function handOver() {
+      seedEvent(db, "rig-1", "node-1", "seat.handover_completed", {
+        rigId: "rig-1", nodeId: "node-1", logicalId: "dev.impl", previousOccupant: "dev-impl@test-rig",
+        currentOccupant: "dev-impl@test-rig", source: "discovered:disc-1",
+      });
+    }
+
+    it("a resumed restore is the current occupant's conversation", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "resumed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "resumed", continuityOutcome: "resumed" });
+    });
+
+    it("a discovered successor after a resumed restore doesn't inherit its conversation", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "resumed");
+      handOver();
+      const before = eventCount();
+
+      expect(agent()).toMatchObject({ restoreOutcome: "resumed", continuityOutcome: null });
+      expect(getNodeInventoryForAllRigs(db).get("rig-1")?.find((e) => e.logicalId === "dev.impl"))
+        .toMatchObject({ continuityOutcome: null });
+      expect(eventCount()).toBe(before);
+    });
+
+    it("a restore that resumes the successor after its handover is its conversation", () => {
+      handOver();
+      startRestore("snap-2");
+      completeRestore("snap-2", "resumed");
+
+      expect(agent()).toMatchObject({ continuityOutcome: "resumed" });
+    });
   });
 });
 

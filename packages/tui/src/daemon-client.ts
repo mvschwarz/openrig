@@ -66,7 +66,8 @@ export interface LaunchNodeResult {
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
   const notice = result.code === "already_running"
-    ? `agent already running: ${agent}`
+    // The launch kept a live session it couldn't prove is a bare shell; that isn't proof the agent is running.
+    ? `not relaunched, live session (its agent isn't proven running): ${agent}`
     : `agent run requested: ${agent}`;
   return [notice, ...(result.warnings ?? [])].join("\n");
 }

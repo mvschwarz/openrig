@@ -779,8 +779,12 @@ export class RestoreOrchestrator {
         }
       }
 
+      // A live session that isn't proven to be a bare shell. Nothing here shows an agent is running in it, so the pane is
+      // kept and reported as a live session, never as a running agent.
       if (isLive) {
-        if (opts.selectedHistory) return { ok: false, code: "seat_running", message: "The selected seat is already running; no resume was started." };
+        if (opts.selectedHistory) {
+          return { ok: false, code: "seat_running", message: "The selected seat has a live session (its agent isn't proven running); no resume was started." };
+        }
         alreadyRunning.push({ nodeId: node.id, logicalId: node.logicalId });
         continue;
       }
