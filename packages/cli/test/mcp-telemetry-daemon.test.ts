@@ -12,6 +12,7 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 describe("rig_telemetry_events on the daemon's telemetry route", () => {
   let db: Database.Database;
@@ -27,7 +28,9 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: fixture.app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
-    const mcp = createMcpServer(new DaemonClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    allowFetchTarget(origin);
+    const mcp = createMcpServer(new DaemonClient(origin));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "collector", version: "1.0.0" });
     await mcp.connect(serverTransport);
@@ -74,5 +77,11 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
     const malformed = await call({ cursor: "not-a-cursor" });
     expect(malformed.isError).toBe(true);
     expect(JSON.parse(malformed.text)).toMatchObject({ code: "telemetry_invalid_request" });
+  });
+
+  it.each([{ cursor: "" }, { nodeId: "" }, { rigId: "" }])("rejects an explicitly empty telemetry argument: %o", async (args) => {
+    const result = await call(args);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.text)).toMatchObject({ code: "telemetry_invalid_request" });
   });
 });
