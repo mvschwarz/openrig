@@ -297,18 +297,22 @@ export interface RestorePermissionSeat {
   runtime: string | null;
   podAware?: boolean;
   startupContext?: boolean;
+  /** Restore's own runtime check (restoreRuntimeCompatibilityError): set, restore stops for a decision before launch. */
+  runtimeError?: string;
 }
 
 export function restorePermissionSeat(rigName: string, node: { id: string; logicalId: string; runtime: string | null; binding?: { tmuxSession: string | null } | null },
   snapshot: Snapshot | null, savedNodeId: string): RestorePermissionSeat {
   const saved = snapshot?.data.nodes?.find((entry) => entry.logicalId === node.logicalId);
   const startup = saved ? snapshot?.data.nodeStartupContext?.[savedNodeId] : undefined;
+  const runtimeError = restoreRuntimeCompatibilityError(node.runtime, startup?.runtime);
   return {
     nodeId: node.id,
     logicalId: node.logicalId,
     seat: node.binding?.tmuxSession ?? `${node.logicalId.replace(".", "-")}@${rigName}`,
     runtime: startup?.runtime ?? node.runtime,
     ...(saved ? { podAware: !!saved.podId, startupContext: !!startup } : {}),
+    ...(runtimeError ? { runtimeError } : {}),
   };
 }
 

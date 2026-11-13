@@ -189,6 +189,7 @@ describe("a seat's planned permission on restore", () => {
     [{ podAware: false }, "runtime from its resume token"],
     [{ podAware: true, startupContext: false }, "no saved startup context"],
     [{ podAware: undefined, startupContext: undefined }, "no saved snapshot names this seat"],
+    [{ podAware: true, startupContext: true, runtimeError: "No session was started for this seat." }, "restore stops for a runtime decision"],
   ])("reads a restore path it can't settle as unknown with the reason, never a definite mode (%o)", (path, words) => {
     const { db, rigRepo, node } = seat("claude-code");
     attach(rigRepo, db, node.id, "builtin:yolo", "full_bypass");

@@ -145,6 +145,20 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
   });
 
+  it.each([
+    ["codex", "claude-code"],
+    ["claude-code", "codex"],
+  ])("plans saved startup %s on live %s as unknown with restore's reason, never a definite mode", (saved, live) => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext(saved) });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, nodeIds[0]);
+    const result = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    const permission = result.targetNodes?.[0]?.permission;
+    expect(permission).toMatchObject({ basis: "unknown" });
+    expect(permission?.summary).toContain("restore stops for a runtime decision before it starts this seat. No session was started for this seat.");
+    expect(permission?.summary).not.toContain("On restore");
+  });
+
   it("returns rig_not_found for unknown rig", async () => {
     const result = await orchestrator.launchNodeSubset("nonexistent", ["dev.driver"]);
     expect(result.ok).toBe(false);

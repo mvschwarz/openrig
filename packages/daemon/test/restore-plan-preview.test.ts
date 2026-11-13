@@ -3,6 +3,7 @@ import { buildRestorePlanPreview, collectPreviewSessionRows, type PreviewSession
 import type { RigWithRelations, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { planRestorePermission } from "../src/domain/permission-account.js";
 
 // OPR.0.4.3.20 FR-6 — restore-plan per-seat token state (read-only forecast).
 
@@ -273,12 +274,29 @@ describe("restore plan permission per seat", () => {
       seen.push(seat);
       return { basis: "unknown", runtime: seat.runtime, summary: `planned ${seat.logicalId}` };
     });
-    // The runtime restore starts n1 with is its saved startup context's, as restore's own adapter choice reads it.
+    // n1's saved startup context names Codex while it runs Claude now: restore stops for that decision before launch
+    // (restoreRuntimeCompatibilityError), so its seat carries restore's own reason, and the plan awaits the decision.
+    expect(preview.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision" });
     expect(seen).toEqual([
-      { nodeId: "n1", logicalId: "dev.impl", seat: "dev-impl@test-rig", runtime: "codex", podAware: true, startupContext: true },
+      { nodeId: "n1", logicalId: "dev.impl", seat: "dev-impl@test-rig", runtime: "codex", podAware: true, startupContext: true,
+        runtimeError: "No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime." },
       { nodeId: "n3", logicalId: "dev.old", seat: "dev-old@test-rig", runtime: "claude-code", podAware: false, startupContext: false },
     ]);
     expect(preview.nodes.map((n) => n.permission?.summary)).toEqual(["planned dev.impl", undefined, "planned dev.old"]);
+  });
+
+  it("plans a live Claude seat whose saved startup runtime is Codex as unknown with restore's reason, beside its awaiting decision", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "dev.impl", runtime: "claude-code" }]);
+    const snapshot = snapshotOf([{ id: "n1", logicalId: "dev.impl", runtime: "codex", podId: "pod-1" }], { n1: { runtime: "codex" } });
+    const db = createFullTestDb();
+    try {
+      // The same planner `rig up --existing --plan` passes; no explicit choice is stored for the seat.
+      const preview = buildRestorePlanPreview(rig, snapshot, [row("n1")], undefined, NOW, {}, undefined,
+        (seat) => planRestorePermission(db, { ...seat, restorePosture: () => "floor" }));
+      expect(preview.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", permission: { basis: "unknown" } });
+      expect(preview.nodes[0]!.permission!.summary).toContain("restore stops for a runtime decision before it starts this seat.");
+      expect(preview.nodes[0]!.permission!.summary).not.toContain("On restore");
+    } finally { db.close(); }
   });
 
   it("carries no permission when the caller doesn't plan one, so the other plan callers are unchanged", () => {
