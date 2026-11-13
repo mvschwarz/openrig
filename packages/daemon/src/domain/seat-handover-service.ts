@@ -101,7 +101,8 @@ export interface SeatHandoverMutationResult {
   };
   /** The packet wasn't seen leaving the successor's input box. `unconfirmed`: its runtime's input box is read, but that
    *  reading was unclear; check the screen before sending it again. `accepted`: typed and submitted on a runtime whose
-   *  input box isn't read (member-connection.v1, `continuity.restorePacketConfirmation`). Absent: seen consumed. */
+   *  input box isn't read (member-connection.v1, `continuity.restorePacketConfirmation`). Absent: no unconfirmed or
+   *  accepted packet status was recorded; where a packet was sent, it was seen consumed. */
   restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
    *  rebuild: EXACTLY which durable artifacts primed the successor, which
@@ -1174,9 +1175,9 @@ export class SeatHandoverService {
     packet: string,
     runtime: string | null,
   ): Promise<RestorePacketDelivery> {
-    // Only a runtime declared to support it has its input box read; anywhere else the packet was typed and submitted, and
-    // that's all that's known.
-    if (declaredCapabilities("typed", runtime).continuity.restorePacketConfirmation !== "supported") {
+    // Only a runtime declared to support it has its input box read, and the only reader is Claude Code's; anywhere else
+    // the packet was typed and submitted, and that's all that's known.
+    if (declaredCapabilities("typed", runtime).continuity.restorePacketConfirmation !== "supported" || runtime !== "claude-code") {
       return { ok: true, confirmation: "accepted",
         reason: `${runtime ?? "this runtime"}'s input box isn't read, so the packet was typed and submitted but not seen consumed` };
     }

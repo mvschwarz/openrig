@@ -4202,8 +4202,9 @@ export class SessionTransport {
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
-        // A dialog is read only on a runtime declared to support it (member-connection.v1, observe.dialog); the runtime
-        // then says which screen reader it is.
+        // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
+        // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
+        // the pane probe below don't read the declaration.
         const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
         if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && input.runtime === "claude-code") {

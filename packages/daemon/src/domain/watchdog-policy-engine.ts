@@ -79,8 +79,9 @@ export interface DeliveryOutcome {
   nextAction?: string;
   terminalReason?: string;
   memberOutcomes?: Record<string, DeliveryOutcome>;
-  /** What the attempt's own result says happened, in the shared words (member-connection.v1): `ok` with a fact other than
-   *  render-verified `accepted` was taken by the route, not seen. Absent where no send result was read. */
+  /** What the attempt's own send result says happened, in the shared words (member-connection.v1); `ok` beside it is
+   *  the status, not the fact, so `ok` with `unknown` is unknown. Absent where no send result was read (an exception, or a
+   *  reconciled receipt): that's no claim of delivery or verification. */
   fact?: ReturnType<typeof readSendOutcome>;
 }
 
@@ -790,8 +791,9 @@ export class WatchdogPolicyEngine {
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
-    // The history says what happened in the shared words, beside its status: a reminder recorded `sent` was taken by the
-    // route, and render-verified only when the screen showed it. Banking a receipt still follows `status` alone.
+    // Where a send returned, the history says what its result showed in the shared words, beside the status, with
+    // render-verified only when the screen showed it; no fact or flag claims no delivery or verification. Banking a
+    // receipt still follows `status` alone.
     const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined && delivery.fact === undefined ? notes
       : { ...(notes ?? {}), ...(delivery.inputPhase === undefined ? {} : { deliveryInputPhase: delivery.inputPhase }),
         ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }),
