@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +10,7 @@ import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-s
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
+import { TMUX_SERVER_LIMIT_PREFIX } from "../tmux-server-start.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -77,7 +79,7 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 
 export type TmuxResult =
   | { ok: true; warnings?: string[]; stopPhase?: StopPhase }
-  | { ok: false; code: string; message: string; stopPhase?: StopPhase };
+  | { ok: false; code: string; message: string; stopPhase?: StopPhase; inputReadFailure?: InputReadDiagnostic };
 
 /** Furthest external stop boundary reached; an attempted command can have an uncertain effect. */
 export type StopPhase = "none" | "detach_attempted" | "detached" | "kill_attempted";
@@ -246,7 +248,7 @@ function isTmuxTransportAbsentError(err: unknown): boolean {
 }
 
 function classifyWriteError(err: unknown): TmuxResult {
-  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message };
+  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message, ...(err.inputReadFailure ? { inputReadFailure: err.inputReadFailure } : {}) };
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
@@ -492,7 +494,29 @@ export class TmuxAdapter {
       if (probe.state !== "present") return false;
       const panes = await this.listPanes(target.session);
       return panes.length === 1 && panes[0]!.id === target.pane && await this.isPaneDead(target.pane);
-    });
+    }, target => this.lastClientActivity(target.session));
+  }
+
+  /** When a writable tmux client attached to this session last had activity (epoch ms, whole seconds), or null when no
+   *  writable client is attached. tmux's client_activity is session-wide and covers more than text keys, so this is
+   *  recent writable-client activity, not proof of typing in the pane. A read-only client (a viewer tile) can't type
+   *  into the seat and doesn't count. An attach counts: tmux can't tell a key in the attach's second from the attach,
+   *  so a delivery can be held briefly after one. A tmux failure or an unreadable row throws: the guard then holds
+   *  the paste rather than take it for "no activity" (#3076). */
+  async lastClientActivity(session: string): Promise<number | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_readonly}${TMUX_FIELD_SEPARATOR}#{client_activity}`;
+    const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+      `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+    let latest: number | null = null;
+    for (const line of output.split("\n").map(row => row.trim()).filter(row => row !== "")) {
+      const [readonly, activity, ...rest] = line.split(TMUX_FIELD_SEPARATOR);
+      if (rest.length || !/^[01]$/.test(readonly ?? "") || !/^[1-9]\d*$/.test(activity ?? "")) {
+        throw new Error(`tmux list-clients: unreadable client row for ${session}`);
+      }
+      if (readonly === "0") latest = Math.max(latest ?? 0, Number(activity) * 1000);
+    }
+    return latest;
   }
   private readonly freshProbes = new Map<string, string>();
   private readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
@@ -600,7 +624,8 @@ export class TmuxAdapter {
         return guard.input(identity, () => write(pane, () => guard.checkInput(identity), bound.nodeId));
       });
     } catch (error) {
-      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
+      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message),
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
   }
 
@@ -730,7 +755,7 @@ export class TmuxAdapter {
       this.scopeSkipLogged = true;
       return fallback(unavailable);
     }
-    const server = posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    const server = TMUX_SERVER_LIMIT_PREFIX + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
     // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
     // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
     const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
@@ -1078,12 +1103,13 @@ export class TmuxAdapter {
         // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
         // checks pass; they then aren't run a second time.
         beforePaste: async () => {
-          let checked = false;
-          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // This send's own checks can wait (a conversation lookup, an input capture), so they run first, and the
+          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery.
+          await options?.beforePaste?.();
+          const checks = async () => { beforeWrite(); beforeInput?.(); };
           // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
           const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
           if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
-          if (!checked) await options?.beforePaste?.();
         },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
@@ -2167,6 +2193,25 @@ export class TmuxAdapter {
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
+    }
+  }
+
+  /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
+   *  "" when it reported none). Empty when the session has no clients, or when the session or the server is gone;
+   *  null when tmux can't be read. */
+  async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
+    try {
+      const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+        `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+      return output.split("\n").flatMap((line) => {
+        const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+        const tty = line.slice(0, Math.max(separator, 0));
+        return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
+      });
+    } catch (err) {
+      return isServerMissingError(err) || isSessionAbsenceError(tmuxReportedError(err)) ? [] : null;
     }
   }
 

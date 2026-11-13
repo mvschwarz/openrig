@@ -21,6 +21,7 @@ const expectedSites = new Map<string, string[]>([
   ["domain/codex-thread-id.ts", ["codex_thread_id.resolve_home"]],
   ["domain/review/gather.ts", ["review.gather.git"]],
   ["domain/tmux-option-defaults.ts", ["tmux_options.command_v"]],
+  ["domain/queue-repository.ts", ["queue.decision_revision.replies", "queue.linked_successors.build", "queue.handoff"]],
 ]);
 
 const pluginVendorUrl = "https://github.com/mvschwarz/openrig-plugins/releases/latest/download/openrig-core.tar.gz";
@@ -287,6 +288,23 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     expect(all).toContain('"site":"request:GET /api/queue/:qitemId"');
     expect(all).not.toContain('"durationMs":249');
     expect(all).toContain('"durationMs":250');
+    await recorder.close();
+  });
+
+  it("records a slow synchronous site only at or above the slow threshold, with its outcome", async () => {
+    const mod = await loadRecorderModule();
+    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
+    if (!mod) return;
+
+    const dir = tempDir();
+    const logPath = path.join(dir, "slow-operations.jsonl");
+    const recorder = new mod.SlowOpRecorder({ logPath, slowThresholdMs: 250 });
+    recorder.recordSlowSync("queue.decision_revision.replies", 249, "ok");
+    recorder.recordSlowSync("queue.decision_revision.replies", 250, "ok");
+    recorder.recordSlowSync("queue.decision_revision.replies", 400, "failed");
+    await recorder.flush();
+    const records = (await readRecords(logPath)).filter((record) => record.site === "queue.decision_revision.replies");
+    expect(records.map((record) => [record.phase, record.durationMs, record.outcome])).toEqual([["end", 250, "ok"], ["end", 400, "failed"]]);
     await recorder.close();
   });
 

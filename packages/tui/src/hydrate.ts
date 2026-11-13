@@ -24,6 +24,7 @@ import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SeatEffortRead, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 import { sanitizeHostDisplayName } from "./topology/host-label.js";
+import { connectedAssistantsOf } from "./connected-assistants.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
 // the daemon's serialized output — see the Phase-2 endpoint-shape survey).
@@ -288,8 +289,8 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
               ? "idle"
               : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
                 // The daemon's activity word decides when it's served (as in `rig ps`): it said unknown, so a quiet
-                // screen stays unknown. A community harness gives no idle signal either. Only an older daemon that
-                // serves no activity word keeps the screen fallback.
+                // screen stays unknown. A community harness gives no idle signal either. When no activityState is
+                // served, the existing screen fallback remains.
                 : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
@@ -572,6 +573,15 @@ export async function hydrateSnapshot(
   // A drilled-into host that isn't this one: its pages read none of this host's seats or queue changes.
   const drilledHost = viewContext?.section === "topology" ? viewContext.drill.find((segment) => segment.kind === "host")?.name : undefined;
   const remoteDrill = !!drilledHost && drilledHost !== (instanceHealth?.selfHostId?.trim() || "local");
+  // Optional, like the Slack manifest: a failed read isn't a page failure. But it isn't an empty list either, so the seat
+  // tables say check-in is unavailable, as `rig ps` does. Read only for the instance and rig tables that list them, and
+  // only this daemon's, never a remote host's.
+  const listsAssistants = !viewContext || (viewContext.section === "topology" && viewContext.viewTab === "table"
+    && (topologyLeaf?.kind === "host" || topologyLeaf?.kind === "rig"));
+  const connectedAssistants = listsAssistants && !remoteDrill
+    ? await client.hostedMembers().then(connectedAssistantsOf,
+      (error: unknown) => ({ unavailable: `the read failed: ${error instanceof Error ? error.message : String(error)}` }))
+    : null;
   const recentTransitionsRig = currentRigName ?? (!viewContext ? summaries?.[0]?.name : null) ?? null;
   const recentTransitionsScope = topologyLeaf?.kind === "host"
     ? { kind: "instance" } as const
@@ -685,6 +695,8 @@ export async function hydrateSnapshot(
     displayName: ownName && ownName !== "localhost" ? ownName : undefined,
     reachable: true,
     rigs: rigs.sort(byRigName),
+    ...(connectedAssistants ? "unavailable" in connectedAssistants
+      ? { connectedAssistantsUnavailable: connectedAssistants.unavailable } : { connectedAssistants: connectedAssistants.assistants } : {}),
   };
   // A remote host is any registered host, or one the attention aggregate answered for. Its reachability is the aggregate's
   // answer where there is one, else the registry's probe. Only a drilled-into remote host's rigs are read, through this

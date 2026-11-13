@@ -11,6 +11,7 @@ import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-sampl
 import type { ContextUsage } from "./types.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, readPendingStartupContext } from "./startup-orchestrator.js";
 import { claudeResumeRotation, SessionRegistry } from "./session-registry.js";
+import { ObservationPass } from "./process-observation-pass.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -104,6 +105,8 @@ export class ContextMonitor {
   private async runPoll(): Promise<void> {
     this.compactionEnforcer?.reconcilePreparations?.();
     const sessions = this.getEligibleSessions();
+    // One pass per poll: the seats re-checked this poll share their process listings; the next poll starts fresh.
+    const pass = new ObservationPass();
     for (const session of sessions) {
       if (!this.isCurrentSession(session, true)) continue;
       let observed: ContextUsage | null = null;
@@ -143,7 +146,7 @@ export class ContextMonitor {
         }
       }
 
-      await this.normalizeStartupStatus(session);
+      await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();
@@ -314,7 +317,7 @@ export class ContextMonitor {
     return this.store.readAndNormalize(session.session_name);
   }
 
-  private async normalizeStartupStatus(session: EligibleSession): Promise<void> {
+  private async normalizeStartupStatus(session: EligibleSession, pass: ObservationPass): Promise<void> {
     const checker = session.runtime ? this.readinessCheckers[session.runtime] : undefined;
     if (!checker?.checkReady) return;
     if (session.startup_status !== "failed" && session.startup_status !== "attention_required") return;
@@ -340,7 +343,9 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
         ...(claude && session.generation_uuid ? { launchGeneration: session.generation_uuid } : {}),
-      }, ...(claude && session.resume_token ? [{ resumeToken: session.resume_token, ...(rotation ? { resumeRotation: rotation } : {}) }] : []));
+      }, ...(claude && session.resume_token ? [{ resumeToken: session.resume_token, ...(rotation ? { resumeRotation: rotation } : {}) }]
+        // Only the Codex adapter takes its process listings from the pass; the others are called as before.
+        : session.runtime === "codex" ? [{ observationPass: pass }] : []));
       // Hold no database lock while observing the runtime. Revalidation and
       // the write share an immediate transaction, reserving the writer before the
       // snapshot read so WAL contention cannot fail a later read-to-write upgrade.

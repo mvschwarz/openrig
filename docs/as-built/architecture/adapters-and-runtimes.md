@@ -82,9 +82,10 @@ optional `evidence` (last-N pane lines, flowed through to
 `RestoreNodeResult.attentionEvidence` for `attention_required` outcomes,
 `:99–102`). This is the honest-failure shape, not a smoothed optional `error`.
 
-Readiness has its own attention codes (`runtime-adapter.ts:74–87`):
+Readiness has its own attention codes (`ATTENTION_REQUIRED_READINESS_CODES` in `runtime-adapter.ts`):
 `trust_gate`, `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,
-`bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
+`bypass_consent_gate`, `claude_resume_selection_prompt`, `claude_gated_grants_gate`,
+`codex_auth_refusal` and `codex_client_incompatible`.
 When `checkReady` reports one, the readiness wait returns at once and startup
 ends `attention_required`.
 
@@ -395,6 +396,19 @@ Discovery (`server.version` and `server.status`) has a 1 s budget, and
 `status()` and `liveness()` share one probe. A request whose reply is lost (a
 timeout, a killed client, an unreadable reply) is `unknown`, not failed: the
 adapter never closes a session on it and reports `rex_outcome_unknown`.
+After the check, the local seats whose tiles opened go to `RexAgentStatusRelay`
+(`rex-agent-status.ts`), which writes an OSC 7501 report to the tty of each tmux
+client attached to the seat whose `client_termtype` (its XTVERSION reply) names
+Rex. Later activity changes (the same hook-or-pane resolution that recovers
+prompt wakes in `startup.ts`) are written to each Rex client that doesn't already
+have that report; an unknown activity is written as `state=clear`. A client the
+relay has no record for (after a daemon restart, or one that moved from another
+seat) gets the current report too, a clear included. After a partial write, the
+next write to that terminal starts with ST to close the unfinished OSC. The relay
+records what each client last took, and a sweep every 5 s lists a shown seat's
+clients again, so a new client or a failed write is caught up without another
+activity change. A seat found without a Rex client is looked at again when a Rex
+view opens it or after five minutes; a failed `list-clients` leaves it as it was.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 
@@ -463,7 +477,8 @@ command + pane content and returns one of four honest statuses
   conversation"; it is *distinct* from `inconclusive` and `failed` (comment
   `:4–6`).
 
-Other codes include `bypass_consent_gate`, `mcp_gate`, `login_required` and
+Other codes include `bypass_consent_gate`, `claude_gated_grants_gate` (the
+"gated grants" trust check, which is never auto-driven), `mcp_gate`, `login_required` and
 `returned_to_shell` for Claude, and `codex_client_incompatible`,
 `no_saved_session`, `codex_auth_refusal` and `model_selection_gate` for Codex;
 an unknown runtime gets `unsupported_runtime`. For Claude, `assessManagedProbe`

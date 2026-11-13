@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "../src/domain/pi-account-state.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
@@ -872,6 +873,30 @@ describe("live seat runtime switch", () => {
     });
   });
 
+  it("abandons only the staged run grant while the live predecessor keeps its authority", async () => {
+    db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
+    const grants = new ActivityGrantStore(db);
+    const old = grants.issue({ nodeId, generation: predecessorGeneration, issuedBy: "launch", run: { runId: "predecessor",
+      binding: { runtime: "pi", runner: 0, pane: "%0", panePid: 100 } } });
+    expect(grants.activate(old.grantId)).toBe(true);
+    let stagedId = "";
+    const target = adapter("pi");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      const staged = grants.issue({ nodeId, generation: binding.launchGeneration!, issuedBy: "launch", run: { runId: "staged",
+        binding: { runtime: "pi", runner: 0, pane: binding.tmuxPane!, panePid: 200 } } });
+      stagedId = staged.grantId;
+      return { ok: true, activityGrantId: stagedId };
+    });
+    const accountHome = path.join(home, "next-account"); fs.mkdirSync(accountHome);
+    fs.writeFileSync(path.join(accountHome, "auth.json"), "selected-login");
+    const result = await service({ runtimeAdapters: { pi: target } }).setRuntime({ seatRef: SEAT, runtime: "pi", accountHome,
+      reason: "change account", confirmTimeoutMs: 1_000 });
+    expect(result).toMatchObject({ ok: false, committed: false });
+    expect(stagedId).not.toBe("");
+    expect(grants.standing(stagedId)).toBe("revoked");
+    expect(grants.standing(old.grantId)).toBe("current");
+  });
+
   it("without a confirmation in time nothing changes: the current occupant keeps the seat and its claim, and the staged successor is retired", async () => {
     const claimed = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
     queueRepo.claim({ qitemId: claimed.qitemId, destinationSession: SEAT });
@@ -956,6 +981,19 @@ describe("live seat runtime switch", () => {
         VALUES ('sw1', ?, ?, 'openrig-switch-sw1', '%0', '%5', ?, 'g-next', 'codex', 'claude-code', ?, 'r', '{}', '2026-10-24T03:00:00Z', ?)`)
         .run(nodeId, SEAT, predecessorGeneration, phase, phase === "committed" ? "2026-10-24T02:01:00Z" : null);
     };
+
+    it("withdraws only the interrupted operation's pending issuance before recovery awaits", async () => {
+      record("preparing"); panes.set("openrig-switch-sw1", "%5");
+      const grants = new ActivityGrantStore(db);
+      const predecessor = grants.issue({ nodeId, generation: predecessorGeneration, issuedBy: "legacy" });
+      const issue = (generation: string, runId: string) => grants.issue({ nodeId, generation, issuedBy: "launch", run: {
+        runId, binding: { runtime: "pi", runner: 0, pane: "%5", panePid: 200 } } });
+      const abandoned = issue("g-next", "abandoned"), unrelated = issue("other-reservation", "unrelated");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: true });
+      expect(grants.standing(abandoned.grantId)).toBe("revoked");
+      expect(grants.standing(unrelated.grantId)).toBe("pending");
+      expect(grants.get(predecessor.grantId)?.revokedAt).toBeNull();
+    });
 
     it("stopped before commit, panes not exchanged: the staged successor is retired and the old runtime keeps the seat", async () => {
       record("preparing");

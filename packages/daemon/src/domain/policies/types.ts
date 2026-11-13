@@ -50,6 +50,8 @@ export interface PolicyJob {
   /** The condition this job last told its target about (the receipt below), or null. */
   lastFiredCondition: string | null;
   occupantGeneration: string | null;
+  /** With no occupantGeneration: true when the name is still carried but names no single seat, false when it's gone. */
+  occupantGenerationAmbiguous?: boolean;
   currentGenerationTranscriptPending: boolean;
   requiredReceiptSatisfied: boolean;
   requiredReceiptDeferred: boolean;

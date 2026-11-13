@@ -16,7 +16,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
-  InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
+  InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult, ReadinessOptions,
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 import type { GuidanceChoice } from "../domain/runtime-adapter.js";
@@ -69,7 +69,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
   codexHookHash(eventLabel: string, handler: { command: string; timeoutSec: number; matcher?: string | null; statusMessage?: string | null }): string;
 };
 
-import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { listNativeProcesses, listNativeProcessesOrThrow, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
@@ -154,6 +154,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
+  /** What a poll's ObservationPass shares: the same listing, but a failure rejects (an empty array reads as success). */
+  private listProcessesShared: () => CodexProcess[] | Promise<CodexProcess[]>;
   private readThreadIdByPid: (pid: number, identity?: string, home?: string) => Promise<string | undefined> | string | undefined;
   private readResumeEvidence: (pid: number, identity: string, home?: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
   private resumeProofWindowMs: number;
@@ -206,6 +208,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private codexSystemConfigDir: string;
   /** #875: the managed guidance blocks a fresh launch's startup queued for its developer instructions, per tmux session. */
   private launchInstructions = new Map<string, Map<string, string>>();
+  /** #3039: per tmux session, the block ids its last launch's developer instructions held. */
+  private sentLaunchGuidance = new Map<string, string[]>();
   /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
   private managedBlockRecords: ManagedBlockRecords | undefined;
 
@@ -278,6 +282,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
+    this.listProcessesShared = deps.listProcesses ?? defaultListProcessesOrThrow;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     // A seat with its own CODEX_HOME logs its threads there, so each read names the home it searches.
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity, home) => identity === undefined
@@ -663,7 +668,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const command = `node "${relay}"`;
-    const keySource = canonicalCodexHookSource(hooksPath);
+    const keySource = codexHookSourcePath(hooksPath);
     const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
@@ -673,7 +678,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     if (!expected) return;
-    const inlineSource = canonicalCodexHookSource(configPath);
+    const inlineSource = codexHookSourcePath(configPath);
     let config = stripped;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groups = document.hooks[event] ?? [];
@@ -709,22 +714,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * OPR.0.4.3.33 — compute + splice Codex's `[hooks.state."<key>"] trusted_hash` for our 4
-   * authored activity hooks into `content`. `key_source` is the canonicalized config path
-   * (Codex keys trust by `std::fs::canonicalize(config.toml).display()`); we best-effort
-   * `realpathSync` the config path to match — on a miss (file not yet on real disk, or a mock
-   * fs in tests) we fall back to the plain absolute path, and any resulting key mismatch just
-   * degrades to the launch-time trust gate (Layer-2 floor), never a broken run. The command
+   * authored activity hooks into `content`. Codex 0.167.2 resolves the source folder but
+   * keeps the file name, including a linked file, as returned by app-server hooks/list. The command
    * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
    * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
    */
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
-    let keySource = configPath;
-    try {
-      keySource = fs.realpathSync.native(configPath);
-    } catch {
-      // config.toml not on the real filesystem (first write / unit-test mock fs) — the plain
-      // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
-    }
+    const keySource = codexHookSourcePath(configPath);
     const command = `node "${relay}"`;
     // upsertCodexActivityHooks has just written our marked block. Codex keys by the
     // group's position among this event's groups, not its position inside our block.
@@ -767,7 +763,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       try {
         const original = this.fs.readFile(hooksPath);
         const document = parseCodexHooksJson(original);
-        const keySource = canonicalCodexHookSource(hooksPath);
+        const keySource = codexHookSourcePath(hooksPath);
         let config = updated ?? "";
         const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
         for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
@@ -809,7 +805,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
-    if (binding.guidanceLaunchInstructions && binding.tmuxSession) this.launchInstructions.set(binding.tmuxSession, new Map());
+    if (binding.guidanceLaunchInstructions && binding.tmuxSession) {
+      this.launchInstructions.set(binding.tmuxSession, new Map());
+      this.sentLaunchGuidance.delete(binding.tmuxSession);
+    }
     const projected: string[] = [];
     const warnings: string[] = [];
     const skipped: string[] = [];
@@ -1167,8 +1166,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, loginShellArg, daemonOptOut, effort } = prepared;
     // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
     // from a path with a space.
+    // A resume whose startup queued the managed guidance carries it as developer instructions, as a fresh launch does.
     return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}${loginShellArg}`, daemonOptOut, effort)
-      + gitDirArg + seatFolderArg;
+      + gitDirArg + seatFolderArg + (binding.guidanceLaunchInstructions && binding.tmuxSession ? this.developerInstructionsArg(binding.tmuxSession) : "");
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string, launchShell?: string): Promise<string> {
@@ -1252,7 +1252,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return await this.tmux.capturePaneContent(target, 40) ?? "";
   }
 
-  async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
+  async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {
     if (!binding.tmuxSession) {
       return { ready: false, reason: "No tmux session bound" };
     }
@@ -1261,6 +1261,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ready: false, reason: "tmux session not responsive" };
     }
 
+    // In a poll's pass, this agent's listings come from the pass: shared with the other agents checked in it, and
+    // still two distinct observations for each proof.
+    const listProcesses = options?.observationPass ? options.observationPass.lister(this.listProcessesShared, this.listProcesses) : this.listProcesses;
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = await this.captureProbeScreen(binding.tmuxSession);
     let probe = assessNativeResumeProbe({
@@ -1271,7 +1274,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime") {
       const process = await verifyCodexPaneProcess({ target: binding.tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
-        listProcesses: this.listProcesses as never });
+        listProcesses: listProcesses as never });
       if (process) {
         const currentPaneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
         const currentPaneContent = await this.captureProbeScreen(binding.tmuxSession);
@@ -1284,7 +1287,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const isIdleShell = await verifyPaneIdleShell({
         target: binding.tmuxSession,
         tmux: this.tmux,
-        listProcesses: this.listProcesses,
+        listProcesses,
       });
       if (!isIdleShell) {
         return {
@@ -1596,17 +1599,25 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const blocks = this.launchInstructions.get(tmuxSession);
     this.launchInstructions.delete(tmuxSession);
     if (!blocks || blocks.size === 0) return "";
+    this.sentLaunchGuidance.set(tmuxSession, [...blocks.keys()]);
     const text = [LAUNCH_INSTRUCTIONS_PREAMBLE, ...[...blocks].map(([id, content]) => managedBlockText(id, content))].join("\n\n");
     return ` -c ${shellQuote(`developer_instructions=${JSON.stringify(text).replace(/\u007f/g, "\\u007F")}`)}`;
+  }
+
+  launchGuidanceSent(tmuxSession: string): string[] | undefined {
+    const sent = this.sentLaunchGuidance.get(tmuxSession);
+    this.sentLaunchGuidance.delete(tmuxSession);
+    return sent;
   }
 
   /** #875: whether a fresh launch can carry this seat's managed guidance as developer instructions instead of writing the
    *  repository AGENTS.md: Codex 0.164.0 or later (where `developer_instructions` is a declared key), and no visible config
    *  layer sets one, since the launch value would replace it. Anything else, or anything unreadable, keeps AGENTS.md. */
-  guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
-    // A resume or fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the
-    // repository path, answered at once.
-    if (opts?.resuming || !binding.tmuxSession) return { file: null };
+  guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
+    // A fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the repository
+    // path, answered at once. A resume of the seat's own conversation (a restore, `rig up --existing`) chooses as a fresh
+    // launch does, so its guidance stays out of the repository AGENTS.md too.
+    if (!binding.tmuxSession || (opts?.resuming && !opts.resumingConversation)) return { file: null };
     return this.freshGuidanceChoice(binding);
   }
 
@@ -2431,9 +2442,10 @@ function tomlSections(text: string, current?: string): TomlSection[] {
   return sections;
 }
 
-function canonicalCodexHookSource(path: string): string {
-  // Codex keys hook trust by the canonical source path; a file not on the real filesystem keeps its plain path.
-  try { return fs.realpathSync.native(path); } catch { return path; }
+function codexHookSourcePath(file: string): string {
+  // Resolve a linked home folder, but retain a linked config.toml/hooks.json file's own name.
+  try { return nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file)); }
+  catch { return file; } // The folder may not exist yet, including with an injected filesystem.
 }
 
 /** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */
@@ -3007,6 +3019,12 @@ async function defaultProfilePreflight(profile: string, selected?: { cwd: string
 // property that the pre-B12 sync implementation violated.
 export async function defaultListProcesses(): Promise<CodexProcess[]> {
   return listNativeProcesses();
+}
+
+/** The default listing for a shared observation pass: a failed enumeration rejects, so the pass can retry each agent
+ *  on its own instead of caching an empty table as a success. */
+export async function defaultListProcessesOrThrow(): Promise<CodexProcess[]> {
+  return listNativeProcessesOrThrow();
 }
 
 function findCodexDescendantPids(

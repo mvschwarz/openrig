@@ -204,6 +204,12 @@ function blockStates(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "e
   return new Map(guidance.items.map((item) => [item.blockId, blockState(content, item.blockId)]));
 }
 
+/** #3039: the block ids the seat's guidance file doesn't hold at all (no marker of theirs), which a resumed launch can carry
+ *  instead of the file. */
+export function absentGuidanceBlocks(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): string[] {
+  return [...blockStates(guidance, fs)].filter(([, state]) => state === "absent").map(([id]) => id);
+}
+
 /** The block ids the seat's guidance file lacks right now (absent, or only partly there). */
 export function missingGuidanceBlocks(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): string[] {
   return [...blockStates(guidance, fs)].filter(([, state]) => state !== "complete").map(([id]) => id);

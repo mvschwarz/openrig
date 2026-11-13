@@ -10,8 +10,8 @@ already does it, or two verbs crossed already answer it. **You cannot look up a 
 not know exists.** So the point of what follows is not skill. It is recognition: that when a task
 lands, something rhymes, and you go check instead of building.
 
-Ninety-two top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.12`). This marker describes the pack's teaching, not publication or live
+Ninety-three top-level verbs ship (capability canon refreshed through
+`capability-delta-v0.7.13`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -148,9 +148,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   A seat's typing guard and `--wait-for-idle` retain their checks. Managed compaction follows the
   ordinary draft default and explicit operator protections; it separately reconciles its own
   uncertain `/compact` write before sending restore input. Draft detection isn't complete.
-  **Each send records one `transport.delivery_evidence` event**: what was admitted, what reached
-  the input, what the screen check showed, and for which occupant. Read it as what was known about
-  the delivery, not proof the agent read it; where the input landed can read unknown.
+  **Each send records one `transport.delivery_evidence` event**, best effort: what was admitted, what
+  reached the input, what the screen check showed, and for which occupant. Read it as what was known
+  about the delivery, not proof the agent read it; where the input landed can read unknown, and a
+  missing record doesn't show there was no send.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -272,8 +273,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
   the failure. In the window's `--json` output, `reusedWorkspace` with no new tiles means an
   existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
-  view in a provider that is already running, without opening a window. Ordinary opens add a new
-  workspace, so to come back to a fixed view, focus its open space; task follow mode reuses one.
+  view in a provider that is already running, without opening a window. Herdr reuses a workspace
+  that still shows the view with live attachments (`reusedWorkspace`, no new tiles); otherwise an
+  ordinary open adds a new workspace. Task follow mode reuses one.
   **`qitem:<id>` as the view** previews or opens the current local owners of that task: its
   pending, in-progress and blocked rows through explicitly linked successors, without closed
   predecessors or past senders. It's a read-only membership view: stopped, missing, external and
@@ -684,7 +686,7 @@ not have to tear one down to change it, and you rarely have to start from nothin
   someone edited it.
   **Since 0.7.12 it stops only a tmux session that carries the seat's own `OPENRIG_NODE_ID`**, on the
   server and session it read. A terminal OpenRig didn't create, a mismarked or replaced one, or a seat
-  joined with `rig attach --self` is left running, and `rig down` exits 2 naming it and the manual way
+  joined with `rig attach --self` from a tmux pane is left running, and `rig down` exits 2 naming it and the manual way
   to stop it. Teardown is incomplete for those terminals: if one is yours, look at it and stop it
   yourself, then run `rig down` again.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
@@ -747,7 +749,10 @@ not have to tear one down to change it, and you rarely have to start from nothin
   conversation continuity stays unverified. Both refuse while typing protection is on.
 - **`rig unclaim` / `rig release`** — stop managing one adopted session, or all of them,
   **without killing the process or the agent inside it**. Handing something back to its human is a
-  first-class move, not an abandonment.
+  first-class move, not an abandonment. To stop an adopted session after unclaiming it, end its
+  process and its tmux session; closing only the viewing window detaches it. Since 0.7.13 a fresh
+  `rig launch` after `rig unclaim` ended the server's last session reopens the server (a released
+  session that's still running blocks it, as before).
 
 > **Two words that mean different things at different altitudes.** `unclaim` and `release` each
 > exist both here — *stop managing a live session* — and in the queue — *put a work row back down*.
@@ -790,6 +795,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
   A start reservation left from an earlier boot is archived by the next start; don't clear it by
   hand.
+- **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
+  activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
+  so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its
@@ -861,7 +869,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   effectful handover path.** Both forms perform the operation by default; pass `--dry-run`
   to plan without changing the seat. Check the selected source and continuity evidence first. A
   seat can be handed over again into its own pane, so a seat left half-handed-over recovers by
-  running the handover again. A Claude seat started through a `#!` wrapper that runs Claude without
+  running the handover again. A handover whose successor was launched but not ready says it may be
+  running: look at the pane before retrying. A handover cleans up the retiring occupant's own claims
+  and jobs. A Claude seat started through a `#!` wrapper that runs Claude without
   `exec`, or through the installer's `~/.local/bin/claude` symlink, rebuilds with `--source
   rebuild`; a failed rebuild leaves the resume target on the earlier conversation, so rebuild again
   rather than relaunching it fresh.
@@ -1226,6 +1236,9 @@ reaching them is ordinary work rather than an escalation.
   see which host you are acting on, and check a registered host is *actually* usable end to end.
   `rig host edit <id>` corrects an entry (its id and transport stay fixed), and `rig host remove <id>` deletes
   only the registry entry: credential files, the learned identity and the selection stay as they are.
+- **`rig network`** — **experimental, unsupported and at your own risk.** It connects one local seat
+  to a hub you already have. The daemon starts the connector, sweeps leftover credential folders and
+  schedules local rounds even with no binding, so it isn't inert, and its migrations apply on upgrade.
 - **A cross-host queue write that times out reads INDETERMINATE, not failed.** The CLI waits 15
   seconds for the daemon's answer, and `rig queue create` with no answer reads the row back once by
   its ID. Reconcile by that ID before any retry; don't send the write twice.
@@ -1270,6 +1283,17 @@ reaching them is ordinary work rather than an escalation.
   a person can decide directly in the TUI's pairing settings. A relay connector that can't accept
   incoming connections can pull instead (`OPENRIG_RELAY_MODE=pull` in the relay secrets file); push
   stays the default, and a person's connector binding can be unset.
+  **Since 0.7.13 a person's runner answer gets a note back:** who decides and in what state, or that
+  the answer is kept and the tool hasn't run, and a runner waiting on it wakes on the decision. Read
+  that note before asking the person to answer again. The answer a receiving agent reads says what an
+  answer typed at the machine's terminal means, to act on a clear one with the request's own decision
+  command, and how to ask the person back, with a new ask to them, when it's unclear.
+- **The `relay` gateway connector** carries a registered person's questions, updates and notices to a
+  bridge process you run, over loopback HTTP, and takes their replies back with the sender resolved
+  against their bindings. It's off until a person has a relay binding (`rig gateway human add <id> …
+  --binding "relay:<connectorRef>:file:<absolute env file>:primary:handle=<alias>"`). The handle is how
+  their replies are matched to them: a binding without one is outbound-only. The bridge, with its reach to
+  any messaging platform, is yours (`docs/reference/gateway-relay.md`).
 - **`rig gateway channel add <id> --display-name <name> --binding
   slack:<connectorRef>:<secretsRef>:<channelId>`** — a Slack shared channel as one participant,
   `<id>@external` (Slack only). Anyone writing there reaches the team, registered or not. Each row
@@ -1402,7 +1426,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   conversation it is in the middle of. **`provider signals` reports anomalies rather than a
   listing** — unbound seats, accounts shared across several seats. A Codex seat showing its
   usage-limit banner reads activity `unknown` with reason `usage_limit`, and keeps it while its
-  screen redraws; `provider signals` can show a provider-event signal for that seat's account that
+  screen redraws (a banner with a curly apostrophe included); a Claude seat whose usage-limit message
+  states a reset time is parked until then, instead of being retried every few minutes; `provider signals` can show a provider-event signal for that seat's account that
   allows a switch decision. With `provider.usage_windows` on (off by default), `rig provider status`
   shows Codex's windows and Claude's 5-hour and weekly windows from the seats' status lines, each
   seat's configured account, and with `--all-hosts` or `--hosts <ids>` every registered machine's
@@ -1439,6 +1464,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
   --account-home <dir> --reason "<why>"` (preview with `--dry-run`). It starts a fresh conversation with a handover
   and retains the seat's address and work. `--clear-account-home --reason "<why>"` returns to configured defaults.
+- **A Pi seat switches accounts** with `rig provider switch --seat <pi seat> --to-account <name> --account-home <dir>
+  --reason "<why>"` (`--dry-run` shows the plan), through a confirmed successor that keeps its model, effort and
+  wrapper. A Pi seat that declares an absolute `PI_CODING_AGENT_DIR` in its `env:` uses that folder as its account
+  home on launch, restart, resume and restore, and needs a readable `auth.json` there, or the launch stops; remove
+  the declaration to keep the managed seat login. A seat that has its own Pi login as well stops at launch even with
+  an `auth.json` there, and the error says why (for example, that the existing login isn't a managed account link).
 - **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
   `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with
   `--to-account plan --token-file <abs>`. The API-key path remains unqualified; verify the resulting
@@ -1467,7 +1498,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
   (empty, the default, means every signed-in one). `--router-line yes|no` decides whether OpenRig
   adds its one line to shared guidance files (`skills.router_line.enabled`).
   Setup offers to register the person when none is registered, and a team started from the
-  person's own assistant fits their own logins, with a review before anything is committed.
+  person's own assistant fits their own logins, with a review before anything is committed. Since
+  0.7.13, `rig daemon start` ends with that offer when the person registry can be read and holds
+  nobody. The kernel operator's startup is also taught to run `rig gateway participants` before its
+  first greeting and offer registration when nobody is registered. The agent asks first and
+  registers only on the person's yes.
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig usage top`** — which of this machine's seats used the most tokens over a window (`--window
@@ -1564,6 +1599,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   with secret names, never values): OpenRig then POSTs a pointer to the row when work lands, and a
   2xx records only that the ring was accepted, not that anything woke. When work waits for a
   member nothing can wake, or a rung member doesn't claim it in time, its person is told.
+  A hosted member's roster entry shows whether it's checking in: its expected cadence and its last
+  check-in, read as checking in, overdue, not yet checked in or checking in on request, and unknown
+  when that can't be read. It's a status, never a gate on delivery.
   **Internet-facing hosted members are experimental, unsupported, off by default and at your
   own risk.** Local assistants can connect locally. Internet access needs your own TLS tunnel or
   proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
@@ -1580,6 +1618,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   selected plugin's skills there (into `.claude/skills/` or `.agents/skills/` only for a seat
   without that storage), so don't copy them by hand; read the `plugin_skill_*` warnings if one
   is missing. TDD is no longer a default skill.
+- **`on_restore: follow_source`** on a spec's `resources.skills[]` entry refreshes that skill from its source when
+  a Claude or Codex seat is restored, keeping its conversation, while the seat's copy is still what OpenRig wrote: an
+  edited, unrecorded or linked copy is kept and named, and a source that can't be read leaves the saved copy.
+  `keep_saved`, the default, keeps the saved copy, but a missing file comes back only from a source that still has the
+  bytes OpenRig wrote: a file whose source changed after `rig down` stays missing, named in the restore's warnings,
+  even when the rest of the skill (its `SKILL.md`, say) is unchanged.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.
@@ -1653,6 +1697,6 @@ deliberate writing.
 
 **`rig --help`**, then `rig <verb> --help`.
 
-Ninety-two verbs ship, and this page named most of them once. **You will not remember which — you
+Ninety-three verbs ship, and this page named most of them once. **You will not remember which — you
 are meant to remember only that the list is long enough to be worth reading before you build
 anything.** The question is never *how do I write this*; it is **does this already exist**.

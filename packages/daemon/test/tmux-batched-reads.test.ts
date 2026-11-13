@@ -13,7 +13,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 const WINDOWS = [
   ["s1@rig", 1, 1790000100], ["s2@rig", 0, 1790000999], ["s2@rig", 1, 1790000050], ["s3@rig", 1, 0], ["s4@rig", 1, 1790000200],
 ] as const;
-const PANES = [["%1", 4242, "node"], ["%2", 5151, "zsh"], ["%3", 0, ""], ["%4", 7777, "codex"]] as const;
+const PANES = [["%1", 4242, "node"], ["%2", 5151, "zsh"], ["%3", 0, ""], ["%4", 7777, "codex"], ["%8", 8888, "node"]] as const;
 const unquote = (t: string) => t.replace(/^'(.*)'$/, "$1");
 function fakeExec() {
   const calls: string[] = [];
@@ -21,6 +21,12 @@ function fakeExec() {
     calls.push(cmd);
     if (cmd.startsWith("tmux list-windows -a")) return WINDOWS.map(([s, a, t]) => `${a}|${t}|${s}`).join("\n") + "\n";
     if (cmd.startsWith("tmux list-panes -a")) return PANES.map(([p, pid, c]) => `${p}|${pid}|0|${c}`).join("\n") + "\n";
+    const census = cmd.match(/^tmux list-panes -s -t '=(s[1-4])@rig:' /);
+    if (census) {
+      // s3's registered %3 is gone; %8 is its remaining live pane. s4 has %4, not the bound %9.
+      const id = census[1] === "s3" ? "%8" : `%${census[1]!.slice(1)}`;
+      return `${id}|0|/tmp|80|24|1\n`;
+    }
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
     const target = unquote(m[1]!), field = m[2]!;
@@ -174,11 +180,14 @@ describe("SeatIdentityReconciler with the batch", () => {
   });
 
   async function reconcile(batched: boolean) {
-    const db = createFullTestDb(); seed(db, SEATS.slice(0, 4));
+    const db = createFullTestDb();
+    // Exercise pane-read parity without selecting the separate Claude native-process proof path.
+    seed(db, SEATS.slice(0, 4).map(([node, session, pane]): [string, string, string, string] => [node, session, pane, "pi"]));
     const { exec, calls } = fakeExec(); const real = new TmuxAdapter(exec as never);
     const tmux = {
       listSessions: async () => ["s1@rig", "s2@rig", "s3@rig", "s4@rig"].map((name) => ({ name })) as never,
       getPanePid: (p: string) => real.getPanePid(p), getPaneCommand: (p: string) => real.getPaneCommand(p),
+      listPanes: (s: string, allWindows?: boolean) => real.listPanes(s, allWindows),
       ...(batched ? { readAllPaneProcesses: () => real.readAllPaneProcesses() } : {}),
     };
     await new SeatIdentityReconciler({ db, tmux, now: () => new Date("2026-09-30T07:00:00Z") }).reconcileAll();
@@ -196,6 +205,7 @@ describe("SeatIdentityReconciler with the batch", () => {
     expect(per.out.n3?.verdict).toBe("pane_missing");
     expect(per.calls.filter((c) => c.startsWith("tmux display-message"))).toHaveLength(6);   // 4 pids + 2 commands (no command read once the pid is gone)
     expect(bat.calls.filter((c) => c.startsWith("tmux list-panes -a"))).toHaveLength(1);
+    expect(bat.calls.filter((c) => c.startsWith("tmux list-panes -s"))).toHaveLength(2);
     // only the misses (%3 without a pid, %9 unknown) are read per pane
     expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => unquote(c.match(/-t (\S+)/)![1]!)).sort()).toEqual(["%3", "%9"]);
   });

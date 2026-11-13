@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "./pi-account-state.js";
 import { piSeatPaths } from "../adapters/pi-runner-protocol.js";
@@ -416,7 +417,9 @@ export class SeatRuntimeSwitchService {
       .run(id, node.id, sessionName, row.staging_session, ctx.predecessorPane, ctx.predecessorGeneration, successorGeneration, node.runtime, target,
         ctx.input.reason, ctx.input.requestedBy ?? null, JSON.stringify(ctx.plan), deadlineAt, stamp(), stamp());
     let successorPane: string | null = null;
+    let activityGrantId: string | undefined;
     const abandon = async (why: string): Promise<RuntimeSwitchRefusal> => {
+      if (activityGrantId) new ActivityGrantStore(db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
       const retired = await this.retireStaging(row.staging_session, node.id, "Uncommitted successor");
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = ?, updated_at = ? WHERE id = ? AND committed_at IS NULL`)
         .run(why, retired.ok ? null : `The staged successor couldn't be retired: ${retired.message}`, stamp(), id);
@@ -486,6 +489,7 @@ export class SeatRuntimeSwitchService {
       const attention = launch.code === "successor_attention_required" ? " It is waiting at a login, trust or approval prompt." : "";
       return abandon(`The ${target} successor didn't start: ${launch.message}.${attention}`);
     }
+    activityGrantId = launch.activityGrantId;
     const warnings = [...ctx.plan.warnings, ...(launch.notes ?? [])];
 
     // 2. The handover, as the successor's first turn; the confirmation it asks for is the evidence it can carry on.
@@ -546,6 +550,7 @@ export class SeatRuntimeSwitchService {
       committed = this.commit({ ...ctx, id, successorGeneration, successorPane: successorPane!, appliedLaunch: launch.appliedLaunch,
         launchResume: launch.resumeToken ? { type: launch.resumeType, token: launch.resumeToken } : null });
     } catch (error) {
+      if (activityGrantId) new ActivityGrantStore(db).revoke({ grantId: activityGrantId }, "cutover_failed");
       const back = await tmux.swapRuntimeSwitchPanes({ nodeId: node.id, stagingSession: row.staging_session, canonicalSession: sessionName,
         canonicalPane: successorPane!, stagedPane: ctx.predecessorPane });
       if (!back.ok) {
@@ -728,6 +733,13 @@ export class SeatRuntimeSwitchService {
     const row = this.openSwitch(nodeId);
     if (!row) return { ok: true, outcome: "No runtime switch needs recovery.", switchId: null };
     const { db, tmuxAdapter: tmux } = this.deps;
+    if (!row.committed_at) {
+      const grants = new ActivityGrantStore(db);
+      // The durable operation owns this unique reservation. Capture/revoke its exact pending IDs before awaits;
+      // active predecessor authority and other reservations are outside this recovery.
+      const pending = grants.pendingForGeneration(nodeId, row.successor_generation);
+      for (const grant of pending) grants.revoke({ grantId: grant.grantId }, "interrupted_cutover_abandoned");
+    }
     const at = () => this.now().toISOString();
     const stuck = (message: string) => {
       db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?").run(message, at(), row.id);

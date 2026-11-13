@@ -1,3 +1,4 @@
+import { inputReadDiagnostic, type InputReadDiagnostic } from "./input-read-diagnostic.js";
 import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAddress } from "./session-registry.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -28,7 +29,7 @@ interface Lease {
 }
 
 export class DeliveryGuardError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
+  constructor(readonly code: string, message: string, readonly inputReadFailure?: InputReadDiagnostic) { super(message); }
 
   // Hono's error protocol also preserves this typed refusal on lifecycle routes.
   getResponse(): Response {
@@ -59,6 +60,15 @@ export interface TypingGuardConfig extends TypingGuardSettings { revision: strin
 const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" };
 /** How long the guard waits before reading again an input it couldn't read right after its own paste or Enter (#2429). */
 const OWN_INPUT_REREAD_MS = 300;
+/** Right before an automatic paste, the empty input is read once more after this wait: a draft typed (or redrawn by the
+ *  agent's TUI) since the first read is seen before the paste, not after it, where nothing is removed (#2447, #3076). */
+const PASTE_SETTLE_MS = 300;
+/** Recent activity at a writable tmux client of the seat (keys, but also other client input; session-wide, not proof of
+ *  typing in this pane) holds the paste: a later attempt can deliver once it reads quiet and the input empty. tmux
+ *  reports client activity in whole seconds, so this is three of them (#3076). */
+const INPUT_QUIET_MS = 3000;
+/** tmux's client_activity is in whole seconds; the activity may have come up to this much after the second it reports. */
+const CLIENT_ACTIVITY_PRECISION_MS = 999;
 /** A terminal member with nothing set holds OpenRig's own notices and takes deliberate sends. */
 const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
 /** The actor a guard change records when its request carries no seat identity, as from an ordinary terminal (#2350).
@@ -121,6 +131,9 @@ export class SeatDeliveryGuard {
   /** A paste this guard kept from being submitted because it couldn't read the input, per node (#2429). */
   private readonly leftovers = new Map<string, { target: GuardTarget; humanEpoch: number; text: string; collapsedPaste: string | null }>();
   private inspectInput?: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>;
+  /** When a writable tmux client of the seat last had activity (epoch ms, whole seconds); null when no writable client
+   *  is attached; a rejection when that can't be known. */
+  private inputActivity?: (target: GuardTarget) => Promise<number | null>;
   private inputAbsent?: (target: GuardTarget) => Promise<boolean>;
   private readonly hasModeConfig: boolean;
 
@@ -132,9 +145,11 @@ export class SeatDeliveryGuard {
     this.hasModeConfig = (db.prepare("PRAGMA table_info(seat_delivery_guards)").all() as Array<{ name: string }>).some(c => c.name === "desired_config");
   }
 
-  attachInputInspection(inspect: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>, absent: (target: GuardTarget) => Promise<boolean>): void {
+  attachInputInspection(inspect: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>, absent: (target: GuardTarget) => Promise<boolean>,
+    activity?: (target: GuardTarget) => Promise<number | null>): void {
     this.inspectInput = inspect;
     this.inputAbsent = absent;
+    this.inputActivity = activity;
   }
 
   /** Startup-only, before exposing routes or starting writers. A stopped operation cannot
@@ -440,14 +455,14 @@ export class SeatDeliveryGuard {
       this.checkInput(name);
       return observed;
     };
-    const unknown = () => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.");
+    const unknown = (reading: ComposerInput | null) => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.", inputReadDiagnostic("draft-aware", reading));
     let input = await read();
     // Claude may still be redrawing this lease's own paste: one bounded re-read before refusing its Enter.
     if (submit && lease.staged && (!input || input.state === "unknown")) { await this.sleep(OWN_INPUT_REREAD_MS); input = await read(); }
     if (!input || input.state === "unknown") {
       // No Enter was sent, so the paste stays there unsubmitted, and the next delivery may recognize it as OpenRig's.
       if (submit && lease.staged) this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged });
-      throw unknown();
+      throw unknown(input);
     }
     if (leftover === "recognize" && !submit && this.ownsLeftover(target, input)) { lease.ownLeftover = "recognized"; return; }
     if (typeof leftover === "object" && lease.ownLeftover === "recognized") {
@@ -466,7 +481,7 @@ export class SeatDeliveryGuard {
           lease.ownLeftover = "submitted";
           await this.sleep(OWN_INPUT_REREAD_MS);
           const after = await read();
-          if (!after || after.state === "unknown") throw unknown();
+          if (!after || after.state === "unknown") throw unknown(after);
           input = after;
         }
       }
@@ -482,6 +497,9 @@ export class SeatDeliveryGuard {
     } else if (input.state !== "empty") {
       throw new DeliveryGuardError("draft_input_busy", "The seat has an unsubmitted input. Automatic delivery is held.");
     } else {
+      // Right before the paste (the adapter's check passes the text): the read above is a snapshot, and a draft typed
+      // after it would get the paste appended and then lose the Enter, with the paste left in the person's input (#3076).
+      if (pasteText !== undefined) input = await this.quietBeforePaste(target, read, unknown);
       const uncertainty = pasteText === undefined ? null : composerPasteUncertainty(input, pasteText);
       if (uncertainty) {
         const message = uncertainty === "controls"
@@ -489,10 +507,35 @@ export class SeatDeliveryGuard {
           : uncertainty === "long"
             ? "OpenRig couldn't confirm ownership of Codex's collapsed long paste. Send a shorter message; nothing was pasted. Turning this seat's typing guard off explicitly disables draft protection."
             : "OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted.";
-        throw new DeliveryGuardError("draft_input_unknown", message);
+        throw new DeliveryGuardError("draft_input_unknown", message, inputReadDiagnostic("draft-aware", input, `paste_${uncertainty}`));
       }
       lease.inputFrame = input.frame;
     }
+  }
+
+  /** No recent writable-client activity before a short wait, the input still empty when read again after it, and still
+   *  no recent activity after that read. A time tmux can't report holds the paste, as an unreadable input does. The
+   *  read it returns is the one the paste goes on. Typing after this final check and before the paste can still leave
+   *  the notice beside the person's draft. In the tested append-mode schedule the Enter is then refused and nothing is
+   *  submitted or deleted; that isn't a guarantee for every interleaving (#3076). */
+  private async quietBeforePaste(target: GuardTarget, read: () => Promise<ComposerInput | null>,
+    unknown: (reading: ComposerInput | null) => DeliveryGuardError): Promise<ComposerInput> {
+    const quiet = async () => {
+      if (!this.inputActivity) return;
+      const last = await this.inputActivity(target).then(at => ({ at }), () => null);
+      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.");
+      // tmux reports whole seconds: activity at N.999 s reads as N, so the quiet window counts from the end of that second.
+      if (last.at !== null && Date.now() - (last.at + CLIENT_ACTIVITY_PRECISION_MS) < INPUT_QUIET_MS) {
+        throw new DeliveryGuardError("draft_input_busy", "A writable client of this seat had recent activity. Automatic delivery is held; nothing was pasted.");
+      }
+    };
+    await quiet();
+    await this.sleep(PASTE_SETTLE_MS);
+    const again = await read();
+    if (!again || again.state === "unknown") throw unknown(again);
+    if (again.state !== "empty") throw new DeliveryGuardError("draft_input_busy", "The input changed just before the paste. Automatic delivery is held; nothing was pasted.");
+    await quiet();
+    return again;
   }
 
   /** A leftover paste is OpenRig's only while it's exactly there: the same occupant, no person's input through OpenRig
@@ -606,4 +649,13 @@ export function resolveGuardTarget(db: Database.Database, name: string): GuardTa
   if (pool.length !== 1 || (current && pool[0]!.nodeId !== current.nodeId)) return null;
   const { archivedAt: _archivedAt, physicalName: _physicalName, logicalId: _logicalId, rigName: _rigName, latestStatus: _latestStatus, ...target } = pool[0]!;
   return target;
+}
+
+/** An external-CLI seat's newest occupant generation by its external session name, which resolveGuardTarget's address
+ *  rules don't match: the one unarchived external_cli binding with that name, else null (none or several). */
+export function resolveExternalCliOccupant(db: Database.Database, name: string): string | null {
+  const rows = db.prepare(`SELECT (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=b.node_id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
+    FROM bindings b JOIN nodes n ON n.id=b.node_id JOIN rigs r ON r.id=n.rig_id
+    WHERE b.attachment_type='external_cli' AND b.external_session_name=? AND r.archived_at IS NULL`).all(name) as Array<{ occupant: string | null }>;
+  return rows.length === 1 ? rows[0]!.occupant : null;
 }

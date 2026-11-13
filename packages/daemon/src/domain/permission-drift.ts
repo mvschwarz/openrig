@@ -2,6 +2,7 @@ import nodePath from "node:path";
 
 export type AppliedLaunchAxis = "permission" | "sandbox" | "resource_trust" | "not_applicable";
 export type AppliedLaunchState = "observed" | "unknown";
+export type CodexObservedApprovalPolicy = "untrusted" | "on-request" | "never";
 
 export interface AppliedLaunchObservation {
   runtime: string;
@@ -10,7 +11,7 @@ export interface AppliedLaunchObservation {
   value: string | null;
   reason?: string;
   /** Emitted Codex approval argument; null/absent does not infer a native default. */
-  approvalPolicy?: "never" | null;
+  approvalPolicy?: CodexObservedApprovalPolicy | null;
   /** Codex: true when the launch added --no-daemon, false when the probe found no such option; absent when not probed. */
   daemonOptOut?: boolean;
 }

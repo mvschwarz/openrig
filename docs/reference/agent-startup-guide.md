@@ -35,8 +35,17 @@ command. `rig ps --nodes` shows it under "Startup details (<seat>)", and
 
 The attention codes that stop startup this way are `trust_gate`,
 `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,
-`bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
+`bypass_consent_gate`, `claude_resume_selection_prompt`,
+`claude_gated_grants_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
 They are recognized from each harness's English prompt text.
+`claude_gated_grants_gate` is Claude Code's workspace trust check that warns "This folder
+pre-approves N tool permissions" (from the folder's `.claude/settings.json`): OpenRig never
+answers it, not even with `recovery.auto_drive_provider_prompts`, because its default choice
+declines those permissions (or exits) and approving them is your call. With that setting on,
+the plain workspace trust prompt is answered only when its options are exactly "No, exit" and
+"Yes, I trust this folder": Claude Code 2.1.322 opens it on "No, exit", so OpenRig moves the
+selection down once and presses Enter only after it reads the focus on "Yes". Any other option
+set, a prompt drawn without a cursor or a focus that does not reach "Yes" gets no confirmation.
 
 ## Continue a Codex fork whose child ID arrived late
 
@@ -360,6 +369,15 @@ not the destination's file contents.)
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or
 - `rig handover <seat> --source rebuild --reason <text>`, which carries durable context.
 
+A rebuild lists the current recap, lineage lessons and restore packet as required
+priming. Superseded recaps are optional history, newest first. The briefing shows
+the newest `output.rebuild_recaps` paths (default 3) and their shared
+`recap-superseded/` folder when that pointer covers the complete history. Other
+layouts retain the full list. Set `rig config set output.rebuild_recaps 0` to
+always list every path; `OPENRIG_OUTPUT_REBUILD_RECAPS` overrides the setting.
+This changes only the briefing: the handover result still records every resolved
+artifact, and no recap file is removed.
+
 For Codex rebuilds, OpenRig also carries a complete supported native permission policy read from the live
 predecessor's own conversation and process, without adding fresh-launch grants. A later recorded seat permission
 or policy choice, or a differing declared successor profile, takes precedence. Missing, stale or unsupported observations keep the existing launch
@@ -405,10 +423,10 @@ Each startup file and action specifies when it applies:
 - a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
 - an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
 
-**A file keeps one copy of each block.**
+**A file keeps one copy of each distinct block text, and tidying the copies never removes a text you wrote.**
 - **Touched markers:** a marker an editor or formatter rewrapped, with spaces or line breaks inside the comment, still reads as its block, and the next write puts it back in OpenRig's form.
-- **Collected copies:** they're reduced to the first. Beside a copy you edited, OpenRig's own unedited copies and exact repeats are removed, and every different edited copy stays (`guidance_block_copies_removed`).
-- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
+- **Collected copies:** a copy that repeats an earlier one exactly is removed. Beside a copy you edited, OpenRig's own unedited copies are removed too, and every different edited copy stays (`guidance_block_copies_removed`).
+- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write treats that block like any other. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
 
 An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 
@@ -615,13 +633,22 @@ daemon's `CODEX_HOME`, else `~/.codex`.
 The guidance still goes to the repository `AGENTS.md`, as before, when:
 
 - a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
-- the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
-  resume puts the guidance back in the repository `AGENTS.md`;
-- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+- the launch forks a conversation. Developer instructions on a fork haven't been tested;
+- the seat is restored and the restore starts a new conversation. A restore keeps the guidance file its launch
   recorded, which for Codex is the repository `AGENTS.md`;
 - a handover successor starts (fresh, fork or rebuild). Its launch carries no guidance of its own, so the handover
   first puts the seat's missing blocks back in the repository `AGENTS.md` from its saved startup context;
 - Codex is older than 0.164.0, or its version is unknown.
+
+A resume of the seat's own conversation, on a snapshot restore or `rig up --existing`, chooses as a fresh launch
+does: on Codex 0.164.0 or later with none configured, the guidance blocks the repository `AGENTS.md` doesn't hold go
+with the resume as `-c developer_instructions=…` instead of being put back in that file, and the guidance file its
+launch recorded isn't changed. A file that already holds blocks keeps them: a block OpenRig wrote whose source has
+changed is refreshed, and one edited by hand, or with no record of OpenRig writing it, is left as it is and named. A
+block whose source is gone or can't be read isn't sent, and the restore reports it as missing. A seat in a rig without
+pods starts its resumed conversation before its startup runs, so its missing blocks are still put back in the
+repository `AGENTS.md`. Whether Codex keeps the earlier session's developer instructions as well isn't documented
+by Codex; the text sent with the resume is the current one.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.

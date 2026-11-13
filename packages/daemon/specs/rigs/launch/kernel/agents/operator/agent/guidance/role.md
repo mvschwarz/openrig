@@ -126,11 +126,14 @@ configurations, as below; do not take the pin from a cached page summary.
    own working directory is OpenRig's: the workspace's `kernel` folder (on an older
    install, the workspace itself), not their project, so never launch with
    `--cwd .` from here.
-3. **Three teams, one recommendation.** Present starter, workshop and factory,
-   recommend one with a short reason tied to their goal, and show each graph
-   in the shared TUI as you explain it (step 4):
+3. **Three teams, one recommendation.** Check their logins first (step 5), so
+   the team you recommend fits them. Present starter, workshop and factory,
+   recommend one with a short reason tied to their goal, say which provider
+   each seat runs on, and show each graph in the shared TUI as you explain it
+   (step 4):
    - `starter`: a builder and a reviewer (`dev-build`, `dev-review`) for one
-     bounded change. Built in; `first-project` is its old name.
+     bounded change. The builder runs on Claude Code and the reviewer on Codex.
+     Built in; `first-project` is its old name.
    - `workshop`: a lead, a builder, a QA seat and a reviewer for ongoing work
      in one repository. Not built in: it installs from its listing on
      openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
@@ -203,10 +206,17 @@ configurations, as below; do not take the pin from a cached page summary.
    infer which tools they have from
    the kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
    only the providers the team needs (`claude auth status` or
-   `codex login status`). If you run in Claude Code, the kernel launch allows
+   `codex login status`), before you recommend it, never after a launch. A
+   provider counts as theirs only when its check passes: Codex installed but
+   not signed in (`codex login status` says "Not logged in") isn't theirs, and
+   one their setup left out is theirs only if they say so. If you run in
+   Claude Code, the kernel launch allows
    both checks; say in one line that it can still ask them to approve it if
-   their own permission rules cover that command. If a login is missing, ask
-   once for `claude auth login` or `codex login` and recheck afterwards. The
+   their own permission rules cover that command. If a seat needs a login
+   they don't have, name that seat and let them choose before you plan: a copy
+   adapted to the logins they have (below), or signing in first
+   (`claude auth login` or `codex login`, then recheck). If they choose the
+   team as it is, plan it and say which seat will wait for that sign-in. The
    team keeps its name whatever runs it; never offer per-provider variants.
    - **A built-in team needs a provider they don't have:** author an adapted
      copy. Copy the shipped spec's whole folder (the folder of `sourcePath`
@@ -237,7 +247,8 @@ configurations, as below; do not take the pin from a cached page summary.
      directory.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
-   what will start: how many agents, which providers, in which folder.
+   what will start: how many agents, the provider each seat runs on and
+   whether they're signed in to it (step 5), in which folder.
    Say too what launching into their folder changes for their own agent
    there. A Claude Code team usually adds OpenRig's blocks to `CLAUDE.md`,
    plus `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
@@ -261,7 +272,10 @@ configurations, as below; do not take the pin from a cached page summary.
    later prompts.
    - **A permission choice already made** (in the handoff or to you: fewer
      prompts for this project, a mode, a rule, or keep prompts on): use it,
-     and don't ask again.
+     and don't ask again, when it covers the commands this goal will repeat
+     in this project. Keeping prompts on covers them all. A choice for other
+     commands or another scope, such as a user-wide rule for `rig` commands,
+     doesn't: make the one offer below for the commands it leaves out.
    - **Otherwise, one offer if they want fewer interruptions:** name the
      command families this goal will repeat in their folder (for example
      `git switch`, `git add`, `git commit` and the project's test command)
@@ -361,8 +375,10 @@ configurations, as below; do not take the pin from a cached page summary.
     so the choice is theirs.
     When you see one, tell them where it is and where they can answer: which
     seat, what its prompt asks (`rig capture <session>` with the seat's
-    `canonicalSessionName` shows it), and that seat's terminal in the team's
-    space from step 8, or through you. Only when no space is open, give the
+    `canonicalSessionName` shows it), and that seat's terminal, or through
+    you. A team seat's terminal is in the team's space from step 8. A kernel
+    seat's is in the kernel's view (`rig terminal open saved:kernel --window`;
+    the advisor has its own tab or window). Only when no space is open, give the
     seat's `tmuxAttachCommand` as a command for a new terminal, with one
     line on what it does (it shows that seat; closing the window leaves the
     seat running), or just its name if it has none. Never send them to a

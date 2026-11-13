@@ -1,8 +1,14 @@
 // #96 — the durable record of where a --reply-to update posts. It is written on the row
 // ONCE, before the first post, so every retry, reconcile scan and --verify read the same
 // choice instead of re-deriving it after the referenced item or its root may have changed.
+//
+// #2990 — a reply arriving in a superseded Slack root records that thread separately
+// from gate correlation. An update answering the reply returns there, while only the
+// conversation's newest root can answer its human gate. The same actor/provenance rule
+// as the reply-to choice protects this in-process record.
 
 const REPLY_TO_CHOICE_PREFIX = "slack-reply-to-choice";
+export const SLACK_ARRIVAL_THREAD_PREFIX = "slack-arrival-thread";
 
 /** The only actor whose choice note is trusted: an agent can append any transition note, so
  *  a note from anyone else must never steer where the update posts. */
@@ -65,6 +71,23 @@ export function parseReplyToChoice(note: string): ReplyToChoice | null {
     return { kind: "fallback", reason: reason as ReplyToRootFallbackReason, threadTs, ...at };
   }
   return null;
+}
+
+export function formatArrivalThread(arrival: { threadTs: string; channel: string }): string {
+  return `${SLACK_ARRIVAL_THREAD_PREFIX} thread_ts=${arrival.threadTs} channel=${arrival.channel}`;
+}
+
+/** Parse an arrival-thread note (null when the note is not one). Callers check the actor. */
+export function parseArrivalThread(note: string): { threadTs: string; channel: string } | null {
+  if (!note.startsWith(SLACK_ARRIVAL_THREAD_PREFIX + " ")) return null;
+  const fields = new Map<string, string>();
+  for (const token of note.slice(SLACK_ARRIVAL_THREAD_PREFIX.length + 1).split(/\s+/)) {
+    const eq = token.indexOf("=");
+    if (eq > 0) fields.set(token.slice(0, eq), token.slice(eq + 1));
+  }
+  const threadTs = fields.get("thread_ts");
+  const channel = fields.get("channel");
+  return threadTs && channel ? { threadTs, channel } : null;
 }
 
 /** #2234: where Slack actually put a --reply-to update that its choice threaded. The thread's root was gone, so Slack posted

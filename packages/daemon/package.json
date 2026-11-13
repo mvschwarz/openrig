@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./tmux-server-start": { "types": "./dist/tmux-server-start-surface.d.ts", "import": "./dist/tmux-server-start-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
     "./spec-validation": {
@@ -98,6 +99,10 @@
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
+    },
+    "./herdr-live-workspace": {
+      "types": "./dist/herdr-live-workspace-surface.d.ts",
+      "import": "./dist/herdr-live-workspace-surface.js"
     }
   },
   "scripts": {

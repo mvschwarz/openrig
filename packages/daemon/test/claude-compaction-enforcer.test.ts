@@ -843,6 +843,9 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("Required items are your restore map's ranked entries above your restore class's tier line");
     expect(send.mock.calls[4]![1]).toContain("the session JSONL stay lookup-only");
     expect(send.mock.calls[4]![1]).toContain("Read every required item that is not FULL in full now");
+    expect(send.mock.calls[4]![1]).toContain("before acting on the restored work, and keep any hold you verified as live");
+    expect(send.mock.calls[4]![1]).toContain("Report the final read-depth table and the reconnect note as you resume; don't hold unaffected work for them.");
+    expect(send.mock.calls[4]![1]).not.toContain("before doing any other work");
     expect(send.mock.calls[4]![1]).not.toContain("Do not optimize for token conservation");
     expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
