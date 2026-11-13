@@ -838,41 +838,49 @@ function summarizeRigs(entries: PsEntry[]): {
  *  counts, so a person can tell which conversations came back and which seats didn't start. The running counts above
  *  are unchanged. */
 export const ROLL_CALL_EVIDENCE = {
-  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed for this occupant. "
-    + "An ambiguous or unavailable identity check doesn't outweigh the hook",
-  agentRunningConversationUnproven: "a runtime hook reports the agent; resuming its original conversation isn't recorded. "
+  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed for this occupant, "
+    + "with no failed identity proof. An ambiguous or unavailable identity check doesn't outweigh the hook",
+  agentRunningConversationUnproven: "a runtime hook reports the agent, but its original conversation isn't proven for this occupant: "
+    + "no resume is recorded, or the identity proof for its process failed or couldn't be retained. "
     + "An ambiguous or unavailable identity check doesn't outweigh the hook",
   bareShell: "the pane holds a shell, not the agent: restore's harness-not-started marker, or the current identity check saw a shell",
   sessionMissing: "no running session, or tmux reports the session missing",
-  unknown: "a running session with no current runtime hook report of an agent in it, or whose current identity check sees a "
-    + "different agent than the seat's, which conflicts with any hook report",
+  unknown: "a running session with no current runtime hook report of an agent in it, or whose current identity check sees the "
+    + "other runtime's agent in the seat's pane, which conflicts with any hook report",
 } as const;
 export type RollCallBucket = keyof typeof ROLL_CALL_EVIDENCE;
 
 // The shells the daemon's identity check reads as "no agent" (seat-identity-reconciler.ts, SHELL_COMMANDS).
 const IDENTITY_SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh", "-bash", "-zsh", "-fish", "-sh", "-dash", "-tcsh", "-csh"]);
 
-/** What the served identity verdict (the daemon serves only one that applies to the current session and pane) saw where
- *  the seat's agent should be, when it contradicts the seat: a shell, or a different agent. An ambiguous or unavailable
- *  check contradicts nothing: it's missing evidence. */
-function contradictingCommand(verdict: NodeEntry["identityVerdict"]): string | null {
-  const command = verdict?.evidence?.observedCommand;
-  return verdict?.verdict === "mismatch" && verdict.reason === "process_identity_mismatch" && typeof command === "string"
-    ? command.trim().toLowerCase() : null;
+/** How the served identity verdict (the daemon serves only one that applies to the current session and pane) contradicts
+ *  the seat: a shell where its agent should be, the other runtime's agent, or a failed proof of the seat's own agent's
+ *  process (restore writes the same reason when the proved process isn't the joined one, or its session metadata conflicts
+ *  or couldn't be retained). An ambiguous or unavailable check contradicts nothing: it's missing evidence. */
+function identityContradiction(n: NodeEntry): "shell" | "otherRuntime" | "proofFailed" | null {
+  const verdict = n.identityVerdict;
+  const command = verdict?.evidence?.observedCommand?.trim().toLowerCase();
+  if (verdict?.verdict !== "mismatch" || verdict.reason !== "process_identity_mismatch" || !command) return null;
+  if (IDENTITY_SHELLS.has(command)) return "shell";
+  // The identity check's own order: the seat's runtime matches first, then the other runtime contradicts it.
+  if (n.runtime === "claude-code" && !command.includes("claude") && command.includes("codex")) return "otherRuntime";
+  if (n.runtime === "codex" && !command.includes("codex") && command.includes("claude")) return "otherRuntime";
+  return "proofFailed";
 }
 
 export function rollCallBucket(n: NodeEntry): RollCallBucket {
   // The daemon serves an applicable session_missing check as a detached session.
   if (n.sessionStatus !== "running") return "sessionMissing";
   if (n.startupStatus === "attention_required" && n.latestErrorStage === "harness_not_started") return "bareShell";
-  const contradiction = contradictingCommand(n.identityVerdict);
+  const contradiction = identityContradiction(n);
   // A positive shell outranks a hook report, which may predate the agent's exit.
-  if (contradiction && IDENTITY_SHELLS.has(contradiction)) return "bareShell";
-  // A different agent in the pane conflicts with any hook report, and conflicting evidence reads unknown.
-  if (contradiction) return "unknown";
+  if (contradiction === "shell") return "bareShell";
+  // The other runtime's agent in the pane conflicts with any hook report, and conflicting evidence reads unknown.
+  if (contradiction === "otherRuntime") return "unknown";
   const a = n.agentActivity;
   if (!a || a.evidenceSource !== "runtime_hook" || a.state === "unknown" || a.stale || a.fallback) return "unknown";
-  return n.continuityOutcome === "resumed" ? "originalConversation" : "agentRunningConversationUnproven";
+  // A recorded resume whose process proof failed doesn't prove the conversation.
+  return n.continuityOutcome === "resumed" && contradiction !== "proofFailed" ? "originalConversation" : "agentRunningConversationUnproven";
 }
 
 export function rollCall(entries: NodeEntry[]): { agentSeats: number } & Record<RollCallBucket, { count: number; seats: string[]; evidence: string }> {

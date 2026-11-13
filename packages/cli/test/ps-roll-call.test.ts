@@ -8,10 +8,11 @@ const seat = (over: Partial<Node>): Node => ({
   model: null, sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", tmuxAttachCommand: null, resumeCommand: null,
   latestError: null, ...over,
 } as Node);
-// The daemon's served verdict when the pane's process contradicts the seat (seat-identity-reconciler.ts).
-const shellCheck = (observedCommand: string) =>
+// The daemon's served verdict when the pane's process contradicts the seat: the identity check's (seat-identity-reconciler.ts),
+// or restore's failed proof of the seat's own process (restore-orchestrator.ts), which keeps the agent's own command.
+const processCheck = (observedCommand: string) =>
   ({ verdict: "mismatch", reason: "process_identity_mismatch", evidence: { observedCommand } });
-const ambiguousCheck = { ...shellCheck("zsh"), reason: "process_identity_ambiguous" };
+const ambiguousCheck = { ...processCheck("zsh"), reason: "process_identity_ambiguous" };
 const hook = (state: "running" | "idle" | "needs_input" | "unknown", extra: Record<string, unknown> = {}) =>
   ({ state, reason: "hook", evidenceSource: "runtime_hook", sampledAt: "2026-11-13T22:00:00.000Z", evidence: null, ...extra });
 
@@ -23,12 +24,16 @@ describe("the node summary's roll call", () => {
     ["other startup attention", { startupStatus: "attention_required", latestErrorStage: "proof_selection" }, "unknown"],
     ["no session", { sessionStatus: "stopped" }, "sessionMissing"],
     ["a session tmux reports missing, which the daemon serves as detached", { sessionStatus: "detached", identityVerdict: { verdict: "pane_missing", reason: "session_missing" } }, "sessionMissing"],
-    ["the identity check seeing a shell, with a recent hook", { startupStatus: "attention_required", identityVerdict: shellCheck("zsh"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "bareShell"],
-    ["the identity check seeing a login shell, with no hook", { startupStatus: "attention_required", identityVerdict: shellCheck("-bash") }, "bareShell"],
+    ["the identity check seeing a shell, with a recent hook", { startupStatus: "attention_required", identityVerdict: processCheck("zsh"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "bareShell"],
+    ["the identity check seeing a login shell, with no hook", { startupStatus: "attention_required", identityVerdict: processCheck("-bash") }, "bareShell"],
     ["an ambiguous identity check, with no hook", { startupStatus: "attention_required", identityVerdict: ambiguousCheck }, "unknown"],
     ["an ambiguous identity check, with a fresh hook", { startupStatus: "attention_required", identityVerdict: ambiguousCheck, agentActivity: hook("running") }, "agentRunningConversationUnproven"],
-    ["another agent in the pane, with no hook", { startupStatus: "attention_required", identityVerdict: shellCheck("codex") }, "unknown"],
-    ["another agent in the pane, with a fresh hook and a resume", { startupStatus: "attention_required", identityVerdict: shellCheck("codex"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "unknown"],
+    ["another agent in the pane, with no hook", { startupStatus: "attention_required", identityVerdict: processCheck("codex") }, "unknown"],
+    ["another agent in the pane, with a fresh hook and a resume", { startupStatus: "attention_required", identityVerdict: processCheck("codex"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "unknown"],
+    ["Claude in a Codex seat's pane, with a fresh hook", { runtime: "codex", startupStatus: "attention_required", identityVerdict: processCheck("claude"), agentActivity: hook("idle") }, "unknown"],
+    ["a Codex seat whose process proof failed, with a fresh hook and an older resume", { runtime: "codex", startupStatus: "attention_required", identityVerdict: processCheck("codex"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "agentRunningConversationUnproven"],
+    ["a Claude Code seat whose resume metadata couldn't be retained, with a fresh hook and an older resume", { startupStatus: "attention_required", identityVerdict: processCheck("claude"), agentActivity: hook("idle"), continuityOutcome: "resumed" }, "agentRunningConversationUnproven"],
+    ["a seat whose process proof failed, with no hook", { runtime: "codex", startupStatus: "attention_required", identityVerdict: processCheck("codex") }, "unknown"],
     ["an identity check tmux couldn't answer, with no hook", { identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable" } }, "unknown"],
     ["an identity check tmux couldn't answer, with a fresh hook and a resume", { identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable" }, agentActivity: hook("idle"), continuityOutcome: "resumed" }, "originalConversation"],
     ["a Codex seat's unavailable check, with a fresh hook", { runtime: "codex", startupStatus: "attention_required", identityVerdict: { verdict: "mismatch", reason: "tmux_unavailable" }, agentActivity: hook("idle") }, "agentRunningConversationUnproven"],
@@ -42,8 +47,9 @@ describe("the node summary's roll call", () => {
   });
 
   it("says in each bucket's evidence how identity evidence weighs against a hook", () => {
-    expect(ROLL_CALL_EVIDENCE.unknown).toContain("different agent than the seat's, which conflicts with any hook report");
-    expect(ROLL_CALL_EVIDENCE.originalConversation).toContain("An ambiguous or unavailable identity check doesn't outweigh the hook");
+    expect(ROLL_CALL_EVIDENCE.unknown).toContain("other runtime's agent in the seat's pane, which conflicts with any hook report");
+    expect(ROLL_CALL_EVIDENCE.originalConversation).toContain("with no failed identity proof. An ambiguous or unavailable identity check doesn't outweigh the hook");
+    expect(ROLL_CALL_EVIDENCE.agentRunningConversationUnproven).toContain("no resume is recorded, or the identity proof for its process failed or couldn't be retained");
     expect(ROLL_CALL_EVIDENCE.agentRunningConversationUnproven).toContain("An ambiguous or unavailable identity check doesn't outweigh the hook");
   });
 
