@@ -958,7 +958,11 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
     ];
     if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}…` }];
-    if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} · refresh to Retry` }];
+    if (rig.inventoryUnavailable) return [
+      { text: `Inventory unavailable for ${rig.name} · refresh to Retry` },
+      ...(leaf?.kind === "pod" ? [] : connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable,
+        rig.name, state.filter, contentWidth, state.timeZone)),
+    ];
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all
