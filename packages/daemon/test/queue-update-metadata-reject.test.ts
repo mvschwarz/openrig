@@ -45,6 +45,7 @@ describe("51-06 D2 narrowed — queue update metadata on a state change", () => 
   const mkItem = async () => (await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "d2 item" })).qitemId;
   const txnCount = (id: string) => (db.prepare("SELECT count(*) c FROM queue_transitions WHERE qitem_id = ?").get(id) as { c: number }).c;
   const setSummary = (id: string, summary: string) => db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run(summary, id);
+  const setEvidence = (id: string, ref: string) => db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run(ref, id);
   const post = (path: string, body: Record<string, unknown>, session: string) => app.request(path, {
     method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
   });
@@ -114,6 +115,33 @@ describe("51-06 D2 narrowed — queue update metadata on a state change", () => 
     // The legacy human-seat requirement isn't extended: a park on the person without them still parks.
     const bare = await mkItem();
     expect(people.update({ qitemId: bare, actorSession: "orch@rig", state: "blocked", blockedOn })).toMatchObject({ state: "blocked", summary: null });
+  });
+
+  it.each(["", "   "])("a blank summary and evidence ref (%j) on a park on a registered person aren't stored: the row keeps its own", async (blank) => {
+    const person = { entityId: "sarah", class: "human" as const, displayName: "Sarah", address: "sarah@external", connectorBindings: [],
+      prefs: { deliveryClass: "A" as const } };
+    const people = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [person] }) });
+    const id = await mkItem();
+    setSummary(id, "Which layout?"); setEvidence(id, "/proof/layout.md");
+    expect(people.update({ qitemId: id, actorSession: "orch@rig", state: "blocked", blockedOn: "sarah@external", summary: blank, evidenceRef: blank }))
+      .toMatchObject({ state: "blocked", blockedOn: "sarah@external", summary: "Which layout?", evidenceRef: "/proof/layout.md" });
+  });
+
+  it("a legacy human-seat park given a blank summary and evidence ref parks on the row's own, instead of refusing", async () => {
+    const id = await mkItem();
+    setSummary(id, "PARK-KEEP"); setEvidence(id, "/proof/park.md");
+    expect(repo.update({ qitemId: id, actorSession: "orch@rig", state: "blocked", blockedOn: "human@kernel", summary: "  ", evidenceRef: "  " }))
+      .toMatchObject({ state: "blocked", summary: "PARK-KEEP", evidenceRef: "/proof/park.md" });
+  });
+
+  it("ROUTE: a blank summary on a park on a person -> 200, parked, and the advisory names the summary as not stored", async () => {
+    const id = await mkItem();
+    setSummary(id, "Original subject"); setEvidence(id, "/proof/kept.md");
+    const res = await post(`/api/queue/${id}/update`, { actorSession: "orch@rig", state: "blocked", blockedOn: "human@kernel", summary: "  " }, "orch@rig");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { state: string; summary: string | null; advisories?: unknown };
+    expect(body).toMatchObject({ state: "blocked", summary: "Original subject" });
+    expect(body.advisories).toEqual([expect.objectContaining({ code: "summary_not_stored", field: "summary" })]);
   });
 
   it("a park on an unregistered name on another daemon's domain stores its summary too", async () => {

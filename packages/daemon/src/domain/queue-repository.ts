@@ -524,8 +524,8 @@ export interface QueueUpdateInput {
    * --summary --evidence-ref` persists them onto the EXISTING item so the
    * attention query + Packet 2 read them, and a done close leaves its
    * artifact on the finished row. A human-seat park still requires them.
-   * Outside a park on a person, a blank value is not stored (it would erase
-   * the row's subject or evidence link); the update route reports any value
+   * A blank value is not stored (it would erase the row's subject or
+   * evidence link); the update route reports any value
    * the stored row doesn't carry, so a caller never believes it was saved.
    */
   summary?: string | null;
@@ -3454,6 +3454,7 @@ export class QueueRepository {
     }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
     const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
+    const hasValidEvidenceRef = typeof input.evidenceRef === "string" && input.evidenceRef.trim().length > 0;
     const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
       qitem.state as "done" | "canceled" | "handed-off",
     );
@@ -3663,11 +3664,12 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "An informational delivery cannot become a human approval park; author a separate decision request.");
     }
     // A park on a person by any address (a legacy human seat, or a registered person's own address or alias) keeps the
-    // summary and evidence it names. validateHumanPark still requires them only for the legacy human-seat form.
+    // summary and evidence it names, or the row's own where it names a blank one. validateHumanPark still requires them
+    // only for the legacy human-seat form.
     const isHumanPark = input.state === "blocked" && !!effectiveBlockedOn && this.isPersonAddress(effectiveBlockedOn);
     // OPR.0.5.1 slice-51-06 D2 refused the whole transition when summary/evidence_ref came with a state it
     // didn't store them for, so finished work could stay pending over optional metadata. A state change now
-    // stores them (below), except a blank value outside a park on a person; the route reports what wasn't stored.
+    // stores them (below), except a blank value; the route reports what wasn't stored.
 
     // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE: an incoherent
     // field must never silently persist (worse than a drop —
@@ -3748,8 +3750,8 @@ export class QueueRepository {
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {
-      effectiveSummary = input.summary ?? qitem.summary;
-      effectiveEvidenceRef = input.evidenceRef ?? qitem.evidenceRef;
+      effectiveSummary = hasValidSummary ? input.summary! : qitem.summary;
+      effectiveEvidenceRef = hasValidEvidenceRef ? input.evidenceRef! : qitem.evidenceRef;
       const park = validateHumanPark({
         blockedOn: effectiveBlockedOn,
         summary: effectiveSummary,
@@ -3879,11 +3881,11 @@ export class QueueRepository {
 
     // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
     // merely validated-then-dropped) — visible to the attention query, to
-    // Packet 2 and to every reader of the row. A park on a person stores what
-    // it was given; any other state change stores only non-blank values.
-    const hasValidEvidenceRef = typeof input.evidenceRef === "string" && input.evidenceRef.trim().length > 0;
-    if (isHumanPark || hasValidSummary) this.persistSummary(input.qitemId, input.summary ?? null);
-    if (isHumanPark || hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
+    // Packet 2 and to every reader of the row. Only non-blank values are
+    // stored, on a park on a person too: a blank one would erase the row's
+    // subject or evidence link, and the route reports it as not stored.
+    if (hasValidSummary) this.persistSummary(input.qitemId, input.summary!);
+    if (hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef!);
 
     const transition = this.transitionLog.append({
       qitemId: input.qitemId,
@@ -4536,9 +4538,11 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
-  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
-   *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
-   *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
+  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions, and the evidence it
+   *  points to, when it has any) and its decision state (open, blocked or terminal; who it's addressed to or parked on; its
+   *  answers, a decision made for them, the current park, and the replies returned). A label, a wake, a claim or a note on a
+   *  park doesn't change it; a new park does, on any blocker, and so does a new evidence pointer. A row with no evidence
+   *  keeps the revision it had before evidence counted. */
   decisionRevision(item: QueueItem, opts?: DecisionRevisionOptions): string {
     const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
     const excludeOp =
@@ -4565,7 +4569,8 @@ export class QueueRepository {
       if (transitions[i]!.state === "blocked" && transitions[i - 1]?.state !== "blocked") parkEntry = transitions[i]!.transitionId;
     }
     const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
-      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
+      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies,
+      ...(item.evidenceRef ? [item.evidenceRef] : [])];
     return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
   }
 
