@@ -211,6 +211,16 @@ export function queueRoutes(): Hono {
       message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
     };
   }
+  /** A blank summary isn't stored with a state change (it would erase the row's subject), so the caller is told. */
+  function blankSummaryAdvisory(summary: unknown, item: QueueItem) {
+    if (typeof summary !== "string" || summary.trim().length > 0 || item.summary === summary) return null;
+    return {
+      code: "summary_not_stored",
+      qitemId: item.qitemId,
+      field: "summary",
+      message: `The summary was blank, so it wasn't stored: ${item.qitemId} keeps ${item.summary ? `its summary "${item.summary}"` : "no summary"}. The rest of the update was applied.`,
+    };
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -312,9 +322,6 @@ export function queueRoutes(): Hono {
         : err.code === "reply_to_requires_update" ? 400
         : err.code === "reply_to_not_found" ? 400
         : err.code === "invalid_human_questions" ? 400
-        // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
-        // input error surfaced as a structured 400 (the daemon rejects before any mutation).
-        : err.code === "summary_evidence_not_persistable" ? 400
         // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
@@ -922,8 +929,9 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null;
-      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) });
+      const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, blankSummaryAdvisory(body.summary, item)]
+        .filter((advisory) => advisory !== null);
+      return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
     } catch (err) {
       return errorResponse(c, err);
     }
