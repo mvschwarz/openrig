@@ -810,6 +810,10 @@ export class RunnerCore {
    *  Pi 0.87.1 emits the exhausted-retry summary AFTER agent_end, so the
    *  correlation must survive the run boundary on forks. */
   private runEnded = false;
+  /** Set at a fork's auto_retry_start and consumed by the NEXT agent_start:
+   *  the retry's opening is exactly one run-opening, so a later new user run
+   *  is never mistaken for it (forks that omit agent_settled included). */
+  private retryOpeningPending = false;
   // Native OMP retry summaries have no message/status. Correlate only within
   // the announced attempt, using the latest typed assistant failure's exact
   // diagnostic as an identity check, never as a transient-error classifier.
@@ -965,6 +969,11 @@ export class RunnerCore {
   private acceptIntoOpenRun(): void {
     if (this.runtime === "omp" || !this.streaming) return;
     this.turn += 1;
+    // A newly accepted prompt is a new user run: any retry correlation (and
+    // its pending opening mark) ended with the previous run.
+    this.retryAttempt = null;
+    this.retryFailure = null;
+    this.retryOpeningPending = false;
     this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
 
@@ -1259,7 +1268,8 @@ export class RunnerCore {
       // it — the retry correlation marks the opening; assistant-owned
       // attention yields to the new run, and a genuinely new run clears
       // everything, as every omp run still does.
-      const retryOpening = this.runtime !== "omp" && this.runtime !== "pi" && this.retryAttempt !== null;
+      const retryOpening = this.retryOpeningPending;
+      this.retryOpeningPending = false;
       if (!(retryOpening && this.attentionOwner !== null && this.attentionOwner !== "assistant")) this.clearAttention();
       this.runEnded = false;
       this.io.clearStatus?.();
@@ -1272,6 +1282,7 @@ export class RunnerCore {
       if (event.type === "auto_retry_start") {
         this.retryAttempt = Number.isInteger(event.attempt) && (event.attempt as number) > 0 ? event.attempt as number : null;
         this.retryFailure = null;
+        if (this.runtime !== "omp" && this.runtime !== "pi") this.retryOpeningPending = true;
       }
       // A successful automatic retry supersedes the failed attempt.
       // OMP keeps its existing clear. A fork's retry start releases only what
@@ -1290,6 +1301,11 @@ export class RunnerCore {
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
     if (opening) {
       this.turn += 1;
+      // A newly accepted prompt is a new user run: any retry correlation (and
+      // its pending opening mark) ended with the previous run.
+      this.retryAttempt = null;
+      this.retryFailure = null;
+      this.retryOpeningPending = false;
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
     }
     // OMP writes its JSONL lazily; re-announce identity after each turn until
@@ -1385,6 +1401,7 @@ export class RunnerCore {
     if (this.runtime !== "pi" && this.runtime !== "omp" && event.type === "agent_settled") {
       this.retryAttempt = null;
       this.retryFailure = null;
+      this.retryOpeningPending = false;
     }
     if (!mapped.activity) return;
     if (event.type === "agent_end" && this.attention === "transient_turn_error") this.clearAttention();
