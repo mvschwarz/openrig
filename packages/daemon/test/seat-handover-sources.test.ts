@@ -746,6 +746,18 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
   });
 
+  it.each(["fresh", "rebuild"])("%s on a runtime whose input box isn't read reports its packet accepted, not seen consumed", async (source) => {
+    const { node } = seedSeat({ resumeToken: "native-abc" });
+    expect((db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(node.id) as { runtime: string }).runtime).toBe("codex");
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true,
+      restorePacket: { status: "accepted", reason: "codex's input box isn't read, so the packet was typed and submitted but not seen consumed" },
+      // Kept for existing readers: typed and submitted is what it has always meant.
+      sideEffects: { startupContextDelivered: true } } });
+  });
+
   it.each(["fresh", "rebuild"])("%s hands the invalidator the handed-over seat's own generation, not a newer same-name row's", async (source) => {
     // Re-running a spec archives a stopped rig and makes a new one with its name; the old one, unarchived and restored
     // while the new one is stopped, records a newer session under the seat's name, and is then archived again.

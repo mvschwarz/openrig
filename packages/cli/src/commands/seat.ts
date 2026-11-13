@@ -177,7 +177,7 @@ interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   sideEffects: {
@@ -399,7 +399,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
     }
     if (outcome.primedArtifacts.length > 0) {
-      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      const heading = result.restorePacket ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
@@ -408,7 +408,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Rebuild chain was EMPTY: ${outcome.emptyChainReason}`);
     }
   }
-  if (result.sideEffects.startupContextDelivered) {
+  if (result.sideEffects.startupContextDelivered && result.restorePacket?.status === "accepted") {
+    // Typed and submitted on a runtime whose input box isn't read: delivered as far as OpenRig can tell, no further.
+    console.log(`The ${result.source.mode === "rebuild" ? "rebuild priming packet" : "captured startup context (restore packet)"} was typed and submitted to the successor; ${result.restorePacket.reason}.`);
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+  } else if (result.sideEffects.startupContextDelivered) {
     if (result.source.mode === "rebuild") {
       console.log("The rebuild priming packet was delivered to the successor.");
     } else {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import type { EventBus } from "./event-bus.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./policies/types.js";
 import { artifactPoolReadyPolicy } from "./policies/artifact-pool-ready.js";
 import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js";
@@ -78,6 +79,9 @@ export interface DeliveryOutcome {
   nextAction?: string;
   terminalReason?: string;
   memberOutcomes?: Record<string, DeliveryOutcome>;
+  /** What the attempt's own result says happened, in the shared words (member-connection.v1): `ok` with a fact other than
+   *  render-verified `accepted` was taken by the route, not seen. Absent where no send result was read. */
+  fact?: ReturnType<typeof readSendOutcome>;
 }
 
 export interface WatchdogDeliverySource {
@@ -786,9 +790,12 @@ export class WatchdogPolicyEngine {
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
-    const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined ? notes
+    // The history says what happened in the shared words, beside its status: a reminder recorded `sent` was taken by the
+    // route, and render-verified only when the screen showed it. Banking a receipt still follows `status` alone.
+    const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined && delivery.fact === undefined ? notes
       : { ...(notes ?? {}), ...(delivery.inputPhase === undefined ? {} : { deliveryInputPhase: delivery.inputPhase }),
-        ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }) };
+        ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }),
+        ...(delivery.fact === undefined ? {} : { deliveryFact: delivery.fact.fact, ...(delivery.fact.renderVerified ? { deliveryRenderVerified: true } : {}) }) };
     const receiptNotes = delivery.retryAt || delivery.nextAction || delivery.occurrenceTracked
       ? { ...(deliveryNotes ?? {}), ...(delivery.retryAt ? { retryAt: delivery.retryAt } : {}),
         ...(delivery.nextAction ? { nextAction: delivery.nextAction } : {}),

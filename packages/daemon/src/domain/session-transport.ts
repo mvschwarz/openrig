@@ -31,7 +31,7 @@ import {
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
-import { readSendOutcome } from "./connection-contract.js";
+import { declaredCapabilities, readSendOutcome } from "./connection-contract.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -4202,8 +4202,11 @@ export class SessionTransport {
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
+        // A dialog is read only on a runtime declared to support it (member-connection.v1, observe.dialog); the runtime
+        // then says which screen reader it is.
+        const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
-        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4223,7 +4226,7 @@ export class SessionTransport {
         // Codex's /model picker fires no hook either, and Codex opens it during a running turn too. After any fresh
         // hook short of a permission request, only a current selector recognized in full refuses (the dialogue-only
         // read skips the numbered-row scan, so history, drafts and a busy pane with no picker still deliver).
-        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && input.runtime === "codex") {
+        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && dialogRead && input.runtime === "codex") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,

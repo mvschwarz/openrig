@@ -878,6 +878,24 @@ describe("rig seat status", () => {
     expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
+  it("handover fresh human output says an accepted packet was typed and submitted, not that it was delivered", async () => {
+    const reason = "codex's input box isn't read, so the packet was typed and submitted but not seen consumed";
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "accepted", reason },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: true },
+    } }, []);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain(`The captured startup context (restore packet) was typed and submitted to the successor; ${reason}.`);
+    expect(output).not.toContain("restore packet) was delivered");
+  });
+
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
     const reason = "the input box could not be observed";
     const deps = makeDeps({ status: 200, data: {

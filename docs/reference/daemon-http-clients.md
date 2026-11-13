@@ -218,6 +218,15 @@ Each typed send also records what happened to it, in the daemon's `transport.del
 screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`; `reporter` says who established it.
 None of them means the member read the work: picking it up is a claim on the row.
 
+What reads these declarations:
+- **A handover's packet.** Only a runtime declared with `continuity.restorePacketConfirmation` has its input box read
+  until the restore or priming packet leaves it. On any other runtime the handover's result carries
+  `restorePacket: { status: "accepted", reason }`: typed and submitted, not seen consumed. `sideEffects.startupContextDelivered`
+  stays `true` there for existing readers and means the same thing, accepted; read `restorePacket` for what was seen.
+- **A send's dialog check.** A dialog or picker is read before typing only on a runtime declared with `observe.dialog`.
+- **A watchdog's history.** Each delivery's history notes carry `deliveryFact`, plus `deliveryRenderVerified: true` when
+  the screen showed it. A reminder recorded `sent` with no `deliveryRenderVerified` was taken by the route, not seen.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
