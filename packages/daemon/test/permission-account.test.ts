@@ -188,18 +188,37 @@ describe("a seat's planned permission on restore", () => {
   it.each([
     [{ podAware: false }, "runtime from its resume token"],
     [{ podAware: true, startupContext: false }, "no saved startup context"],
-    [{ podAware: undefined, startupContext: undefined }, "No saved snapshot names this seat"],
-  ])("names the restore path it can't settle (%o)", (path, words) => {
-    const { db, node } = seat("claude-code");
+    [{ podAware: undefined, startupContext: undefined }, "no saved snapshot names this seat"],
+  ])("reads a restore path it can't settle as unknown with the reason, never a definite mode (%o)", (path, words) => {
+    const { db, rigRepo, node } = seat("claude-code");
+    attach(rigRepo, db, node.id, "builtin:yolo", "full_bypass");
     const restored = planRestorePermission(db, { ...inputs(node.id, () => "floor"), ...path }, env);
-    expect(restored.basis === "planned" ? restored.unknown.join(" ") : "").toContain(words);
+    expect(restored).toEqual({ basis: "unknown", runtime: "claude-code", summary: expect.stringContaining(words) });
+    expect(restored.summary).not.toContain("On restore");
   });
 
-  it("adds no path note for a pod seat with saved startup context, the path restore's posture is exact for", () => {
+  it("plans only the path restore's posture is exact for: a pod seat with saved startup context", () => {
     const { db, node } = seat("claude-code");
     const restored = planRestorePermission(db, inputs(node.id, () => "floor"), env);
-    const notes = restored.basis === "planned" ? restored.unknown.join(" ") : "";
-    expect(notes).toContain("This is the plan for restoring this seat");
-    for (const words of ["resume token", "startup context", "No saved snapshot"]) expect(notes).not.toContain(words);
+    expect(restored.basis).toBe("planned");
+    expect(restored.summary.startsWith("On restore: ")).toBe(true);
+    expect(restored.basis === "planned" ? restored.unknown.join(" ") : "").toContain("This is the plan for restoring this seat");
+  });
+
+  // Startup makes the permission decision for every runtime, Pi included, and fails the seat on its error.
+  it("reads unknown when startup would refuse a Pi seat's choice, made for another runtime or unreadable", () => {
+    const { db, node } = seat("pi");
+    expect(planRestorePermission(db, { ...inputs(node.id, () => "floor"), runtime: "pi" }, env))
+      .toMatchObject({ basis: "planned", summary: "Pi has no native permission policy; its resource trust is set at launch." });
+    new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "plan" }, "person@host", "before the switch");
+    const changed = planRestorePermission(db, { ...inputs(node.id, () => "floor"), runtime: "pi" }, env);
+    expect(changed).toMatchObject({ basis: "unknown", runtime: "pi" });
+    expect(changed.summary).toContain("Seat runtime changed since permission selection");
+    // A stored choice is only ever Claude's or Codex's (the table checks it); an unreadable mode fails startup's read first.
+    db.prepare("UPDATE node_permission_selections SET mode = 'not-a-mode' WHERE node_id = ?").run(node.id);
+    const unreadable = planRestorePermission(db, { ...inputs(node.id, () => "floor"), runtime: "pi" }, env);
+    expect(unreadable).toMatchObject({ basis: "unknown", runtime: "pi" });
+    expect(unreadable.summary).toContain("Invalid persisted native permission selection");
+    expect(unreadable.summary).not.toContain("Pi has no native permission policy");
   });
 });

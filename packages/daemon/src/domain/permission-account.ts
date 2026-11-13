@@ -190,25 +190,27 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
 export type RestorePermissionPreview = PermissionAccount | { basis: "unknown"; runtime: string | null; summary: string };
 
 /** One seat's permission as a restore will start it, for the plan previews (`rig up --existing --plan`, `rig launch
- *  --plan`): restore's own posture through the same NativePermissionStore.apply its launch calls. `podAware` and
- *  `startupContext` come from the snapshot restore reads (undefined when there isn't one yet); they name the paths whose
- *  posture this read can't settle. A permission fact restore would refuse on reads as unknown, never guessed. */
+ *  --plan`): restore's own posture through the same NativePermissionStore.apply its launch calls. It's planned only for
+ *  the path that posture is exact for, a pod seat with saved startup context; `podAware` and `startupContext` come from
+ *  the snapshot restore reads (undefined when no saved node names the seat). Every other path, and a permission fact
+ *  restore would refuse on, reads unknown with the reason, never a definite mode. */
 export function planRestorePermission(db: Database.Database, input: {
   nodeId: string; seat: string; runtime: string | null;
   restorePosture: () => NonNullable<NodeBinding["launchPosture"]>;
   podAware?: boolean; startupContext?: boolean;
 }, env: NodeJS.ProcessEnv = process.env): RestorePermissionPreview {
+  const unknown = (reason: string): RestorePermissionPreview => ({ basis: "unknown", runtime: input.runtime, summary: `Unknown: ${reason}` });
+  if (input.podAware === undefined) return unknown("no saved snapshot names this seat yet, so which launch path restore takes for it isn't known.");
+  if (!input.podAware) return unknown("restore takes this seat's runtime from its resume token, which this read doesn't know.");
+  if (input.startupContext === false) return unknown("this seat has no saved startup context, so restore starts it fresh and re-reads its policy then.");
+  if (input.runtime === null) return unknown("this seat's runtime isn't recorded.");
   try {
-    const account = planPermissionAccount(db, input.nodeId, input.seat, input.runtime, env, { launchPosture: input.restorePosture() });
-    if (input.podAware === undefined) {
-      account.unknown.push("No saved snapshot names this seat yet, so which launch path restore takes for it isn't known here.");
-    } else if (!input.podAware) {
-      account.unknown.push("Restore takes this seat's runtime from its resume token.");
-    } else if (input.startupContext === false) {
-      account.unknown.push("This seat has no saved startup context, so restore starts it fresh and re-reads its policy then; that can differ from this posture.");
-    }
-    return account;
+    const launchPosture = input.restorePosture();
+    // Startup makes this decision for every runtime (StartupOrchestrator's apply) and fails the seat on its error, so a
+    // choice it would refuse, even on a runtime OpenRig sets no native argument for, reads unknown here too.
+    new NativePermissionStore(db).apply({ nodeId: input.nodeId, launchPosture } as NodeBinding, input.runtime);
+    return planPermissionAccount(db, input.nodeId, input.seat, input.runtime, env, { launchPosture });
   } catch (error) {
-    return { basis: "unknown", runtime: input.runtime, summary: `Permission unknown: ${(error as Error).message}` };
+    return unknown((error as Error).message);
   }
 }

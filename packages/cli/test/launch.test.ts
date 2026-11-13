@@ -114,6 +114,25 @@ describe("rig launch --seats", () => {
     expect(logs.join("\n")).not.toContain("Launched");
   });
 
+  it.each([
+    ["no saved snapshot names this seat yet, so which launch path restore takes for it isn't known."],
+    ["restore takes this seat's runtime from its resume token, which this read doesn't know."],
+    ["this seat has no saved startup context, so restore starts it fresh and re-reads its policy then."],
+  ])("--plan prints an unsettled target's permission as unknown with the reason: %s", async (reason) => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: { ok: true, planOnly: true, snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          targetNodes: [{ nodeId: "n-1", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code", summary: `Unknown: ${reason}` } }],
+          nonTargetEffects: { mode: "detach_and_hold", reason: "operator hold", affected: [{ logicalId: "dev.guard", reason: "operator hold" }] } },
+      },
+    });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--hold-reason", "operator hold", "--plan"]);
+    expect(logs.join("\n")).toContain(`Targets:\n  dev.driver: Unknown: ${reason}`);
+    expect(logs.join("\n")).not.toContain("On restore");
+  });
+
   it("passes --plan through and renders non-target effects without claiming launch", async () => {
     const deps = makeDeps({
       "launch-subset": {
