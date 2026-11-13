@@ -231,6 +231,7 @@ With `needs-me.read` supported:
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the
