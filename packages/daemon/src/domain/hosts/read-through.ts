@@ -68,7 +68,6 @@ export const READ_THROUGH_ALLOWLIST = [
   // target keep its origin host — the detail read crosses the edge with the
   // same GET discipline as the reads above (origin shape stays the law).
   "/api/scopes/slice",
-  "/api/specs/library/:id/review",
 ] as const;
 
 export function isReadThroughPath(path: string): boolean {
