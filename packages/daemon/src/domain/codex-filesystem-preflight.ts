@@ -32,6 +32,8 @@ const accessRank = { deny: 0, read: 1, write: 2 };
 const isAccess = (value: unknown): value is CodexFilesystemAccess => value === "read" || value === "write" || value === "deny";
 const canonicalKey = (key: string) => key === ":project_roots" ? ":workspace_roots" : key;
 const literalAbsolute = (key: string) => path.isAbsolute(key) && path.normalize(key) === key && !/[?*\[\]{}]/.test(key);
+const nativeSelectors = new Set([":root", ":minimal", ":workspace_roots", ":tmpdir", ":slash_tmp"]);
+const literalHomePath = (key: string) => key.startsWith("~/") && path.normalize(key) === key && !/[?*\[\]{}]/.test(key);
 
 /** Compare only established flat coverage. Native expansion, inheritance and
  * unfamiliar syntax stay unknown; this is not a second sandbox implementation. */
@@ -53,12 +55,18 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
   const at = (rules: Record<string, unknown>, key: string): CodexFilesystemAccess | undefined => {
     if (ambiguous.has(key)) return undefined;
     if (isAccess(rules[key])) return rules[key];
-    if (!literalAbsolute(key)) return undefined;
-    const ancestors = Object.keys(rules).filter(root => literalAbsolute(root) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
+    const fullRoot = rules[":root"] ?? (literalAbsolute(path.sep) ? rules[path.sep] : undefined);
+    // These are known native grants, not unfamiliar syntax. A newly merged
+    // selector expands the authored policy unless an authored full-root grant
+    // already covers it. Minimal read does not authorize full-root read.
+    if (nativeSelectors.has(key)) return isAccess(fullRoot) ? fullRoot : "deny";
+    if (!literalAbsolute(key) && !literalHomePath(key)) return undefined;
+    const ancestors = Object.keys(rules).filter(root => (literalAbsolute(root) || literalHomePath(root)) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
       .sort((a, b) => b.length - a.length);
     const root = ancestors[0];
     if (root) return isAccess(rules[root]) ? rules[root] : undefined;
-    if (isAccess(rules[":root"])) return rules[":root"];
+    if (isAccess(fullRoot)) return fullRoot;
+    if (literalHomePath(key)) return "deny";
     if (Object.keys(rules).some(rule => !literalAbsolute(rule) && rule !== ":minimal")) return undefined;
     // :minimal read cannot grant write; its native read coverage is not
     // enumerated here, so extra reads outside a literal ancestor stay unknown.

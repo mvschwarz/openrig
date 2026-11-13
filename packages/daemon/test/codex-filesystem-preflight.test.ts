@@ -139,6 +139,26 @@ describe("Codex seat filesystem verifier reader boundary", () => {
 });
 
 describe("compatible policies and inconclusive reads", () => {
+  it.each([":root", ":minimal", ":workspace_roots", ":project_roots", ":tmpdir", ":slash_tmp", "~/x"])(
+    "refuses a known extra write grant at %s, including beside an unfamiliar representation", key => {
+      const read = config();
+      Object.assign(read.config.permissions["openrig-seat"].filesystem, { [key]: "write", future: { access: "future" } });
+      expect(decide(read)).toMatchObject({ ok: false });
+    });
+
+  it("refuses full-root read beyond minimal read", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { ":root": "read" });
+    expect(decide(read)).toMatchObject({ ok: false });
+  });
+
+  it("accepts a known selector grant already covered by an authored full-root grant", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { ":root": "write", ":workspace_roots": "write", "~/x": "read" });
+    expect(decideCodexFilesystemPolicy({ permissions: { ...permissions, filesystem: { ...permissions.filesystem, ":root": "write" } },
+      configRead: read, requirementsRead: { requirements: null } })).toEqual({ ok: true, verified: true });
+  });
+
   it.each(["default_permissions", "approval_policy"])("reports a future %s representation without inventing a conflict", key => {
     const read = config();
     Object.assign(read.config, { [key]: { selection: "future-native-format" } });

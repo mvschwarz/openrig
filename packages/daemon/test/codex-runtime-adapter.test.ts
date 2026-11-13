@@ -2987,7 +2987,8 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
   it("keeps a named configuration profile and the authored filesystem policy on resume", async () => {
     const tmux = mockTmux();
     const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: false, reason: "profile reader unavailable" }));
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy,
+      verifyProfilePreflight: async profile => ({ ok: true, profile }) });
     expect(await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: filesystemChoice, codexConfigProfile: "named" },
       { name: "dev-a@test-rig", resumeToken: "thread-A" })).toMatchObject({ ok: true,
         core: expect.stringMatching(/-p 'named' .*default_permissions="openrig-seat"/), appliedLaunch: { reason: "policy not verified: profile reader unavailable" } });
@@ -3009,6 +3010,34 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
     const refusing = new CodexResumeAdapter(tmux, { verifyFilesystemPolicy: async () => ({ ok: false, error: "policy mismatch" }) });
     expect(await refusing.resume("dev-a@test-rig", kind, "thread-A", "/same", undefined, "floor", undefined, undefined,
       undefined, undefined, undefined, undefined, filesystemChoice)).toMatchObject({ ok: false, message: "policy mismatch" });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it.each(["fresh", "resume", "codex_id", "codex_last"])("checks a filesystem seat's named profile load before dispatch on %s", async kind => {
+    const tmux = mockTmux();
+    const verifyFilesystemPolicy: CodexFilesystemVerifier = async () => ({ ok: true, verified: false, reason: "profile configuration cannot be compared" });
+    if (kind === "fresh" || kind === "resume") {
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy,
+        verifyProfilePreflight: async profile => ({ ok: false, profile, error: "profile failed to load" }) });
+      const binding = { ...makeBinding(), codexPermissions: filesystemChoice, codexConfigProfile: "broken" };
+      const result = kind === "fresh" ? await adapter.launchHarness(binding, { name: "dev-a@test-rig" })
+        : await adapter.buildResumeCommand(binding, { name: "dev-a@test-rig", resumeToken: "thread-A" });
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("profile failed to load") });
+    } else {
+      const restore = new CodexResumeAdapter(tmux, { verifyFilesystemPolicy, exec: async () => { throw new Error("profile failed to load"); } });
+      expect(await restore.resume("dev-a@test-rig", kind, "thread-A", "/same", "broken", "floor", undefined, undefined,
+        undefined, undefined, undefined, undefined, filesystemChoice)).toMatchObject({ ok: false, message: expect.stringContaining("profile failed to load") });
+    }
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("refuses a filesystem seat's broken named profile during pre-cutover checks", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(),
+      verifyFilesystemPolicy: async () => ({ ok: true, verified: false, reason: "profile configuration cannot be compared" }),
+      verifyProfilePreflight: async profile => ({ ok: false, profile, error: "profile failed to load" }) });
+    expect(await adapter.preflightLaunch({ ...makeBinding(), codexPermissions: filesystemChoice, codexConfigProfile: "broken" }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("profile failed to load") });
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 });

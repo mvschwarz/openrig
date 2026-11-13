@@ -109,7 +109,7 @@ export class CodexResumeAdapter {
     // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
     await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
 
-    if (codexConfigProfile?.trim() && !filesystem) {
+    if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
       const execFn = this.options.exec ?? ((cmd: string) => execRuntimeProbe("codex.resume.profile_preflight", cmd,
         codexHome ? { cwd, env: { ...process.env, CODEX_HOME: codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}));

@@ -905,6 +905,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const decision = await this.checkFilesystemPolicy(binding);
     if (!decision) return { ok: true };
     if (!decision.ok) return decision;
+    const profile = await this.checkProfileLoad(binding);
+    if (!profile.ok) return profile;
     this.filesystemPreflight.set(binding, decision);
     return decision.verified ? { ok: true } : { ok: true, warnings: [codexPolicyWarning(decision.reason)] };
   }
@@ -918,6 +920,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     } catch {
       return { ok: true, verified: false, reason: "Native Codex configuration reader failed" };
     }
+  }
+
+  private async checkProfileLoad(binding: NodeBinding): Promise<{ ok: true } | { ok: false; error: string }> {
+    const profile = binding.codexConfigProfile?.trim();
+    if (!profile) return { ok: true };
+    const own = this.ownHome(binding);
+    const probe = await (own ? this.verifyProfilePreflight(profile, binding.cwd, own) : this.verifyProfilePreflight(profile, binding.cwd));
+    return probe.ok ? { ok: true } : { ok: false, error: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
   }
 
   async launchHarness(
@@ -1104,7 +1114,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
     opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    const decision = this.filesystemPreflight.get(binding) ?? await this.checkFilesystemPolicy(binding);
+    const checkedBeforeCutover = this.filesystemPreflight.get(binding);
+    const decision = checkedBeforeCutover ?? await this.checkFilesystemPolicy(binding);
     this.filesystemPreflight.delete(binding);
     if (decision && !decision.ok) return decision;
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
@@ -1154,14 +1165,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
-    if (profile && !filesystemPermissions) {
-      const probeResult = await (own ? this.verifyProfilePreflight(profile, binding.cwd, own) : this.verifyProfilePreflight(profile, binding.cwd));
-      if (!probeResult.ok) {
-        return {
-          ok: false,
-          error: `${probeResult.error}${probeResult.migrationHint ? `\n  Fix: ${probeResult.migrationHint}` : ""}`,
-        };
-      }
+    if (profile && !checkedBeforeCutover) {
+      const loaded = await this.checkProfileLoad(binding);
+      if (!loaded.ok) return loaded;
     }
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
