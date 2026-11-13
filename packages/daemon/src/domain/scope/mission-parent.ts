@@ -1,0 +1,81 @@
+import fs from "node:fs";
+import path from "node:path";
+import YAML from "yaml";
+import { resolveNodeFile } from "./node-file.js";
+
+/** One authored node in a single project's missions tree. IDs are read, never invented. */
+export interface ParentScopeNode {
+  id: string;
+  name: string;
+  kind: "mission" | "slice";
+  path: string;
+  missionId: string;
+  parent: string | null;
+  intent: string | null;
+  status: string | null;
+}
+
+function frontmatter(file: string): Record<string, unknown> {
+  const text = fs.readFileSync(file, "utf8");
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!match) return {};
+  const value: unknown = YAML.parse(match[1]!);
+  if (value === null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error(`${file}: frontmatter must be a mapping`);
+  return value as Record<string, unknown>;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Discover declared missions and slices, including closed slices, under one root. */
+export function readParentScope(root: string): ParentScopeNode[] {
+  if (!fs.existsSync(root)) return [];
+  const nodes: ParentScopeNode[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const missionPath = path.join(root, entry.name), file = resolveNodeFile(missionPath);
+    if (!file) continue;
+    const fm = frontmatter(file), id = stringValue(fm.id ?? fm.dotId);
+    if (!id) continue;
+    const manifest = path.join(missionPath, "mission.yaml");
+    const data: unknown = fs.existsSync(manifest) ? YAML.parse(fs.readFileSync(manifest, "utf8")) : null;
+    const meta = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).metadata : null;
+    const metadata = meta && typeof meta === "object" && !Array.isArray(meta) ? meta as Record<string, unknown> : {};
+    nodes.push({ id, name: entry.name, kind: "mission", path: missionPath, missionId: id,
+      parent: stringValue(fs.existsSync(manifest) ? metadata.parent : fm.parent), intent: stringValue(fm.intent), status: stringValue(metadata.status ?? fm.status) });
+    for (const dir of ["slices", "closed"]) {
+      const sliceRoot = path.join(missionPath, dir);
+      if (!fs.existsSync(sliceRoot)) continue;
+      for (const slice of fs.readdirSync(sliceRoot, { withFileTypes: true })) {
+        if (!slice.isDirectory()) continue;
+        const slicePath = path.join(sliceRoot, slice.name), nodeFile = resolveNodeFile(slicePath);
+        if (!nodeFile) continue;
+        const sfm = frontmatter(nodeFile), sid = stringValue(sfm.id ?? sfm.dotId);
+        if (sid) nodes.push({ id: sid, name: slice.name, kind: "slice", path: slicePath, missionId: id,
+          parent: null, intent: stringValue(sfm.intent), status: stringValue(sfm.status) });
+      }
+    }
+  }
+  return nodes;
+}
+
+/** Require an unambiguous node and reject a link that reaches its own mission. */
+export function validateMissionParent(nodes: ParentScopeNode[], missionId: string, parentId: string): ParentScopeNode {
+  const unique = (id: string) => {
+    const found = nodes.filter((node) => node.id === id);
+    if (found.length !== 1) throw new Error(`Parent scope '${id}' resolves to ${found.length} nodes; it must resolve uniquely.`);
+    return found[0]!;
+  };
+  const parent = unique(parentId);
+  const seen = new Set<string>();
+  let current: ParentScopeNode | null = parent;
+  while (current) {
+    const owner: ParentScopeNode = current.kind === "slice" ? unique(current.missionId) : current;
+    if (owner.id === missionId || seen.has(owner.id)) throw new Error(`Parent '${parentId}' would form or enter a cycle.`);
+    seen.add(owner.id);
+    current = owner.parent ? unique(owner.parent) : null;
+  }
+  return parent;
+}

@@ -294,6 +294,37 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
                 body = f"intent: {value}" if value else "MISSING INTENT — no readable intent: field"
             output.append(f"\n### {label} · {spec.name}\n{body}")
 
+            # Parent links are logical edges, not filesystem ancestors. Ask the
+            # scope reader to resolve IDs so tracing uses the same rules as CLI.
+            manifest = read(node / "mission.yaml") if (node / "mission.yaml").is_file() else None
+            link_source = manifest if manifest is not None else text
+            if re.search(r"(?m)^\s*parent:\s*[^\s#]", link_source):
+                seen = set()
+                current = node
+                while current not in seen:
+                    seen.add(current)
+                    raw = rig_output("scope", "mission", "show", str(current), "--workspace", str(current.parent.parent), "--json")
+                    try:
+                        mission = json.loads(raw)["mission"]
+                        parent_id = mission["parentId"]
+                        parent = mission["parent"]
+                    except (TypeError, ValueError, KeyError):
+                        failures.append(f"parent link unavailable: {current}")
+                        output.append(f"PARENT TRACE GAP — unable to read parent link at {current}")
+                        break
+                    if not parent_id:
+                        break
+                    if not parent:
+                        failures.append(f"unresolved parent {parent_id}: {current}")
+                        output.append(f"PARENT TRACE GAP — {parent_id} does not resolve uniquely")
+                        break
+                    output.append(f"PARENT · {parent_id} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
+                    parent_path = Path(parent["path"])
+                    current = parent_path.parent.parent if parent["kind"] == "slice" else parent_path
+                else:
+                    failures.append(f"parent cycle: {current}")
+                    output.append(f"PARENT TRACE GAP — cycle at {current}")
+
         notes, resolution_error = resolve_notes(node)
         if resolution_error:
             failures.append(resolution_error)

@@ -9,6 +9,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
+import YAML from "yaml";
+import { readParentScope, validateMissionParent } from "@openrig/daemon/mission-parent";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
@@ -277,6 +279,8 @@ function buildSliceShowCommand(): Command {
           .map((e) => ({ name: e.name, kind: e.isDirectory() ? "dir" : "file" as const }));
         // FR-5: derive read-time trust from (stage x verified) — NEVER stored.
         const trust = deriveScopeTrust(slice.frontmatter);
+        const scopeNodes = readParentScope(missionsRoot);
+        const childMissions = slice.id && scopeNodes.filter((node) => node.id === slice.id).length === 1 ? scopeNodes.filter((node) => node.kind === "mission" && node.parent === slice.id) : [];
         const payload = {
           ok: true,
           slice: {
@@ -289,6 +293,7 @@ function buildSliceShowCommand(): Command {
             trust,
             readme,
             children,
+            childMissions,
           },
         };
         if (json) {
@@ -300,6 +305,7 @@ function buildSliceShowCommand(): Command {
           out.write(formatTrustLine(trust));
           out.write(`  path: ${slice.absPath}\n`);
           out.write(`  children: ${children.length}\n`);
+          if (childMissions.length) out.write(`  child missions: ${childMissions.map((node) => node.name).join(", ")}\n`);
           if (readme) {
             out.write("\n--- README ---\n");
             out.write(readme);
@@ -758,6 +764,11 @@ function buildMissionShowCommand(): Command {
         }));
         // FR-5: derive read-time trust from (stage x verified) — NEVER stored.
         const trust = deriveScopeTrust(mission.frontmatter);
+        const scopeNodes = readParentScope(missionsRoot);
+        const own = scopeNodes.find((node) => node.kind === "mission" && node.path === mission.absPath);
+        const parentMatches = own?.parent ? scopeNodes.filter((node) => node.id === own.parent) : [];
+        const parent = parentMatches.length === 1 ? parentMatches[0] : null;
+        const childMissions = mission.id && scopeNodes.filter((node) => node.id === mission.id).length === 1 ? scopeNodes.filter((node) => node.kind === "mission" && node.parent === mission.id) : [];
         const payload = {
           ok: true,
           mission: {
@@ -771,6 +782,9 @@ function buildMissionShowCommand(): Command {
             trust,
             readme,
             slices,
+            parent,
+            parentId: own?.parent ?? null,
+            childMissions,
           },
         };
         if (json) {
@@ -778,6 +792,7 @@ function buildMissionShowCommand(): Command {
         } else {
           out.write(`Mission: ${mission.name}\n`);
           out.write(`  id: ${mission.id ?? "—"}\n`);
+          if (own?.parent) out.write(`  parent: ${parent?.name ?? own.parent} (${own.parent})\n`);
           out.write(formatTrustLine(trust));
           out.write(`  active slices: ${mission.activeSliceCount}\n`);
           out.write(`  shipped slices: ${mission.shippedSliceCount}\n`);
@@ -844,6 +859,7 @@ function buildMissionCreateCommand(): Command {
     .option("--title <text>", "Display title (defaults to titlecased name)")
     .option("--intent <text>", "Authored intent stored in SPEC.md frontmatter (defaults to title)")
     .option("--depends-on <dot-id...>", "Advisory build-order dependencies on sibling mission dot-IDs")
+    .option("--parent <dot-id>", "Mission or slice this mission breaks down")
     .option("--no-notes", "Skip NOTES.md scaffolding")
     .option("--no-mission-notes", "Deprecated alias for --no-notes")
     .option("--json", "Machine-readable output")
@@ -909,6 +925,11 @@ function buildMissionCreateCommand(): Command {
         const title = opts.title ?? titleFromSlug(name.replace(/^release-/, ""));
         const intent = opts.intent ?? title;
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        if (opts.parent !== undefined) {
+          const nodes = readParentScope(missionsRoot);
+          if (nodes.some((node) => node.id === id)) throw new ScopeCliError({ fact: `Mission ID ${id} is already in use.`, consequence: "Mission not created.", action: "Choose an unused mission ID." });
+          validateMissionParent(nodes, id, opts.parent);
+        }
         const project = id.split(".")[0];
         for (const dependency of dependsOn) {
           if (dependency === id) {
@@ -964,7 +985,13 @@ function buildMissionCreateCommand(): Command {
         // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
         const readmePath = path.join(absPath, "SPEC.md");
         fs.writeFileSync(readmePath, readmeBody, "utf8");
-        fs.writeFileSync(path.join(absPath, "mission.yaml"), missionManifest(name), "utf8");
+        let manifestBody = missionManifest(name);
+        if (opts.parent !== undefined) {
+          const manifest = YAML.parseDocument(manifestBody);
+          manifest.setIn(["metadata", "parent"], opts.parent);
+          manifestBody = manifest.toString();
+        }
+        fs.writeFileSync(path.join(absPath, "mission.yaml"), manifestBody, "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
         const capabilityDeltaPath = capabilityDeltaBody
@@ -1012,6 +1039,38 @@ function buildMissionCreateCommand(): Command {
       } catch (err) {
         fail(err, json, out);
       }
+    });
+}
+
+function buildMissionParentCommand(): Command {
+  return new Command("parent")
+    .description("Set or clear the mission or slice this mission breaks down")
+    .argument("<mission>", "Mission name or path")
+    .argument("[parent]", "Parent mission or slice dot-ID")
+    .option("--clear", "Remove the parent link")
+    .option("--json", "Machine-readable output")
+    .action(async (name: string, parent: string | undefined, opts, command) => {
+      const out = makeStdout(), json = Boolean(opts.json);
+      try {
+        if (Boolean(parent) === Boolean(opts.clear)) throw new ScopeCliError({ fact: "Choose a parent ID or --clear.", consequence: "No parent was changed.", action: "Pass exactly one parent ID or --clear." });
+        const root = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const mission = findMission(root, name);
+        if (!mission.id) throw new ScopeCliError({ fact: `Mission ${name} has no authored ID.`, consequence: "No parent was changed.", action: "Give the mission a stable ID first." });
+        const nodes = readParentScope(root);
+        if (nodes.filter((node) => node.id === mission.id).length !== 1) throw new Error(`Mission ID '${mission.id}' is not unique.`);
+        if (parent) validateMissionParent(nodes, mission.id, parent);
+        const manifestPath = path.join(mission.absPath, "mission.yaml");
+        if (fs.existsSync(manifestPath)) {
+          const doc = YAML.parseDocument(fs.readFileSync(manifestPath, "utf8"));
+          if (doc.errors.length) throw doc.errors[0];
+          if (parent) doc.setIn(["metadata", "parent"], parent);
+          else doc.deleteIn(["metadata", "parent"]);
+          fs.writeFileSync(manifestPath, doc.toString(), "utf8");
+        } else {
+          updateFrontmatter(mission.readmePath!, { parent: parent ?? null });
+        }
+        emit(out, { ok: true, mission: mission.name, parent: parent ?? null }, json, [`Mission ${mission.name} parent: ${parent ?? "(none)"}`]);
+      } catch (err) { fail(err, json, out); }
     });
 }
 
@@ -1244,6 +1303,21 @@ function buildAuditCommand(): Command {
           ...missionResult.findings.map((f) => ({ ...f, scope: "mission" as const, scopeName: missionName })),
           ...sliceResults.flatMap((s) => s.result.findings.map((f) => ({ ...f, scope: "slice" as const, scopeName: s.name }))),
         ];
+        const parentNodes = readParentScope(missionsRoot);
+        const audited = parentNodes.find((node) => node.kind === "mission" && node.path === missionDir);
+        const parentFindings: string[] = [];
+        if (audited?.parent) {
+          try { validateMissionParent(parentNodes, audited.id, audited.parent); }
+          catch (error) { parentFindings.push((error as Error).message); }
+        }
+        if (audited) {
+          const children = parentNodes.filter((node) => node.kind === "mission" && node.parent && (node.parent === audited.id || parentNodes.some((target) => target.kind === "slice" && target.missionId === audited.id && target.id === node.parent)));
+          for (const child of children) {
+            const target = parentNodes.filter((node) => node.id === child.parent);
+            if (target.length !== 1) parentFindings.push(`Child ${child.id} has an ambiguous parent ${child.parent}.`);
+            else if (target[0]!.kind === "slice" && ["done", "closed", "shipped"].includes(target[0]!.status ?? "") && ["active", "in-progress", "wip", "blocked"].includes(child.status ?? "")) parentFindings.push(`Child ${child.id} is active while parent slice ${child.parent} is complete.`);
+          }
+        }
         const hardFindings = allFindings.filter((f) => f.severity === "high");
 
         if (json) {
@@ -1258,8 +1332,8 @@ function buildAuditCommand(): Command {
               // OPR.0.5.0.18 — amendment lineage (present only when re-stamped).
               ...(s.attestations ? { attestations: s.attestations } : {}),
             })),
-            graph,
-            totalFindings: allFindings.length,
+            graph, parentFindings,
+            totalFindings: allFindings.length + parentFindings.length,
           }, null, 2));
           out.write("\n");
           if (hardFindings.length > 0) process.exitCode = 1;
@@ -1290,6 +1364,7 @@ function buildAuditCommand(): Command {
           out.write("\n");
         }
 
+        for (const finding of parentFindings) out.write(`PARENT LINK: ${finding}\n`);
         if (allFindings.length > 0) {
           out.write("FINDINGS:\n");
           for (const f of allFindings) {
@@ -1303,7 +1378,7 @@ function buildAuditCommand(): Command {
           } else {
             out.write(`\nWARN: ${allFindings.length} advisory finding(s)\n`);
           }
-        } else {
+        } else if (!parentFindings.length) {
           out.write("PASS: all scope items have valid rails\n");
         }
       } catch (err) {
@@ -2220,6 +2295,7 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionLsCommand());
   mission.addCommand(buildMissionShowCommand());
   mission.addCommand(buildMissionCreateCommand());
+  mission.addCommand(buildMissionParentCommand());
   mission.addCommand(buildMissionGraphCommand());
   mission.addCommand(buildMissionProgressCommand());
   mission.addCommand(buildMissionRepairCommand());

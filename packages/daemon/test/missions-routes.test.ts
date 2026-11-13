@@ -98,6 +98,17 @@ afterEach(() => {
 });
 
 describe("GET /api/missions/:missionId", () => {
+  it("returns a linked mission even before it has slices", async () => {
+    writeMissionReadme(missionsRoot, "parent", { id: "M.1" });
+    writeSliceInMission(missionsRoot, "parent", "01-work", { id: "M.1.1" });
+    writeMissionReadme(missionsRoot, "child", { id: "M.2", intent: "Follow through" });
+    fs.writeFileSync(path.join(missionsRoot, "child", "mission.yaml"), "metadata:\n  parent: M.1.1\n");
+    const res = await app.request("/api/missions/child");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { parentId: string; parent: { id: string; kind: string } };
+    expect(body.parentId).toBe("M.1.1");
+    expect(body.parent).toMatchObject({ id: "M.1.1", kind: "slice" });
+  });
   it("returns 200 with missionPath + slices filtered to the requested mission", async () => {
     writeSliceInMission(missionsRoot, "getting-started", "first-slice", { status: "active" });
     writeSliceInMission(missionsRoot, "getting-started", "second-slice", { status: "done" });

@@ -227,6 +227,14 @@ describe("PL-slice-story-view-v0 slices routes", () => {
   });
 
   describe("GET /api/slices (list)", () => {
+    it("exposes child missions on their indexed parent slice", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n# Parent\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n# Work\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\n---\n# Child\n", "mission.yaml": "metadata:\n  parent: M.1.1\n" });
+      const res = await app.request("/api/slices?filter=all");
+      const body = await res.json() as { slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
     it("returns 503 with config-hint when slicesRoot is not configured", async () => {
       const emptyIndexer = new SliceIndexer({ slicesRoot: "", dogfoodEvidenceRoot: null, db });
       const emptyProjector = new SliceDetailProjector({ db, indexer: emptyIndexer });

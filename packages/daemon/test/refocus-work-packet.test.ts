@@ -55,6 +55,9 @@ if [ "$1 $2" = "queue whoami" ]; then
 fi
 if [ "$1 $2" = "whoami --json" ]; then printf '{"identity":{"rigName":"demo","sessionName":"builder@demo"}}\\n'; exit 0; fi
 if [ "$1 $2" = "config --json" ]; then printf '{}'; exit 0; fi
+if [ "$1 $2 $3" = "scope mission show" ] && [ -n "$RIG_PARENT_REPLY" ]; then
+  case "$4" in */release-a) printf '%s' "$RIG_PARENT_REPLY";; *) printf '{"mission":{"parentId":null,"parent":null}}';; esac; exit 0
+fi
 if [ "$1 $2" = "scope resolve-notes" ]; then
   if [ -r "$3/NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"NOTES.md"}}\\n' "$3/NOTES.md"; exit 0; fi
   printf '{"ok":true,"resolution":null}\\n'; exit 0
@@ -238,6 +241,14 @@ describe("frontmatterIntent — folded and literal intents", () => {
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {
+  it("traces the logical parent intent, not just filesystem ancestors", () => {
+    const w = world();
+    writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: join(w.missions, "release-b"), kind: "mission", intent: "Ship B" } } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(result.stdout).toContain("intent: Ship B");
+  });
   it("shows one direct candidate as the work, labelled with its source, without a root fallback (W2)", () => {
     const w = world();
     const evidence = deriveWorkCandidates([{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-a"] }], w.missions, nothingElse);
