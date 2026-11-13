@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { PsProjectionService } from "../src/domain/ps-projection.js";
 import type { RigSpec } from "../src/domain/types.js";
 
 describe("persisted pod-aware launch recipes", () => {
@@ -440,6 +442,12 @@ describe("persisted pod-aware launch recipes", () => {
     expect(freshLaunch).not.toHaveBeenCalled();
     expect(setup.sessionRegistry.getSessionsForRig(rig.id).some((entry) => entry.nodeId === node.id && entry.status === "running")).toBe(true);
     expect(setup.sessionRegistry.getBindingForNode(node.id)).toEqual(expect.objectContaining({ tmuxSession: expect.any(String) }));
+    // The kept shell carries restore's harness-not-started marker, so rig ps doesn't count it as a running seat.
+    expect(getNodeInventory(db, rig.id).find((entry) => entry.logicalId === node.logicalId)).toMatchObject({
+      sessionStatus: "running", startupStatus: "attention_required", latestErrorStage: "harness_not_started",
+      latestError: "Harness not started: no usable persisted launch recipe for dev.impl.",
+    });
+    expect(new PsProjectionService({ db }).getEntries().find((entry) => entry.rigId === rig.id)).toMatchObject({ nodeCount: 1, runningCount: 0 });
   });
 
   it.each([

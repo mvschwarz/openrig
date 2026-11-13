@@ -50,7 +50,7 @@ describe("PsProjectionService", () => {
   }
 
   // A pane restore left as a bare shell (no harness started) carries its own marker and isn't counted running. A seat
-  // that needs attention for another reason (an identity question here) is a live seat and still counts, and so does a
+  // that needs attention for another reason (an identity question here) keeps the existing running count, and so does a
   // later launch on a once-bare seat: the marker belongs to the session that recorded it.
   it("a seat restore left as a bare shell isn't counted running; other attention still is", () => {
     const rigId = seedRig("shell-only");
