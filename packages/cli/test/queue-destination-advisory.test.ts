@@ -257,11 +257,12 @@ describe("queue create scope advisories preserve admission and output", () => {
     await queueCommand(deps).parseAsync(args, { from: "user" });
   }
 
+  const scopeAdvisoryCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
+    "scope_check_unavailable", "scope_check_skipped"]);
+
   function handoffScopeAdvisories(data: Record<string, unknown>): Array<Record<string, unknown>> {
     const advisories = Array.isArray(data.advisories) ? data.advisories as Array<Record<string, unknown>> : [];
-    const scopeCodes = new Set(["unresolved_scope", "ambiguous_scope", "empty_scope", "conflicting_scope",
-      "scope_check_unavailable", "scope_check_skipped"]);
-    return advisories.filter(advisory => scopeCodes.has(String(advisory.code)));
+    return advisories.filter(advisory => scopeAdvisoryCodes.has(String(advisory.code)));
   }
 
   function expectHandoffJsonProjection(data: Record<string, unknown>, space?: number): void {
@@ -625,6 +626,74 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(advisory?.message).not.toContain("mission:source-scope");
   });
 
+  it.each(handoffVerbs.flatMap(({ verb, closedState }) => [
+    { label: "inherited", sourceTags: ["mission:source-scope"], requestedTags: undefined, expectedScopeTags: ["mission:source-scope"] },
+    { label: "explicit", sourceTags: ["mission:source-scope"], requestedTags: ["mission:requested-scope"], expectedScopeTags: ["mission:requested-scope"] },
+  ].map(row => ({ ...row, verb, closedState }))))("uses requested $label scope for a successful cross-host $verb response with missing tags", async row => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(row.sourceTags);
+    let reportedPayload: Record<string, unknown> | undefined;
+    const { app, observation } = forwardingApp(receiver, false, undefined, async response => {
+      reportedPayload = await response.clone().json() as Record<string, unknown>;
+      delete reportedPayload.tags;
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(JSON.stringify(reportedPayload), { status: response.status, headers });
+    });
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, row.verb, { json: true, host: "remote-fixture",
+      ...(row.requestedTags === undefined ? {} : { tags: row.requestedTags }) });
+
+    const data = handoffResponses[0]!.data;
+    const [advisory] = handoffScopeAdvisories(data);
+    const created = data.created as Record<string, unknown>;
+    const successorId = deriveCrossHostSuccessorId(original.qitemId, "worker@scope", "remote-fixture");
+    const accepted = receiver.daemon.deps.queueRepo.getById(successorId);
+
+    expect(observation.committedStatuses).toEqual([201]);
+    expect(observation.forwardedDiagnosticHeaders).toEqual([null]);
+    expect(handoffResponses[0]!.status).toBe(201);
+    expect(source.daemon.deps.queueRepo.getById(original.qitemId)?.state).toBe(row.closedState);
+    expect(accepted?.tags).toEqual(crossHostProvenanceTags(row.requestedTags ?? original.tags ?? []));
+    expect(reportedPayload).not.toHaveProperty("tags");
+    expect(created).toEqual(reportedPayload);
+    expect(created).not.toHaveProperty("tags");
+    expect(advisory).toMatchObject({ code: "scope_check_skipped" });
+    expect(advisory?.message).toContain("queue " + row.verb + " scope check skipped for cross-host write");
+    for (const tag of row.expectedScopeTags) expect(advisory?.message).toContain(tag);
+    expect(advisory?.message).toContain("effective scope tag provenance is unknown");
+    expect(advisory?.message).not.toContain("inherited from the source item");
+    expect(advisory?.message).not.toContain("explicit tags supplied on this handoff");
+    expect(scopeLines()).toContain("Note:");
+    for (const tag of row.expectedScopeTags) expect(scopeLines()).toContain(tag);
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
+  it.each(handoffVerbs)("does not infer requested scope when a successful cross-host $verb response explicitly reports empty tags", async ({ verb }) => {
+    const receiver = await fixture("receiver");
+    const original = await seedHandoffSource(["mission:source-scope"]);
+    let reportedPayload: Record<string, unknown> | undefined;
+    const { app } = forwardingApp(receiver, false, undefined, async response => {
+      reportedPayload = await response.clone().json() as Record<string, unknown>;
+      reportedPayload.tags = [];
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(JSON.stringify(reportedPayload), { status: response.status, headers });
+    });
+    setSelfHostId(source.hostId);
+    await handoff(app, original.qitemId, verb, { json: true, host: "remote-fixture", tags: ["mission:requested-scope"] });
+
+    const data = handoffResponses[0]!.data;
+    expect(handoffResponses[0]!.status).toBe(201);
+    expect(data.created).toEqual(reportedPayload);
+    expect((data.created as Record<string, unknown>).tags).toEqual([]);
+    expect(handoffScopeAdvisories(data)).toHaveLength(0);
+    expect(scopeLines()).toBe("");
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
   const crossHostHumanAlertTagCases = [
     {
       name: "inherited scope with --alert addition",
@@ -735,6 +804,10 @@ describe("queue create scope advisories preserve admission and output", () => {
       closed: { qitemId: original.qitemId, state: closedState, closureReason: "handed_off_to" },
       created: { destinationSession: "worker@scope", state: "pending" },
     });
+    const topLevelAdvisories = Array.isArray(receipt.advisories)
+      ? receipt.advisories as Array<Record<string, unknown>>
+      : [];
+    expect(topLevelAdvisories.filter(advisory => scopeAdvisoryCodes.has(String(advisory.code)))).toEqual([]);
     expect((receipt.closed as Record<string, unknown>)).not.toHaveProperty("advisories");
     expect((receipt.created as Record<string, unknown>)).not.toHaveProperty("advisories");
     expect(scopeLines()).toContain("Warning:");
@@ -983,7 +1056,8 @@ describe("queue create scope advisories preserve admission and output", () => {
     return reads;
   }
 
-  function forwardingApp(receiver: Fixture, loseResponse = false, remoteResponse?: () => Response) {
+  function forwardingApp(receiver: Fixture, loseResponse = false, remoteResponse?: () => Response,
+    transformRemoteResponse?: (response: Response) => Promise<Response>) {
     const observation = { forwards: 0, committedStatuses: [] as number[],
       forwardedDiagnosticHeaders: [] as Array<string | null>, forwardedBodies: [] as Array<Record<string, unknown>>,
       receiverPayloads: [] as Array<Record<string, unknown>> };
@@ -1003,12 +1077,12 @@ describe("queue create scope advisories preserve admission and output", () => {
         const previous = getSelfHostId();
         setSelfHostId(receiver.hostId);
         try {
-          const response = remoteResponse
-            ? remoteResponse()
-            : await receiver.app.request("/api/queue/create", { ...init,
-              headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
+          const originResponse = remoteResponse ? null : await receiver.app.request("/api/queue/create", { ...init,
+            headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
+          let response = remoteResponse ? remoteResponse() : originResponse!;
           observation.committedStatuses.push(response.status);
-          if (!remoteResponse && response.status < 400) observation.receiverPayloads.push(await response.clone().json() as Record<string, unknown>);
+          if (originResponse && originResponse.status < 400) observation.receiverPayloads.push(await originResponse.clone().json() as Record<string, unknown>);
+          if (transformRemoteResponse) response = await transformRemoteResponse(response);
           if (loseResponse) {
             await response.text();
             return new Response(new ReadableStream({ start(controller) {

@@ -597,9 +597,12 @@ export function queueRoutes(): Hono {
     // `created` is the origin daemon's row, verbatim. The origin can also report
     // that its own scope check was skipped, without pretending the forwarding
     // daemon inspected remote filesystem state.
-    const acceptedTags = fwd.payload && typeof fwd.payload === "object" && !Array.isArray(fwd.payload)
-      && Array.isArray((fwd.payload as { tags?: unknown }).tags)
-      ? (fwd.payload as { tags: unknown[] }).tags.filter((tag): tag is string => typeof tag === "string")
+    const receiverReportedTags = fwd.payload && typeof fwd.payload === "object" && !Array.isArray(fwd.payload)
+      ? (fwd.payload as { tags?: unknown }).tags
+      : undefined;
+    const hasAcceptedTags = Array.isArray(receiverReportedTags);
+    const acceptedTags = hasAcceptedTags
+      ? receiverReportedTags.filter((tag): tag is string => typeof tag === "string")
       : [];
     const requestedTags = forwardBody.tags as string[];
     const acceptedScopeTags = acceptedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
@@ -607,11 +610,11 @@ export function queueRoutes(): Hono {
     const acceptedTagsMatchRequest = acceptedScopeTags.length === requestedScopeTags.length
       && acceptedScopeTags.every((tag, index) => tag === requestedScopeTags[index]);
     const scopeCheck = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1"
-      ? skippedCreateScopeAdvisory(acceptedTags)
+      ? skippedCreateScopeAdvisory(hasAcceptedTags ? acceptedTags : requestedTags)
       : null;
     const scopeAdvisory = scopeCheck ? toCreateScopeAdvisory(scopeCheck, {
       verb: terminalState === "done" ? "handoff-and-complete" : "handoff",
-      tagSource: acceptedTagsMatchRequest ? (body.tags == null ? "inherited" : "explicit") : "unknown",
+      tagSource: hasAcceptedTags && acceptedTagsMatchRequest ? (body.tags == null ? "inherited" : "explicit") : "unknown",
       delivery,
     }) : null;
     return c.json({ closed: closed.item, created: fwd.payload,
