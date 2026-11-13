@@ -759,13 +759,17 @@ export class SeatRuntimeSwitchService {
         try { seatPanes = (await tmux.listPanes(row.canonical_session, true)).map((pane) => pane.id); }
         catch { /* unreadable: no evidence of the successor */ }
       }
-      const successorGone = pastDeadline && !(await this.successorAtSeat(row, seatPanes));
+      const successorPresent = pastDeadline && await this.successorAtSeat(row, seatPanes);
+      const successorGone = pastDeadline && !successorPresent;
       if (exchanged) {
         const back = await tmux.swapRuntimeSwitchPanes({ nodeId, stagingSession: row.staging_session, canonicalSession: row.canonical_session,
           canonicalPane: row.successor_pane!, stagedPane: row.predecessor_pane });
         if (!back.ok) return stuck(`The panes couldn't be exchanged back: ${back.message}`);
       } else if (canonicalPane !== row.predecessor_pane && !successorGone) {
         return stuck(`The seat's pane (${canonicalPane ?? "none"}) is neither the predecessor's nor the successor's; nothing was touched.`);
+      } else if (successorPresent) {
+        // The predecessor's pane is current, but the successor is still in another of the seat's windows: it keeps its hold.
+        return stuck(`The staged successor's pane (${row.successor_pane}) is still in another window of the seat's session; nothing was touched.`);
       }
       const retired = await this.retireStaging(row.staging_session, nodeId, "Uncommitted successor");
       if (!retired.ok) return stuck(`The staged successor couldn't be retired: ${retired.message}`);

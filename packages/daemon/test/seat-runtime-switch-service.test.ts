@@ -1084,6 +1084,17 @@ describe("live seat runtime switch", () => {
       expect(openSwitch()).toMatchObject({ phase: "preparing" });
     });
 
+    it("#3103: with the original pane current and the successor in another window, an expired switch isn't settled", async () => {
+      record("preparing");
+      fakeTmux.listPanes.mockImplementation(async (name: string, allWindows?: boolean) =>
+        name === SEAT ? (allWindows ? [{ id: "%0" }, { id: "%5" }] : [{ id: "%0" }]) as never : []);
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
+      expect(openSwitch()).toMatchObject({ phase: "preparing" });
+      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: expect.stringMatching(/successor's pane \(%5\) is still in another window/) });
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+    });
+
     it("#3103: with several panes at the seat and none the successor's, an expired switch settles with its occupant unknown", async () => {
       record("preparing");
       fakeTmux.listPanes.mockImplementation(async (name: string) => name === SEAT ? [{ id: "%9" }, { id: "%8" }] as never : []);
