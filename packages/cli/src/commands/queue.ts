@@ -752,6 +752,8 @@ async function readBackQueueUpdate(
   requested: Record<string, unknown>,
   options: { headers?: Record<string, string>; timeoutMs?: number },
   transitionFloor?: number,
+  /** Why the transition cursor wasn't taken before the write, when it wasn't. */
+  floorUnknown?: string,
 ): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; detail: string }> {
   let response: DaemonResponse<Record<string, unknown>>;
   try {
@@ -776,6 +778,10 @@ async function readBackQueueUpdate(
     ? requested.transitionNote
     : null;
   if (requestedNote !== null) {
+    // Without the cursor, a transition carrying the note can't be shown to be this write's: never accept an older one.
+    if (transitionFloor === undefined) {
+      return { ok: false, detail: `the requested note can't be shown to be new, because the transition read before the write failed (${floorUnknown ?? "no cursor"})` };
+    }
     let transitions: DaemonResponse<unknown>;
     try {
       transitions = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, options);
@@ -789,7 +795,7 @@ async function readBackQueueUpdate(
       if (!entry || typeof entry !== "object") return false;
       const transition = entry as Partial<QueueTransitionReadBack>;
       return typeof transition.transitionId === "number"
-        && transition.transitionId > (transitionFloor ?? Number.MAX_SAFE_INTEGER)
+        && transition.transitionId > transitionFloor
         && (typeof transition.transitionNote === "string" || transition.transitionNote === null)
         && transitionCarriesRequestedNote(transition.transitionNote, requestedNote);
     });
@@ -798,14 +804,6 @@ async function readBackQueueUpdate(
     }
   }
   return { ok: true, row: response.data };
-}
-
-function emitQueueUpdatePreflightFailure(qitemId: string, detail: string, json: boolean): void {
-  const message = `Queue update was not sent: ${detail}. The transition receipt could not be established safely.`;
-  const action = `Run rig queue show ${shellQuote(qitemId)} --full --json against the same daemon, then retry.`;
-  if (json) console.error(JSON.stringify({ error: "queue_update_preflight_failed", message, action }));
-  else console.error(`${message}\n${action}`);
-  process.exitCode = 1;
 }
 
 function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: boolean): void {
@@ -1606,17 +1604,16 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           ...actor,
         };
         let transitionFloor: number | undefined;
+        let floorUnknown: string | undefined;
         if (typeof requested.transitionNote === "string" && requested.transitionNote.trim().length > 0) {
+          // The cursor proves the note is new afterwards. Without it the write still goes; the receipt says what's unproven.
           const cursor = await readQueueTransitionCursor(target.client, qitemId, target.options);
-          if (!cursor.ok) {
-            emitQueueUpdatePreflightFailure(qitemId, cursor.detail, opts.json ?? false);
-            return;
-          }
-          transitionFloor = cursor.latestTransitionId;
+          if (cursor.ok) transitionFloor = cursor.latestTransitionId;
+          else floorUnknown = cursor.detail;
         }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, requested, target.options);
         if (res.status < 400) {
-          const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor);
+          const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown);
           if (!verified.ok) {
             emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false);
             return;

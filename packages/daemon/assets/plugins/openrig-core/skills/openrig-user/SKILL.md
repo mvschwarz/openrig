@@ -98,8 +98,9 @@ handoff answers with the closed row and its successor. When that answer shows wh
 `queue update` is stricter: before it reports success, the CLI reads the row back from the canonical queue and checks
 every requested row field using daemon semantics (including normalized deadlines and appended closing resolutions).
 When `--note` is present, it first records the transition cursor and then requires a newer canonical transition that
-carries those note bytes. A failed transition preflight sends no write; a failed post-write check exits non-zero and
-says the write may have committed. Reconcile with `rig queue show <id> --full --json` before retrying. Preserve that
+carries those note bytes. If that cursor can't be read, the write is still sent, and the note can't be shown to be
+new: the command says so and exits non-zero. A failed post-write check exits non-zero and says the write may have
+committed. Reconcile with `rig queue show <id> --full --json` before retrying. Preserve that
 exit status in wrappers, and use `set -o pipefail` when piping its output so a downstream formatter cannot turn failure
 into success.
 

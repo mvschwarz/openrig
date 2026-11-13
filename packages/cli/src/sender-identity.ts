@@ -3,11 +3,15 @@ import { execFileSync } from "node:child_process";
 
 export type TmuxIdentityReader = (pane: string, option: string) => string | undefined;
 
+/** A busy or wedged tmux server must not hold every queue request: past this, the pane's seat is unresolved. */
+export const TMUX_IDENTITY_TIMEOUT_MS = 1_000;
+
 const readTmuxIdentity: TmuxIdentityReader = (pane, option) => {
   try {
     const value = execFileSync("tmux", ["show-option", "-v", "-t", pane, option], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: TMUX_IDENTITY_TIMEOUT_MS,
     }).trim();
     return value || undefined;
   } catch {

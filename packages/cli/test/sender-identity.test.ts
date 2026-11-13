@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { senderIdentityHeaders } from "../src/client.js";
-import { resolveSenderSession } from "../src/sender-identity.js";
+import { resolveSenderSession, TMUX_IDENTITY_TIMEOUT_MS } from "../src/sender-identity.js";
+
+const execFileSync = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", async (original) => ({ ...(await original<typeof import("node:child_process")>()), execFileSync }));
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -24,6 +27,20 @@ describe("managed sender identity recovery", () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "dev-coder@studio");
     vi.stubEnv("TMUX_PANE", "%149");
     expect(resolveSenderSession(() => "producer-lead@studio")).toBe("dev-coder@studio");
+  });
+
+  it("bounds the tmux read, and a read that times out leaves the seat unresolved", () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    vi.stubEnv("TMUX_PANE", "%149");
+    // The reader catches what the call throws, so the options are checked here, not inside the mock.
+    execFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error("spawnSync tmux ETIMEDOUT"), { code: "ETIMEDOUT" });
+    });
+    expect(resolveSenderSession()).toBeUndefined();
+    expect(execFileSync).toHaveBeenCalledTimes(1);
+    expect(execFileSync.mock.calls[0]![2]).toMatchObject({ timeout: TMUX_IDENTITY_TIMEOUT_MS });
+    expect(TMUX_IDENTITY_TIMEOUT_MS).toBeLessThanOrEqual(2_000);
   });
 
   it("stays unresolved when neither env nor managed pane metadata exists", () => {

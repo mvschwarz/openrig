@@ -12,11 +12,15 @@ import { queueCommand } from "../src/commands/queue.js";
 import { STATE_FILE } from "../src/daemon-lifecycle.js";
 
 type UpdateTransform = (body: Record<string, unknown>) => Record<string, unknown> | null;
+/** The nth read of the row's transitions (0 is the cursor read before the write): a response, or a throw for no answer. */
+type TransitionsRead = (call: number) => { status: number; data: unknown } | undefined;
 
 let database: Database.Database;
 let repo: QueueRepository;
 
-async function runUpdate(qitemId: string, args: string[], transform: UpdateTransform = (body) => body) {
+async function runUpdate(qitemId: string, args: string[], transform: UpdateTransform = (body) => body, transitionsRead?: TransitionsRead) {
+  let transitionReads = 0;
+  let posts = 0;
   const output: string[] = [];
   const errors: string[] = [];
   const program = new Command();
@@ -37,9 +41,10 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
     },
     clientFactory: () => ({
       get: async (route: string) => route.endsWith("/transitions")
-        ? { status: 200, data: repo.listTransitions(qitemId) }
+        ? transitionsRead?.(transitionReads++) ?? { status: 200, data: repo.listTransitions(qitemId) }
         : { status: 200, data: repo.getById(qitemId) },
       post: async (_route: string, rawBody: unknown) => {
+        posts += 1;
         const body = transform(structuredClone(rawBody as Record<string, unknown>));
         return {
           status: 200,
@@ -61,7 +66,7 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
       err: (value) => errors.push(value),
       exit: () => undefined,
     });
-    return { code, output, errors, row: repo.getByIdOrThrow(qitemId), transitions: repo.listTransitions(qitemId) };
+    return { code, output, errors, row: repo.getByIdOrThrow(qitemId), transitions: repo.listTransitions(qitemId), posts };
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -188,6 +193,31 @@ describe("queue update canonical read-back against daemon domain semantics", () 
     expect(result.code).toBe(1);
     expect(result.transitions).toHaveLength(before);
     expect(result.errors.join("\n")).toContain("no newer canonical transition carried requested note");
+  });
+
+  // The cursor read before the write only proves a note is new afterwards. When it fails, the write is still sent and
+  // persists; the receipt says the note can't be shown to be new and exits non-zero, even with an older transition
+  // already carrying the same note.
+  it.each([
+    ["doesn't answer", () => { throw new Error("socket hang up (fixture)"); }],
+    ["answers HTTP 503", () => ({ status: 503, data: { error: "busy" } })],
+    ["returns a malformed list", () => ({ status: 200, data: [{ transitionId: "seven" }] })],
+  ] as const)("sends a note-bearing update when the cursor read %s, and says the note is unproven", async (_label, fail) => {
+    const qitemId = await claimedRow();
+    repo.update({ qitemId, actorSession: "reviewer@fixture", transitionNote: "must persist" }); // an older matching note
+    const before = repo.listTransitions(qitemId).length;
+    const result = await runUpdate(qitemId, ["--note", "must persist", "--summary", "kept summary"], undefined,
+      (call) => call === 0 ? fail() : undefined);
+
+    expect(result.posts).toBe(1);
+    expect(result.transitions).toHaveLength(before + 1);
+    expect(result.transitions.at(-1)?.transitionNote).toMatch(/^must persist/);
+    expect(result.row.summary).toBe("kept summary");
+    expect(result.code).toBe(1);
+    const said = result.errors.join("\n");
+    expect(said).toContain("queue_update_readback_failed");
+    expect(said).toContain("can't be shown to be new");
+    expect(said).not.toContain("queue_update_preflight_failed");
   });
 
   it("accepts a note only after its canonical transition appears", async () => {
