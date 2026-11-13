@@ -145,4 +145,45 @@ describe("51-06 D2 narrowed — queue update metadata on a state change", () => 
       message: `The summary was blank, so it wasn't stored: ${id} keeps its summary "Original subject". The rest of the update was applied.`,
     }]);
   });
+
+  it("a stored evidence pointer survives a blank one on a state change, and a done close keeps it too", async () => {
+    const id = (await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "d2 item", evidenceRef: "/proof/kept.md" })).qitemId;
+    expect(repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "in-progress", evidenceRef: "" })).toMatchObject({ state: "in-progress", evidenceRef: "/proof/kept.md" });
+    expect(repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "done", closureReason: "no-follow-on", evidenceRef: "   " }))
+      .toMatchObject({ state: "done", evidenceRef: "/proof/kept.md" });
+  });
+
+  it("ROUTE: a blank evidence ref with a state change -> 200, the pointer kept, and an advisory names it as not stored", async () => {
+    const created = await post("/api/queue/create", { sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r", evidenceRef: "/proof/kept.md" }, "orch@rig");
+    const id = ((await created.json()) as { qitemId: string }).qitemId;
+    const res = await post(`/api/queue/${id}/update`, { actorSession: "dev-x@rig", state: "in-progress", evidenceRef: "  " }, "dev-x@rig");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { state: string; evidenceRef: string | null; advisories?: Array<Record<string, unknown>> };
+    expect(body).toMatchObject({ state: "in-progress", evidenceRef: "/proof/kept.md" });
+    expect(body.advisories).toEqual([{
+      code: "evidence_ref_not_stored", qitemId: id, field: "evidenceRef",
+      message: `The evidence ref was blank, so it wasn't stored: ${id} keeps its evidence ref "/proof/kept.md". The rest of the update was applied.`,
+    }]);
+  });
+
+  it("ROUTE: when the repository can't write either field, the state still changes, the caller is told, and the event agrees with the stored row", async () => {
+    const created = await post("/api/queue/create", { sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r", summary: "Original subject" }, "orch@rig");
+    const id = ((await created.json()) as { qitemId: string }).qitemId;
+    // A column probe that read false at construction (its PRAGMA read failed), while the columns exist.
+    Object.assign(repo as unknown as Record<string, boolean>, { hasSummaryColumn: false, hasEvidenceRefColumn: false });
+    const events: Array<Record<string, unknown>> = [];
+    bus.subscribe((e) => events.push(e as unknown as Record<string, unknown>));
+    const res = await post(`/api/queue/${id}/update`, { actorSession: "dev-x@rig", state: "in-progress", summary: "New subject", evidenceRef: "/proof/new.md" }, "dev-x@rig");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { state: string; summary: string | null; evidenceRef: string | null; advisories?: Array<Record<string, unknown>> };
+    expect(body).toMatchObject({ state: "in-progress", summary: "Original subject", evidenceRef: null });
+    expect(body.advisories).toEqual([
+      { code: "summary_not_stored", qitemId: id, field: "summary",
+        message: `The summary wasn't stored: ${id} keeps its summary "Original subject". The rest of the update was applied.` },
+      { code: "evidence_ref_not_stored", qitemId: id, field: "evidenceRef",
+        message: `The evidence ref wasn't stored: ${id} keeps no evidence ref. The rest of the update was applied.` },
+    ]);
+    expect(events.find((e) => e.type === "queue.updated")).toMatchObject({ toState: "in-progress", summary: "Original subject" });
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "in-progress", summary: "Original subject", evidenceRef: null });
+  });
 });

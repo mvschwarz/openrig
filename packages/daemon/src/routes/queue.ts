@@ -211,15 +211,23 @@ export function queueRoutes(): Hono {
       message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
     };
   }
-  /** A blank summary isn't stored with a state change (it would erase the row's subject), so the caller is told. */
-  function blankSummaryAdvisory(summary: unknown, item: QueueItem) {
-    if (typeof summary !== "string" || summary.trim().length > 0 || item.summary === summary) return null;
-    return {
-      code: "summary_not_stored",
-      qitemId: item.qitemId,
-      field: "summary",
-      message: `The summary was blank, so it wasn't stored: ${item.qitemId} keeps ${item.summary ? `its summary "${item.summary}"` : "no summary"}. The rest of the update was applied.`,
-    };
+  /** A summary or evidence ref the update asked for but the stored row doesn't carry (a blank one, which isn't stored
+   *  because it would erase what the row has, or one the repository couldn't write): read from the stored row, so the
+   *  caller is told whatever the reason. */
+  function unstoredAdvisories(body: { summary?: unknown; evidenceRef?: unknown }, item: QueueItem) {
+    return ([["summary", "summary", "summary_not_stored"], ["evidenceRef", "evidence ref", "evidence_ref_not_stored"]] as const)
+      .flatMap(([field, name, code]) => {
+        const requested = body[field];
+        const stored = item[field];
+        if (typeof requested !== "string" || stored === requested) return [];
+        const why = requested.trim().length === 0 ? `The ${name} was blank, so it wasn't stored` : `The ${name} wasn't stored`;
+        return [{
+          code,
+          qitemId: item.qitemId,
+          field,
+          message: `${why}: ${item.qitemId} keeps ${stored ? `its ${name} "${stored}"` : `no ${name}`}. The rest of the update was applied.`,
+        }];
+      });
   }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
@@ -929,7 +937,7 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, blankSummaryAdvisory(body.summary, item)]
+      const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
         .filter((advisory) => advisory !== null);
       return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
     } catch (err) {

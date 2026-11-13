@@ -524,8 +524,9 @@ export interface QueueUpdateInput {
    * --summary --evidence-ref` persists them onto the EXISTING item so the
    * attention query + Packet 2 read them, and a done close leaves its
    * artifact on the finished row. A human-seat park still requires them.
-   * A blank summary is not stored (it would erase the row's subject); the
-   * update route reports it, so a caller never believes it was saved.
+   * Outside a park on a person, a blank value is not stored (it would erase
+   * the row's subject or evidence link); the update route reports any value
+   * the stored row doesn't carry, so a caller never believes it was saved.
    */
   summary?: string | null;
   evidenceRef?: string | null;
@@ -3665,8 +3666,8 @@ export class QueueRepository {
     // summary and evidence it names. validateHumanPark still requires them only for the legacy human-seat form.
     const isHumanPark = input.state === "blocked" && !!effectiveBlockedOn && this.isPersonAddress(effectiveBlockedOn);
     // OPR.0.5.1 slice-51-06 D2 refused the whole transition when summary/evidence_ref came with a state it
-    // didn't store them for, so finished work could stay pending over optional metadata. Every state change
-    // now stores them (below); the only value left unstored is a blank summary, and the route reports it.
+    // didn't store them for, so finished work could stay pending over optional metadata. A state change now
+    // stores them (below), except a blank value outside a park on a person; the route reports what wasn't stored.
 
     // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE: an incoherent
     // field must never silently persist (worse than a drop —
@@ -3744,7 +3745,7 @@ export class QueueRepository {
       }
     }
 
-    let effectiveSummary = hasValidSummary ? input.summary! : qitem.summary;
+    let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {
       effectiveSummary = input.summary ?? qitem.summary;
@@ -3878,10 +3879,11 @@ export class QueueRepository {
 
     // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
     // merely validated-then-dropped) — visible to the attention query, to
-    // Packet 2 and to every reader of the row. A human-seat park stores what
-    // it was given; any other state change stores a non-blank summary.
+    // Packet 2 and to every reader of the row. A park on a person stores what
+    // it was given; any other state change stores only non-blank values.
+    const hasValidEvidenceRef = typeof input.evidenceRef === "string" && input.evidenceRef.trim().length > 0;
     if (isHumanPark || hasValidSummary) this.persistSummary(input.qitemId, input.summary ?? null);
-    this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
+    if (isHumanPark || hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
 
     const transition = this.transitionLog.append({
       qitemId: input.qitemId,
@@ -3965,9 +3967,9 @@ export class QueueRepository {
       closureReason: validation.closureReason ?? null,
       closureTarget: validation.closureTarget ?? null,
       actorSession: input.actorSession,
-      // FR-1 × FR-6: the event carries the summary as of THIS mutation
+      // FR-1 × FR-6: the event carries the summary as stored by THIS mutation
       // (park-time summary included) so surfaces refresh without a fetch.
-      summary: effectiveSummary ?? null,
+      summary: this.getById(input.qitemId)?.summary ?? null,
     });
     return { persistedEvent, persistedEvents: [...dependentEvents, persistedEvent] };
   }
