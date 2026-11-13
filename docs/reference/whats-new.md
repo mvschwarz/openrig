@@ -110,6 +110,12 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   auto-update-failure footer on screen, a seat in the opt-in draft-aware typing
   mode whose input is empty can hold an ordinary send. The message is kept;
   `rig seat held-messages` shows it.
+- **Draft-aware delivery to a busy Codex seat:** on Codex (seen with 0.167.1
+  and 0.167.2), a send to a seat in the opt-in draft-aware typing mode while
+  it's busy can be pasted into its input without Enter. The message isn't
+  delivered, and it isn't kept for `rig seat held-messages`. A deliberate send
+  reports failed, and its text stays in the seat's input box. This was seen on
+  0.7.12 and 0.7.14, and there's no fix for it in this release.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
