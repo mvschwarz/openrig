@@ -520,14 +520,13 @@ export interface QueueUpdateInput {
   wakeMessage?: string;
   /**
    * OPR.0.4.4.19 FR-6 — park-time inputs. summary + evidence_ref are
-   * updatable AT THE PARK MOMENT (state=blocked with a human-seat blocker),
-   * not create-only: `rig queue block --summary --evidence-ref` persists
-   * them onto the EXISTING item so the attention query + Packet 2 read
-   * them. A done close also persists evidence_ref, so a finished row carries
-   * its artifact. OPR.0.5.1 slice-51-06 D2: supplying either where it can't
-   * be stored is REJECTED (QueueRepositoryError "summary_evidence_not_persistable")
-   * before any mutation — not silently ignored — so a caller never believes
-   * unpersistable metadata was saved.
+   * updatable with any state change, not create-only: `rig queue block
+   * --summary --evidence-ref` persists them onto the EXISTING item so the
+   * attention query + Packet 2 read them, and a done close leaves its
+   * artifact on the finished row. A human-seat park still requires them.
+   * A blank value is not stored (it would erase the row's subject or
+   * evidence link); the update route reports any value
+   * the stored row doesn't carry, so a caller never believes it was saved.
    */
   summary?: string | null;
   evidenceRef?: string | null;
@@ -3455,6 +3454,7 @@ export class QueueRepository {
     }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
     const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
+    const hasValidEvidenceRef = typeof input.evidenceRef === "string" && input.evidenceRef.trim().length > 0;
     const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
       qitem.state as "done" | "canceled" | "handed-off",
     );
@@ -3664,35 +3664,15 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "An informational delivery cannot become a human approval park; author a separate decision request.");
     }
     // A park on a person by any address (a legacy human seat, or a registered person's own address or alias) keeps the
-    // summary and evidence it names. validateHumanPark still requires them only for the legacy human-seat form.
+    // summary and evidence it names, or the row's own where it names a blank one. validateHumanPark still requires them
+    // only for the legacy human-seat form.
     const isHumanPark = input.state === "blocked" && !!effectiveBlockedOn && this.isPersonAddress(effectiveBlockedOn);
-    // A done close can also store the artifact the work produced, so the finished row carries its link.
-    const isDoneClose = input.state === "done";
+    // OPR.0.5.1 slice-51-06 D2 refused the whole transition when summary/evidence_ref came with a state it
+    // didn't store them for, so finished work could stay pending over optional metadata. A state change now
+    // stores them (below), except a blank value; the route reports what wasn't stored.
 
-    // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
-    // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
-    // (the operator believes the metadata was saved). HARD-REJECT before ANY UPDATE/log/event so the
-    // caller learns immediately and nothing is half-applied. null/undefined = absent (allowed);
-    // empty string = present (a deliberate value → rejected on a non-park transition).
-    if (!isHumanPark) {
-      const invalidFields: Array<"summary" | "evidenceRef"> = [];
-      if (input.summary != null) invalidFields.push("summary");
-      if (input.evidenceRef != null && !isDoneClose) invalidFields.push("evidenceRef");
-      if (invalidFields.length > 0) {
-        const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
-        const where = invalidFields.map((f) => f === "summary"
-          ? "summary persists on a human-seat park, or on its own (rig queue update <id> --summary … with no --state)"
-          : "evidenceRef persists on a human-seat park or a done close").join("; ");
-        throw new QueueRepositoryError(
-          "summary_evidence_not_persistable",
-          `${where}; the '${input.state}' transition cannot store ${invalidFields.length > 1 ? "them" : "it"}. Remove ${flags}, or use one of those.`,
-          { invalidFields },
-        );
-      }
-    }
-
-    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE, beside the reference
-    // reject above: an incoherent field must never silently persist (worse than a drop —
+    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE: an incoherent
+    // field must never silently persist (worse than a drop —
     // the COALESCE below would write it). Admits-map, derived from LIVE schema use:
     //   closure_reason/closure_target → state "done", OR the PARK-RECORD form
     //     (state "blocked" with closureReason "blocked_on" — the workflow gate/park
@@ -3770,8 +3750,8 @@ export class QueueRepository {
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {
-      effectiveSummary = input.summary ?? qitem.summary;
-      effectiveEvidenceRef = input.evidenceRef ?? qitem.evidenceRef;
+      effectiveSummary = hasValidSummary ? input.summary! : qitem.summary;
+      effectiveEvidenceRef = hasValidEvidenceRef ? input.evidenceRef! : qitem.evidenceRef;
       const park = validateHumanPark({
         blockedOn: effectiveBlockedOn,
         summary: effectiveSummary,
@@ -3899,15 +3879,13 @@ export class QueueRepository {
         input.qitemId
       );
 
-    // FR-6: park-time summary/evidence_ref are PERSISTED onto the existing
-    // item (not merely validated-then-dropped) — visible to the attention
-    // query and to Packet 2. A done close writes evidence_ref the same way.
-    if (isHumanPark) {
-      this.persistSummary(input.qitemId, input.summary ?? null);
-      this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
-    } else if (isDoneClose) {
-      this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
-    }
+    // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
+    // merely validated-then-dropped) — visible to the attention query, to
+    // Packet 2 and to every reader of the row. Only non-blank values are
+    // stored, on a park on a person too: a blank one would erase the row's
+    // subject or evidence link, and the route reports it as not stored.
+    if (hasValidSummary) this.persistSummary(input.qitemId, input.summary!);
+    if (hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef!);
 
     const transition = this.transitionLog.append({
       qitemId: input.qitemId,
@@ -3991,9 +3969,9 @@ export class QueueRepository {
       closureReason: validation.closureReason ?? null,
       closureTarget: validation.closureTarget ?? null,
       actorSession: input.actorSession,
-      // FR-1 × FR-6: the event carries the summary as of THIS mutation
+      // FR-1 × FR-6: the event carries the summary as stored by THIS mutation
       // (park-time summary included) so surfaces refresh without a fetch.
-      summary: effectiveSummary ?? null,
+      summary: this.getById(input.qitemId)?.summary ?? null,
     });
     return { persistedEvent, persistedEvents: [...dependentEvents, persistedEvent] };
   }
@@ -4560,9 +4538,11 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
-  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
-   *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
-   *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
+  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions, and the evidence it
+   *  points to, when it has any) and its decision state (open, blocked or terminal; who it's addressed to or parked on; its
+   *  answers, a decision made for them, the current park, and the replies returned). A label, a wake, a claim or a note on a
+   *  park doesn't change it; a new park does, on any blocker, and so does a new evidence pointer. A row with no evidence
+   *  keeps the revision it had before evidence counted. */
   decisionRevision(item: QueueItem, opts?: DecisionRevisionOptions): string {
     const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
     const excludeOp =
@@ -4589,7 +4569,8 @@ export class QueueRepository {
       if (transitions[i]!.state === "blocked" && transitions[i - 1]?.state !== "blocked") parkEntry = transitions[i]!.transitionId;
     }
     const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
-      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
+      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies,
+      ...(item.evidenceRef ? [item.evidenceRef] : [])];
     return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
   }
 
