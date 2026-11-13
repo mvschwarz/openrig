@@ -375,8 +375,10 @@ swapped, and account/project settings are never edited to make the check pass.
 Absent selection or approval fields, unfamiliar approval strings or profile formats,
 and unclear overlap between native selectors and authored path rules are also unverified.
 An authored selector that may cover an extra grant is considered before a literal
-ancestor would reject that grant. Duplicate aliases from a lower layer leave their
-own coverage unverified; they do not hide a known widening at another path.
+ancestor would reject that grant, except that an explicit authored deny ancestor
+always takes precedence over possible selector coverage. Duplicate aliases from a
+lower layer leave their own coverage unverified; they do not hide a known widening
+at another path.
 Inconclusive coverage warnings name the extra rule and access. An excluding managed
 allowlist is reported before an effective selection or approval mismatch.
 Concrete refusals name the conflicting rule and offer a remedy; handover preserves

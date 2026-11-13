@@ -70,7 +70,9 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     // native expansion remains Codex's job, not another policy engine here.
     // Only the agent's own ambiguity can affect coverage of another key;
     // duplicate aliases introduced by a lower layer stay local to those aliases.
-    const possibleCoverage = extraAccess !== undefined && (!isAccess(ancestorAccess) || accessRank[extraAccess] > accessRank[ancestorAccess])
+    // Possible selector coverage cannot weaken an explicit deny ancestor.
+    const possibleCoverage = extraAccess !== undefined && (!root || rules[root] !== "deny")
+      && (!isAccess(ancestorAccess) || accessRank[extraAccess] > accessRank[ancestorAccess])
       && (authoredAmbiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
         && (nativeSelectors.has(key) || literalHomePath(key) || !literalAbsolute(rule))
         && isAccess(access) && accessRank[access] >= accessRank[extraAccess]));
@@ -91,7 +93,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
   for (const [key, value] of Object.entries(effective)) {
     if (!isAccess(value)) { checks.push(unknown("Codex returned an unfamiliar filesystem access value or nested mapping")); continue; }
     const expected = at(authored, key, value);
-    if (expected === undefined) { checks.push(unknown(`Filesystem rule ${JSON.stringify(key)}: a lower Codex layer grants ${value}; agent coverage could not be compared.`)); continue; }
+    if (expected === undefined) { checks.push(unknown(`Filesystem rule ${JSON.stringify(key)}: the effective configuration grants ${value}; agent coverage could not be compared.`)); continue; }
     if (accessRank[value] > accessRank[expected]) return refuse(
       `Filesystem rule ${JSON.stringify(key)}: agent coverage is at most ${expected}; a lower Codex layer (account or trusted project) grants ${value}.`,
       "Remove the conflicting lower-layer grant, or deliberately update the agent's codex_permissions to the intended access.");

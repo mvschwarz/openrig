@@ -86,6 +86,63 @@ describe("Codex seat filesystem configuration preflight", () => {
   });
 });
 
+describe("authored ancestor and selector coverage matrix", () => {
+  const ancestors = {
+    "root read": { "/": "read" },
+    "root write": { "/": "write" },
+    "root deny": { "/": "deny" },
+    "literal read": { ":root": "read", "/work/hidden": "read" },
+    "literal write": { ":root": "read", "/work/hidden": "write" },
+    "literal deny": { ":root": "read", "/work": "write", "/work/hidden": "deny" },
+  } satisfies Record<string, CodexFilesystemPermissions["filesystem"]>;
+  type Outcome = "accept" | "not-verified" | "refuse";
+  // Expected outcomes are authored from the rule, not computed by another
+  // coverage comparator. Columns: read, write, read+aliases, write+aliases.
+  // Authored uncertainty warns; lower-layer aliases cannot hide a known
+  // widening; an explicit authored deny ancestor wins over selectors.
+  const matrix = [
+    ["root read", "none",  "accept", "refuse",       "not-verified", "refuse"],
+    ["root read", "read",  "accept", "refuse",       "not-verified", "refuse"],
+    ["root read", "write", "accept", "not-verified", "not-verified", "not-verified"],
+    ["root write", "none",  "accept", "accept", "not-verified", "not-verified"],
+    ["root write", "read",  "accept", "accept", "not-verified", "not-verified"],
+    ["root write", "write", "accept", "accept", "not-verified", "not-verified"],
+    ["root deny", "none",  "refuse", "refuse", "refuse", "refuse"],
+    ["root deny", "read",  "refuse", "refuse", "refuse", "refuse"],
+    ["root deny", "write", "refuse", "refuse", "refuse", "refuse"],
+    ["literal read", "none",  "accept", "refuse",       "not-verified", "refuse"],
+    ["literal read", "read",  "accept", "refuse",       "not-verified", "refuse"],
+    ["literal read", "write", "accept", "not-verified", "not-verified", "not-verified"],
+    ["literal write", "none",  "accept", "accept", "not-verified", "not-verified"],
+    ["literal write", "read",  "accept", "accept", "not-verified", "not-verified"],
+    ["literal write", "write", "accept", "accept", "not-verified", "not-verified"],
+    ["literal deny", "none",  "refuse", "refuse", "refuse", "refuse"],
+    ["literal deny", "read",  "refuse", "refuse", "refuse", "refuse"],
+    ["literal deny", "write", "refuse", "refuse", "refuse", "refuse"],
+  ] satisfies [keyof typeof ancestors, "none" | "read" | "write", Outcome, Outcome, Outcome, Outcome][];
+  const cases = matrix.flatMap(([ancestor, selector, read, write, readAliases, writeAliases]) => [
+    { ancestor, selector, grant: "read", aliases: false, outcome: read },
+    { ancestor, selector, grant: "write", aliases: false, outcome: write },
+    { ancestor, selector, grant: "read", aliases: true, outcome: readAliases },
+    { ancestor, selector, grant: "write", aliases: true, outcome: writeAliases },
+  ]);
+  it.each(cases)("$ancestor; selector=$selector; grant=$grant; aliases=$aliases => $outcome", ({ ancestor, selector, grant, aliases, outcome }) => {
+    const own: CodexFilesystemPermissions = { ...permissions, filesystem: {
+      ...ancestors[ancestor], ...(selector === "none" ? {} : { ":workspace_roots": selector }),
+    } };
+    const aliasAccess = selector === "none" ? "read" : selector;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: {
+      ...own.filesystem, ...(aliases ? { ":workspace_roots": aliasAccess, ":project_roots": aliasAccess } : {}),
+      "/work/hidden/secret": grant,
+    }, network: { enabled: false } } });
+    const result = decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } });
+    if (outcome === "refuse") expect(result).toMatchObject({ ok: false, error: expect.stringContaining('"/work/hidden/secret"') });
+    else if (outcome === "not-verified") expect(result).toMatchObject({ ok: true, verified: false });
+    else expect(result).toEqual({ ok: true, verified: true });
+  });
+});
+
 describe("Codex seat filesystem verifier reader boundary", () => {
   it.each([["env", "CODEX_HOME=/other"], ["custom-wrapper"]])("reports a launch wrapper without certifying a different configuration %#", async launchWrapper => {
     vi.mocked(readCodexConfiguration).mockClear();
@@ -196,7 +253,7 @@ describe("compatible policies and inconclusive reads", () => {
     const read = config();
     Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, ":tmpdir": "write" }, network: { enabled: false } } });
     expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
-      .toMatchObject({ ok: true, verified: false });
+      .toMatchObject({ ok: true, verified: false, reason: expect.stringContaining("effective configuration grants") });
   });
 
   it.each([
@@ -246,6 +303,20 @@ describe("compatible policies and inconclusive reads", () => {
     Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/": "write" }, network: { enabled: false } } });
     expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
       .toMatchObject({ ok: false, error: expect.stringContaining('"/"') });
+  });
+
+  it("refuses a read beneath the fixture's authored deny despite minimal read coverage", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { "/work/hidden/secret": "read" });
+    expect(decide(read)).toMatchObject({ ok: false, error: expect.stringContaining('"/work/hidden/secret"') });
+  });
+
+  it("refuses a write beneath an authored deny despite an authored write selector", () => {
+    const own = { ...permissions, filesystem: { ...permissions.filesystem, ":workspace_roots": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/work/hidden/secret": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('"/work/hidden/secret"') });
   });
 
   it("names the extra selector and access in an inconclusive coverage warning", () => {
