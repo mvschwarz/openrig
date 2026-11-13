@@ -375,8 +375,14 @@ swapped, and account/project settings are never edited to make the check pass.
 Absent selection or approval fields, unfamiliar approval strings or profile formats,
 and unclear overlap between native selectors and authored path rules are also unverified.
 An authored selector that may cover an extra grant is considered before a literal
-ancestor would reject that grant, except that an explicit authored deny ancestor
-always takes precedence over possible selector coverage. Duplicate aliases from a
+ancestor would reject that grant, except that an explicit non-root deny ancestor
+always takes precedence over possible selector coverage. A full-root deny, written
+as `/` or `:root`, is a default narrower grants may refine: possible authored
+selector coverage stays unverified, while a proven outside grant still refuses.
+Codex 0.167.2's `:minimal` adds system read defaults, not `/home` or `/Users`
+user-data coverage; extra grants there under a root deny still refuse unless
+another authored rule may cover them. Other minimal-path coverage stays unexpanded.
+Duplicate aliases from a
 lower layer leave their own coverage unverified; they do not hide a known widening
 at another path.
 Inconclusive coverage warnings name the extra rule and access. An excluding managed

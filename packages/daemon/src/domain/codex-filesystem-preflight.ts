@@ -70,10 +70,16 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     // native expansion remains Codex's job, not another policy engine here.
     // Only the agent's own ambiguity can affect coverage of another key;
     // duplicate aliases introduced by a lower layer stay local to those aliases.
-    // Possible selector coverage cannot weaken an explicit deny ancestor.
-    const possibleCoverage = extraAccess !== undefined && (!root || rules[root] !== "deny")
+    // Non-root denies are restrictions; either full-root spelling is a
+    // default that narrower grants may refine under Codex's native rules.
+    const denyAncestor = root !== undefined && root !== path.sep && rules[root] === "deny";
+    // Codex 0.167.2's Linux/macOS minimal defaults are system paths, not
+    // these user-data roots. Other minimal coverage stays unexpanded.
+    const outsideMinimal = literalAbsolute(key) && /^\/(?:home|Users)(?:\/|$)/.test(key);
+    const possibleCoverage = extraAccess !== undefined && !denyAncestor
       && (!isAccess(ancestorAccess) || accessRank[extraAccess] > accessRank[ancestorAccess])
       && (authoredAmbiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
+        && !(rule === ":minimal" && outsideMinimal)
         && (nativeSelectors.has(key) || literalHomePath(key) || !literalAbsolute(rule))
         && isAccess(access) && accessRank[access] >= accessRank[extraAccess]));
     if (nativeSelectors.has(key)) return key !== ":root" && possibleCoverage ? undefined : rootAccess;

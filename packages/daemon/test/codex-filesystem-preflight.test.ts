@@ -91,6 +91,7 @@ describe("authored ancestor and selector coverage matrix", () => {
     "root read": { "/": "read" },
     "root write": { "/": "write" },
     "root deny": { "/": "deny" },
+    "native root deny": { ":root": "deny" },
     "literal read": { ":root": "read", "/work/hidden": "read" },
     "literal write": { ":root": "read", "/work/hidden": "write" },
     "literal deny": { ":root": "read", "/work": "write", "/work/hidden": "deny" },
@@ -99,7 +100,7 @@ describe("authored ancestor and selector coverage matrix", () => {
   // Expected outcomes are authored from the rule, not computed by another
   // coverage comparator. Columns: read, write, read+aliases, write+aliases.
   // Authored uncertainty warns; lower-layer aliases cannot hide a known
-  // widening; an explicit authored deny ancestor wins over selectors.
+  // widening. A non-root deny wins; a root deny is a refinable default.
   const matrix = [
     ["root read", "none",  "accept", "refuse",       "not-verified", "refuse"],
     ["root read", "read",  "accept", "refuse",       "not-verified", "refuse"],
@@ -108,8 +109,11 @@ describe("authored ancestor and selector coverage matrix", () => {
     ["root write", "read",  "accept", "accept", "not-verified", "not-verified"],
     ["root write", "write", "accept", "accept", "not-verified", "not-verified"],
     ["root deny", "none",  "refuse", "refuse", "refuse", "refuse"],
-    ["root deny", "read",  "refuse", "refuse", "refuse", "refuse"],
-    ["root deny", "write", "refuse", "refuse", "refuse", "refuse"],
+    ["root deny", "read",  "not-verified", "refuse", "not-verified", "refuse"],
+    ["root deny", "write", "not-verified", "not-verified", "not-verified", "not-verified"],
+    ["native root deny", "none",  "refuse", "refuse", "refuse", "refuse"],
+    ["native root deny", "read",  "not-verified", "refuse", "not-verified", "refuse"],
+    ["native root deny", "write", "not-verified", "not-verified", "not-verified", "not-verified"],
     ["literal read", "none",  "accept", "refuse",       "not-verified", "refuse"],
     ["literal read", "read",  "accept", "refuse",       "not-verified", "refuse"],
     ["literal read", "write", "accept", "not-verified", "not-verified", "not-verified"],
@@ -140,6 +144,47 @@ describe("authored ancestor and selector coverage matrix", () => {
     if (outcome === "refuse") expect(result).toMatchObject({ ok: false, error: expect.stringContaining('"/work/hidden/secret"') });
     else if (outcome === "not-verified") expect(result).toMatchObject({ ok: true, verified: false });
     else expect(result).toEqual({ ok: true, verified: true });
+  });
+});
+
+describe("root deny refinements", () => {
+  it.each(["/", ":root"])('keeps selector overlap unverified beneath %s deny', root => {
+    const own: CodexFilesystemPermissions = { ...permissions, filesystem: { [root]: "deny", ":slash_tmp": "write" } };
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/tmp/child": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+  });
+
+  it.each([
+    ["/", "/Users/x/.ssh/key"], [":root", "/Users/x/.ssh/key"],
+    ["/", "/home/x/.ssh/key"], [":root", "/home/x/.ssh/key"],
+  ])('refuses a user-data read outside minimal defaults beneath %s deny at %s', (root, key) => {
+    const own: CodexFilesystemPermissions = { ...permissions, filesystem: { [root]: "deny", ":minimal": "read", "/work": "write" } };
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, [key]: "read" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false, error: expect.stringContaining(JSON.stringify(key)) });
+  });
+
+  it.each(["/", ":root"])('does not claim to expand minimal system reads beneath %s deny', root => {
+    const own: CodexFilesystemPermissions = { ...permissions, filesystem: { [root]: "deny", ":minimal": "read" } };
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/usr/bin/tool": "read" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+  });
+
+  it.each(["/", ":root"])('retains other authored coverage for user data beneath %s deny', root => {
+    const key = "/Users/x/.ssh/key";
+    for (const [rule, expected] of [[":workspace_roots", "not-verified"], ["/Users/x", "accept"]] as const) {
+      const own: CodexFilesystemPermissions = { ...permissions, filesystem: { [root]: "deny", ":minimal": "read", [rule]: "read" } };
+      const read = config();
+      Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, [key]: "read" }, network: { enabled: false } } });
+      const result = decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } });
+      if (expected === "accept") expect(result).toEqual({ ok: true, verified: true });
+      else expect(result).toMatchObject({ ok: true, verified: false });
+    }
   });
 });
 
