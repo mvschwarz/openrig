@@ -202,6 +202,30 @@ profiles:
     expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots").get()).toEqual(before);
   });
 
+  // A malformed recorded roster isn't "no roster": snapshot capture refuses it, so restore-check reports the rig's restore
+  // inputs as unknown and never says restore brings a seat back. With no roster recorded, every current seat is in it.
+  it.each([
+    ["malformed JSON", "{not json", "unknown"],
+    ["a malformed id array", JSON.stringify({ type: "topology.roster_recorded", intendedNodeIds: [1] }), "unknown"],
+    ["no recorded roster", null, "actionable"],
+  ] as const)("reads a current-state restore's roster with %s", async (_label, payload, recovery) => {
+    const rig = rigRepo.createRig("roster-read");
+    const node = rigRepo.addNode(rig.id, "seat", { runtime: "terminal" });
+    sessionRegistry.registerSession(node.id, "seat@roster-read");
+    insertStartupContextRow(db, node.id, { runtime: "terminal" });
+    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+    if (payload !== null) {
+      db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'topology.roster_recorded', ?)").run(rig.id, payload);
+    }
+    const body = await (await app.request("/api/restore-check?rig=roster-read&noQueue=true&noHooks=true")).json();
+    expect(body.recovery.status).toBe(recovery);
+    expect(body.rigs[0].status === "unknown").toBe(recovery === "unknown");
+    if (recovery === "unknown") {
+      expect(body.checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions")).evidence).toContain("malformed authoritative topology roster");
+      expect(body.checks.some((c: { evidence: string }) => c.evidence.includes("brings it back"))).toBe(false);
+    }
+  });
+
   it("isolates a real factory snapshot read error to its rig", () => {
     const broken = rigRepo.createRig("broken-read");
     const good = rigRepo.createRig("good-read");

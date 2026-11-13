@@ -729,11 +729,11 @@ as no rig by that name or a failed boot).
             console.log(`  ${n.logicalId}: ${n.status}`);
           }
         }
-        // A seat of this rig outside the snapshot's intended roster (claimed after the topology was recorded) wasn't started.
+        // A seat of this rig outside the snapshot's intended roster (added or claimed after that roster was recorded) wasn't started.
         const skipped = ((res.data["excludedNodes"] as Array<{ logicalId: string; reason: string }> | undefined) ?? [])
           .filter((excluded) => excluded.reason === "current_seat_not_in_intended_roster").map((excluded) => excluded.logicalId);
         for (const logicalId of skipped) {
-          console.log(`  ${logicalId}: skipped — not in this restore's roster (a seat claimed after the rig's topology was recorded)`);
+          console.log(`  ${logicalId}: skipped — not in this restore's roster (added or claimed after that roster was recorded)`);
         }
         // Every seat running still exits 1 when the restore isn't whole; say why, so nobody retries a start that worked.
         if (rigResult === "partially_restored" && nodes.length > 0 && nodes.every((n) => launchStatusRunning(n.status))) {
