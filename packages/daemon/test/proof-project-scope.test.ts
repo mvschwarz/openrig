@@ -53,7 +53,8 @@ function fixture(alphaMissions = "missions") {
 }
 
 describe("project-qualified proof scope (#132)", () => {
-  it("resolves a literal colon path in the caller's rig project before a catalog prefix", async () => {
+  // Windows filesystems do not permit ':' in a directory name.
+  it.skipIf(process.platform === "win32")("resolves a literal colon path in the caller's rig project before a catalog prefix", async () => {
     const f = fixture();
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
@@ -375,7 +376,7 @@ describe("project-qualified proof scope (#132)", () => {
     expect(viaScopes.readiness.items[0].revision).toBe(viaProof.items[0].revision);
   });
 
-  it("an unqualified scope whose mission folder has a colon still resolves as written, even when the prefix is a catalogued project", async () => {
+  it.skipIf(process.platform === "win32")("an unqualified scope whose mission folder has a colon still resolves as written, even when the prefix is a catalogued project", async () => {
     const f = fixture();
     // the selected workspace has a mission folder "alpha:trial"; "alpha" is also a catalogued project
     const trial = join(f.legacy.missions, "alpha:trial"), slice = join(trial, "slices", "01-t001");
