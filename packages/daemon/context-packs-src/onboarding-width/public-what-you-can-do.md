@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-three top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.13`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.14`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -33,7 +33,10 @@ one command away. Your memory of the fleet is a claim about the past.
   *including the broken ones*. **The bare form is the question you usually want:** `--active`
   filters to running and **hides detached, exited and attention states** — which are exactly the
   cells you were scanning for. A seat whose tmux session is confirmed gone reads `detached`
-  (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it.
+  (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it. Since 0.7.14 `rig ps` ends with connected
+  assistants and their check-in line, and node reads take turns through their three synchronous
+  steps, so other reads and sends aren't held behind a burst of them; a nodes response is no longer
+  one snapshot across those steps, and in a burst each one comes later.
   A verified exited process in a retained pane reads `pane_exited`, instead of running and ready;
   outstanding work uses the existing recovery-finding route. An unknown observation is not an exit.
   `rig ps --nodes` also shows the model each seat was last seen using (`modelObservation`, with its
@@ -109,7 +112,8 @@ one command away. Your memory of the fleet is a claim about the past.
   Closed work's content and metadata can also be erased on a schedule
   (`retention.closed_content_days`, `retention.closed_metadata_days`; `0`, the default, keeps them),
   with an optional `retention.erasure_ledger`, for a retention policy or an account deletion. It's
-  opt-in, and a retried create can't bring erased work back.
+  opt-in, and a retried create can't bring erased work back. Since 0.7.14 an account's erasure also
+  removes OpenRig's own wakes and notices for that account's seats.
 - **Check the exit code.** Many commands used to print nothing and exit 0 when a daemon read
   failed; now they exit 1 or 2. Empty output from a failed read is not empty state.
 
@@ -124,7 +128,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   consequential delivery gets an effect check at the far end rather than a blind retry.
   `--verify` exits 1 when it can't confirm what its Enter did (`submission unconfirmed`, or text
   staged but not submitted): the message may still have arrived, so inspect with `rig capture`
-  before any resend, and don't let a script resend on that exit code alone. A
+  before any resend, and don't let a script resend on that exit code alone. Since 0.7.14 an ordinary
+  send doesn't act on an open Claude Code or Codex `/model` picker. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
@@ -175,7 +180,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   and the box was empty after Enter; it only reports.
 - **`rig broadcast`** — one fact to everyone at once, rather than relaying it N times and getting
   the wording wrong on the fourth. **Blast radius is real** — on a large rig this lands in every
-  seat's turn. A broadcast that reached no one says so.
+  seat's turn. A broadcast that reached no one says so, and a recipient a seat's setting held
+  reads as retained, not sent.
 - **`rig capture <seat>`** — read what is on their screen right now. **`--rig` / `--pod`** captures
   every seat in one call. `--lines N` is the last N lines (stderr says how many earlier lines were
   cut); `--history-plus-pane` gives the older N history lines plus the whole pane. A short capture
@@ -255,7 +261,7 @@ unseen — which makes messages the one delivery channel that never gets skipped
   default. **Opening `rig terminal open saved:kernel --window` is the step after install or start**:
   say you're opening it, run it on the daemon's desktop, then tell the person where it opened. Don't
   wait for a phrase like “show me my agents”; the same command brings their agents back later. No
-  YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
+  YAML, herdr when installed or plain tmux. Rex tiles show each seat's agent and its activity. The layout follows the terminal's width: on a narrow
   one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
   and the advisor gets its own tab. A `kernel` view the person saved still wins.
   Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
@@ -480,7 +486,8 @@ relay is a reason to inspect the available routing, not to surrender judgment to
 - **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you. A
   step with no allowed exit that can finish it or route onward is reported as `step_cannot_finish`.
   An allowed mapped exit is valid; in a dependency graph, `handoff` can finish a sink without a next
-  step.
+  step. Since 0.7.14 each step with a `harness:` pin gets a `harness_pin_unchecked` warning:
+  validation doesn't check pins against seats.
 - **`rig workflow compile <mission>`** / **`instantiate-lifecycle`** — derive one executable graph
   from `project.yaml` → `mission.yaml` → `slice.yaml`, inspect it without writing, then start an
   eligible graph with an opaque replay key. Typed acceptance candidate, verdict, and evidence
@@ -632,6 +639,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   steps): hand it work, follow it, answer the team's questions in their own words, and read the
   result. VS Code, Copilot CLI and Cursor load it with no seat: give the app its own
   `rig mcp serve --front-door` server with `OPENRIG_SESSION_NAME` set and turn the plugin's off.
+  A skill-only edition for Claude's plugin directory, in `plugins/claude-directory/`, follows
+  handed-on work and keeps its reply route.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -962,7 +971,8 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,
-  `--cancel` and `--skip-map` inspect, stop or skip that wait. If preparation stops at an ordinary
+  `--cancel` and `--skip-map` inspect, stop or skip that wait; since 0.7.14 `--state` also names the
+  input check behind a `draft_input_unknown` stop (`inputReadFailure`). If preparation stops at an ordinary
   approval, a manual `rig compact` keeps waiting for someone to answer it, within its 180-second
   budget; OpenRig never answers it, and the request times out after 240 seconds. The `claude-compaction-restore`
   skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
@@ -1502,7 +1512,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   0.7.13, `rig daemon start` ends with that offer when the person registry can be read and holds
   nobody. The kernel operator's startup is also taught to run `rig gateway participants` before its
   first greeting and offer registration when nobody is registered. The agent asks first and
-  registers only on the person's yes.
+  registers only on the person's yes. Since 0.7.14 a first team is fitted to the person's logins: a
+  login `rig doctor` reports missing matters when a seat you'd start runs on that harness, so say
+  which one before launch (`rig specs preview <team> --kind rig --json` shows each seat's runtime).
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig usage top`** — which of this machine's seats used the most tokens over a window (`--window
@@ -1587,7 +1599,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   Clients on MCP protocol revision 2026-07-28 and on the 2025 revisions share the same endpoint.
   With a grant service (experimental and off by default; you serve it to the internet behind
   your own tunnel), `--task-destination <member@rig>` names where a caller's `rig_queue_create`
-  goes when it gives no destination, and a seat's name alone resolves within the grant's team. A
+  goes when it gives no destination, and a seat's name alone resolves within the grant's team. Since
+  0.7.14 a plain name finds the seat's actual session (its own name, then its pod-member form, then
+  that name's slug, among seats the grant can address): an ambiguous name returns
+  `destination_ambiguous` with the candidates, an unknown one `destination_not_found`, and an
+  unreadable team `destination_unchecked`. Its person sees each tool's plain title, and under a
+  grant service's fair-use limit only new work is held back. A
   grant that names a person adds `rig_question_list` and `rig_question_answer`, so that person
   answers the team's questions from their assistant, recorded as their answer through that
   connection.
@@ -1601,7 +1618,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   member nothing can wake, or a rung member doesn't claim it in time, its person is told.
   A hosted member's roster entry shows whether it's checking in: its expected cadence and its last
   check-in, read as checking in, overdue, not yet checked in or checking in on request, and unknown
-  when that can't be read. It's a status, never a gate on delivery.
+  when that can't be read. It's a status, never a gate on delivery. Since 0.7.14 `rig ps`,
+  `rig_team` and the TUI's tables list connected assistants with that check-in line.
   **Internet-facing hosted members are experimental, unsupported, off by default and at your
   own risk.** Local assistants can connect locally. Internet access needs your own TLS tunnel or
   proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
@@ -1659,7 +1677,8 @@ database. It is one more set of primitives on a machine full of them.
   original byte size and the exact expansion command. Read the complete original record with
   `rig queue show <qitemId> --full --json`; a preview or a compact list is not the whole body.
   Compact `rig queue list` rows carry `summary`; the fields they leave out are absent, not empty,
-  and `fieldsElided` names them.
+  and `fieldsElided` names them. Since 0.7.14 `--tag` (repeatable; every tag must match),
+  `--mission` and `--slice` filter exactly, and bounded listings over retained history use indexes.
   Delivery status is separate from content: inspect its receipt before claiming it was consumed.
 - **"What am I waiting on?"** — the queue row's `waiting` view derives its owner, exact blocker
   and blocker owner, last meaningful change, activity confidence and next backstop from live
