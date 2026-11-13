@@ -324,6 +324,9 @@ describe("workflow routes (PL-004 Phase D)", () => {
     const result = await app.request("/api/workflow/list?status=active&project=p&mission=m&slice=s&rig=rig&name=routes-fixture&tag=review&tag=ready&limit=1");
     expect(result.status).toBe(200);
     expect(((await result.json()) as Array<{ instanceId: string }>).map((row) => row.instanceId)).toEqual([ids[1]]);
+    const allTags = await app.request("/api/workflow/list?status=active&project=p&mission=m&slice=s&rig=rig&name=routes-fixture&tag=review&tag=ready");
+    expect(allTags.status).toBe(200);
+    expect(((await allTags.json()) as Array<{ instanceId: string }>).map((row) => row.instanceId)).toEqual([ids[1]]);
     expect((await app.request("/api/workflow/list?limit=0")).status).toBe(400);
     expect((await app.request("/api/workflow/list?tag=")).status).toBe(400);
   });
