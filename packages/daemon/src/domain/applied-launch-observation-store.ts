@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import type { AppliedLaunchAxis, AppliedLaunchObservation, AppliedLaunchState } from "./permission-drift.js";
+import type {
+  AppliedLaunchAxis,
+  AppliedLaunchObservation,
+  AppliedLaunchState,
+  CodexObservedApprovalPolicy,
+} from "./permission-drift.js";
 
 export interface StoredAppliedLaunchObservation extends AppliedLaunchObservation {
   generationUuid: string;
@@ -13,9 +18,23 @@ interface ObservationRow {
   observation_state: string;
   value: string | null;
   reason: string | null;
-  approval_policy: "never" | null;
+  approval_policy: CodexObservedApprovalPolicy | null;
   daemon_opt_out?: number | null;
   observed_at: string;
+}
+
+function rowToStoredObservation(row: ObservationRow): StoredAppliedLaunchObservation {
+  return {
+    generationUuid: row.generation_uuid,
+    runtime: row.runtime,
+    axis: row.axis as AppliedLaunchAxis,
+    state: row.observation_state as AppliedLaunchState,
+    value: row.value,
+    ...(row.reason ? { reason: row.reason } : {}),
+    ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
+    ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
+    observedAt: row.observed_at,
+  };
 }
 
 /**
@@ -102,41 +121,39 @@ export class AppliedLaunchObservationStore {
          WHERE invalidated.generation_uuid IS NULL
       `).get(nodeId) as ObservationRow | undefined;
       if (!row) return null;
-      return {
-        generationUuid: row.generation_uuid,
-        runtime: row.runtime,
-        axis: row.axis as AppliedLaunchAxis,
-        state: row.observation_state as AppliedLaunchState,
-        value: row.value,
-        ...(row.reason ? { reason: row.reason } : {}),
-        ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
-        ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
-        observedAt: row.observed_at,
-      };
+      return rowToStoredObservation(row);
     } catch {
       return null;
     }
   }
 
-  /** readCurrent's daemon choice for every node that has one recorded, in one read; unknown nodes are absent. */
-  readCurrentDaemonOptOuts(): Map<string, boolean> {
+  /** readCurrent's observation for every node that has one recorded, in one read; unknown nodes are absent. */
+  readCurrentObservations(): Map<string, StoredAppliedLaunchObservation> {
     try {
       const rows = this.db.prepare(`
-        SELECT t.node_id, o.daemon_opt_out
+        SELECT t.node_id, o.*
           FROM occupant_tenures t
           JOIN applied_launch_observations o
             ON o.generation_uuid = t.generation_uuid
           LEFT JOIN applied_launch_observation_invalidations invalidated
             ON invalidated.generation_uuid = t.generation_uuid
          WHERE invalidated.generation_uuid IS NULL
-           AND o.daemon_opt_out IN (0, 1)
            AND t.generation_ordinal = (
              SELECT MAX(latest.generation_ordinal) FROM occupant_tenures latest WHERE latest.node_id = t.node_id
            )
-      `).all() as Array<{ node_id: string; daemon_opt_out: number }>;
-      return new Map(rows.map((row) => [row.node_id, row.daemon_opt_out === 1]));
+      `).all() as Array<ObservationRow & { node_id: string }>;
+      return new Map(rows.map((row) => [row.node_id, rowToStoredObservation(row)]));
     } catch {
       return new Map();
     }
+  }
+
+  /** readCurrent's daemon choice for every node that has one recorded, in one read; unknown nodes are absent. */
+  readCurrentDaemonOptOuts(): Map<string, boolean> {
+    const out = new Map<string, boolean>();
+    for (const [nodeId, obs] of this.readCurrentObservations()) {
+      if (obs.daemonOptOut !== undefined) out.set(nodeId, obs.daemonOptOut);
+    }
+    return out;
   }
 }

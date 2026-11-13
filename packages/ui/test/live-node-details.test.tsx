@@ -670,5 +670,39 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(resumeButton.textContent).toContain("Copy resume command");
     expect(resumeButton.textContent).not.toContain("Claude");
     expect(resumeButton.querySelector("svg")).toBeDefined();
+    expect(screen.queryByTestId("detail-resume-command-label")).toBeNull();
+  });
+
+  it("shows resumeCommandLabel beside the copy button while copying only the runnable command", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+    const command = "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'";
+    const label = "launched with -s danger-full-access -a never; a resume now uses -s workspace-write";
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      runtime: "codex",
+      resumeCommand: command,
+      resumeCommandLabel: label,
+    });
+    renderDetails();
+    const resumeButton = await screen.findByTestId("detail-copy-resume");
+    const renderedLabel = screen.getByTestId("detail-resume-command-label");
+    expect(renderedLabel.textContent).toBe(label);
+    fireEvent.click(resumeButton);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(command));
+  });
+
+  it("surfaces a permission-selection diagnostic label without rendering a copy button when real resume refuses invalid settings", async () => {
+    const diagnostic = "Permission selection: Seat node-1 (dev.impl): cannot read codex_permissions (bad json).";
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      runtime: "codex",
+      resumeCommand: null,
+      resumeCommandLabel: diagnostic,
+    });
+    renderDetails();
+    const renderedLabel = await screen.findByTestId("detail-resume-command-label");
+    expect(renderedLabel.textContent).toBe(diagnostic);
+    expect(screen.queryByTestId("detail-copy-resume")).toBeNull();
   });
 });
