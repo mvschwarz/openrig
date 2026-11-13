@@ -354,8 +354,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   `rig slack setup --reactions off` disables that routing; the default is `route`, and regenerating
   the app manifest preserves the setting. Since 0.7.15 link and media previews on posts to a person
   are off by default: `rig slack setup --unfurl on` turns them back on from the connector's next
-  rewire, and `rig slack status` shows the mode. An answer to a reply that arrived in an older
-  thread posts back into that thread.
+  rewire, and `rig slack status` shows the mode. When the arrival note is recorded before the
+  answer is routed, an answer to a reply in an older thread posts back into that thread; a failed
+  note write, or a notification posted before the note is recorded, posts it top-level.
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
@@ -798,12 +799,14 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
-  Since 0.7.15 start waits up to 180 s for the child it started, with a progress line about every
-  20 s: let it finish rather than starting again. The longer wait isn't a cure for a slow start.
+  Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
+  line about every 20 s: let it finish rather than starting again. Synchronous work can run past
+  the budget, and it isn't a cure for a slow start.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
-  slow synchronous steps by site, since 0.7.15 including three more queue reads and each slow step
-  of a nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
-  `nodes.inventory.terminal_work`).
+  slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
+  of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
+  `nodes.inventory.terminal_work`). These records are written after a slow call completes; a
+  missing record doesn't rule out unfinished work or work outside those steps.
   On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
   own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
   as before, with one log line giving the reason.
@@ -870,9 +873,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   Use `rig launch ... --snapshot-id <id>` when selection must be exact, and `rig restore status
   <attempt> --rig <rig>` for the derived intended-set receipt after an asynchronous restore.
   restore-check's per-seat `seat.<s>.queue-file` check is now `seat.<s>.queue-store`.
-  Since 0.7.15 restore resumes a seat in a rig with pods that has a resume token but no saved
-  startup context, names the missing context in its restore gaps and reads `partially_restored`;
-  restore-check reads that seat yellow. Both warn when a snapshot's named Codex profile was cleared
+  Since 0.7.15, for an eligible seat in a rig with pods that it starts in its own pane, restore
+  tries the saved conversation when the seat has a resume token but no saved startup context, and
+  records the `startup_context` gap; a successful resume reads `partially_restored`, and a missing
+  conversation or failed start keeps its own status. restore-check reads that seat yellow. Both warn when a snapshot's named Codex profile was cleared
   from the current seat. A rig can still read `fully_restored` past a seat restore didn't start or
   one left attached, and a seat left as a bare shell still counts as running in `rig ps`.
 - **`rig restore-packet write` / `read` / `validate`** — a seat is about to die or must move
