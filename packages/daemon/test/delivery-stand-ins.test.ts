@@ -114,6 +114,19 @@ describe("delivery suite stand-ins: the Claude Code Messages API", () => {
     expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([["/v1/messages/count_tokens", "other"], ["/api/hello", "not-found"]]);
   });
 
+  it("answers a registry GET for a scripted package with a newer version whose tarball it doesn't serve", async () => {
+    const standIn = await start("messages", { script: { rules: [], registry: { "@anthropic-ai/claude-code": "2.1.999" } } });
+    const meta = await (await fetch(`${standIn.url}/@anthropic-ai%2fclaude-code`)).json();
+    expect(meta["dist-tags"]).toMatchObject({ latest: "2.1.999", stable: "2.1.999" });
+    const tarball = meta.versions["2.1.999"].dist.tarball;
+    expect(tarball).toBe(`${standIn.url}/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz`);
+    expect((await fetch(tarball)).status).toBe(404);
+    expect((await fetch(`${standIn.url}/left-pad`)).status).toBe(404);
+    expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([
+      ["/@anthropic-ai%2fclaude-code", "registry"], ["/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz", "not-found"], ["/left-pad", "not-found"]]);
+    expect(() => loadScript({ registry: { "@anthropic-ai/claude-code": "latest" } })).toThrow(/registry/);
+  });
+
   it("reads the typed text and tool results out of the request's last turn", () => {
     expect(messagesTurnOf({ messages: [{ role: "user", content: "plain" }] })).toEqual({ kind: "user", text: "plain", parts: [{ text: "plain", source: "text" }] });
     expect(messagesTurnOf({ messages: [{ role: "assistant", content: "hi" }] })).toEqual({ kind: "other", text: "", parts: [] });

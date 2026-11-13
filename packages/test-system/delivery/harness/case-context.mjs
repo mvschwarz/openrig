@@ -161,6 +161,12 @@ export function caseContext(cell, { caseId, kind, version }) {
       writeFileSync(join(cell.env.DELIVERY_INJECT_DIR, "arm.json"), JSON.stringify(spec));
       cell.record({ step: "arm-injection", caseId, ...spec });
     },
+    /** Resize the seat's window, as a person resizing their terminal would; returns the size tmux then reports. */
+    async resize(width, height) {
+      cell.record({ step: "person-resizes", caseId, width, height });
+      await cell.tmux(["resize-window", "-t", cell.session, "-x", String(width), "-y", String(height)]);
+      return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{window_width}x#{window_height}"])).trim();
+    },
     /** What the injection did, or null if no paste came to fire it. */
     injection() {
       const path = join(cell.env.DELIVERY_INJECT_DIR, "fired.json");

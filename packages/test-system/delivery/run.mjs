@@ -244,7 +244,7 @@ async function cellMain(specPath) {
   });
   try {
     cell = await openCell({ dir: join(spec.dir, "world"), arm: spec.arm, program: { kind: spec.kind, bin: spec.programEntry }, openrig: spec.openrigEntry,
-      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null });
+      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null, claudeEnv: c.claudeEnv ?? null });
   } catch (error) {
     outcome = { result: "NOT RUN", reason: `the seat didn't open: ${String(error.message ?? error).split("\n")[0]}`, detail: String(error.stack ?? error).slice(0, 4000) };
   }
