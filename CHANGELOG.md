@@ -116,8 +116,6 @@ release doesn't fix.
 - With `recovery.auto_drive_provider_prompts` on, Claude Code's gated-grants
   trust check is never answered for you, and the plain trust prompt is answered
   "Yes". ([#3073](https://github.com/mvschwarz/openrig/pull/3073))
-- Codex seats with linked `CODEX_HOME` folders or config files get hook trust
-  under the keys Codex reads. ([#3079](https://github.com/mvschwarz/openrig/pull/3079))
 - `rig terminal open --provider herdr` reuses a live Herdr workspace, and Rex
   tiles show the seat's agent and its activity. ([#3068](https://github.com/mvschwarz/openrig/pull/3068), [#2992](https://github.com/mvschwarz/openrig/pull/2992))
 - `rig broadcast` prints a held recipient as retained, not sent. ([#3054](https://github.com/mvschwarz/openrig/pull/3054))
@@ -201,7 +199,7 @@ release doesn't fix.
 
 Thanks to @Kayhusk, @billbenetti, @cavalcanticampos, @Aummadour, @Tankard,
 @w4rc0n and @Totopo27 for merged contributions. Thanks also for the reports
-behind these fixes: @Kayhusk ([#3035](https://github.com/mvschwarz/openrig/issues/3035) and [#3078](https://github.com/mvschwarz/openrig/issues/3078)), @Tankard ([#2583](https://github.com/mvschwarz/openrig/issues/2583)),
+behind these fixes: @Kayhusk ([#3035](https://github.com/mvschwarz/openrig/issues/3035)), @Tankard ([#2583](https://github.com/mvschwarz/openrig/issues/2583)),
 @dajiaohuang ([#2529](https://github.com/mvschwarz/openrig/issues/2529)), @billbenetti ([#2728](https://github.com/mvschwarz/openrig/issues/2728)), @emilio-gagliardi ([#3087](https://github.com/mvschwarz/openrig/issues/3087)), @korallis
 ([#161](https://github.com/mvschwarz/openrig/issues/161)) and @w4rc0n ([#3017](https://github.com/mvschwarz/openrig/issues/3017)).
 
