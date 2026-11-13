@@ -2,7 +2,7 @@ import { OutboxHandlerError, type OutboxHandler } from "./outbox-handler.js";
 import { withWatchdogReceipts } from "./watchdog-delivery-receipts.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { PARKED_OWNER_COMPACTION_PENDING, PARKED_OWNER_POLICY_NAME } from "./policies/parked-owner-consumer.js";
-import type { SessionTransport } from "./session-transport.js";
+import { writtenFact, type SessionTransport } from "./session-transport.js";
 import { readSendOutcome } from "./connection-contract.js";
 import {
   formatWatchdogDeliveryMessage,
@@ -43,7 +43,7 @@ export function makeWatchdogDeliver(deps: {
       } : undefined;
       const result = await deps.sessionTransport.send(targetSession, payload,
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, ...(beforeWrite ? { beforeWrite } : {}) });
-      const fact = readSendOutcome(result);
+      const fact = readSendOutcome(result, writtenFact(result));
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
         ? { status: "ok", continuityActionCompleted, fact }

@@ -205,17 +205,21 @@ member's `hosted-trigger`, and a person's `gateway`. A route with `armed: false`
 delivered on it until a setting arms it.
 
 Each capability reads `supported`, `not-supported`, `unavailable` (the route has it, but this member can't use it now,
-such as a seat with no live terminal), `not-applicable` (it means nothing on this route) or `unknown`. A missing key
-means `unknown`. None of them means idle or success. A daemon without the route (HTTP 404) predates the contract: treat
+such as a seat with no session recorded as current), `not-applicable` (it means nothing on this route) or `unknown`. A
+missing key means `unknown`. None of them means idle or success, and a declaration isn't readiness: whether a seat has a
+current session comes from what OpenRig has recorded, not from looking at its pane or process. A daemon without the route (HTTP 404) predates the contract: treat
 every capability as unknown and keep using what works today.
 
 `?session=<address>` adds `member`: `{ member, route, runtime, capabilities, reason? }` for the member that address
-names, which is a registered person, a hosted member or a seat. An address none of them has comes back with
-`route: null`, every capability `unknown`, and the reason.
+names: a person the human registry resolves (or the terminal person's own `human@host`), a hosted member, or a seat. An
+address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. An address none
+of them has, or a person's address when the registry can't be read, comes back with `route: null`, every capability
+`unknown`, and the reason.
 
 Each typed send also records what happened to it, in the daemon's `transport.delivery_evidence` event, as
-`outcome: { fact, reporter, route }`. `fact` is `accepted` (the route took it, with `renderVerified: true` when the
-screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`; `reporter` says who established it.
+`outcome: { fact, reporter, route }`. `fact` is `accepted` (typed and submitted, with `renderVerified: true` when
+the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown` (a prompt answer typed without
+Enter is `unknown`: whether the prompt took it isn't known); `reporter` says who established it.
 None of them means the member read the work: picking it up is a claim on the row.
 
 What reads these declarations:

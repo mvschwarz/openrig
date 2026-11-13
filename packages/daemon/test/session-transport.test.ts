@@ -2808,10 +2808,16 @@ describe("SessionTransport", () => {
         { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "submit_refused" },
         { ok: false, sessionName: s, sent: false, inputPhase: "not_reached" },
         { ok: false, sessionName: s, reason: "transport_unavailable" },
-      ].map((result) => readSendOutcome(result).fact === "accepted" && readSendOutcome(result).renderVerified
-        ? "accepted, render verified" : readSendOutcome(result).fact))
+        // A prompt answer typed without Enter: it succeeded, but whether the prompt took it isn't known.
+        { ok: true, sessionName: s, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" },
+        // Text written and Enter refused before it was pressed: the text may sit in the input box.
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "draft_input_changed" },
+      ].map((result) => {
+        const outcome = readSendOutcome(result, writtenFact(result as Parameters<typeof writtenFact>[0]));
+        return outcome.fact === "accepted" && outcome.renderVerified ? "accepted, render verified" : outcome.fact;
+      }))
         .toEqual(["accepted", "accepted, render verified", "accepted", "held", "failed-effect-unknown", "failed-effect-unknown",
-          "not-delivered", "unknown"]);
+          "not-delivered", "unknown", "unknown", "failed-effect-unknown"]);
     });
 
     it("uses the caller's delivery id as the message, and gives each attempt its own id", async () => {
