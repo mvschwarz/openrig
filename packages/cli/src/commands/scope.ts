@@ -793,6 +793,7 @@ function buildMissionShowCommand(): Command {
           out.write(`Mission: ${mission.name}\n`);
           out.write(`  id: ${mission.id ?? "—"}\n`);
           if (own?.parent) out.write(`  parent: ${parent?.name ?? own.parent} (${own.parent})\n`);
+          if (childMissions.length) out.write(`  child missions: ${childMissions.map((node) => node.name).join(", ")}\n`);
           out.write(formatTrustLine(trust));
           out.write(`  active slices: ${mission.activeSliceCount}\n`);
           out.write(`  shipped slices: ${mission.shippedSliceCount}\n`);
@@ -926,7 +927,7 @@ function buildMissionCreateCommand(): Command {
         const intent = opts.intent ?? title;
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
         if (opts.parent !== undefined) {
-          const nodes = readParentScope(missionsRoot);
+          const nodes = readParentScope(missionsRoot, { strict: true });
           if (nodes.some((node) => node.id === id)) throw new ScopeCliError({ fact: `Mission ID ${id} is already in use.`, consequence: "Mission not created.", action: "Choose an unused mission ID." });
           validateMissionParent(nodes, id, opts.parent);
         }
@@ -1053,10 +1054,15 @@ function buildMissionParentCommand(): Command {
       const out = makeStdout(), json = Boolean(opts.json);
       try {
         if (Boolean(parent) === Boolean(opts.clear)) throw new ScopeCliError({ fact: "Choose a parent ID or --clear.", consequence: "No parent was changed.", action: "Pass exactly one parent ID or --clear." });
-        const root = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const root = resolveMissionsRoot({ override: getOpts(command).workspace, strictOverride: true });
         const mission = findMission(root, name);
+        const realRoot = fs.realpathSync(root);
+        const realMission = fs.realpathSync(mission.absPath);
+        if (path.dirname(realMission) !== realRoot) throw new ScopeCliError({ fact: `Mission ${name} is outside the selected missions root.`, consequence: "No parent was changed.", action: "Select a mission inside the selected workspace." });
+        const writeTarget = fs.existsSync(path.join(mission.absPath, "mission.yaml")) ? path.join(mission.absPath, "mission.yaml") : mission.readmePath!;
+        if (path.dirname(fs.realpathSync(writeTarget)) !== realMission) throw new ScopeCliError({ fact: `Mission file for ${name} is outside its directory.`, consequence: "No parent was changed.", action: "Use a mission whose authored files are inside its directory." });
         if (!mission.id) throw new ScopeCliError({ fact: `Mission ${name} has no authored ID.`, consequence: "No parent was changed.", action: "Give the mission a stable ID first." });
-        const nodes = readParentScope(root);
+        const nodes = readParentScope(root, { strict: true });
         if (nodes.filter((node) => node.id === mission.id).length !== 1) throw new Error(`Mission ID '${mission.id}' is not unique.`);
         if (parent) validateMissionParent(nodes, mission.id, parent);
         const manifestPath = path.join(mission.absPath, "mission.yaml");
@@ -1303,9 +1309,9 @@ function buildAuditCommand(): Command {
           ...missionResult.findings.map((f) => ({ ...f, scope: "mission" as const, scopeName: missionName })),
           ...sliceResults.flatMap((s) => s.result.findings.map((f) => ({ ...f, scope: "slice" as const, scopeName: s.name }))),
         ];
-        const parentNodes = readParentScope(missionsRoot);
-        const audited = parentNodes.find((node) => node.kind === "mission" && node.path === missionDir);
         const parentFindings: string[] = [];
+        const parentNodes = readParentScope(missionsRoot, { onInvalid: (message) => parentFindings.push(message) });
+        const audited = parentNodes.find((node) => node.kind === "mission" && node.path === missionDir);
         if (audited?.parent) {
           try { validateMissionParent(parentNodes, audited.id, audited.parent); }
           catch (error) { parentFindings.push((error as Error).message); }
@@ -1315,7 +1321,7 @@ function buildAuditCommand(): Command {
           for (const child of children) {
             const target = parentNodes.filter((node) => node.id === child.parent);
             if (target.length !== 1) parentFindings.push(`Child ${child.id} has an ambiguous parent ${child.parent}.`);
-            else if (target[0]!.kind === "slice" && ["done", "closed", "shipped"].includes(target[0]!.status ?? "") && ["active", "in-progress", "wip", "blocked"].includes(child.status ?? "")) parentFindings.push(`Child ${child.id} is active while parent slice ${child.parent} is complete.`);
+            else if (target[0]!.kind === "slice" && /^(done|closed|shipped)(?:$|-)/.test(target[0]!.status ?? "") && ["active", "in-progress", "wip", "blocked"].includes(child.status ?? "")) parentFindings.push(`Child ${child.id} is active while parent slice ${child.parent} is complete.`);
           }
         }
         const hardFindings = allFindings.filter((f) => f.severity === "high");

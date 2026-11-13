@@ -67,7 +67,8 @@ export function missionsRoutes(): Hono {
     const allSlices = indexer.list();
     const slices = allSlices.filter((s) => s.missionId === missionId);
     const fallbackPath = path.resolve(indexer.slicesRoot, missionId);
-    if (slices.length === 0 && (path.dirname(fallbackPath) !== path.resolve(indexer.slicesRoot) || !resolveNodeFile(fallbackPath) || (!fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices"))))) {
+    const legacyLinked = slices.length === 0 && path.dirname(fallbackPath) === path.resolve(indexer.slicesRoot) && !fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && readParentScope(indexer.slicesRoot).some((node) => node.kind === "mission" && node.path === fallbackPath && node.parent !== null);
+    if (slices.length === 0 && (path.dirname(fallbackPath) !== path.resolve(indexer.slicesRoot) || !resolveNodeFile(fallbackPath) || (!fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && !legacyLinked))) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
     const missionPath = slices.length ? computeMissionPath(slices[0]!) : fallbackPath;

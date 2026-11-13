@@ -303,7 +303,8 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
                 current = node
                 while current not in seen:
                     seen.add(current)
-                    raw = rig_output("scope", "mission", "show", str(current), "--workspace", str(current.parent.parent), "--json")
+                    workspace = next((ancestor for ancestor in current.parents if (ancestor / "project.yaml").is_file()), current.parent)
+                    raw = rig_output("scope", "mission", "show", str(current), "--workspace", str(workspace), "--json")
                     try:
                         mission = json.loads(raw)["mission"]
                         parent_id = mission["parentId"]

@@ -249,6 +249,20 @@ describe("trace-to-root --packet — the work packet as text", () => {
     expect(result.stdout).toContain("PARENT · M.2");
     expect(result.stdout).toContain("intent: Ship B");
   });
+  it("selects the project workspace for a nested missions root", () => {
+    const w = world();
+    const nested = join(w.workspace, "internal", "nested");
+    const child = join(nested, "release-a");
+    const parent = join(nested, "release-b");
+    mkdirSync(child, { recursive: true }); mkdirSync(parent, { recursive: true });
+    writeFileSync(join(w.workspace, "project.yaml"), "missions:\n  root: internal/nested\n");
+    writeFileSync(join(child, "SPEC.md"), "---\nintent: Child\n---\n");
+    writeFileSync(join(child, "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: parent, kind: "mission", intent: "Parent" } } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", child], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(w.calls()).toContain(`--workspace ${w.workspace} --json`);
+  });
   it("shows one direct candidate as the work, labelled with its source, without a root fallback (W2)", () => {
     const w = world();
     const evidence = deriveWorkCandidates([{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-a"] }], w.missions, nothingElse);

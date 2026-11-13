@@ -109,6 +109,14 @@ describe("GET /api/missions/:missionId", () => {
     expect(body.parentId).toBe("M.1.1");
     expect(body.parent).toMatchObject({ id: "M.1.1", kind: "slice" });
   });
+
+  it("returns a linked legacy mission without a manifest or slices directory", async () => {
+    writeMissionReadme(missionsRoot, "parent", { id: "M.1" });
+    writeMissionReadme(missionsRoot, "child", { id: "M.2", parent: "M.1" });
+    const res = await app.request("/api/missions/child");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ parentId: "M.1", parent: { id: "M.1" } });
+  });
   it("returns 200 with missionPath + slices filtered to the requested mission", async () => {
     writeSliceInMission(missionsRoot, "getting-started", "first-slice", { status: "active" });
     writeSliceInMission(missionsRoot, "getting-started", "second-slice", { status: "done" });
