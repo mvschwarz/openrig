@@ -19,6 +19,9 @@ function mockClient(overrides?: {
   return client;
 }
 
+// What a connection that relays a person's request is told when more than one seat could be the one they mean.
+const ASK_WHICH_SEAT = "If more than one seat could be the one the person means, ask which; don't choose from your own history.";
+
 describe("MCP Server", () => {
   let mcpClient: Client;
   let daemonClient: DaemonClient;
@@ -395,6 +398,8 @@ describe("MCP Server", () => {
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // It hands the team the person's work, so which seat they mean is theirs to say when several fit.
+      expect(FRONT_DOOR_WORKFLOW).toContain(ASK_WHICH_SEAT);
       // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
       expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
       const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
@@ -877,6 +882,8 @@ describe("MCP Server", () => {
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
     expect(instructions).toContain("You may omit destination");
+    // Asked to "send my Claude assistant one request" on a team with four Claude seats, a client picked one from its own history.
+    expect(instructions).toContain(ASK_WHICH_SEAT);
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
@@ -899,6 +906,8 @@ describe("MCP Server", () => {
     expect(named.filter((tool) => !offered.has(tool))).toEqual([]);
     expect(instructions).not.toMatch(/rig_whoami|rig_queue_handoff|rig_queue_decide/);
     expect(instructions.includes("rig_team")).toBe(offered.has("rig_team"));
+    // Only a grant that can hand the team work is told to ask which seat the person means.
+    expect(instructions.includes(ASK_WHICH_SEAT)).toBe(offered.has("rig_queue_create"));
     await external.close();
     await server.close();
   });
@@ -911,6 +920,8 @@ describe("MCP Server", () => {
       "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
       "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
     ]) expect(instructions).toContain(paragraph);
+    // A member works items rather than relaying a person's request, so it isn't told to ask which seat they mean.
+    expect(instructions).not.toContain(ASK_WHICH_SEAT);
   });
 
   it("shows a connected assistant's person plain titles and openings, keeping each tool's rules and hints", async () => {
