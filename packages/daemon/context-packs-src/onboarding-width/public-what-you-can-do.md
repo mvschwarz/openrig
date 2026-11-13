@@ -596,12 +596,14 @@ not have to tear one down to change it, and you rarely have to start from nothin
   A fresh Pi seat normally keeps OpenRig's guidance in its own agent folder, and a fresh Codex
   0.164.0+ seat normally gets it as launch developer instructions, so neither adds it to the
   repository's `AGENTS.md`. The repository file is still used when the Pi folder or its `AGENTS.md`
-  is a link, when a Codex config layer sets `developer_instructions` or can't be read, and for a
-  Codex resume, fork, restore or handover successor, or an older or unknown Codex version
+  is a link, when a Codex config layer sets `developer_instructions` or can't be read, for a Codex
+  fork or handover successor, a Codex resume in a rig without pods, or an older or unknown Codex
+  version. An eligible Codex resume (a rig with pods, Codex 0.164.0 or later, no configured
+  guidance, readable configuration) sends the missing blocks with the resume instead
   (`docs/reference/agent-startup-guide.md` has the rule). At
   launch, a block a person edited is kept and named (`guidance_block_edited`), not replaced.
   `rig up <rig> --existing` puts back the OpenRig guidance blocks `rig down` removed before a
-  resumed seat starts. A seat still missing one makes the rig `partially_restored` (its node lists
+  resumed seat starts, except on that eligible Codex resume, where they go with the resume. A seat still missing one makes the rig `partially_restored` (its node lists
   `guidanceGaps`) and `rig up` exits 1. A seat that wasn't running at the snapshot, but whose
   earlier session left a resume token, stops at `awaiting-decision` instead of starting fresh, in
   `rig up --existing` and in `rig launch` (exit 1); the message names the command that starts it
