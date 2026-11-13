@@ -28,6 +28,15 @@ describe("createDb", () => {
     db.close();
     fs.rmSync(tmpDir, { recursive: true });
   });
+
+  it.skipIf(process.platform === "win32")("file-backed database is owner-only (0600)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    const dbPath = path.join(tmpDir, "test.sqlite");
+    const db = createDb(dbPath);
+    expect(fs.statSync(dbPath).mode & 0o777).toBe(0o600);
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true });
+  });
 });
 
 describe("migrate", () => {
