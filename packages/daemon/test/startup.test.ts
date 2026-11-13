@@ -446,14 +446,14 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
 
     expect(canonical.destinationSession).toBe("human-operator@kernel");
     expect(generic.destinationSession).toBe("human@host");
-    await expect(
-      deps.queueRepo.create({
-        sourceSession: "dev-qa@implementation-pair",
-        destinationSession: "driver@phantom-rig",
-        body: "must still reject phantom rigs",
-        nudge: false,
-      }),
-    ).rejects.toThrow(/unknown rig/);
+    const missing = await deps.queueRepo.create({
+      sourceSession: "dev-qa@implementation-pair",
+      destinationSession: "driver@phantom-rig",
+      body: "keep work addressed to a missing rig",
+      nudge: false,
+    });
+    expect(deps.queueRepo.getById(missing.qitemId)?.destinationSession).toBe("driver@phantom-rig");
+    expect(deps.queueRepo.destinationAdvisory(missing.destinationSession)?.status).toBe("missing");
 
     db.close();
   });
@@ -490,7 +490,7 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
         transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
       });
 
-      for (const destination of ["product-ba@unknown", "bare-seat"]) {
+      for (const destination of ["bare-seat"]) {
         const before = counts();
         const response = await create(destination);
         expect(response.status).toBe(400);

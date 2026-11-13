@@ -7,13 +7,14 @@ import type { LoadResult } from "./gateway/human-registry.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 
 // PL-004 Phase A revision (R1): topology-backed validateRig.
-// Reject `<member>@<unknown-rig>` shapes against the rig registry.
+// Canonical addresses remain recordable when topology is missing or unavailable.
+// Destination observation is advice after persistence, not admission authority.
 // Bare ids without `@` are also rejected
 // (no canonical rig binding).
 // OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
-// parse contract — human-seat classification BEFORE parse, then the
-// greedy first-@ rig (so "member@rig@x" looks up rig "rig@x", misses,
-// and rejects with the same unknown_destination_rig as ever — BR-1).
+// parse contract — human-seat classification BEFORE parse. The greedy
+// first-@ spelling remains intact; local topology does not authorize or
+// rewrite canonical destination addresses.
 export function makeTopologyDestinationCheck(deps: {
   findRigsByName: (name: string) => unknown[];
   loadHumanRegistry: () => LoadResult;
@@ -38,6 +39,6 @@ export function makeTopologyDestinationCheck(deps: {
     }
     if (isHumanSeatSessionRef(sessionRef)) return true;
     if (parsed.kind !== "canonical") return false;
-    return deps.findRigsByName(parsed.rig).length > 0;
+    return true;
   };
 }
