@@ -12,7 +12,7 @@ import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { codexMemberLaunch, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
-import { verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
+import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -94,19 +94,22 @@ export class CodexResumeAdapter {
     if (wrapped && !this.options.seatLaunchEnvironment) {
       return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
-    const codexHome = seatCodexHome ?? this.options.codexHome;
-    if (codexPermissions && "filesystem" in codexPermissions) {
-      if (codexConfigProfile?.trim()) return { ok: false, code: "resume_failed", message: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify it. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
+    const filesystem = codexPermissions && "filesystem" in codexPermissions ? codexPermissions : undefined;
+    const codexHome = seatCodexHome ?? this.options.codexHome ?? (filesystem ? resolveCodexFilesystemHome() : undefined);
+    let policyWarning: string | undefined;
+    if (filesystem) {
       try {
-        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: codexPermissions, cwd, codexHome, launchPath: this.options.launchPath, launchWrapper });
+        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: filesystem, cwd, codexHome, launchPath: this.options.launchPath, launchWrapper,
+          codexConfigProfile: codexConfigProfile?.trim() || undefined });
         if (!verified.ok) return { ok: false, code: "resume_failed", message: verified.error };
-      } catch (error) { return { ok: false, code: "resume_failed", message: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
+        if (!verified.verified) policyWarning = codexPolicyWarning(verified.reason);
+      } catch { policyWarning = codexPolicyWarning("Native Codex configuration reader failed"); }
     }
 
     // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
     await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
 
-    if (codexConfigProfile?.trim()) {
+    if (codexConfigProfile?.trim() && !filesystem) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
       const execFn = this.options.exec ?? ((cmd: string) => execRuntimeProbe("codex.resume.profile_preflight", cmd,
         codexHome ? { cwd, env: { ...process.env, CODEX_HOME: codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}));
@@ -131,6 +134,7 @@ export class CodexResumeAdapter {
     const choice = codexPermissions ? codexMemberLaunch(codexPermissions) : undefined;
     const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = choice ? choice.observation : observeCodexSandbox(posture);
+    if (policyWarning) appliedLaunch.reason = policyWarning;
     const postureArg = posture + operationalLaunchArg("codex", choice ? { nonInterruptive }
       : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const readNetworkDefault = this.options.readNetworkDefault;
@@ -160,7 +164,7 @@ export class CodexResumeAdapter {
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...((filesystem ? codexHome : seatCodexHome) ? { codexHome: filesystem ? codexHome : seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Codex resume preparation; no native command was sent." };
     const textResult = beforeNativeDispatch
@@ -172,7 +176,7 @@ export class CodexResumeAdapter {
 
     const result = await this.verifyResume(tmuxSessionName);
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut: daemonSupport.kind === "supported" } : appliedLaunch;
-    return result.ok ? { ...result, appliedLaunch: launchFacts } : result;
+    return result.ok ? { ...result, appliedLaunch: launchFacts, ...(policyWarning ? { warnings: [policyWarning] } : {}) } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native

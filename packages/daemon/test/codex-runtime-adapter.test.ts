@@ -2848,12 +2848,12 @@ describe("a seat's own permission envelope (argv only, not native enforcement)",
 describe("a seat's explicit filesystem policy (argv and native-read preflight, not enforcement)", () => {
   const filesystemChoice = { approval: "never", filesystem: { ":minimal": "read", "/same": "write", "/same/private": "deny" }, network_access: false } satisfies import("../src/domain/codex-member-permissions.js").CodexFilesystemPermissions;
 
-  it.each(["fresh", "resume", "codex_id", "codex_last"])("refuses a wrapped filesystem launch before dispatch on %s", async kind => {
+  it.each(["fresh", "resume", "codex_id", "codex_last"])("keeps a wrapped filesystem launch and reports unverified policy on %s", async kind => {
     const tmux = mockTmux();
     const environment = new SeatLaunchEnvironment(tmux, { PATH: "/bin" }, "/same");
     const command = vi.spyOn(environment, "command").mockImplementation(async (_session, core) => core);
     const verifyFilesystemPolicy: CodexFilesystemVerifier = async request => request.launchWrapper?.length
-      ? { ok: false, error: "launch_wrapper can change the checked configuration" } : { ok: true };
+      ? { ok: true, verified: false, reason: "launch_wrapper can change the checked configuration" } : { ok: true, verified: true };
     const launchWrapper = ["env", "CODEX_HOME=/other"];
     const options = { codexHome: "/shared-home", verifyFilesystemPolicy, seatLaunchEnvironment: environment,
       sleep: async () => {} };
@@ -2862,21 +2862,20 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
       const binding = { ...makeBinding("/same"), codexPermissions: filesystemChoice, launchWrapper };
       const result = kind === "fresh" ? await adapter.launchHarness(binding, { name: "dev-a@test-rig" })
         : await adapter.buildResumeCommand(binding, { name: "dev-a@test-rig", resumeToken: "thread-A" });
-      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("launch_wrapper") });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { reason: expect.stringContaining("policy not verified: launch_wrapper") } });
     } else {
       const restore = new CodexResumeAdapter(tmux, { ...options, maxWaitMs: 0 });
       expect(await restore.resume("dev-a@test-rig", kind, "thread-A", "/same", undefined, "floor", undefined, undefined,
         undefined, undefined, undefined, undefined, filesystemChoice, undefined, launchWrapper))
-        .toMatchObject({ ok: false, message: expect.stringContaining("launch_wrapper") });
+        .toMatchObject({ ok: true, appliedLaunch: { reason: expect.stringContaining("policy not verified: launch_wrapper") } });
     }
-    expect(command).not.toHaveBeenCalled();
-    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(command).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('default_permissions="openrig-seat"'), expect.objectContaining({ launchWrapper }));
   });
 
   it.each(["fresh", "resume"])("emits the selected policy on %s without extra writable roots or shared policy files", async path => {
     const tmux = mockTmux(), filesystem = mockFs();
     const writes = vi.spyOn(filesystem, "writeFile");
-    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true }));
+    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: true }));
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: filesystem, sleep: async () => {}, verifyFilesystemPolicy,
       codexHome: "/shared-home", resolveGitAddDirs: async () => ["/same/.git"], prepareSeatFolder: () => "/seat-state" });
     const binding = { ...makeBinding("/same"), codexPermissions: filesystemChoice, launchPosture: "full_bypass" as const };
@@ -2899,13 +2898,65 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
+  it.each(["fresh", "resume"])("pins the normal account home on the native read and %s command", async kind => {
+    const previous = process.env.CODEX_HOME;
+    delete process.env.CODEX_HOME;
+    try {
+      const tmux = mockTmux();
+      const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: false, reason: "native read timed out" }));
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: { ...mockFs(), homedir: "/normal-account" }, sleep: async () => {}, verifyFilesystemPolicy });
+      const binding = { ...makeBinding("/same"), codexPermissions: filesystemChoice };
+      const result = kind === "fresh" ? await adapter.launchHarness(binding, { name: "dev-a@test-rig" })
+        : await adapter.buildResumeCommand(binding, { name: "dev-a@test-rig", resumeToken: "thread-A" });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { reason: "policy not verified: native read timed out" } });
+      expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ codexHome: "/normal-account/.codex" }));
+      const command = kind === "fresh" ? vi.mocked(tmux.sendText).mock.calls[0]?.[1] : "command" in result ? result.command : "";
+      expect(command).toContain("CODEX_HOME='/normal-account/.codex'");
+      expect(command).toContain('default_permissions="openrig-seat"');
+      expect(command).toContain('"/same/private"="deny"');
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous;
+    }
+  });
+
+  it("reports a thrown native reader as unverified before handover without changing config or sending input", async () => {
+    const tmux = mockTmux(), filesystem = mockFs();
+    const write = vi.spyOn(filesystem, "writeFile");
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: filesystem,
+      verifyFilesystemPolicy: async () => { throw new Error("private error contents"); } });
+    expect(await adapter.preflightLaunch({ ...makeBinding(), codexPermissions: filesystemChoice }))
+      .toEqual({ ok: true, warnings: ["policy not verified: Native Codex configuration reader failed"] });
+    expect(write).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("carries a pre-cutover check into one launch and checks again for a later launch", async () => {
+    const tmux = mockTmux();
+    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>()
+      .mockResolvedValueOnce({ ok: true, verified: false, reason: "native read timed out" })
+      .mockResolvedValueOnce({ ok: false, error: "later policy conflict" });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, verifyFilesystemPolicy });
+    const binding = { ...makeBinding("/same"), codexPermissions: filesystemChoice };
+    expect(await adapter.preflightLaunch(binding)).toMatchObject({ ok: true });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(await adapter.launchHarness(binding, { name: "dev-a@test-rig" }))
+      .toMatchObject({ ok: true, warnings: ["policy not verified: native read timed out"],
+        appliedLaunch: { reason: "policy not verified: native read timed out" } });
+    expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
+    vi.mocked(tmux.sendText).mockClear();
+    expect(await adapter.launchHarness(binding, { name: "dev-a@test-rig" })).toMatchObject({ ok: false, error: "later policy conflict" });
+    expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(2);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it.each([
     { homes: ["/shared-home", "/shared-home"], cwds: ["/same", "/same"] },
     { homes: ["/shared-home", "/shared-home"], cwds: ["/project-a", "/project-b"] },
     { homes: ["/home-a", "/home-b"], cwds: ["/same", "/same"] },
   ] satisfies { homes: [string, string]; cwds: [string, string] }[])("keeps A/B/A policies separate with home/cwd sharing: %j", async ({ homes, cwds }) => {
     const tmux = mockTmux();
-    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true }));
+    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: true }));
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, verifyFilesystemPolicy,
       seatHome: id => id === "A" ? homes[0] : homes[1] });
     const other: import("../src/domain/codex-member-permissions.js").CodexFilesystemPermissions = {
@@ -2933,18 +2984,21 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
     ]);
   });
 
-  it("refuses a named configuration profile for the new policy without changing legacy selections", async () => {
+  it("keeps a named configuration profile and the authored filesystem policy on resume", async () => {
     const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy: async () => ({ ok: true }) });
+    const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: false, reason: "profile reader unavailable" }));
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy });
     expect(await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: filesystemChoice, codexConfigProfile: "named" },
-      { name: "dev-a@test-rig", resumeToken: "thread-A" })).toMatchObject({ ok: false, error: expect.stringContaining("codex_config_profile") });
+      { name: "dev-a@test-rig", resumeToken: "thread-A" })).toMatchObject({ ok: true,
+        core: expect.stringMatching(/-p 'named' .*default_permissions="openrig-seat"/), appliedLaunch: { reason: "policy not verified: profile reader unavailable" } });
+    expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ codexConfigProfile: "named" }));
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
   it.each(["codex_id", "codex_last"])("legacy restore %s carries the same policy and refuses a failed native read", async kind => {
     const tmux = mockTmux();
     const restore = new CodexResumeAdapter(tmux, { codexHome: "/shared-home", maxWaitMs: 0, sleep: async () => {},
-      verifyFilesystemPolicy: async () => ({ ok: true }), resolveGitAddDirs: async () => ["/same/.git"] });
+      verifyFilesystemPolicy: async () => ({ ok: true, verified: true }), resolveGitAddDirs: async () => ["/same/.git"] });
     await restore.resume("dev-a@test-rig", kind, "thread-A", "/same", undefined, "full_bypass", undefined, undefined,
       undefined, undefined, undefined, undefined, filesystemChoice);
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];

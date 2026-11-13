@@ -341,7 +341,8 @@ codex_permissions:
 ```
 
 The mapping accepts native `read`, `write` and `deny` values at absolute paths,
-`~/path`, or `:root`, `:minimal`, `:workspace_roots`, `:tmpdir` and `:slash_tmp`.
+`~/path`, or `:root`, `:minimal`, `:workspace_roots` (alias `:project_roots`),
+`:tmpdir` and `:slash_tmp`.
 It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
 of this option. Omitted network access becomes `false`. Include the read access
 your tools and installed Codex executable need; this custom profile adds no
@@ -357,28 +358,34 @@ other. Clearing the selection changes only that seat's record. Existing
 account-scoped `codex_config_fragment` resources and their root-key rejection
 stay unchanged.
 
-Before dispatch, Codex's native configuration reader must report the selected
-profile, approval, filesystem and network settings exactly as supplied. A lower
-layer's extra grant, inherited policy, legacy sandbox setting, unreadable result
-or unsupported managed constraint refuses the launch; the policy is never
-silently replaced with a broader fallback. This check requires an explicit
-absolute `CODEX_HOME` in member/rig `env:` or the daemon environment. It also
-refuses a named `codex_config_profile`: the native reader cannot load that
-profile on the supported path. Clear the configuration profile before selecting
-`filesystem`, or keep the legacy `sandbox` envelope. The spec and setters reject
-this combination early, and launch checks stored records defensively.
+Before dispatch, OpenRig compares Codex's native configuration with the seat's
+selection. Positive evidence of access widening, a conflicting profile or
+approval choice, an excluding managed allowlist, or a missing/empty selected
+profile refuses launch. Compatible managed defaults and allowlists, harmless
+descriptions and provably narrower flat rules are accepted. Legacy sandbox
+settings are inert under the invocation's explicit permission-profile selection.
+Null fields are treated as absent, including unfamiliar optional fields.
 
-A filesystem policy also refuses a nonempty `launch_wrapper`: an arbitrary
-wrapper can change `CODEX_HOME` or other configuration after the native read.
-Clear the wrapper before using this option. Legacy sandbox selections retain
-their existing wrapper support.
+A timeout, reader failure, unfamiliar representation or unsupported managed
+requirement continues with the authored flags and reports `policy not verified:
+<reason>` in the launch observation and status. The policy is never dropped or
+swapped, and account/project settings are never edited to make the check pass.
+Without an explicit `CODEX_HOME`, OpenRig resolves the normal account home and
+pins it for both the read and launch; an unresolvable home is reported as
+unverified. A named `codex_config_profile` is retained but unverified because the
+native reader cannot load that layer on this path. A `launch_wrapper` is also
+retained and unverified: it may change the effective home/configuration, so a
+read without that wrapper cannot certify the launch.
 
 The filesystem selection replaces permission-mode and team/kernel defaults,
 including ambient YOLO. Fresh launches, both resume paths and restore emit the
-same selection. A rebuild uses the saved filesystem policy ahead of an observed
+same selection. Hand-resuming from the command shown by `rig ps` does not yet
+carry this filesystem policy. A rebuild uses the saved filesystem policy ahead of an observed
 predecessor sandbox; clearing or replacing the policy after a snapshot takes
 effect on restore. Status reports the plan and its limits, not observed native
-enforcement. Configuration can change between the preflight and native startup;
+enforcement. Handover checks the successor's filesystem selection before
+signaling the predecessor; a concrete conflict leaves that predecessor running.
+Configuration can change between the preflight and native startup;
 the read and launch are not atomic. Codex's sandbox governs local command
 execution, not every connector, account or external service.
 

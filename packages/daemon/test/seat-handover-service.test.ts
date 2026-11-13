@@ -1307,7 +1307,8 @@ describe("SeatHandoverService", () => {
     db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
       .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
     const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: true as const }));
-    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy });
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+      fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {} } });
     vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
     vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
     signalPaneProcess.mockImplementation(async () => {
@@ -1327,13 +1328,14 @@ describe("SeatHandoverService", () => {
     db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
       .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
     const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: false as const, reason: "native read timed out" }));
-    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy });
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+      fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {} } });
     vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
     vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
     const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
     expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "keep authored policy" }))
-      .toMatchObject({ ok: true });
+      .toMatchObject({ ok: true, result: { warnings: expect.arrayContaining(["policy not verified: native read timed out"]) } });
     expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
     expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({ codexPermissions: { filesystem: { ":minimal": "read" } } });
     expect(signalPaneProcess).toHaveBeenCalledTimes(1);

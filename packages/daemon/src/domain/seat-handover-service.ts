@@ -781,7 +781,7 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       startedWithoutRequired,
-      launchWarnings: coreCopyNotes,
+      launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }

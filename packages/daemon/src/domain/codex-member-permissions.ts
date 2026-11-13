@@ -35,16 +35,10 @@ export interface CodexFilesystemPermissions {
 
 export type CodexMemberPermissions = CodexSandboxPermissions | CodexFilesystemPermissions;
 
-export function assertCodexFilesystemProfileCompatible(permissions: CodexMemberPermissions, profile: unknown): void {
-  if ("filesystem" in permissions && typeof profile === "string" && profile.trim()) {
-    throw new Error("Filesystem codex_permissions cannot be combined with codex_config_profile; clear the configuration profile or use the legacy sandbox envelope");
-  }
-}
-
 const KEYS = ["sandbox", "approval", "network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
 const WORKSPACE_ONLY = ["network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"];
 const FILESYSTEM_KEYS = ["filesystem", "approval", "network_access"];
-const FILESYSTEM_SPECIAL_PATHS = new Set([":root", ":minimal", ":workspace_roots", ":tmpdir", ":slash_tmp"]);
+const FILESYSTEM_SPECIAL_PATHS = new Set([":root", ":minimal", ":workspace_roots", ":project_roots", ":tmpdir", ":slash_tmp"]);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -114,10 +108,6 @@ export function codexMemberEnvelope(permissions: CodexSandboxPermissions): Codex
 
 /** Invocation-local profile: never written into the account home or the shared project. */
 export const CODEX_SEAT_PERMISSION_PROFILE = "openrig-seat";
-
-export function codexFilesystemProfile(permissions: CodexFilesystemPermissions) {
-  return { filesystem: permissions.filesystem, network: { enabled: permissions.network_access === true } };
-}
 
 export function codexFilesystemOverrides(permissions: CodexFilesystemPermissions): string[] {
   const entries = Object.entries(permissions.filesystem).map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");

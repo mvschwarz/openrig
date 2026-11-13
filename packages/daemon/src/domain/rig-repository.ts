@@ -2,7 +2,7 @@ import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
-import { assertCodexFilesystemProfileCompatible, validateCodexMemberPermissions } from "./codex-member-permissions.js";
+import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
@@ -665,7 +665,7 @@ export class RigRepository {
     }
     if (opts?.codexPermissions !== undefined) {
       if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
-      assertCodexFilesystemProfileCompatible(validateCodexMemberPermissions(opts.codexPermissions), opts.codexConfigProfile);
+      validateCodexMemberPermissions(opts.codexPermissions);
       // The envelope is written atomically with creation, including direct repository callers.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }

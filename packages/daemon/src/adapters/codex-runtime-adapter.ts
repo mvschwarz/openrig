@@ -1,6 +1,6 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
 import { codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
-import { verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
+import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemDecision, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -178,6 +178,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
   private profileFingerprint: (path: string) => Promise<ProfileFingerprint>;
   private verifyFilesystemPolicy: CodexFilesystemVerifier;
+  // A handover checks the exact binding before retiring its predecessor. Consume
+  // that result once at dispatch, rather than repeat a refusal after cutover.
+  private filesystemPreflight = new WeakMap<NodeBinding, CodexFilesystemDecision>();
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -313,8 +316,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** The home a seat's Codex uses: its own from its member or rig `env:`, else the daemon's explicit CODEX_HOME. Undefined
    *  keeps the legacy OS/PID home behavior. */
-  private homeFor(binding: { nodeId?: string; accountHome?: string | null } | undefined): string | undefined {
-    return this.ownHome(binding) ?? this.codexHome;
+  private homeFor(binding: { nodeId?: string; accountHome?: string | null; codexPermissions?: NodeBinding["codexPermissions"] } | undefined): string | undefined {
+    const selected = this.ownHome(binding) ?? this.codexHome;
+    return binding?.codexPermissions && "filesystem" in binding.codexPermissions
+      ? selected ?? resolveCodexFilesystemHome(undefined, this.fs.homedir) : selected;
   }
 
   /** Only the seat's own CODEX_HOME, undefined when it declares none. Probes and readers get it as an extra argument
@@ -323,8 +328,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return binding?.accountHome ?? (binding?.nodeId ? this.seatHome?.(binding.nodeId, binding.accountHome === null) : undefined);
   }
 
-  private ownHomeCommandOpt(binding: { nodeId?: string; accountHome?: string | null }): { codexHome?: string } {
-    const own = this.ownHome(binding);
+  private ownHomeCommandOpt(binding: NodeBinding): { codexHome?: string } {
+    const own = binding.codexPermissions && "filesystem" in binding.codexPermissions ? this.homeFor(binding) : this.ownHome(binding);
     return own ? { codexHome: own } : {};
   }
 
@@ -895,6 +900,26 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /** No managed config writes, pane input, termination or bindings change here. */
+  async preflightLaunch(binding: NodeBinding): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }> {
+    const decision = await this.checkFilesystemPolicy(binding);
+    if (!decision) return { ok: true };
+    if (!decision.ok) return decision;
+    this.filesystemPreflight.set(binding, decision);
+    return decision.verified ? { ok: true } : { ok: true, warnings: [codexPolicyWarning(decision.reason)] };
+  }
+
+  private async checkFilesystemPolicy(binding: NodeBinding): Promise<CodexFilesystemDecision | undefined> {
+    if (!binding.codexPermissions || !("filesystem" in binding.codexPermissions)) return undefined;
+    try {
+      return await this.verifyFilesystemPolicy({ permissions: binding.codexPermissions, cwd: binding.cwd,
+        codexHome: this.homeFor(binding), launchPath: this.launchPath, launchWrapper: binding.launchWrapper,
+        codexConfigProfile: binding.codexConfigProfile?.trim() || undefined });
+    } catch {
+      return { ok: true, verified: false, reason: "Native Codex configuration reader failed" };
+    }
+  }
+
   async launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; beforeNativeDispatch?: () => boolean },
@@ -918,6 +943,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
     const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg, loginShellArg } = prepared;
+    const policyNotice = appliedLaunch.reason?.startsWith("policy not verified:") ? { warnings: [appliedLaunch.reason] } : {};
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -958,7 +984,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         // For a handover a missed capture is pending metadata, not a failed launch: the fork returns
         // without a token and the handover's readiness checks still decide success. Any other fork
         // keeps its unsent context pending for `rig seat continue`, which verifies the child first.
-        if (opts.forkSource.pendingIdAllowed) return { ok: true, appliedLaunch };
+        if (opts.forkSource.pendingIdAllowed) return { ok: true, appliedLaunch, ...policyNotice };
         return {
           ok: false,
           error: "codex fork: could not capture new post-fork thread id",
@@ -966,7 +992,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           forkIdentityPending: true,
         };
       }
-      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch, ...policyNotice };
     }
 
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
@@ -993,17 +1019,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, ...this.ownHomeOpt(binding) });
       if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch, ...policyNotice,
         ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
     }
 
     const threadId = await this.captureFreshThreadId(binding, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
     if (threadId) {
-      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch, ...policyNotice };
     }
 
-    return { ok: true, appliedLaunch };
+    return { ok: true, appliedLaunch, ...policyNotice };
   }
 
   /** The command launchHarness would type to resume `resumeToken`, wrapped in the seat launch environment,
@@ -1011,7 +1037,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   async buildResumeCommand(
     binding: NodeBinding,
     opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string },
-  ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation; warnings?: string[] } | { ok: false; error: string }> {
     if (binding.launchWrapper?.length && !this.seatLaunchEnvironment) {
       return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
     }
@@ -1026,7 +1052,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     } catch {
       return { ok: false, error: "launch_wrapper unavailable; no agent started." };
     }
-    return { ok: true, command, core, appliedLaunch: prepared.appliedLaunch };
+    return { ok: true, command, core, appliedLaunch: prepared.appliedLaunch,
+      ...(prepared.appliedLaunch.reason?.startsWith("policy not verified:") ? { warnings: [prepared.appliedLaunch.reason] } : {}) };
   }
 
   /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
@@ -1077,6 +1104,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
     opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    const decision = this.filesystemPreflight.get(binding) ?? await this.checkFilesystemPolicy(binding);
+    this.filesystemPreflight.delete(binding);
+    if (decision && !decision.ok) return decision;
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
     // concurrent launches never interleave them. An unselected seat's launch never installs.
     // A seat with its own CODEX_HOME gets OpenRig's managed config (hooks, feature flag) and plugin in that home.
@@ -1096,13 +1126,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const filesystemPermissions = binding.codexPermissions && "filesystem" in binding.codexPermissions ? binding.codexPermissions : undefined;
-    if (filesystemPermissions) {
-      if (profile) return { ok: false, error: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify that configuration profile. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
-      try {
-        const verified = await this.verifyFilesystemPolicy({ permissions: filesystemPermissions, cwd: binding.cwd, codexHome: home, launchPath: this.launchPath, launchWrapper: binding.launchWrapper });
-        if (!verified.ok) return verified;
-      } catch (error) { return { ok: false, error: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
-    }
     // An authored filesystem policy always wins over a stale observed legacy envelope. Legacy rebuilds keep their carry behavior.
     const memberChoice = binding.codexPermissions && (!binding.codexRebuildPermissions || filesystemPermissions) ? codexMemberLaunch(binding.codexPermissions) : undefined;
     const envelope = memberChoice ? undefined : binding.codexRebuildPermissions;
@@ -1110,6 +1133,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? profileArg + codexEnvelopeArgs(envelope)
       : codexPostureArg(profileArg, process.env, binding.launchPosture);
     const appliedLaunch: AppliedLaunchObservation = memberChoice?.observation ?? (envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture));
+    if (decision && !decision.verified) appliedLaunch.reason = codexPolicyWarning(decision.reason);
     // The seat's envelope is not full access, so a policy's full_bypass extras don't follow it.
     const postureArg = posture + operationalLaunchArg(this.runtime, memberChoice ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
 
@@ -1130,7 +1154,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
-    if (profile) {
+    if (profile && !filesystemPermissions) {
       const probeResult = await (own ? this.verifyProfilePreflight(profile, binding.cwd, own) : this.verifyProfilePreflight(profile, binding.cwd));
       if (!probeResult.ok) {
         return {
