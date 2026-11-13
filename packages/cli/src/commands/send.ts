@@ -79,7 +79,7 @@ export function renderShortStamp(stampISO: string): string {
 }
 
 /** The address OpenRig records an answer typed at this machine under (the daemon's UNATTRIBUTED_ACTOR). It names nobody,
- *  and nothing is delivered there, so a reply hint never points at it. */
+ *  and a row there notifies no one (it only waits on Steering and in the Feed), so a reply hint never points at it. */
 const UNATTRIBUTED_PERSON = "human@host";
 
 export function wrapSendBody(
@@ -113,7 +113,7 @@ export function wrapSendBody(
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : personAddress === UNATTRIBUTED_PERSON
-      ? `↩ Don't write to ${senderLabel}: nothing is delivered there. To ask the person back, use their own address (rig gateway human list shows it).`
+      ? `↩ ${senderLabel} names no person: a reply there notifies no one and only waits on Steering and in the Feed. To ask the person back, use their registered address (rig gateway human list lists who's registered).`
     : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
       : meta?.senderReachable === false
