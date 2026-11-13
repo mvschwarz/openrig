@@ -16,6 +16,7 @@ import { composerText } from "../../test-system/delivery/harness/screen.mjs";
 import { ownsEnviron, parseStat, reapByIdentity } from "../../test-system/delivery/harness/world.mjs";
 import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
 import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
+import { expectFor } from "../../test-system/delivery/cases/d18.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
 
@@ -161,6 +162,30 @@ describe("delivery harness: the receiver-side oracle", () => {
     expect(v.toJSON()).toMatchObject({ result: "FAIL", failed: ["b"] });
     const n = new Verdict(); n.skip("no program");
     expect(n.toJSON()).toMatchObject({ result: "NOT RUN", reason: "no program" });
+  });
+});
+
+describe("delivery harness: the typing-guard matrix (D18)", () => {
+  it("holds every sender a mode doesn't let type, in every state", () => {
+    expect(expectFor("hold", "idle", "automatic")).toEqual({ type: "held", reasons: ["typing_guard_enabled"] });
+    expect(expectFor("urgent-only", "idle", "deliberate")).toEqual({ type: "held", reasons: ["typing_guard_enabled"] });
+    expect(expectFor("openrig-urgent", "draft", "deliberate").type).toBe("held");
+    expect(expectFor("sends-only", "idle", "automatic").type).toBe("held");
+    expect(expectFor("hold", "dialog", "deliberate_urgent").reasons).toEqual(["typing_guard_enabled", "target_needs_input"]);
+  });
+
+  it("types where the mode allows it, as the expected matrix says per state", () => {
+    expect(expectFor("off", "draft", "automatic")).toEqual({ type: "merge" });
+    expect(expectFor("sends-only", "copy_mode", "deliberate")).toEqual({ type: "copy-then-deliver" });
+    expect(expectFor("off", "dialog", "deliberate")).toEqual({ type: "refuse", reasons: ["target_needs_input"] });
+    // The guarded modes are stated only as "refused, no write" at a dialog: any no-input reason, recorded.
+    expect(expectFor("draft-aware", "dialog", "deliberate")).toEqual({ type: "refuse", reasons: null });
+    expect(expectFor("draft-aware", "draft", "deliberate")).toEqual({ type: "held", reasons: ["draft_input_busy"] });
+    expect(expectFor("draft-aware", "busy", "automatic").type).toBe("deliver-or-held");
+    expect(expectFor("openrig-urgent", "idle", "automatic")).toEqual({ type: "deliver" });
+    expect(expectFor("urgent-only", "draft", "deliberate_urgent").type).toBe("held");
+    // Not stated by the matrix: recorded, never judged.
+    expect(expectFor("openrig-urgent", "copy_mode", "automatic")).toEqual({ type: "record" });
   });
 });
 

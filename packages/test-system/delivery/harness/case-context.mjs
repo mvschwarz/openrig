@@ -188,6 +188,12 @@ export function caseContext(cell, { caseId, kind, version }) {
     async setGuard(mode) {
       const out = await cell.rig(["seat", "set-typing-guard", cell.session, "--mode", mode, "--reason", `delivery suite ${caseId}`, "--json"]);
       verdict.info(`typing guard set to ${mode}`, out.stdout.trim().slice(0, 400));
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** Release one held message's quota; it delivers nothing. The route requires a sender, so the suite names itself. */
+    async retireHeld(outboxId) {
+      const out = await cell.rig(["seat", "retire-held-message", cell.session, outboxId, "--reason", `delivery suite ${caseId}`, "--json"], { allowFail: true, as: "delivery-suite@dlv" });
+      return { exit: out.exit, stdout: out.stdout.trim().slice(0, 600) };
     },
     async setDraftDelivery(value) {
       await cell.rig(["config", "set", "transport.draft_delivery", value]);

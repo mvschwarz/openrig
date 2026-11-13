@@ -165,9 +165,10 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
   // A case's own Claude settings, such as allowing one harmless command, so a busy case isn't a permission case.
   if (program.kind === "claude" && claudeSettings) writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify(claudeSettings, null, 2), { mode: 0o600 });
 
-  const rig = async (args, { timeout = 60_000, allowFail = false } = {}) => {
+  const rig = async (args, { timeout = 60_000, allowFail = false, as = null } = {}) => {
     try {
-      const { stdout, stderr } = await run(process.execPath, [openrig, ...args], { env, cwd: work, timeout, maxBuffer: 16 << 20 });
+      // `as` names the sender a command is attributed to, for a route that requires one.
+      const { stdout, stderr } = await run(process.execPath, [openrig, ...args], { env: as ? { ...env, OPENRIG_SESSION_NAME: as } : env, cwd: work, timeout, maxBuffer: 16 << 20 });
       record({ step: "rig", args, exit: 0 });
       return { exit: 0, stdout, stderr };
     } catch (error) {
