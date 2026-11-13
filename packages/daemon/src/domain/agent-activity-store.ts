@@ -242,9 +242,9 @@ export class AgentActivityStore {
         if (!row.resume_token) {
           const runtime = grant.binding!.runtime;
           const resumeType = runtime === "pi" ? "pi_session_file" : `community:${runtime}`;
-          new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef, "hook");
+          new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef);
           register(this.eventBus.persistWithinTransaction({ type: "agent.session_identity", rigId: session.rigId,
-            nodeId: grant.nodeId, sessionName: row.session_name, runtime, sessionId: observations.session.nativeRef, provenance: "hook" }));
+            nodeId: grant.nodeId, sessionName: row.session_name, runtime, sessionId: observations.session.nativeRef, provenance: "launcher" }));
         }
       }
       return { ok: true, observation: receipt(report, event.seq) };
@@ -662,6 +662,7 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
   if (raw.session !== undefined) {
     if (!object(raw.session) || !only(raw.session, ["nativeRef"])) return null;
     const ref = raw.session.nativeRef;
+    if (typeof ref !== "string" || /\p{Cf}/u.test(ref)) return null;
     if (grant.binding?.runtime === "pi" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
       const valid = validateSessionFileFormat(ref);
       if (!valid.ok) return null;
@@ -672,7 +673,7 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
     }
   }
   if (raw.model !== undefined) {
-    if (!object(raw.model) || !only(raw.model, ["id"]) || !usableCommunityNativeRef(raw.model.id)) return null;
+    if (!object(raw.model) || !only(raw.model, ["id"]) || !usableCommunityNativeRef(raw.model.id) || /\p{Cf}/u.test(raw.model.id)) return null;
     out.model = { id: raw.model.id };
   }
   if (raw.context !== undefined) {

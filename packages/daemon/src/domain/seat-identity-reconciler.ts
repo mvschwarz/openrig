@@ -1,6 +1,6 @@
 import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
 import { basename } from "node:path";
-import { readProcessTable } from "./process-table.js";
+import { readProcessTableCensus } from "./process-table.js";
 import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation, type NativeProcessRow } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -91,6 +91,8 @@ interface RunningSeatRow {
   startup_status?: string | null;
 }
 
+type RunnerProcessCensus = { rows: NativeProcessRow[]; permissionHiddenPids: number[] };
+
 type PaneObservation = { pid: number | null; command: string | null; dead?: boolean };
 
 export interface SeatIdentityReconcilerDeps {
@@ -98,6 +100,7 @@ export interface SeatIdentityReconcilerDeps {
   tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
+  readProcessTableCensus?: () => Promise<RunnerProcessCensus>;
   readPiRunnerState?: (sessionName: string) => PiRunnerState | null;
 }
 
@@ -119,7 +122,7 @@ export class SeatIdentityReconciler {
   private readonly store: SeatIdentityStore;
   private readonly listProcesses: NativeProcessLister;
   private readonly readPiRunnerState?: SeatIdentityReconcilerDeps["readPiRunnerState"];
-  private readonly listRunnerProcesses: NativeProcessLister;
+  private readonly readRunnerCensus: () => Promise<RunnerProcessCensus>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
   private generation = 0;
@@ -132,7 +135,8 @@ export class SeatIdentityReconciler {
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.readPiRunnerState = deps.readPiRunnerState;
     // Unlike the native best-effort recognizer, absence proof must not turn a census failure into an empty table.
-    this.listRunnerProcesses = deps.listProcesses ?? readProcessTable;
+    this.readRunnerCensus = deps.readProcessTableCensus ?? (deps.listProcesses
+      ? async () => ({ rows: await deps.listProcesses!(), permissionHiddenPids: [] }) : readProcessTableCensus);
   }
 
   private runningSeats(): RunningSeatRow[] {
@@ -298,8 +302,8 @@ export class SeatIdentityReconciler {
       panes = await readPanes();
       if (generation !== this.generation) return;
     }
-    let runnerProcesses: Promise<NativeProcessRow[]> | undefined;
-    const readRunnerProcesses = () => runnerProcesses ??= Promise.resolve().then(() => this.listRunnerProcesses());
+    let runnerProcesses: Promise<RunnerProcessCensus> | undefined;
+    const readRunnerProcesses = () => runnerProcesses ??= Promise.resolve().then(() => this.readRunnerCensus());
     for (const seat of seats) {
       try {
         const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes, readRunnerProcesses);
@@ -337,7 +341,7 @@ export class SeatIdentityReconciler {
     observedAt: string,
     native: NativeProcessObservation | null,
     panes: Map<string, PaneObservation> | null = null,
-    readRunnerProcesses: () => Promise<NativeProcessRow[]>,
+    readRunnerProcesses: () => Promise<RunnerProcessCensus>,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -438,8 +442,8 @@ export class SeatIdentityReconciler {
         evidence: { registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: pid, observedCommand: command, matchedLayer: null } };
       if (!recordedRunner(seat.community_runner) || seat.startup_status !== "ready"
         || !isShellForeground(command?.trim().toLowerCase() ?? "")) return unconfirmed;
-      let rows: NativeProcessRow[] | null = null;
-      try { rows = await readRunnerProcesses(); } catch { /* Unreadable census cannot establish absence. */ }
+      let census: RunnerProcessCensus | null = null;
+      try { census = await readRunnerProcesses(); } catch { /* Unreadable census cannot establish absence. */ }
       const [finalPid, finalCommand, membership] = await Promise.all([
         this.tmux.getPanePid(seat.tmux_pane), this.tmux.getPaneCommand(seat.tmux_pane),
         this.tmux.listPanes?.(seat.session_name, true).catch(() => null) ?? null,
@@ -452,10 +456,13 @@ export class SeatIdentityReconciler {
         || selected.tmux_session !== seat.session_name || selected.tmux_pane !== seat.tmux_pane) {
         return { ...unconfirmed, evidence: { ...unconfirmed.evidence, observedPanePid: null, observedPid: null } };
       }
-      const root = rows?.find(row => row.pid === pid);
+      // A hidden stat cannot reveal its parent; even an unrelated omission prevents this absence proof.
+      if (!census || census.permissionHiddenPids.length > 0) return unconfirmed;
+      const rows = census.rows;
+      const root = rows.find(row => row.pid === pid);
       if (!root) return unconfirmed;
       // Any live child makes this a wrapper/ambiguous subtree. Its argv cannot prove native identity and is never persisted.
-      const child = rows!.find(row => row.ppid === pid && row.pid !== pid);
+      const child = rows.find(row => row.ppid === pid && row.pid !== pid);
       if (child) return { ...unconfirmed, evidence: { ...unconfirmed.evidence, observedPid: child.pid } };
       const shell = root.executableName ?? basename(root.command.trim().split(/\s+/)[0] ?? "");
       if (!isShellForeground(shell.toLowerCase()) || !root.pgid || root.pgid <= 0 || root.tpgid !== root.pgid) return unconfirmed;

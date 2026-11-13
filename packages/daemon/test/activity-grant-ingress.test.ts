@@ -455,11 +455,29 @@ describe("credential-bound observation-only reports", () => {
     { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 70 } },
     { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 50.001 } }, { model: { id: "" } },
     { session: { nativeRef: "with spaces" } }, { model: { id: "model", source: "verified" } },
+    { model: { id: "model\u202Ehidden" } }, { model: { id: "model\u200Djoiner" } },
+    { session: { nativeRef: "session\u2066hidden" } }, { session: { nativeRef: "session\u200Cjoiner" } },
     { context: {} }, {}, [], null,
   ])("refuses an invalid whole observation object without effects: %j", async observations => {
     const f = runner();
     expect(await f.post(f.grant.token, f.report(1, observations))).toMatchObject({ status: 400, body: { code: "invalid_runner_observation" } });
     expect(f.reports()).toHaveLength(0); expect(f.recorded()).toBe(0);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
+  });
+
+  it("keeps Pi observation references inside the same format-character boundary", async () => {
+    const f = runner();
+    f.db.prepare("UPDATE nodes SET runtime='pi' WHERE id=?").run(f.guest.id);
+    f.sessions.recordCommunityHarnessSelection(f.row.id, "pi", "pi-rpc");
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core launch",
+      run: { runId: "pi-observation", sessionId: f.row.id, binding: { ...f.grant.binding!, runtime: "pi", runner: 2 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const body = { ...f.report(1, { session: { nativeRef: "/tmp/pi-\u202Ehidden.jsonl" } }), runId: grant.runId };
+    expect((await f.post(grant.token, body)).status).toBe(400);
+    expect(f.reports()).toHaveLength(0);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect((await f.post(grant.token, { ...body, observations: { session: { nativeRef: "/tmp/pi-visible.jsonl" } } })).status).toBe(200);
   });
 
   it("requires actual bound authority, run ID, sequence and time; preserves legacy hook behavior", async () => {
@@ -577,22 +595,30 @@ describe("credential-bound observation-only reports", () => {
     expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason: "stale", usedPercentage: null });
   });
 
-  it("persists a current native reference as hook origin without verification or duplicate identity effects", async () => {
+  it("persists a current native reference as launcher origin without verification or duplicate identity effects", async () => {
     const f = runner();
     const body = f.report(1, { session: { nativeRef: "provider:会話/abc?x=1" } });
     const accepted = await f.post(f.grant.token, body);
     expect(accepted.status).toBe(200);
     expect(f.db.prepare("SELECT resume_type,resume_token,resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
-      .toEqual({ resume_type: "community:synth", resume_token: "provider:会話/abc?x=1", resume_provenance: "hook", resume_last_verified: null, resume_last_probe_status: null });
+      .toEqual({ resume_type: "community:synth", resume_token: "provider:会話/abc?x=1", resume_provenance: "launcher", resume_last_verified: null, resume_last_probe_status: null });
     const identities = () => f.db.prepare("SELECT payload FROM events WHERE type='agent.session_identity'").all();
     expect(identities()).toHaveLength(1);
-    expect(JSON.parse((identities()[0] as { payload: string }).payload)).toMatchObject({ provenance: "hook", sessionId: "provider:会話/abc?x=1" });
+    expect(JSON.parse((identities()[0] as { payload: string }).payload)).toMatchObject({ provenance: "launcher", sessionId: "provider:会話/abc?x=1" });
     expect(await f.post(f.grant.token, body)).toEqual(accepted);
     expect(identities()).toHaveLength(1);
     expect(new SeatIdentityStore(f.db).getForNode(f.guest.id)?.verdict).not.toBe("verified");
     expect((await f.post(f.grant.token, f.report(2, { session: { nativeRef: "conflicting" } }))).status).toBe(200);
     expect((f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id) as { resume_token: string }).resume_token).toBe("provider:会話/abc?x=1");
     expect(identities()).toHaveLength(1);
+  });
+
+  it.each(["scrape", "adoption"] as const)("lets Core %s evidence supersede a runner-reported reference", async provenance => {
+    const f = runner();
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "runner-claim" } }))).status).toBe(200);
+    expect(f.sessions.updateResumeToken(f.row.id, "community:synth", "core-evidence", provenance)).toBe(true);
+    expect(f.db.prepare("SELECT resume_token,resume_provenance FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_token: "core-evidence", resume_provenance: provenance });
   });
 
   it("rolls back the report and native reference together if the identity event cannot commit", async () => {

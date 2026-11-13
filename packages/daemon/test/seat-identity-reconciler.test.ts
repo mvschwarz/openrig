@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { readPermissionHiddenProc, restoreProc, serveProcRoot, writeFakeProc } from "./helpers/fake-proc.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { spawn } from "node:child_process";
@@ -741,7 +744,7 @@ describe("definitive Core exit ends exact run authority", () => {
 
 describe("launch-recorded community runner Core process evidence", () => {
   const databases: Database.Database[] = [];
-  afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+  afterEach(() => { restoreProc(); for (const db of databases.splice(0)) db.close(); });
 
   function fixture(runner = 1, startup = "ready", command: string | null = "bash") {
     const db = createFullTestDb(); databases.push(db);
@@ -862,11 +865,44 @@ describe("launch-recorded community runner Core process evidence", () => {
       await new SeatIdentityReconciler({ db: f.db, tmux: f.tmux }).reconcileAll();
       expect(f.verdict()).toMatchObject({ verdict: "unconfirmed", evidence: { observedPid: childPid, observedPanePid: wrapper.pid } });
       expect(f.grants.standing(grant.grantId)).toBe("current");
+      // The same live child, but its stat is permission-hidden in the controlled /proc served to the real worker.
+      const startedAt = "Sat Jan  1 12:00:00 2000";
+      const root = writeFakeProc([
+        { pid: wrapper.pid!, ppid: process.pid, pgid: wrapper.pid!, tpgid: wrapper.pid!, name: "sh", startedAt, command: "sh" },
+        { pid: childPid, ppid: wrapper.pid!, pgid: wrapper.pid!, tpgid: wrapper.pid!, name: "node", startedAt, command: "node runner" },
+      ]);
+      fs.chmodSync(path.join(root, String(childPid), "stat"), 0);
+      serveProcRoot(root);
+      const census = await readPermissionHiddenProc(root, childPid);
+      expect(census.permissionHiddenPids).toEqual([childPid]);
+      process.kill(childPid, 0); // The process exists; its permission-hidden stat is not an exit.
+      await new SeatIdentityReconciler({ db: f.db, tmux: f.tmux,
+        ...(process.getuid?.() === 0 ? { readProcessTableCensus: async () => census } : {}) }).reconcileAll();
+      expect(f.verdict()?.verdict).toBe("unconfirmed");
+      expect(f.grants.standing(grant.grantId)).toBe("current");
     } finally {
       if (childPid) { try { process.kill(childPid, "SIGTERM"); } catch { /* already exited */ } }
       wrapper.kill("SIGTERM");
       await exited;
     }
+  });
+
+  it.each(["permission-hidden", "gone", "bare"])("uses the real reader for a %s child without inventing exit evidence", async kind => {
+    const f = fixture();
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const root = writeFakeProc([
+      { pid: 101, ppid: 1, pgid: 101, tpgid: 101, name: "bash", startedAt, command: "bash" },
+      ...(kind === "bare" ? [] : [{ pid: 102, ppid: 101, pgid: 101, tpgid: 101, name: "node", startedAt, command: "node runner" }]),
+    ]);
+    serveProcRoot(root);
+    if (kind === "gone") fs.rmSync(path.join(root, "102", "stat"));
+    if (kind === "permission-hidden") fs.chmodSync(path.join(root, "102", "stat"), 0);
+    // The root-only child drops privilege so the actual worker sees EACCES, never a synthetic process list.
+    const census = kind === "permission-hidden" ? await readPermissionHiddenProc(root, 102) : null;
+    const rootReader = process.getuid?.() === 0 && census ? { readProcessTableCensus: async () => census } : {};
+    await new SeatIdentityReconciler({ db: f.db, tmux: f.tmux, ...rootReader }).reconcileAll();
+    expect(f.verdict()?.verdict).toBe(kind === "permission-hidden" ? "unconfirmed" : "mismatch");
+    expect(f.grants.get(f.grant.grantId)?.revokedAt === null).toBe(kind === "permission-hidden");
   });
 
   it("a delayed shell completion revokes its sampled grant without revoking a replacement", async () => {

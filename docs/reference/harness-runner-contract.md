@@ -171,13 +171,21 @@ not an inferred context occupancy (`availability: unknown`, `reason: window_capa
 `usedTokens/windowTokens` pair or explicit percentage supplies reported occupancy. The current context reader
 uses accepted events, rechecking run/binding, sequence and the existing ten-minute freshness policy; it never
 revives a runner sample from the context cache. Community model reads use the same current-report boundary.
+Printed observation model IDs and session references must not contain Unicode format characters (`\p{Cf}`),
+including bidi formatting and zero-width joiners; visible Unicode remains supported where the existing format permits.
 Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
 readers retain their evidence paths and labels. Omitted components retain their own sample times.
 An unreadable binding or report is unknown (`binding_unverified`), not evidence of replacement. The grant and
 existing receipt remain intact; retrying after verification recovers the same accepted receipt.
 
+Report changed components rather than repeating unchanged high-rate samples. Retry the same report with its original
+sequence, timestamp and payload. If unchanged facts must remain current, renew them deliberately with a new sequence
+and sample time before the existing freshness window expires; change-only reporting without renewal eventually becomes
+stale. This reduces unnecessary event growth, but does not bound retention or worst-case history query cost. No default
+physical pruning of observation events is provided.
+
 A fresh current session component can fill an absent resume reference through the existing report-only
-persistence path, with `hook` meaning origin only. It emits the existing session-identity event once after
+persistence path with `launcher` provenance, below Core scrape/adoption evidence. It emits the existing session-identity event once after
 commit; it does not stamp independent verification or resumability. A known conflicting Core reference stays
 unchanged and makes current observations unknown. A retry returns its original receipt without repeating
 identity effects. Community process identity remains unconfirmed without independent Core evidence.
@@ -188,7 +196,10 @@ Core observes launch-recorded community runners independently of session reports
 readiness is committed, a concrete foreground shell with no live child can establish the existing process
 mismatch and end only the sampled run credential, even before any native reference was reported. A shell
 wrapper with a live descendant, incomplete/unreadable census or changed pane/binding stays unconfirmed;
-unknown evidence never ends a run. Pending launch remains unconfirmed until readiness. Explicit same-process
+unknown evidence never ends a run. On Linux, a permission-hidden process (`EPERM`/`EACCES` reading its stat)
+makes this absence check unconfirmed, even when the hidden process might be unrelated: its parent cannot be read.
+Processes that disappeared (`ENOENT`/`ESRCH`) do not mark the census permission-incomplete; macOS retains its existing
+`ps` listing. Other process-table consumers retain their row-only listing behavior. Pending launch remains unconfirmed until readiness. Explicit same-process
 adoption retains the observed pane anchor and its existing ready state. Native Claude/Codex/Pi checks and
 Pi-RPC report routing keep their existing paths. A report plus a live Node process does not independently
 verify the native conversation.

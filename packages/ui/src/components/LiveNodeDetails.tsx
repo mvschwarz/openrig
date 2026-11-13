@@ -439,8 +439,14 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
           )}
         </div>
       ) : (
-        <div className="font-mono text-[10px] text-on-surface-variant">
-          unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
+        <div className="space-y-0.5 font-mono text-[10px]">
+          <div className="text-on-surface-variant">
+            unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
+          </div>
+          {contextUsage?.source === "runner_reported" && <InfoRow label="Source" value="runner-reported" />}
+          <InfoRow label="Input tokens" value={contextUsage?.totalInputTokens?.toLocaleString()} />
+          <InfoRow label="Output tokens" value={contextUsage?.totalOutputTokens?.toLocaleString()} />
+          <InfoRow label="Sampled" value={contextUsage?.sampledAt} />
         </div>
       )}
     </section>
