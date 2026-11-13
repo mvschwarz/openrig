@@ -46,7 +46,7 @@ it("names the daemon on the rollup line when rigs are listed", async () => {
   const { baseUrl, command } = await fixture(1);
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   await command.parseAsync(["node", "rig", "ps"]);
-  const rollup = log.mock.calls.flat().find((l) => /need( s)? attention/.test(String(l)));
+  const rollup = log.mock.calls.flat().find((l) => /needs? attention/.test(String(l)));
   expect(rollup).toBeDefined();
   expect(String(rollup)).toMatch(/1 rig · 1 seat · 0 need attention · daemon http:\/\/127\.0\.0\.1:\d+$/);
   expect(String(rollup)).toContain(`daemon ${baseUrl}`);
