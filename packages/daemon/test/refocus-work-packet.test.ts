@@ -263,6 +263,16 @@ describe("trace-to-root --packet — the work packet as text", () => {
     expect(result.stdout).toContain("PARENT · M.2");
     expect(w.calls()).toContain(`--workspace ${w.workspace} --json`);
   });
+  it("does not select a project above the selected work root", () => {
+    const w = world();
+    writeFileSync(join(w.root, "project.yaml"), "missions:\n  root: outside\n");
+    writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: join(w.missions, "release-b"), kind: "mission", intent: "Parent" } } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", join(w.missions, "release-a")], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(w.calls()).toContain(`--workspace ${w.missions} --json`);
+    expect(w.calls()).not.toContain(`--workspace ${w.root} --json`);
+  });
   it("shows one direct candidate as the work, labelled with its source, without a root fallback (W2)", () => {
     const w = world();
     const evidence = deriveWorkCandidates([{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-a"] }], w.missions, nothingElse);
