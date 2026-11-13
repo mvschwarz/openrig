@@ -472,6 +472,10 @@ export class RunnerCore {
   /** Whether the last activity posted is that attention. Later activity in
    *  the same turn (a tool call after a denied approval) replaces it. */
   private attentionIsLatest = false;
+  /** The attention this run's assistant error raised, if any. A harness that
+   *  types `willRetry` at agent_end releases exactly this attention, never a
+   *  refused input's or a get_state attention that happens to be held. */
+  private assistantErrorAttention: "runtime_error" | "transient_turn_error" | null = null;
   // Native OMP retry summaries have no message/status. Correlate only within
   // the announced attempt, using the latest typed assistant failure's exact
   // diagnostic as an identity check, never as a transient-error classifier.
@@ -886,6 +890,7 @@ export class RunnerCore {
     const message = event.message as Record<string, unknown> | undefined;
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
+      this.assistantErrorAttention = null;
     }
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
@@ -896,8 +901,11 @@ export class RunnerCore {
       this.writeSidecar({});
     }
 
-    if (event.type === "agent_start") this.clearAttention();
-    if (this.runtime === "omp") {
+    if (event.type === "agent_start") {
+      this.clearAttention();
+      this.assistantErrorAttention = null;
+    }
+    if (this.runtime !== "pi") {
       if (event.type === "agent_start" || event.type === "turn_start"
         || (event.type === "message_start" && message?.role === "assistant")
         || ((event.type === "message_end" || event.type === "turn_end")
@@ -909,7 +917,7 @@ export class RunnerCore {
       // A successful automatic retry supersedes the failed attempt.
       if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")) this.clearAttention();
       // Some paths omit agent_start; turn_start still opens a new turn.
-      if (event.type === "turn_start") this.assistantErrorShown = false;
+      if (event.type === "turn_start") { this.assistantErrorShown = false; this.assistantErrorAttention = null; }
     }
     const mapped = mapPiEvent(event, this.runtime);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
@@ -931,6 +939,16 @@ export class RunnerCore {
       // completed turn — get_entries returns append-order entries with stable
       // ids; the response handler advances the cursor from the tail.
       this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      // A provider failure the harness says it will retry (Pi >=0.75.4 types
+      // `willRetry` at agent_end) must not hold the seat through the backoff.
+      // Release only the attention this run's assistant error raised; a
+      // refused input or get_state attention is not this run's to clear.
+      if ((event as { willRetry?: unknown }).willRetry === true
+        && this.assistantErrorAttention !== null
+        && this.attention === this.assistantErrorAttention && this.attentionIsLatest) {
+        this.clearAttention();
+      }
+      this.assistantErrorAttention = null;
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -951,24 +969,39 @@ export class RunnerCore {
         && message?.role === "assistant" && message.stopReason === "error"
         && typeof status === "number" && [408, 429, 500, 502, 503, 504, 529].includes(status);
       // Built-in Pi leaves assistant failures as pane output; OMP and `protocol:
-      // pi-rpc` community harnesses make them attention, keeping auth/config
-      // failures (runtime_error) distinct from typed transient HTTP statuses
-      // (transient_turn_error, released at agent_end).
+      // pi-rpc` community harnesses make them attention. The typed-transient
+      // release needs a harness that types `errorStatus` (OMP does); an untyped
+      // fork provider error releases instead through `willRetry` at agent_end
+      // and a matched retry summary, while a final unretried failure stays held.
       if (this.runtime !== "pi") {
         const retrySummary = event.type === "auto_retry_end" && event.success === false
           && this.retryAttempt !== null && event.attempt === this.retryAttempt
           && this.retryFailure !== null && event.finalError === this.retryFailure
           && event.message === undefined && event.error === undefined;
         if (event.type !== "auto_retry_end") {
-          this.retryFailure = transient && this.retryAttempt !== null && typeof message?.errorMessage === "string"
+          // OMP records a retryable diagnostic only when the status is typed
+          // transient; a pi-rpc fork never types `errorStatus` (Pi 0.87.1), so
+          // its in-flight retry records the prose instead — never as a
+          // classifier, only to match the harness's own retry summary.
+          const retryable = this.runtime === "omp" ? transient : true;
+          this.retryFailure = retryable && this.retryAttempt !== null && typeof message?.errorMessage === "string"
             && message.errorMessage.length > 0 ? message.errorMessage : null;
         } else if (!retrySummary) {
           this.retryFailure = null;
         }
-        this.raiseAttention(transient || retrySummary ? "transient_turn_error" : "runtime_error");
+        // A pi-rpc fork's failure while the harness has a retry in flight is
+        // transient-class too (it never types errorStatus); a final unretried
+        // failure stays runtime_error. OMP keeps its typed-status rule.
+        const assistantFailure = (event.type === "message_end" || event.type === "turn_end")
+          && message?.role === "assistant" && message.stopReason === "error";
+        const forkRetried = this.runtime !== "omp" && this.retryAttempt !== null;
+        this.assistantErrorAttention = transient || retrySummary || (assistantFailure && forkRetried)
+          ? "transient_turn_error" : "runtime_error";
+        this.raiseAttention(this.assistantErrorAttention);
+        this.raiseAttention(this.assistantErrorAttention);
       }
     }
-    if (this.runtime === "omp" && (event.type === "auto_retry_end" && event.success === true
+    if (this.runtime !== "pi" && (event.type === "auto_retry_end" && event.success === true
       || event.type === "agent_end" && event.isTerminal !== false)) {
       this.retryAttempt = null;
       this.retryFailure = null;

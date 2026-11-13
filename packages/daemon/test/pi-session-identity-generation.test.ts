@@ -294,4 +294,61 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     expect(f.posts).toEqual([]);
     expect(f.latest()?.state).not.toBe("needs_input");
   });
+
+  it("an untyped fork provider error the harness will retry does not hold needs_input through the backoff", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const failed = { role: "assistant", stopReason: "error", errorMessage: "rate limited" };
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: failed }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a fork's exhausted automatic retry clears attention the omp way", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const err = "429 overloaded";
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 2, finalError: err }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a fork's final unretried provider error stays needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "401 unauthorized" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
+  });
+
+  it("a refused prompt posts its attention exactly once", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts.filter((p) => p.hookEvent === "Notification")).toHaveLength(1);
+  });
+
+  it.each([["steer"], ["follow_up"]])("a refused %s on a pi-rpc fork raises runtime_error", async (command) => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "cmd-1", command, success: false, error: "refused" }));
+    await f.settle();
+    expect(f.posts).toContainEqual(expect.objectContaining({ hookEvent: "Notification", subtype: "runtime_error", runtime: "omo" }));
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+  });
 });
