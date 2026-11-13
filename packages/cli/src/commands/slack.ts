@@ -127,7 +127,7 @@ type PrivateScopeCheck = { status: "not-applicable" | "unknown" | "missing" | "c
 
 function checkPrivateScopes(
   isPrivate: boolean | null | undefined,
-  scope: Awaited<ReturnType<VerifyScopesFn>>,
+  scope: Awaited<ReturnType<typeof VerifyScopesFn>>,
   privateScopes: readonly string[],
 ): PrivateScopeCheck {
   if (isPrivate === false) return { status: "not-applicable", missing: [] };
