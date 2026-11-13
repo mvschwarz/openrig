@@ -516,7 +516,8 @@ export class SeatDeliveryGuard {
   /** No recent writable-client activity before a short wait, the input still empty when read again after it, and still
    *  no recent activity after that read. A time tmux can't report holds the paste, as an unreadable input does. The
    *  read it returns is the one the paste goes on. Typing after this final check and before the paste can still leave
-   *  the notice beside the person's draft: the Enter is then refused, nothing is submitted or deleted (#3076). */
+   *  the notice beside the person's draft. In the tested append-mode schedule the Enter is then refused and nothing is
+   *  submitted or deleted; that isn't a guarantee for every interleaving (#3076). */
   private async quietBeforePaste(target: GuardTarget, read: () => Promise<ComposerInput | null>,
     unknown: (reading: ComposerInput | null) => DeliveryGuardError): Promise<ComposerInput> {
     const quiet = async () => {

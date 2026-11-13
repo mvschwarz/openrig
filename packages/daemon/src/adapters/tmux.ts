@@ -1103,9 +1103,8 @@ export class TmuxAdapter {
         // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
         // checks pass; they then aren't run a second time.
         beforePaste: async () => {
-          // This send's own checks can wait (a conversation lookup, an input capture), so they run first: the guard's
-          // read of the input is then the last wait before the paste (#3076). A check that refuses leaves a leftover's
-          // record for the next delivery.
+          // This send's own checks can wait (a conversation lookup, an input capture), so they run first, and the
+          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery.
           await options?.beforePaste?.();
           const checks = async () => { beforeWrite(); beforeInput?.(); };
           // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
