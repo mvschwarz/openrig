@@ -734,8 +734,10 @@ export class SeatRuntimeSwitchService {
       return { ok: false as const, code: "runtime_switch_pending", message, switchId: row.id };
     };
     let canonicalPane: string | null = null;
+    let canonicalPanes: string[] | null = null;
     try {
       const panes = await tmux.listPanes(row.canonical_session);
+      canonicalPanes = panes.map((pane) => pane.id);
       canonicalPane = panes.length === 1 ? panes[0]!.id : null;
     } catch { /* absent or unreadable: decided below */ }
     const staging = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
@@ -751,10 +753,9 @@ export class SeatRuntimeSwitchService {
     if (!row.committed_at) {
       // Before commit: the predecessor holds the seat.
       const exchanged = canonicalPane !== null && canonicalPane === row.successor_pane && stagingPane === row.predecessor_pane;
-      // Past its deadline with no staging session and the successor's pane not at the seat, the staged successor is gone
-      // (a host reboot or tmux server restart renumbers every pane), so the seat's pane can't be matched to the record.
-      const successorGone = staging.state === "absent" && canonicalPane !== row.successor_pane
-        && this.now().getTime() >= Date.parse(row.deadline_at);
+      // Past its deadline with no staging session, the staged successor is gone unless one of the seat's panes is it.
+      const successorGone = staging.state === "absent" && this.now().getTime() >= Date.parse(row.deadline_at)
+        && !(await this.successorAtSeat(row, canonicalPanes));
       if (exchanged) {
         const back = await tmux.swapRuntimeSwitchPanes({ nodeId, stagingSession: row.staging_session, canonicalSession: row.canonical_session,
           canonicalPane: row.successor_pane!, stagedPane: row.predecessor_pane });
@@ -766,8 +767,11 @@ export class SeatRuntimeSwitchService {
       if (!retired.ok) return stuck(`The staged successor couldn't be retired: ${retired.message}`);
       tmux.finishLaunchBinding(row.staging_session);
       // An abandoned switch keeps why it stopped; recovery only settles the successor it couldn't retire then.
+      // An unreadable listing settles too (a hold needs positive evidence), and the outcome doesn't claim who holds the seat.
+      const occupant = canonicalPanes === null ? "the seat's current occupant is unknown (its panes couldn't be read)"
+        : canonicalPanes.length === 0 ? "no pane holds the seat" : `the ${row.from_runtime} occupant holds the seat`;
       const outcome = row.phase === "abandoned" ? `${row.outcome ?? "abandoned before commit"} The staged ${row.to_runtime} successor was retired at recovery.`
-        : `interrupted before commit: the ${row.from_runtime} occupant holds the seat; the staged ${row.to_runtime} successor ${successorGone ? "was already gone" : "was retired"}`;
+        : `interrupted before commit: ${occupant}; the staged ${row.to_runtime} successor ${successorGone ? "was already gone" : "was retired"}`;
       db.prepare("UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = NULL, updated_at = ? WHERE id = ?").run(outcome, at(), row.id);
       return { ok: true, outcome, switchId: row.id };
     }
@@ -778,6 +782,20 @@ export class SeatRuntimeSwitchService {
     const finished = await this.finishCommitted(row);
     if (!finished.ok) return { ok: false, code: "runtime_switch_pending", message: finished.message, switchId: row.id };
     return { ok: true, outcome: `committed: finished; the seat runs ${row.to_runtime}`, switchId: row.id };
+  }
+
+  /** Whether one of the seat's panes may be this switch's successor. A pane id names one pane only on the tmux server that
+   *  made it: a server restart numbers panes from zero again and makes every session anew. So a seat's session created
+   *  after the switch was recorded holds none of its panes, and in one created before, the recorded id is the successor.
+   *  No recorded successor pane matches nothing; an unreadable listing is no evidence of the successor either. */
+  private async successorAtSeat(row: SwitchRow, panes: string[] | null): Promise<boolean> {
+    if (!row.successor_pane || !panes?.includes(row.successor_pane)) return false;
+    let created: string | undefined;
+    try { created = (await this.deps.tmuxAdapter.listSessions()).find((session) => session.name === row.canonical_session)?.created; }
+    catch { /* undated: the recorded id stands */ }
+    const createdMs = created && /^\d+$/.test(created) ? Number(created) * 1000 : NaN;
+    // tmux dates a session to the second; one from the switch's own second isn't shown to be later.
+    return !(createdMs >= Math.floor(Date.parse(row.created_at) / 1000) * 1000 + 1000);
   }
 
   /** Daemon start: finish every interrupted switch, including an abandoned one whose successor wasn't retired. Returns
