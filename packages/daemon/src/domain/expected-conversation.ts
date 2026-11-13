@@ -1,6 +1,4 @@
 import { statSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { effectiveRuntimeHome } from "./seat-runtime-home.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -19,6 +17,7 @@ export interface ExpectedConversation {
   nativeId: string;
 }
 const census = new ProcessCensus({ freshnessMs: 0 });
+const nativeDefaultThreads = new CodexThreadIdResolver();
 function unavailable(message: string): never { throw new DeliveryGuardError("expected_identity_unavailable", message); }
 function mismatch(message: string): never { throw new DeliveryGuardError("expected_identity_mismatch", message); }
 
@@ -56,9 +55,9 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
       mismatch("The occupant binding changed during the conditional operation.");
   };
   const codexHome = expected.runtime === "codex"
-    ? effectiveRuntimeHome(registry.db, expected.nodeId, "codex", process.env.CODEX_HOME || undefined) ?? path.join(os.homedir(), ".codex")
+    ? effectiveRuntimeHome(registry.db, expected.nodeId, "codex", process.env.CODEX_HOME || undefined)
     : undefined;
-  const threads = new CodexThreadIdResolver({ codexHome });
+  const threads = codexHome ? new CodexThreadIdResolver({ codexHome }) : nativeDefaultThreads;
   let nativeId: string, recordPath: string | null, rootPid: number | null;
   try {
     rootPid = await tmux.getPanePid(pane);
@@ -73,13 +72,21 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
       if (!selected.ok) unavailable(selected.reason);
       nativeId = selected.id; recordPath = selected.path;
     } else {
-      let verifiedThread: string | undefined;
+      let verifiedThread: string | undefined, verifiedHome: string | undefined;
+      const homes = new Set<string>();
       const selected = await resolveLiveCodexThreadId(pane, { ...deps, readThreadIdByPid: async (pid, startedAt) => {
-        const id = await deps.readThreadIdByPid(pid, startedAt); if (pid === proof.evidence.observedPid) verifiedThread = id; return id;
+        if (!startedAt) return undefined;
+        const read = await threads.resolveWithHome(pid, startedAt);
+        if (read.thread && read.codexHome) homes.add(read.codexHome);
+        if (pid === proof.evidence.observedPid) { verifiedThread = read.thread; verifiedHome = read.codexHome; }
+        return read.thread;
       } });
       if (!selected.ok) unavailable(selected.reason);
-      nativeId = selected.id; recordPath = store.readCodexTranscriptPath(nativeId, codexHome);
+      nativeId = selected.id;
       if (proof.evidence.observedPanePid != null && verifiedThread !== nativeId) unavailable("The selected thread is not owned by the verified native process.");
+      const recordHome = verifiedHome ?? (homes.size === 1 ? [...homes][0] : undefined);
+      if (!recordHome) unavailable("The current native process's record home could not be established.");
+      recordPath = store.readCodexTranscriptPath(nativeId, recordHome);
     }
     assertCurrent();
     if (await tmux.getPanePid(pane) !== rootPid) mismatch("The pane process changed during native resolution.");

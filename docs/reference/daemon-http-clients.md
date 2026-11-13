@@ -295,7 +295,11 @@ identity returns a partial result. Existing occupants stay in place. This select
 a fresh conversation. Its current-original check needs the existing qualified occupant, pane and native-record
 evidence; a stored resume token by itself is insufficient. A legacy named history that cannot establish the
 banked native identity remains partial. For Codex, the PID/start-time log and transcript are resolved in the
-current selected runtime home used for launch; another home's copy of the same thread UUID is not selected.
+current selected runtime home used for launch. With no explicit home, the existing default-home and PID-bound
+process-HOME reader supplies the home; the transcript lookup uses that same positively resolved home. Another
+home's copy of the same thread UUID is not selected. These checks also serve conditional sends and record reads.
+If a recorded explicit home changes before its running process is relaunched, its record may be unavailable;
+the check does not borrow another home's copy or change the running process's account.
 
 Retain the operation ID after a timeout. Repeating that same request first reconciles current native identity;
 it reports a matching running original or `operation_unconfirmed`, and never dispatches that operation again.
