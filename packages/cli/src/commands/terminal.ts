@@ -438,6 +438,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; appHome?: string; json?: boolean }) => {
       const deps = getDeps();
       const env = deps.env ?? process.env;
+      const trimmedProvider = opts.provider?.trim();
       if (opts.all) {
         if (view !== undefined) {
           printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with a <view> argument." }, 400);
@@ -447,9 +448,13 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with --app-home." }, 400);
           return;
         }
+        if (opts.provider !== undefined && !trimmedProvider) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "unknown_provider", error: "unknown provider '' — expected herdr or tmux" }, 400);
+          return;
+        }
         await withClient(deps, async (client) => {
           const res = await client.post<CloseAllResult>("/api/terminal/close-all",
-            { ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.session !== undefined ? { session: opts.session.trim() } : {}) },
+            { ...(trimmedProvider ? { provider: trimmedProvider } : {}), ...(opts.session !== undefined ? { session: opts.session.trim() } : {}) },
             { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
           printCloseAll(opts.json ?? false, res.data, res.status);
         });
@@ -457,6 +462,38 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
       }
       if (!view) {
         printResult(opts.json ?? false, { ok: false, code: "view_required", error: "Provide <view> or pass --all." }, 400);
+        return;
+      }
+      if (opts.provider !== undefined && trimmedProvider !== "herdr-app") {
+        const res: OpenViewResult = {
+          provider: trimmedProvider || "herdr-app",
+          ok: false,
+          opened: [],
+          absent: [],
+          degraded: [],
+          pages: 0,
+          code: "close_unsupported",
+          error: "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.",
+        };
+        if (opts.json) { printResult(true, res, 400); return; }
+        console.log(`Not closed: ${res.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.session !== undefined) {
+        const res: OpenViewResult = {
+          provider: "herdr-app",
+          ok: false,
+          opened: [],
+          absent: [],
+          degraded: [],
+          pages: 0,
+          code: "unsupported_terminal_session",
+          error: "herdr-app selects its client by app home, not by session; pass --all --session <name> for Herdr bulk viewers.",
+        };
+        if (opts.json) { printResult(true, res, 400); return; }
+        console.log(`Not closed: ${res.error}`);
+        process.exitCode = 1;
         return;
       }
       await withClient(deps, async (client) => {

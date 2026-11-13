@@ -51,7 +51,7 @@ function getService(c: { get(key: string): unknown }): TerminalService | null {
 function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 | 500 {
   if (ok) return 200;
   if (code === "corrupt_ledger") return 500;
-  if (code === "view_required" || code === "unknown_provider" || code === "unsupported_provider") return 400;
+  if (code === "view_required" || code === "unknown_provider" || code === "unsupported_provider" || code === "close_unsupported") return 400;
   if (code === "invalid_terminal_session" || code === "unsupported_terminal_session") return 400;
   if (code === "view_not_found" || code === "scope_not_found") return 404;
   if (code === "preview_changed" || code === "scope_ambiguous" || code === "scope_unavailable") return 409;

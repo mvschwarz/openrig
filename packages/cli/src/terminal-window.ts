@@ -724,6 +724,17 @@ export async function openAllTerminalWindows(
   if (typeof launchWindow === "string") {
     return { ok: false, provider: selected ?? "herdr", rigs: [], windowAttempted: false, code: "terminal_window_failed", error: `No terminal window was opened. ${launchWindow}`, notes: windowNotes };
   }
+  if (typeof launchWindow === "object" && selected === "tmux") {
+    return {
+      ok: false,
+      provider: "tmux",
+      rigs: [],
+      windowAttempted: false,
+      code: "terminal_window_failed",
+      error: "No terminal window was opened. The current Herdr view requires provider herdr; no extra window was opened.",
+      ...(windowNotes.length ? { notes: windowNotes } : {}),
+    };
+  }
 
   const herdr = selected === "tmux" ? null : await herdrBinary(deps);
   if (!herdr && (selected === "herdr" || session !== undefined)) {
@@ -742,7 +753,19 @@ export async function openAllTerminalWindows(
   if (herdr) {
     return openAllHerdrWindow(client, deps, herdr, launchWindow, session, windowNotes);
   }
-  return openAllTmuxWindows(client, deps, launchWindow as (command: string) => Promise<{ app: string; surface: string; columns?: number }>, windowNotes);
+  if (typeof launchWindow !== "function") {
+    return {
+      ok: false,
+      provider: "herdr",
+      ...(session !== undefined ? { session } : {}),
+      rigs: [],
+      windowAttempted: false,
+      code: "terminal_window_failed",
+      error: "No terminal window was opened. The Herdr executable is unavailable; no space was opened.",
+      ...(windowNotes.length ? { notes: windowNotes } : {}),
+    };
+  }
+  return openAllTmuxWindows(client, deps, launchWindow, windowNotes);
 }
 
 async function openAllHerdrWindow(
@@ -753,88 +776,115 @@ async function openAllHerdrWindow(
   session: string | undefined,
   windowNotes: string[],
 ): Promise<OpenAllResult> {
-  const sessionQuery = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
-  const statusRes = await client.get<{ session?: string; tmux?: { mode?: "inherit" | "isolated" }; providers: Array<{ liveness?: { alive: boolean }; status?: { launch?: { socketPath?: string; session?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
-  if (statusRes.status >= 400) {
-    return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], code: "terminal_window_failed", error: `Could not read terminal status (HTTP ${statusRes.status}).` };
-  }
-  if (session !== undefined && statusRes.data?.session !== session) {
-    return { ok: false, provider: "herdr", session, rigs: [], code: "terminal_session_mismatch", error: "The daemon did not confirm the requested Herdr session." };
-  }
-  await assertLocalTmux(client, statusRes.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
-  const socket = statusRes.data.providers?.[0]?.status?.launch?.socketPath;
-  if (!socket) {
-    return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], code: "terminal_window_failed", error: "The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window." };
-  }
-  if (typeof launchWindow === "object") {
-    const socketCheck = checkCurrentHerdrSocket(deps.env, socket);
-    if (!socketCheck.ok) {
-      const here = socketCheck.callerSession
-        ? `You're in Herdr session ${JSON.stringify(socketCheck.callerSession)}. ` : "";
-      return {
-        ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted: false,
-        code: "terminal_window_failed",
-        error: `The current Herdr endpoint differs from the selected endpoint; no space was opened in another session. ${here}Use --provider herdr without --window to place views in the selected session.`,
-        notes: windowNotes,
-      };
-    }
-    windowNotes.push("Using the current Herdr session; no terminal window or personal config was changed.");
-  }
   let window: { app: string; surface: string } | undefined;
   let windowAttempted = false;
-  if (typeof launchWindow === "function") {
-    let configEnv = "";
-    try { configEnv = ` HERDR_CONFIG_PATH=${shellQuote(deps.herdrConfig(socket))}`; } catch { /* Optional config. */ }
-    const directCommand = `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`;
-    windowAttempted = true;
-    try {
-      window = await launchWindow(directCommand);
-    } catch (err) {
-      if (/-1743\b/.test(`${(err as Error).message} ${(err as { stderr?: string }).stderr ?? ""}`)) {
-        windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");
-      }
-      return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted, code: "terminal_window_failed", error: (err as Error).message, notes: windowNotes };
+  let openAllRequested = false;
+  try {
+    const sessionQuery = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
+    const statusRes = await client.get<{ session?: string; tmux?: { mode?: "inherit" | "isolated" }; providers: Array<{ liveness?: { alive: boolean }; status?: { launch?: { socketPath?: string; session?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+    if (statusRes.status >= 400) {
+      return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted: false, code: "terminal_window_failed", error: `Could not read terminal status (HTTP ${statusRes.status}).` };
     }
-  }
-  let alive = false;
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
-    if (probe.data.providers?.[0]?.liveness.alive) { alive = true; break; }
-    await deps.sleep(250);
-  }
-  if (!alive) {
-    return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], window, windowAttempted, code: "herdr_unavailable", error: "The terminal was requested, but herdr's control socket did not become ready.", notes: windowNotes };
-  }
-  const res = await client.post<OpenAllResult>("/api/terminal/open-all",
-    { provider: "herdr", reuseLive: true, ...(session !== undefined ? { session } : {}) },
-    { timeoutMs: 45_000, headers: terminalAuthHeaders() });
-  const body = res.data && typeof res.data === "object" ? res.data : undefined;
-  const bodyNotes = body && Array.isArray(body.notes) ? body.notes : [];
-  if (res.status >= 400 || !body || !Array.isArray(body.rigs)) {
+    if (session !== undefined && statusRes.data?.session !== session) {
+      return { ok: false, provider: "herdr", session, rigs: [], windowAttempted: false, code: "terminal_session_mismatch", error: "The daemon did not confirm the requested Herdr session." };
+    }
+    await assertLocalTmux(client, statusRes.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
+    const socket = statusRes.data.providers?.[0]?.status?.launch?.socketPath;
+    if (!socket) {
+      return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted: false, code: "terminal_window_failed", error: "The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window." };
+    }
+    if (typeof launchWindow === "object") {
+      const socketCheck = checkCurrentHerdrSocket(deps.env, socket);
+      if (!socketCheck.ok) {
+        const here = socketCheck.callerSession
+          ? `You're in Herdr session ${JSON.stringify(socketCheck.callerSession)}. ` : "";
+        return {
+          ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted: false,
+          code: "terminal_window_failed",
+          error: `The current Herdr endpoint differs from the selected endpoint; no space was opened in another session. ${here}Use --provider herdr without --window to place views in the selected session.`,
+          notes: windowNotes,
+        };
+      }
+      windowNotes.push("Using the current Herdr session; no terminal window or personal config was changed.");
+    }
+    if (typeof launchWindow === "function") {
+      let configEnv = "";
+      try { configEnv = ` HERDR_CONFIG_PATH=${shellQuote(deps.herdrConfig(socket))}`; } catch { /* Optional config. */ }
+      const directCommand = `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`;
+      windowAttempted = true;
+      try {
+        window = await launchWindow(directCommand);
+      } catch (err) {
+        if (/-1743\b/.test(`${(err as Error).message} ${(err as { stderr?: string }).stderr ?? ""}`)) {
+          windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");
+        }
+        return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted, code: "terminal_window_failed", error: (err as Error).message, notes: windowNotes };
+      }
+    }
+    let alive = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+      if (probe.data.providers?.[0]?.liveness.alive) { alive = true; break; }
+      await deps.sleep(250);
+    }
+    if (!alive) {
+      return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], window, windowAttempted, code: "herdr_unavailable", error: "The terminal was requested, but herdr's control socket did not become ready.", notes: windowNotes };
+    }
+    openAllRequested = true;
+    const res = await client.post<OpenAllResult>("/api/terminal/open-all",
+      { provider: "herdr", reuseLive: true, ...(session !== undefined ? { session } : {}) },
+      { timeoutMs: 45_000, headers: terminalAuthHeaders() });
+    const body = res.data && typeof res.data === "object" ? res.data : undefined;
+    const bodyNotes = body && Array.isArray(body.notes) ? body.notes : [];
+    if (res.status >= 400 || !body || !Array.isArray(body.rigs)) {
+      return {
+        ...(body ?? {}),
+        ok: false,
+        provider: body?.provider ?? "herdr",
+        ...(session !== undefined ? { session } : {}),
+        rigs: Array.isArray(body?.rigs) ? body.rigs : [],
+        ...(window ? { window } : {}),
+        windowAttempted,
+        error: body?.error ?? (res.status >= 400 ? `Daemon refused bulk terminal open (HTTP ${res.status}).` : "Daemon returned an invalid bulk terminal open response."),
+        notes: [...bodyNotes, ...windowNotes],
+      };
+    }
+    if (session !== undefined && body.session !== session) {
+      return {
+        ...body,
+        ok: false,
+        code: "terminal_session_mismatch",
+        error: `The daemon's response did not confirm selected Herdr session ${JSON.stringify(session)}. Inspect the selected endpoint before retrying.`,
+        ...(window ? { window } : {}),
+        windowAttempted,
+        notes: [...bodyNotes, ...windowNotes],
+      };
+    }
+    return { ...body, ...(window ? { window } : {}), notes: [...bodyNotes, ...windowNotes] };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (openAllRequested && typeof launchWindow === "object") {
+      windowNotes.push("The /api/terminal/open-all request had already been sent to the current Herdr session; inspect Herdr before retrying.");
+    }
+    const error = window
+      ? `A terminal window was requested, but the bulk view outcome could not be confirmed. ${message}`
+      : windowAttempted
+        ? `Terminal window status is unknown. ${message}`
+        : openAllRequested
+          ? `The current Herdr bulk view outcome could not be confirmed. ${message}`
+          : `No terminal window was opened. ${message}`;
     return {
-      ...(body ?? {}),
       ok: false,
-      provider: body?.provider ?? "herdr",
+      provider: "herdr",
       ...(session !== undefined ? { session } : {}),
-      rigs: Array.isArray(body?.rigs) ? body.rigs : [],
+      rigs: [],
       ...(window ? { window } : {}),
       windowAttempted,
-      error: body?.error ?? (res.status >= 400 ? `Daemon refused bulk terminal open (HTTP ${res.status}).` : "Daemon returned an invalid bulk terminal open response."),
-      notes: [...bodyNotes, ...windowNotes],
+      code: "terminal_window_failed",
+      error,
+      ...(windowNotes.length ? { notes: windowNotes } : {}),
     };
   }
-  if (session !== undefined && body.session !== session) {
-    return {
-      ...body,
-      ok: false,
-      code: "terminal_session_mismatch",
-      error: `The daemon's response did not confirm selected Herdr session ${JSON.stringify(session)}. Inspect the selected endpoint before retrying.`,
-      ...(window ? { window } : {}),
-      windowAttempted,
-      notes: [...bodyNotes, ...windowNotes],
-    };
-  }
-  return { ...body, ...(window ? { window } : {}), notes: [...bodyNotes, ...windowNotes] };
 }
 
 async function openAllTmuxWindows(
@@ -843,31 +893,50 @@ async function openAllTmuxWindows(
   launchWindow: (command: string) => Promise<{ app: string; surface: string; columns?: number }>,
   windowNotes: string[],
 ): Promise<OpenAllResult> {
-  const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
-  if (!tmux) {
-    return { ok: false, provider: "tmux", rigs: [], code: "terminal_window_failed", error: "tmux is unavailable; run rig setup first." };
-  }
-  const statusRes = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
-  if (statusRes.status >= 400) {
-    return { ok: false, provider: "tmux", rigs: [], code: "terminal_window_failed", error: `Cannot inspect tmux status (HTTP ${statusRes.status}).` };
-  }
-  await assertLocalTmux(client, statusRes.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
-  const tmuxServer = readTmuxServerArgs(statusRes.data.tmux?.serverArgs);
-  const runTmux = (args: string[]) => deps.exec(tmux, [...tmuxServer, ...args]);
-  const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
-  const tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
+  let tmux = "";
+  let tmuxServer: string[] = [];
+  let runTmux: (args: string[]) => Promise<string>;
+  let tmuxCommand = "";
+  let rigNames: string[] = [];
+  try {
+    tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
+    if (!tmux) {
+      return { ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "terminal_window_failed", error: "tmux is unavailable; run rig setup first." };
+    }
+    const statusRes = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+    if (statusRes.status >= 400) {
+      return { ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "terminal_window_failed", error: `Cannot inspect tmux status (HTTP ${statusRes.status}).` };
+    }
+    await assertLocalTmux(client, statusRes.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
+    tmuxServer = readTmuxServerArgs(statusRes.data.tmux?.serverArgs);
+    runTmux = (args: string[]) => deps.exec(tmux, [...tmuxServer, ...args]);
+    const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
+    tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
 
-  const viewsRes = await client.get<{ rigs?: string[]; error?: string }>("/api/terminal/views");
-  if (viewsRes.status >= 400 || !Array.isArray(viewsRes.data?.rigs)) {
+    const viewsRes = await client.get<{ rigs?: string[]; error?: string }>("/api/terminal/views");
+    if (viewsRes.status >= 400 || !Array.isArray(viewsRes.data?.rigs)) {
+      return {
+        ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "views_unavailable",
+        error: viewsRes.data?.error ?? `Cannot list rig views (HTTP ${viewsRes.status}).`,
+        ...(windowNotes.length ? { notes: windowNotes } : {}),
+      };
+    }
+    rigNames = [...new Set(viewsRes.data.rigs)].sort();
+  } catch (err) {
     return {
-      ok: false, provider: "tmux", rigs: [], code: "views_unavailable",
-      error: viewsRes.data?.error ?? `Cannot list rig views (HTTP ${viewsRes.status}).`,
+      ok: false,
+      provider: "tmux",
+      rigs: [],
+      windowAttempted: false,
+      code: "terminal_window_failed",
+      error: `No terminal window was opened. ${err instanceof Error ? err.message : String(err)}`,
       ...(windowNotes.length ? { notes: windowNotes } : {}),
     };
   }
-  const rigNames = [...new Set(viewsRes.data.rigs)].sort();
   const rigs: OpenAllRigResult[] = [];
   let automationDeniedError: string | null = null;
+  let anyWindowAttempted = false;
+  let anyViewerEffect = false;
 
   for (const rig of rigNames) {
     const view = `rig:${rig}`;
@@ -875,13 +944,26 @@ async function openAllTmuxWindows(
       rigs.push({ rig, view, outcome: "failed", code: "automation_denied", error: automationDeniedError, opened: [], absent: [], degraded: [], skipped: [] });
       continue;
     }
-    const previewRes = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr&bulk=1`);
-    if (previewRes.status >= 400 || !("composed" in previewRes.data)) {
-      const errData = previewRes.data as OpenViewResult;
+    let previewData: Preview | OpenViewResult | undefined;
+    let previewStatus = 200;
+    try {
+      const previewRes = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr&bulk=1`);
+      previewStatus = previewRes.status;
+      previewData = previewRes.data;
+    } catch (err) {
+      rigs.push({
+        rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
+        code: "terminal_window_failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    if (previewStatus >= 400 || !previewData || !("composed" in previewData)) {
+      const errData = (previewData ?? {}) as OpenViewResult;
       rigs.push({ rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], ...(errData.code ? { code: errData.code } : {}), error: errData.error ?? "Could not compose rig view." });
       continue;
     }
-    const { composed, skipped = [] } = previewRes.data;
+    const { composed, skipped = [] } = previewData;
     if (composed.opened.length === 0) {
       const outcome = skipped.length > 0 && composed.absent.length === 0 ? "skipped" : "absent";
       rigs.push({ rig, view, outcome, opened: [], absent: composed.absent, degraded: composed.degraded, skipped });
@@ -892,6 +974,7 @@ async function openAllTmuxWindows(
     let created: CreatedTmuxViewer | undefined;
     let registered = false;
     try {
+      anyViewerEffect = true;
       created = await createTmuxViewerLayout(runTmux, viewer, composed, undefined, true);
       const reg = await client.post("/api/terminal/rig-viewers", {
         kind: "tmux", view, sessionName: created.sessionName, sessionId: created.sessionId,
@@ -899,6 +982,7 @@ async function openAllTmuxWindows(
       }, { headers: terminalAuthHeaders() });
       if (reg.status >= 400) throw new Error(`Failed to record rig viewer (HTTP ${reg.status}).`);
       registered = true;
+      anyWindowAttempted = true;
       const window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
       rigs.push({
         rig, view, outcome: "opened", opened: composed.opened.map(p => p.seat),
@@ -928,10 +1012,23 @@ async function openAllTmuxWindows(
       });
     }
   }
+  const anyOpened = rigs.some(r => r.outcome === "opened");
+  const anyFailed = rigs.some(r => r.outcome === "failed");
+  const failedSummary = rigs
+    .filter(r => r.outcome === "failed")
+    .map(r => `${r.rig}: ${r.error ?? "failed"}`)
+    .join("; ");
   return {
-    ok: rigs.some(r => r.outcome === "opened"),
+    ok: anyOpened,
     provider: "tmux",
     rigs,
+    ...(anyFailed ? { windowAttempted: anyWindowAttempted } : {}),
+    ...(!anyOpened && anyFailed ? {
+      code: "terminal_window_failed",
+      error: anyWindowAttempted || anyViewerEffect
+        ? `Some tmux rig viewers were started or attempted, but none opened completely: ${failedSummary}`
+        : `No terminal window was opened. ${failedSummary}`,
+    } : {}),
     ...(windowNotes.length ? { notes: windowNotes } : {}),
   };
 }

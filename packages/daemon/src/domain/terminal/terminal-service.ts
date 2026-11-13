@@ -288,6 +288,14 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
 
 const BULK_UNSUPPORTED_PROVIDERS = new Set(["herdr-app", "cmux", "rex"]);
 
+function normalizeTerminalSession(raw: unknown): { ok: true; session: string } | { ok: false; code: "invalid_terminal_session"; error: string } {
+  const session = typeof raw === "string" ? raw.trim() : "";
+  if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
+    return { ok: false, code: "invalid_terminal_session", error: "session must be one non-empty session name, not a socket path." };
+  }
+  return { ok: true, session };
+}
+
 function bulkSeatName(row: BulkSeatRow): string {
   if (row.canonicalSessionName && row.canonicalSessionName.trim()) return row.canonicalSessionName.trim();
   if (row.logicalId && row.rigName) {
@@ -454,10 +462,9 @@ export class TerminalService {
     const defaultProvider = this.deps.resolveProvider(name);
     if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, herdr-app, cmux or rex`);
     if (req.session === undefined) return { name, provider: defaultProvider };
-    const session = typeof req.session === "string" ? req.session.trim() : "";
-    if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
-      return errorResult(name, "invalid_terminal_session", "session must be one non-empty session name, not a socket path.");
-    }
+    const normalized = normalizeTerminalSession(req.session);
+    if (!normalized.ok) return errorResult(name, normalized.code, normalized.error);
+    const session = normalized.session;
     const provider = this.deps.resolveSessionProvider?.(name, session);
     return provider ? { name, provider, session }
       : errorResult(name, "unsupported_terminal_session", `Provider '${name}' does not support selecting a named session. Use herdr with --session <name>.`);
@@ -800,6 +807,22 @@ export class TerminalService {
     if (named && named !== "herdr" && named !== "tmux") {
       return { ok: false, viewers: [], code: "unknown_provider", error: `unknown provider '${named}' — expected herdr or tmux` };
     }
+    let session: string | undefined;
+    if (req.session !== undefined) {
+      if (named === "tmux") {
+        return {
+          ok: false,
+          viewers: [],
+          code: "unsupported_terminal_session",
+          error: "--session selects a Herdr session; use herdr without --provider tmux.",
+        };
+      }
+      const normalized = normalizeTerminalSession(req.session);
+      if (!normalized.ok) {
+        return { ok: false, viewers: [], code: normalized.code, error: normalized.error };
+      }
+      session = normalized.session;
+    }
     let allEntries: Array<{ endpoint: string; key: string; record: RigViewerRecord }>;
     try {
       allEntries = await this.rigViewers.listAll();
@@ -809,7 +832,8 @@ export class TerminalService {
       }
       throw err;
     }
-    const filtered = allEntries.filter(({ record }) => !named || record.kind === named);
+    const effectiveProvider = named || (session !== undefined ? "herdr" : undefined);
+    const filtered = allEntries.filter(({ record }) => !effectiveProvider || record.kind === effectiveProvider);
     if (filtered.length === 0) {
       return { ok: true, viewers: [], notes: ["no OpenRig rig viewers recorded"] };
     }
@@ -826,7 +850,7 @@ export class TerminalService {
       await this.rigViewers.runExclusive(endpoint, async (tx) => {
         const firstKind = entries[0]!.record.kind;
         if (firstKind === "herdr") {
-          await this.closeHerdrEndpoint(endpoint, entries as Array<{ key: string; record: HerdrRigViewerRecord }>, req.session, tx, viewers);
+          await this.closeHerdrEndpoint(endpoint, entries as Array<{ key: string; record: HerdrRigViewerRecord }>, session, tx, viewers);
         } else {
           await this.closeTmuxEndpoint(endpoint, entries as Array<{ key: string; record: TmuxRigViewerRecord }>, tx, viewers);
         }
@@ -1044,9 +1068,10 @@ export class TerminalService {
 
   /** Close one herdr-app Rig view: its cells leave the client's layout first, then only its own verified viewers end.
    *  Seats are never touched. Other providers have no close. */
-  async closeView(req: { provider?: string; view: string; herdrApp?: HerdrAppTarget }): Promise<OpenViewResult> {
+  async closeView(req: { provider?: string; view: string; session?: string; herdrApp?: HerdrAppTarget }): Promise<OpenViewResult> {
     const name = req.provider?.trim() ?? "herdr-app";
-    if (name !== "herdr-app") return errorResult(name, "close_unsupported", "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.");
+    if (name !== "herdr-app") return errorResult(name || "herdr-app", "close_unsupported", "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.");
+    if (req.session !== undefined) return errorResult(name, "unsupported_terminal_session", "herdr-app selects its client by app home, not by session.");
     const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
     if (!provider) return errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
     if (!req.view.trim()) return errorResult(name, "view_required", "Name the Rig view to close (rv-…).");

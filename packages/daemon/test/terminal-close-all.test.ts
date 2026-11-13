@@ -3,8 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
+import { RigViewerLedger, tmuxEndpointKey } from "../src/domain/terminal/rig-viewer-records.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { LiveSeatRow } from "../src/domain/terminal/terminal-views-store.js";
@@ -647,5 +648,253 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       tmuxExec: async () => "",
     }).closeAll({ provider: "tmux" });
     expect(closeOtherTmux.viewers[0]).toMatchObject({ outcome: "kept", code: "different_endpoint" });
+  });
+});
+
+describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider exclusion", () => {
+  const createdDirs: string[] = [];
+
+  afterEach(() => {
+    while (createdDirs.length > 0) {
+      rmSync(createdDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  function makeHerdrEndpoint(socketPath: string, initialWorkspaces: Array<{ wid: string; label: string; tabId: string; tabLabel: string; paneId: string }>) {
+    const workspaces = initialWorkspaces.map(w => ({ workspace_id: w.wid, label: w.label }));
+    const closedWorkspaces: string[] = [];
+    const transport: HerdrTransport = {
+      probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }),
+      request: async (method, raw): Promise<HerdrResult> => {
+        const params = (raw ?? {}) as Record<string, unknown>;
+        if (method === "workspace.list") return { type: "workspace_list", workspaces: [...workspaces] };
+        if (method === "tab.list") {
+          const item = initialWorkspaces.find(w => w.wid === params["workspace_id"] && workspaces.some(ws => ws.workspace_id === w.wid));
+          return { type: "tab_list", tabs: item ? [{ workspace_id: item.wid, tab_id: item.tabId, label: item.tabLabel }] : [] };
+        }
+        if (method === "pane.list") {
+          const item = initialWorkspaces.find(w => w.wid === params["workspace_id"] && workspaces.some(ws => ws.workspace_id === w.wid));
+          return { type: "pane_list", panes: item ? [{ workspace_id: item.wid, tab_id: item.tabId, pane_id: item.paneId, label: "op" }] : [] };
+        }
+        if (method === "workspace.close") {
+          const wid = String(params["workspace_id"] ?? "");
+          closedWorkspaces.push(wid);
+          const idx = workspaces.findIndex(w => w.workspace_id === wid);
+          if (idx >= 0) workspaces.splice(idx, 1);
+          return { type: "ok" };
+        }
+        return { type: "ok" };
+      },
+    };
+    const adapter = new HerdrAdapter({ transportFactory: () => transport, launch: { socketPath } });
+    return { adapter, closedWorkspaces };
+  }
+
+  function makeBaseDeps(overrides: Partial<TerminalServiceDeps> & { rigViewersDir: string }): TerminalServiceDeps {
+    return {
+      resolveProvider: () => null,
+      viewsStore: { get: () => undefined, list: () => [] },
+      listRigSeats: () => [],
+      listPodSeats: () => [],
+      listRigNames: () => [],
+      resolveHost: () => null,
+      hasSession: () => false,
+      tmuxServerArgs: () => ["-L", "isolated-sock"],
+      ...overrides,
+    };
+  }
+
+  it.each(["", "   ", ".", "..", "a/b", "a\\b", "bad\nb", "bad\x00"])(
+    "rejects invalid session %j with invalid_terminal_session BEFORE reading ledger or resolving providers",
+    async (badSession) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-corrupt-"));
+      createdDirs.push(dir);
+      writeFileSync(path.join(dir, `${"a".repeat(64)}.json`), "{not-json", "utf8");
+      const resolveProvider = vi.fn(() => null);
+      const resolveSessionProvider = vi.fn(() => null);
+      const tmuxExec = vi.fn(async () => "");
+      const svc = new TerminalService(makeBaseDeps({
+        rigViewersDir: dir,
+        resolveProvider,
+        resolveSessionProvider,
+        tmuxExec,
+      }));
+      const res = await svc.closeAll({ session: badSession });
+      expect(res).toMatchObject({ ok: false, viewers: [], code: "invalid_terminal_session" });
+      expect(resolveProvider).not.toHaveBeenCalled();
+      expect(resolveSessionProvider).not.toHaveBeenCalled();
+      expect(tmuxExec).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { provider: "tmux", session: "work" },
+    { provider: " tmux ", session: "default" },
+    { provider: "tmux", session: "" },
+    { provider: "tmux", session: ".." },
+  ])(
+    "rejects explicit tmux with session ($provider / $session) as unsupported_terminal_session BEFORE ledger or tmux calls",
+    async ({ provider, session }) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-tmux-sess-"));
+      createdDirs.push(dir);
+      writeFileSync(path.join(dir, `${"b".repeat(64)}.json`), "{not-json", "utf8");
+      const resolveProvider = vi.fn(() => null);
+      const resolveSessionProvider = vi.fn(() => null);
+      const tmuxExec = vi.fn(async () => "");
+      const svc = new TerminalService(makeBaseDeps({
+        rigViewersDir: dir,
+        resolveProvider,
+        resolveSessionProvider,
+        tmuxExec,
+      }));
+      const res = await svc.closeAll({ provider, session });
+      expect(res).toMatchObject({ ok: false, viewers: [], code: "unsupported_terminal_session" });
+      expect(resolveProvider).not.toHaveBeenCalled();
+      expect(resolveSessionProvider).not.toHaveBeenCalled();
+      expect(tmuxExec).not.toHaveBeenCalled();
+    },
+  );
+
+  it("validates session \"default\" under selectProvider policy and closes default Herdr while preserving work & tmux", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-default-sess-"));
+    createdDirs.push(dir);
+    const ledger = new RigViewerLedger(dir);
+    const def = makeHerdrEndpoint("/tmp/h/herdr.sock", [{ wid: "ws-def", label: "alpha", tabId: "t-def", tabLabel: "openrig:rig:alpha#p1#k1/1", paneId: "p-def" }]);
+    const work = makeHerdrEndpoint("/tmp/h/sessions/work/herdr.sock", [{ wid: "ws-work", label: "beta", tabId: "t-work", tabLabel: "openrig:rig:beta#p2#k2/1", paneId: "p-work" }]);
+    await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    await ledger.upsert({ kind: "herdr", endpoint: work.adapter.endpointKey(), view: "rig:beta", workspaceId: "ws-work", tabIds: ["t-work"], tabLabels: ["openrig:rig:beta#p2#k2/1"], paneIds: ["p-work"], planId: "p2", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    const tmuxExec = vi.fn(async () => "");
+    const resolveSessionProvider = vi.fn((_name: string, sess: string) => (sess === "default" ? def.adapter : sess === "work" ? work.adapter : null));
+    const svc = new TerminalService(makeBaseDeps({
+      rigViewersDir: dir,
+      resolveProvider: () => def.adapter,
+      resolveSessionProvider,
+      tmuxExec,
+    }));
+
+    const res = await svc.closeAll({ session: " default " });
+    expect(res.ok).toBe(true);
+    expect(resolveSessionProvider).toHaveBeenCalledWith("herdr", "default");
+    expect(def.closedWorkspaces).toEqual(["ws-def"]);
+    expect(work.closedWorkspaces).toEqual([]);
+    expect(tmuxExec).not.toHaveBeenCalled();
+    expect(res.viewers.find(v => v.provider === "tmux")).toBeUndefined();
+    expect(res.viewers.find(v => v.target === "ws-def")?.outcome).toBe("closed");
+    expect(res.viewers.find(v => v.target === "ws-work")).toMatchObject({ outcome: "kept", code: "different_endpoint" });
+    expect((await ledger.listAll()).map(e => e.record.kind).sort()).toEqual(["herdr", "tmux"]);
+  });
+
+  it("closeAll({ session: \" work \" }) omits provider -> selects ONLY matching Herdr session, excluding tmux and keeping other Herdr endpoints", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-work-sess-"));
+    createdDirs.push(dir);
+    const ledger = new RigViewerLedger(dir);
+    const def = makeHerdrEndpoint("/tmp/h2/herdr.sock", [{ wid: "ws-def", label: "alpha", tabId: "t-def", tabLabel: "openrig:rig:alpha#p1#k1/1", paneId: "p-def" }]);
+    const work = makeHerdrEndpoint("/tmp/h2/sessions/work/herdr.sock", [{ wid: "ws-work", label: "beta", tabId: "t-work", tabLabel: "openrig:rig:beta#p2#k2/1", paneId: "p-work" }]);
+    await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    await ledger.upsert({ kind: "herdr", endpoint: work.adapter.endpointKey(), view: "rig:beta", workspaceId: "ws-work", tabIds: ["t-work"], tabLabels: ["openrig:rig:beta#p2#k2/1"], paneIds: ["p-work"], planId: "p2", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    const tmuxExec = vi.fn(async () => "");
+    const resolveSessionProvider = vi.fn((_name: string, sess: string) => (sess === "work" ? work.adapter : def.adapter));
+    const svc = new TerminalService(makeBaseDeps({
+      rigViewersDir: dir,
+      resolveProvider: () => def.adapter,
+      resolveSessionProvider,
+      tmuxExec,
+    }));
+
+    const res = await svc.closeAll({ session: " work " });
+    expect(res.ok).toBe(true);
+    expect(resolveSessionProvider).toHaveBeenCalledWith("herdr", "work");
+    for (const call of resolveSessionProvider.mock.calls) {
+      expect(call).toEqual(["herdr", "work"]);
+    }
+    expect(work.closedWorkspaces).toEqual(["ws-work"]);
+    expect(def.closedWorkspaces).toEqual([]);
+    expect(tmuxExec).not.toHaveBeenCalled();
+    expect(res.viewers.some(v => v.provider === "tmux")).toBe(false);
+    expect(res.viewers.find(v => v.target === "ws-work")?.outcome).toBe("closed");
+    expect(res.viewers.find(v => v.target === "ws-def")).toMatchObject({ outcome: "kept", code: "different_endpoint" });
+  });
+
+  it("closeAll({ session: \"work\" }) when only tmux viewers exist never touches tmux", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-only-tmux-"));
+    createdDirs.push(dir);
+    const ledger = new RigViewerLedger(dir);
+    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    const tmuxExec = vi.fn(async () => "");
+    const svc = new TerminalService(makeBaseDeps({
+      rigViewersDir: dir,
+      tmuxExec,
+    }));
+
+    const res = await svc.closeAll({ session: "work" });
+    expect(res.ok).toBe(true);
+    expect(res.viewers).toEqual([]);
+    expect(tmuxExec).not.toHaveBeenCalled();
+    expect(await ledger.listAll()).toHaveLength(1);
+  });
+
+  it("normalizes whitespace provider and preserves unscoped closeAll across Herdr default + tmux", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-unscoped-"));
+    createdDirs.push(dir);
+    const ledger = new RigViewerLedger(dir);
+    const def = makeHerdrEndpoint("/tmp/h3/herdr.sock", [{ wid: "ws-def", label: "alpha", tabId: "t-def", tabLabel: "openrig:rig:alpha#p1#k1/1", paneId: "p-def" }]);
+    await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    let killed = false;
+    const tmuxExec = vi.fn(async (args: string[]) => {
+      if (args[0] === "list-sessions") return killed ? "" : "$1|openrig-view-1\n";
+      if (args[0] === "list-windows") return killed ? "" : "$1|@1\n";
+      if (args[0] === "list-panes") return killed ? "" : "$1|%1\n";
+      if (args[0] === "show-options") return "n1\n";
+      if (args[0] === "list-clients") return "";
+      if (args[0] === "kill-session") { killed = true; return ""; }
+      return "";
+    });
+    const svc = new TerminalService(makeBaseDeps({
+      rigViewersDir: dir,
+      resolveProvider: () => def.adapter,
+      tmuxExec,
+    }));
+
+    const res = await svc.closeAll({});
+    expect(res.ok).toBe(true);
+    expect(def.closedWorkspaces).toEqual(["ws-def"]);
+    expect(killed).toBe(true);
+    expect(await ledger.listAll()).toEqual([]);
+
+    const bogus = await svc.closeAll({ provider: " cmux " });
+    expect(bogus).toMatchObject({ ok: false, viewers: [], code: "unsupported_provider" });
+  });
+
+  it("closeView rejects session and non-herdr-app provider while retaining default herdr-app + appHome", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-single-"));
+    createdDirs.push(dir);
+    const closed: Array<{ viewId: string; appHome: string }> = [];
+    const resolveHerdrAppProvider = vi.fn((target: { appHome?: string }) => ({
+      name: "herdr-app",
+      appHome: target.appHome ?? "/default/app",
+      status: async () => ({ provider: "herdr-app", available: true, capabilities: {} }),
+      liveness: async () => ({ alive: true }),
+      openView: async () => ({ provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 }),
+      closeView: async (viewId: string) => {
+        closed.push({ viewId, appHome: target.appHome ?? "/default/app" });
+        return { provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 };
+      },
+    }));
+    const svc = new TerminalService(makeBaseDeps({ rigViewersDir: dir, resolveHerdrAppProvider }));
+
+    const badSession = await svc.closeView({ view: "rv-1", session: "work" } as never);
+    expect(badSession).toMatchObject({ ok: false, code: "unsupported_terminal_session" });
+    expect(resolveHerdrAppProvider).not.toHaveBeenCalled();
+
+    const badProvider = await svc.closeView({ view: "rv-1", provider: "tmux" });
+    expect(badProvider).toMatchObject({ ok: false, code: "close_unsupported" });
+    expect(resolveHerdrAppProvider).not.toHaveBeenCalled();
+
+    const okRes = await svc.closeView({ view: "rv-1", herdrApp: { appHome: "/custom/app" } });
+    expect(okRes.ok).toBe(true);
+    expect(closed).toEqual([{ viewId: "rv-1", appHome: "/custom/app" }]);
   });
 });
