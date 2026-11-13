@@ -30,6 +30,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { abandonOpenHandoverAttempt, openHandoverAttempt } from "../src/domain/seat-handover-attempts.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SessionAddressConflict } from "../src/domain/session-registry.js";
+import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 
 const relay = createRequire(import.meta.url)(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")) as {
   buildSessionIdentityPayload(p: unknown, env: Record<string, string>): Record<string, unknown> | null;
@@ -229,6 +230,18 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(await sessionStart(generation)).toMatchObject({ ok: true, tokenPersisted: true });
     // And there is nothing left to recover.
     expect(await service().recover({ seatRef: SEAT, reason: "again" })).toMatchObject({ ok: false, code: "no_handover_to_recover" });
+  });
+
+  it("#3044: the recovered successor keeps the applied-launch observation its launch returned", async () => {
+    const generation = await failedHandover();
+    // The failed attempt records what the launch applied, though only readiness failed.
+    const attempt = db.prepare("SELECT applied_launch_json FROM seat_handover_attempts").get() as { applied_launch_json: string | null };
+    expect(attempt.applied_launch_json).not.toBeNull();
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt the running successor" });
+    expect(result).toMatchObject({ ok: true });
+    expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation });
+    // The adopted generation carries the observation, as a committed handover's would.
+    expect(new AppliedLaunchObservationStore(db).readCurrent(nodeId)).toMatchObject({ axis: "permission" });
   });
 
   it("refuses, writing nothing, when the pane's Claude is another conversation", async () => {

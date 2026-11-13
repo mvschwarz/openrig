@@ -646,7 +646,7 @@ export class SeatHandoverService {
         const recorded = launch.tmuxPane ? this.recordUnadoptedSuccessor({ node, latestSession, occupantGeneration,
           predecessorGeneration, sourceRaw: parsed.source.raw, reason, operator, pane: launch.tmuxPane, launchToken: failedToken,
           contextDelivery: "not_sent", departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
-          launchAdditionNotes, startedWithoutRequired, appliedLaunch: null, launchedExecutable: launch.launchedExecutable ?? null,
+          launchAdditionNotes, startedWithoutRequired, appliedLaunch: launch.appliedLaunch ?? null, launchedExecutable: launch.launchedExecutable ?? null,
           failedStep: launch.step, failureCode: launch.code }) : false;
         // The conversation start a committed handover records before its commit, recorded for the successor that may run.
         if (recorded && failedToken) recordPrompt(failedToken.token);

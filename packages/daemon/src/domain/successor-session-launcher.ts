@@ -131,6 +131,8 @@ export type SuccessorLaunchResult =
       resumeType?: string;
       retireeExit?: "graceful" | "forced";
       launchedExecutable?: { path: string; isScript: boolean };
+      /** With successorLaunched, what the launch applied, so a recovery commits it with the successor's generation. */
+      appliedLaunch?: AppliedLaunchObservation;
     };
 
 export class SuccessorSessionLauncher {
@@ -317,7 +319,8 @@ export class SuccessorSessionLauncher {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
         tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path,
           ...(started.resumeToken ? { resumeToken: started.resumeToken, resumeType: started.resumeType } : {}),
-          ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}) } : {}) };
+          ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
+          ...(started.appliedLaunch ? { appliedLaunch: started.appliedLaunch } : {}) } : {}) };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
@@ -409,7 +412,7 @@ export class SuccessorSessionLauncher {
     launchGeneration?: string | null,
     staged?: StagedLaunch,
   ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
-    | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; launchedExecutable?: { path: string; isScript: boolean } }> {
+    | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -491,6 +494,7 @@ export class SuccessorSessionLauncher {
       resumeType = launch.resumeType;
     }
     const launchedExecutable = launch.launchedExecutable ? { launchedExecutable: launch.launchedExecutable } : {};
+    const appliedLaunch = launch.appliedLaunch ? { appliedLaunch: launch.appliedLaunch } : {};
 
     // OPR.0.4.3.04 rev2 code-review fix — checkReady/waitForReady can THROW after
     // createSession already succeeded (adapter/socket/permission errors rethrow).
@@ -513,6 +517,7 @@ export class SuccessorSessionLauncher {
         message: `Successor readiness probe threw: ${err instanceof Error ? err.message : String(err)}`,
         launched: true,
         ...(resumeToken ? { resumeToken, resumeType } : {}),
+        ...appliedLaunch,
         ...launchedExecutable,
       };
     }
@@ -524,6 +529,7 @@ export class SuccessorSessionLauncher {
         message: `Successor did not become a ready agent: ${readiness.reason ?? "readiness timeout"}`,
         launched: true,
         ...(resumeToken ? { resumeToken, resumeType } : {}),
+        ...appliedLaunch,
         ...launchedExecutable,
       };
     }
