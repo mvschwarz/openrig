@@ -21,7 +21,7 @@ function mockClient(overrides?: {
 
 // What a connection that relays a person's request is told when more than one assistant could be the one they mean. With
 // rig_team it lists the team first; pickup is said only where it's true for the path.
-const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.";
+const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.";
 const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your person that seat will pick it up on its own.";
 const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.";
 const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
@@ -894,6 +894,7 @@ describe("MCP Server", () => {
     // Without rig_team it can't list the team, and its destinations aren't other connected assistants: it's told only to ask.
     expect(instructions).toContain(ASK_UNLISTED);
     expect(instructions).not.toContain("list the team's members");
+    expect(instructions).not.toContain("removed from the team");
     expect(instructions).not.toMatch(/picked up|pick it up/);
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
