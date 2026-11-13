@@ -226,7 +226,9 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     // Nothing was typed into, respawned in or killed in the pane: the successor's work is untouched. The held message
     // is named on the result only.
     expect(inputs()).toEqual(before);
-    expect(result.result.warnings).toEqual([`1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`]);
+    // no session file for the process here: the launch's conversation is recorded, said as unconfirmed (#3044 :1050)
+    expect(result.result.warnings).toEqual([`1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`,
+      expect.stringContaining("couldn't be read")]);
     // The closed attempt keeps no resume token.
     expect(db.prepare("SELECT phase, resume_token FROM seat_handover_attempts").all()).toEqual([{ phase: "adopted", resume_token: null }]);
 
@@ -859,11 +861,34 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       ["a file older than the process (a reused pid)", () => pidFile({ name: SEAT, sessionId: T2 }, new Date(Date.parse(startedAt) - 86_400_000))],
       ["a file of another session", () => pidFile({ name: "someone@else", sessionId: T2 })],
       ["no file", () => {}],
-    ])("keeps the launch's conversation with %s", async (_name, write) => {
+    ])("keeps the launch's conversation with %s, said as unconfirmed", async (_name, write) => {
       await failedHandover();
       write();
-      expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
       expect(resumeTarget()).toBe(successorToken);
+      expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
+    });
+
+    // The maintainer's review (:1050): a session file that can't be read and one that confirms the launch's conversation
+    // are two cases. The first still recovers, with the launch's conversation recorded and said as unconfirmed.
+    it("the session file missing after a /clear: records the launch's conversation and warns it may be stale", async () => {
+      await failedHandover();
+      // the successor ran /clear (now on T2), and Claude's session file for its process is gone
+      rmSync(path.join(configDir, "sessions", "102.json"), { force: true });
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+      expect(resumeTarget()).toBe(successorToken);
+      expect(result.result.warnings).toEqual([expect.stringContaining("a /clear before the recovery would make it stale")]);
+    });
+
+    it("the session file confirming the launch's conversation: recorded with no warning", async () => {
+      await failedHandover();
+      pidFile({ name: SEAT, sessionId: successorToken });
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+      expect(resumeTarget()).toBe(successorToken);
+      expect(result.result.warnings).toBeUndefined();
     });
   });
 

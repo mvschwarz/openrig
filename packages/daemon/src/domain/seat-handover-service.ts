@@ -50,6 +50,8 @@ import type { RuntimeHint } from "./discovery-types.js";
 const NO_RETRY = "do not retry the handover; it ends the running successor.";
 /** #3044 delta review SD1: how long the recovery waits before a second sample confirms a not-provable foreground. */
 const UNPROVABLE_CONFIRM_MS = 3_000;
+/** #3044 review (:1050): the recovery's warning when the successor's current conversation could not be read. */
+const UNREAD_CURRENT_CONVERSATION = "The conversation the successor's process holds now couldn't be read (Claude's session file for it is missing, older than the process, or of another session), so the one its launch named is recorded as the seat's resume target; a /clear before the recovery would make it stale.";
 
 /** #2985: the commit of a recovery found that another occupant took the seat since its checks (rolled back). */
 class RecoveryAttemptSuperseded extends Error {}
@@ -911,6 +913,9 @@ export class SeatHandoverService {
     const held = proof.currentToken
       ? this.recoveredConversation(proof.currentToken, parsed.ok ? parsed.source : null, attempt, node.runtime, proof.launchForkParent ?? null) : null;
     const reportedSource: SeatHandoverSource = parsed.ok ? parsed.source : { mode: "fresh", ref: null, raw: attempt.sourceRaw, defaulted: false };
+    // The note is said once: in a fork's outcome (its limit), else as a warning. An unread current conversation is said
+    // too (#3044 review :1050): the launch's is recorded, not confirmed.
+    const warnings = [...(proof.currentUnread ? [UNREAD_CURRENT_CONVERSATION] : []), ...(held?.note && !held.forkRef ? [held.note] : [])];
     // The pane's discovery row, as the launch would have left it; a row this revives goes back to vanished on a refusal.
     const priorDiscovery = this.discoveryRepo.getByTmuxIdentity(attempt.canonicalSession, attempt.pane);
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
@@ -947,8 +952,7 @@ export class SeatHandoverService {
       launchToken: held
         ? { token: held.token, resumeType: "claude_id" }
         : { token: attempt.resumeToken!, ...(attempt.resumeType ? { resumeType: attempt.resumeType } : {}) },
-      // The note is said once: in a fork's outcome (its limit), else as a warning.
-      ...(held?.note && !held.forkRef ? { launchWarnings: [held.note] } : {}),
+      ...(warnings.length ? { launchWarnings: warnings } : {}),
       occupantGeneration: attempt.successorGeneration,
       appliedLaunch: attempt.appliedLaunch,
       sourceOutcome,
@@ -979,7 +983,7 @@ export class SeatHandoverService {
    *  generated for it, the same process in two samples, in the seat session's only pane, with an unchanged PID (as
    *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
    *  process. Reads only. */
-  private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string } | { ok: false; message: string; unprovable?: true }> {
+  private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true } | { ok: false; message: string; unprovable?: true }> {
     const first = await this.proveAttemptSuccessorOnce(attempt, cwd);
     if (first.ok || !first.unprovable) return first;
     // #3044 delta review SD1: a #! wrapper in its start window (only the wrapper with the token, before its exec or its
@@ -996,7 +1000,7 @@ export class SeatHandoverService {
 
   /** One sample of proveAttemptSuccessor; a not-provable answer carries the foreground it saw (pid and command of each
    *  process of the pane's foreground group), so two samples can be compared. */
-  private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
+  private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
     const onlyPane = async () => {
@@ -1048,7 +1052,11 @@ export class SeatHandoverService {
       // observation of the same process.
       const configDir = nodePath.resolve(cwd ?? process.cwd(), claudeConfigRootFor(this.db, attempt.nodeId));
       const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt, sessionName: attempt.canonicalSession });
-      if (!current || current === token) return { ok: true };
+      // #3044 review (:1050): a file that confirms the launch's conversation changes nothing; one that can't be read (missing,
+      // older than the process, of another session, or a Claude that writes none) leaves the launch's conversation as the
+      // record, said as unconfirmed, never a refusal.
+      if (!current) return { ok: true, currentUnread: true };
+      if (current === token) return { ok: true };
       const again = await observeClaudePaneProcess(proofInput);
       if (again?.fingerprint !== native.fingerprint) {
         return { ok: false, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} changed while its successor's current conversation was being read.` };
