@@ -25,7 +25,7 @@ export type CodexFilesystemAccess = "read" | "write" | "deny";
 /** An explicit native filesystem policy, mutually exclusive with the legacy sandbox fields. */
 export interface CodexFilesystemPermissions {
   filesystem: Record<string, CodexFilesystemAccess>;
-  approval: CodexSandboxPermissions["approval"];
+  approval: Exclude<CodexSandboxPermissions["approval"], "untrusted">;
   network_access?: boolean;
   sandbox?: never;
   writable_roots?: never;
@@ -58,6 +58,9 @@ export function validateCodexMemberPermissions(value: unknown, label = "codex_pe
     throw new Error(`${label}.approval: expected never, on-request or untrusted`);
   }
   if ("filesystem" in raw) {
+    if (approval === "untrusted") {
+      throw new Error(`${label}.approval: untrusted is not supported with filesystem; expected never or on-request`);
+    }
     if (!isRecord(raw.filesystem) || Object.keys(raw.filesystem).length === 0) {
       throw new Error(`${label}.filesystem: expected a nonempty mapping of paths to read, write or deny`);
     }

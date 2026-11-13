@@ -123,6 +123,7 @@ describe("a seat's explicit filesystem policy", () => {
   });
 
   it.each([
+    { ...policy, approval: "untrusted" },
     { ...policy, sandbox: "workspace-write" },
     { ...policy, writable_roots: ["/another/root"] },
     { ...policy, exclude_slash_tmp: true },

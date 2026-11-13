@@ -347,6 +347,8 @@ of this option. Omitted network access becomes `false`. Include the read access
 your tools and installed Codex executable need; this custom profile adds no
 workspace, temporary, queue-state, seat-folder or Git-directory write grants of
 its own. Native Codex decides whether the host can enforce the supplied rules.
+Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
+approval is rejected before the selection is saved.
 
 OpenRig emits the policy as invocation-local `permissions.openrig-seat` and
 `default_permissions` overrides, with the selected approval. It writes no policy
