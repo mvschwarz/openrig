@@ -208,8 +208,8 @@ curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/i
 
 The same command without `--dry-run`,
 `curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
-latest published `@openrig/cli` with `npm install -g`,
-runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
+present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
 `FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
 `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
