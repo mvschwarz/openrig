@@ -224,7 +224,7 @@ export function buildCompactCommand(compactInstruction: string): string {
 }
 
 function buildPreCompactPrepPrompt(input: {
-  usedPercentage: number;
+  usedPercentage: number | null;
   thresholdPercent: number;
   preCompactInstruction?: string | null;
   /** The policy's compaction instruction when it is too long for the /compact command. */
@@ -239,7 +239,7 @@ function buildPreCompactPrepPrompt(input: {
     ]
     : [
       "OpenRig automatic compaction preparation is now required.",
-      `Current context usage is ${input.usedPercentage}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+      `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
       `The ${AUTO_PREP_WAIT_MS_DEFAULT / 60_000}-minute ceiling starts after preparation delivery returns; completing the restore map and becoming idle must fit within it.`,
     ];
   pieces.push(
@@ -253,6 +253,7 @@ function buildPreCompactPrepPrompt(input: {
   pieces.push(
     `Write this attempt's complete restore map to ${JSON.stringify(input.preparation.mapPath + ".tmp")}, using your ordinary file-edit tool. Append the exact completion marker below as its LAST line, then finish and close the file. OpenRig will atomically publish it to ${JSON.stringify(input.preparation.mapPath)}; do not run a shell command to rename or publish it. Never write the final file incrementally.`,
     `Completion marker: ${input.preparation.marker}`,
+    "Keep this turn free of approval prompts, which would hold /compact: write files with your file-edit tool, and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variables or command substitution.",
     "The marker identifies this attempt and occupant; it does not certify the map's quality. Keep the normal ranked restore-map content.",
     `Near the top of the map, copy this note word for word; the restore request will have you read it: ${MANAGED_COMPACT_TRUST_NOTE}`,
     ...(input.overflowCompactInstruction?.trim()
@@ -498,6 +499,9 @@ export interface PreparationState {
   mapUsedPercentage?: number;
   /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
   supersedes?: StrandedCompaction;
+  /** A manual attempt waiting for its seat to answer a prompt (a permission request its preparation turn reached, say)
+   *  before /compact can go: since when, and the seat's own reason. Cleared when the seat reads idle. */
+  awaitingInput?: { since: number; reason: string };
 }
 /** An open record from before a restart, too old to resume: the seat's restore steps may still be owed. */
 export interface StrandedCompaction { attemptId: string; mapPath: string; phase: string; recordedAt: string }
@@ -1409,7 +1413,6 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" };
     }
     if (input.runtime !== "claude-code") return this.recordManualFailure(input.sessionName, "runtime_filter");
-    if (input.usedPercentage == null) return this.recordManualFailure(input.sessionName, "no_usage_data");
     // The preparation prompt cannot be written to such a seat either, so the whole attempt is refused up front.
     if (this.paneUnknownProtected(input.sessionName)) return this.recordManualFailure(input.sessionName, "pane_unknown_protected");
     const actor = opts.actor ?? { source: "caller" as const, session: null };
@@ -1435,28 +1438,41 @@ export class ClaudeCompactionEnforcer {
       await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
     }
     if (attempt.status !== "waiting") return failed(attempt.reason ?? "preparation_incomplete");
-    // Manual preparation can pause for an ordinary approval after the map is complete.
+    // Manual preparation can pause for an ordinary approval, before or after the map is complete.
     // Keep the same classifier/deadline and wait outside the input lease; never answer it.
-    let idle;
-    do {
-      const remaining = attempt.deadlineAt! - this.now();
-      if (remaining <= 0) return failed(this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
-      try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
-      catch { idle = { ok: false, reason: "transport_unavailable" }; }
-      this.reconcilePreparations();
-      if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
-      await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
-      this.reconcilePreparations();
-    } while (attempt.status === "waiting");
-    if (!idle.ok || attempt.status !== "waiting") {
-      // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
-      const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
-        : idle.reason === "wait_for_idle_timeout"
-          ? this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete"
-          : idle.reason);
-      return failed(reason);
+    const awaiting = (reason: string | undefined) => {
+      if (reason === "target_needs_input") attempt.awaitingInput ??= { since: this.now(), reason: "target_needs_input" };
+    };
+    // The budget ran out: name a prompt the seat was still at, else as before.
+    const expired = () => attempt.awaitingInput ? "preparation_needs_input"
+      : this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete";
+    let compact: { ok: boolean; reason?: string; needsInput?: boolean };
+    for (;;) {
+      let idle;
+      do {
+        const remaining = attempt.deadlineAt! - this.now();
+        if (remaining <= 0) return failed(expired());
+        try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
+        catch { idle = { ok: false, reason: "transport_unavailable" }; }
+        this.reconcilePreparations();
+        if (idle.ok) delete attempt.awaitingInput;
+        else awaiting(idle.reason);
+        if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
+        await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
+        this.reconcilePreparations();
+      } while (attempt.status === "waiting");
+      if (!idle.ok || attempt.status !== "waiting") {
+        // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
+        const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
+          : idle.reason === "wait_for_idle_timeout" ? expired() : idle.reason);
+        return failed(reason);
+      }
+      compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
+      // The seat wasn't idle at the send after all (its preparation turn reached a prompt, or did more work): nothing was
+      // written, so wait again within this attempt's deadline rather than disarm.
+      if (compact.ok || compact.reason !== "waiting_for_idle") break;
+      if (compact.needsInput) awaiting("target_needs_input");
     }
-    const compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
     if (!compact.ok) {
       const outcome = failed(compact.reason ?? "send_failed");
       // A /compact whose result was lost still owes its restore steps, and this request authorizes them.
@@ -1590,7 +1606,7 @@ export class ClaudeCompactionEnforcer {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
       prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
-        usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
+        usedPercentage: input.usedPercentage ?? null, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }), { openrigNotice: true, allowDraftWhileIdle: true, ...idleGate, beforeWrite: () => {
         this.reconcilePreparations();
@@ -1634,7 +1650,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
   }
 
-  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string}> {
+  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string; needsInput?: boolean}> {
     const check = () => {
       this.reconcilePreparations();
       this.checkAttemptPolicy(input, attempt);
@@ -1705,13 +1721,15 @@ export class ClaudeCompactionEnforcer {
       if (notSent && typeof windowReason === "string" && HOLD_REASONS.has(windowReason) && this.holdPrepared(input.sessionName, attempt, windowReason)) {
         return { ok: false, reason: PREPARED_AWAITING_WINDOW };
       }
-      // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
-      // marks those `not_reached`. Reconciliation still bounds the idle grace and stops on an occupant change.
+      // Only a known pre-input idle deferral keeps the attempt armed: an automatic one for a later poll, a manual one for
+      // the rest of its deadline (its caller waits again). The transport marks those `not_reached`. Reconciliation still
+      // bounds the idle grace and stops on an occupant change.
       // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
       // as not sent, and a fresh attempt may begin after the retry cooldown.
       const draftHold = policyDraftHold || (typeof result.reason === "string" && result.reason.startsWith("draft_"));
-      if (attempt.mode === "automatic" && attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold) {
-        return { ok: false, reason: "waiting_for_idle" };
+      if (attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold
+        && (attempt.mode === "automatic" || this.now() < attempt.deadlineAt!)) {
+        return { ok: false, reason: "waiting_for_idle", needsInput: result.reason === "target_needs_input" };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
       attempt.compact = notSent ? "not_sent" : "uncertain";
@@ -1790,7 +1808,9 @@ export class ClaudeCompactionEnforcer {
       else if (!attempt.prepared && attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
         const ready = this.mapReady(attempt);
         if (!(ready && this.holdPrepared(session, attempt, "map_complete_seat_never_idle"))) {
-          this.stopPreparation(session, ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
+          // A manual attempt still waiting at a prompt says so (only the manual wait records awaitingInput).
+          this.stopPreparation(session, attempt.awaitingInput ? "preparation_needs_input"
+            : ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
         }
       }
       if (enabled) attempt.policyWasEnabled = true;

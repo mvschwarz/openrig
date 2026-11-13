@@ -277,7 +277,7 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(sentTexts).toHaveLength(0);
   });
 
-  it("unknown usage (no sample persisted) → 409 no_usage_data (never triggers blind)", async () => {
+  it("unknown usage (no sample persisted): an explicit manual request doesn't depend on the threshold, so it prepares and compacts", async () => {
     seed();
     const { app, sentTexts } = buildApp();
     const res = await app.request("/api/compaction/trigger", {
@@ -285,9 +285,11 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session: "dev-impl@my-rig" }),
     });
-    expect(res.status).toBe(409);
-    expect((await res.json()).reason).toBe("no_usage_data");
-    expect(sentTexts).toHaveLength(0);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, stage: "compact-sent" });
+    expect(sentTexts[0]).toContain("OpenRig manual compaction was requested for this seat");
+    expect(sentTexts[0]).not.toContain("null");
+    expect(sentTexts.some((text) => text.startsWith("/compact"))).toBe(true);
   });
 
   it("ambiguous session across rigs → 409", async () => {

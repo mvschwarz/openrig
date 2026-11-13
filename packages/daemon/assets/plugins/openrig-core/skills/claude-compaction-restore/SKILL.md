@@ -106,7 +106,9 @@ You are about to lose every connection you have built. Spend this turn making th
 3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
-   `rig context recap-write --file <that file>`, which writes your own seat's recap. If your world profile has a seat
+   `rig context recap-write --file <that file>`, which writes your own seat's recap. Give the file's literal absolute
+   path, with no shell variables or command substitution: a command the seat's permissions can't match stops at an
+   approval prompt, and OpenRig won't send `/compact` while it waits. If your world profile has a seat
    recap atom, it loads this recap, and an old recap would be served as if it were current.
 4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
    - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave

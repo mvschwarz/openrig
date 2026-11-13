@@ -498,7 +498,7 @@ it('manual route preserves a non-timeout idle-wait refusal after map completion'
 it('preparation receipt: unresolved permission at deadline discloses the delivered prep and exact attempt',async()=>{
  const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
  const res=await routeFixture(f)();const body=await res.json();
- expect(res.status).toBe(409);expect(body.reason).toBe('map_complete_seat_never_idle');
+ expect(res.status).toBe(409);expect(body.reason).toBe('preparation_needs_input');expect(body.error).toContain('Answer the prompt in the seat');
  expect(body.preparation).toMatchObject({attemptId:f.e.getPreparationState(seat)!.attemptId,delivery:'delivered'});
  expect(body.error).toContain('Preparation was sent');expect(body.error).not.toContain('could not be sent');
  expect(body.error).toContain('disarmed');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
@@ -854,7 +854,7 @@ it('manual attention clears within the same attempt with one preparation and one
 });
 it('manual unresolved attention consumes the deadline and never revives',async()=>{
  const f=fixture();const start=f.clock();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
- expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_needs_input'});
  expect(f.clock()).toBe(start+1000);expect(compacts(f)).toHaveLength(0);
  f.activity('idle');stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
 });
