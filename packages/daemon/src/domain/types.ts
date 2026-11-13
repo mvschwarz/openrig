@@ -528,6 +528,8 @@ export interface RestoreResult {
   snapshotSelection?: RestoreSnapshotSelection;
   intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
   excludedNodes?: RestoreExcludedNode[];
+  /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -544,6 +546,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
+  stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */

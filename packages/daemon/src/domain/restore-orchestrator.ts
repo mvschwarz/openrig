@@ -1,4 +1,5 @@
 import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./claude-continuation-launch.js";
+import type { HarnessNotStartedReport } from "./harness-not-started-notice.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -216,6 +217,8 @@ export interface NarrowLaunchResult {
   launched?: RestoreNodeResult[];
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
+  /** The notice for targets this launch left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: HarnessNotStartedReport;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   targetNodes?: Array<{ nodeId: string; logicalId: string }>;
   unmatchedIds?: string[];
@@ -266,6 +269,8 @@ export interface RestoreOrchestratorDeps {
    *  Absent in older wiring/tests: the current selection is unknown, so a
    *  missing saved marker is reported, never guessed. */
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
+  /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
+  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
 export class RestoreOrchestrator {
@@ -294,6 +299,7 @@ export class RestoreOrchestrator {
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
+  private harnessNotStartedNotice: RestoreOrchestratorDeps["harnessNotStartedNotice"];
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -337,6 +343,7 @@ export class RestoreOrchestrator {
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.seatSkillSelection = deps.seatSkillSelection;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
+    this.harnessNotStartedNotice = deps.harnessNotStartedNotice;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
@@ -590,6 +597,8 @@ export class RestoreOrchestrator {
         intendedRoster: topology.intendedRoster,
         excludedNodes,
       };
+      const notice = await this.noticeBareShells(rigId, `restore attempt ${attemptId}`, nodeResults, restoreWarnings);
+      if (notice) restoreResult.harnessNotStarted = notice;
 
       // 7. Emit restore.completed
       this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: restoreResult });
@@ -845,6 +854,7 @@ export class RestoreOrchestrator {
     }
 
     // Emit restore.subset_completed for launched targets only
+    let harnessNotStarted: HarnessNotStartedReport | undefined;
     if (launched.length > 0) {
       const subsetResult: RestoreResult = {
         snapshotId: snapshot.id,
@@ -854,7 +864,8 @@ export class RestoreOrchestrator {
         warnings: subsetWarnings,
         snapshotSelection,
       };
-      this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      harnessNotStarted = await this.noticeBareShells(rigId, `launch attempt ${completed.seq}`, launched, subsetWarnings);
     }
 
     // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
@@ -903,6 +914,7 @@ export class RestoreOrchestrator {
       unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined,
       warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined,
       snapshotSelection,
+      ...(harnessNotStarted ? { harnessNotStarted } : {}),
       nonTargetEffects: {
         mode: opts.nonTargetMode,
         reason: opts.nonTargetMode === "detach_and_hold" ? holdReasonText : null,
@@ -1687,6 +1699,23 @@ export class RestoreOrchestrator {
     return true;
   }
 
+  /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
+   *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
+   *  positively left as shells stay in the roll call. */
+  private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
+    const seats = results.filter((n) => n.stage === "harness_not_started")
+      .map(({ nodeId, logicalId, error }) => ({ nodeId, logicalId, ...(error ? { cause: error } : {}) }));
+    if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
+    try {
+      const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
+      for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
+      return report;
+    } catch (err) {
+      warnings.push(`Restore: the notice for the seats left as a bare shell wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
+      return undefined;
+    }
+  }
+
   /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
    *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. */
   private markHarnessNotStarted(rigId: string, nodeId: string, sessionId: string, error: string): void {
@@ -2124,7 +2153,7 @@ export class RestoreOrchestrator {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
           this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
         if (!retired.ok) {
@@ -2157,7 +2186,7 @@ export class RestoreOrchestrator {
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
       this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
     }
 
     // Attempt restore-safe startup replay if context available
