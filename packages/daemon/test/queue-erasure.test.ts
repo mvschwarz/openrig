@@ -654,6 +654,28 @@ describe("account deletion of a rig that never had a member", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
   });
 
+  // A table without AUTOINCREMENT reuses a deleted top rowid. The highest reader action (an outside reader's) is deleted
+  // during a yield, and a seat at the rig then declines with that same rowid, at the watermark. The receipt's own check
+  // reads every row at the rig, so the run stops and writes no record.
+  it("stops when a record at the rig reuses a deleted row's rowid during the run, and writes no receipt", async () => {
+    db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-out', ?, 'k', ?, 'x')").run(NOW, OUT);
+    recordReaderAction(db, { streamItemId: "s-out", readerSession: OUT, action: "decline", reason: "outside" }, NOW);
+    const top = (db.prepare("SELECT MAX(rowid) AS n FROM stream_reader_actions").get() as { n: number }).n;
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const count = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG) as { n: number }).n;
+    const full = count();
+    const run = erase();
+    for (let i = 0; i < 10_000 && count() === full; i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(count()).toBeLessThan(full);
+    db.prepare("DELETE FROM stream_reader_actions WHERE rowid = ?").run(top);
+    recordReaderAction(db, { streamItemId: "s-out", readerSession: "helper@n-empty", action: "decline", reason: "not mine" }, NOW);
+    expect(db.prepare("SELECT rowid AS n FROM stream_reader_actions WHERE reader_session = 'helper@n-empty'").get()).toEqual({ n: top });
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("stream_reader_actions") } });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
   // An address at the rig qualified with a host: this host's own id is this rig's seat, and so is a host that can't be
   // resolved; another known host's is that host's same-named rig, which doesn't refuse and isn't erased.
   it("reads a host-qualified address by its host: this one refuses, another known host doesn't, an unresolved one refuses", async () => {

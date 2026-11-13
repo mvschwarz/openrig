@@ -454,12 +454,14 @@ async function addressesAtRig(db: Database.Database, tables: Set<string>, rigNam
  *  the watermark (an event of the rig or its nodes, a session on its nodes, queue work at its address). A seat that
  *  arrives while the run yields stops it before its records go, and no receipt is written. */
 function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id: string; name: string | null; found: boolean },
-  mark: Watermark, classifyHost: (host: string) => HostClass): () => void {
+  mark: Watermark, classifyHost: (host: string) => HostClass): (full?: boolean) => void {
   const params = { rig: rig.id, rigName: rig.name ?? "", seq: mark.seq };
   const stop = (what: string) => {
     throw new Error(`rig ${rig.name ?? rig.id} changed during the run (${what}), so nothing more was erased and no receipt was written; rerun to check it again`);
   };
-  return () => {
+  // `full`, in the receipt's own transaction: every row at the rig, not only those past the watermark. A table without
+  // AUTOINCREMENT can give a new row a deleted row's rowid, at or below its watermark. One unindexed pass over each table.
+  return (full = false) => {
     const event = (db.prepare("SELECT type FROM events WHERE rig_id = @rig AND seq > @seq LIMIT 1").get(params)
       ?? db.prepare("SELECT type FROM events WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = @rig) AND seq > @seq LIMIT 1").get(params)) as
       { type: string } | undefined;
@@ -467,11 +469,20 @@ function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id:
     if (db.prepare("SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = @rig LIMIT 1").get(params) !== undefined) stop("a session");
     if (rig.name === null) return;
     const rigName = rig.name;
+    const isEvidence = (row: Record<string, unknown>, columns: string[]) =>
+      columns.some((column) => atRig(row[column], rigName) && memberEvidence(row[column] as string, rigName, classifyHost));
     // A full page could hide evidence past it, and unknown refuses: it stops too (a rerun reads it all again).
     const evidence = (rows: Array<Record<string, unknown>>, columns: string[]) => rows.length >= GUARD_PAGE
-      || rows.some((row) => columns.some((column) => atRig(row[column], rigName) && memberEvidence(row[column] as string, rigName, classifyHost)));
+      || rows.some((row) => isEvidence(row, columns));
     for (const { table, columns } of ADDRESS_COLUMNS) {
       if (!tables.has(table)) continue;
+      if (full) {
+        const every = db.prepare(`SELECT ${columns.join(", ")} FROM ${table} WHERE ${columns.map(AT_RIG).join(" OR ")}`);
+        for (const row of every.iterate(params) as Iterable<Record<string, unknown>>) {
+          if (isEvidence(row, columns)) stop(`queue work at the rig in ${table}`);
+        }
+        continue;
+      }
       const rows = db.prepare(`SELECT ${columns.join(", ")} FROM ${table} WHERE rowid > @after AND (${columns.map(AT_RIG).join(" OR ")}) LIMIT ${GUARD_PAGE}`)
         .all({ ...params, after: mark.rowids[table] ?? 0 }) as Array<Record<string, unknown>>;
       if (evidence(rows, columns)) stop(`queue work at the rig in ${table}`);
@@ -1090,7 +1101,7 @@ const RIG_RECORDS_CHUNK = 1_000;
  *  what it erased. */
 async function eraseRigRecords(db: Database.Database, st: Statements,
   rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null; members: string; digest: string },
-  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>, guard?: () => void): Promise<void> {
+  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>, guard?: (full?: boolean) => void): Promise<void> {
   const tables = tableNames(db);
   const params = { rig: rig.id, rigName: rig.name ?? "", members: rig.members };
   const add = (into: Record<string, number>, table: string, n: number) => {
@@ -1134,7 +1145,7 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
   const leftTotal = Object.values(out.left).reduce((sum, n) => sum + n, 0);
   if (rig.completedAt !== null) out.completedAt = rig.completedAt;
   if (apply && rig.verified) db.transaction(() => {
-    guard?.();
+    guard?.(true);
     if (rig.found) {
       // While the rig exists, its id and name are kept with this membership, so the run after its removal is verified.
       db.prepare(`INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at, completed_at) VALUES (?, ?, ?, ?, NULL)
