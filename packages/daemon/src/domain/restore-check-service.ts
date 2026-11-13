@@ -176,6 +176,7 @@ export interface RestoreCheckOpts {
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
 
 export interface NodeInventoryEntry {
+  codexConfigProfile?: string | null;
   nodeId?: string | null;
   rigId: string;
   rigName: string;
@@ -455,6 +456,8 @@ export class RestoreCheckService {
         fsOps: { exists: this.deps.exists },
         servicesRecord: input.servicesRecord,
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries(inventory.filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const { blockers, warnings } = validation;
       return {
