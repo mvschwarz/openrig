@@ -7,11 +7,12 @@ import Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { deriveSessionName } from "../src/domain/session-name.js";
-const live = vi.hoisted(() => ({ original: false, reason: "The exact current native identity is unavailable" }));
+const live = vi.hoisted(() => ({ original: false, reason: "The exact current native identity is unavailable", afterResolve: undefined as (() => void) | undefined }));
 vi.mock("../src/domain/expected-conversation.js", async original => ({
   ...await original<typeof import("../src/domain/expected-conversation.js")>(),
   resolveExpectedConversation: vi.fn(async () => {
     if (!live.original) throw new Error(live.reason);
+    live.afterResolve?.();
     return { assertCurrent() {}, generation: "fixture-generation", pane: "%1" };
   }),
 }));
@@ -23,7 +24,7 @@ describe("opt-in original conversation resume", () => {
   let setup: ReturnType<typeof createTestApp>;
   const token = "banked-private-native-original";
   beforeEach(() => {
-    live.original = false; live.reason = "The exact current native identity is unavailable";
+    live.original = false; live.afterResolve = undefined; live.reason = "The exact current native identity is unavailable";
     db = createFullTestDb();
     setup = createTestApp(db, { listProcesses: async () => [
       { pid: 1234, ppid: 1, command: "zsh" },
@@ -41,7 +42,8 @@ describe("opt-in original conversation resume", () => {
   });
   function fixture() {
     const rig = setup.rigRepo.createRig("original-resume");
-    const node = setup.rigRepo.addNode(rig.id, "lead", { runtime: "claude-code", model: "old-model", cwd: "/old-snapshot-cwd" });
+    const oldCwd = mkdtempSync(join(tmpdir(), "original-snapshot-cwd-"));
+    const node = setup.rigRepo.addNode(rig.id, "lead", { runtime: "claude-code", model: "old-model", cwd: oldCwd });
     const sibling = setup.rigRepo.addNode(rig.id, "unselected", { runtime: "claude-code" });
     const source = setup.sessionRegistry.registerSession(node.id, deriveSessionName(rig.name, node.logicalId));
     setup.sessionRegistry.updateStatus(source.id, "running");
@@ -181,6 +183,19 @@ describe("opt-in original conversation resume", () => {
     const launch = vi.spyOn(setup.restoreOrchestrator, "launchSingleNode");
     const r = await setup.app.request(f.path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(apply(f, b.revision)) });
     expect(r.status).toBe(401); expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("rechecks current choices after awaited original identity evidence", async () => {
+    const f = fixture(); const b = await review(f);
+    vi.spyOn(ClaudeResumeAdapter.prototype, "resume").mockImplementation(async () => {
+      live.original = true;
+      live.afterResolve = () => db.prepare("UPDATE nodes SET account_home='/changed-after-identity' WHERE id=?").run(f.node.id);
+      return { ok: true };
+    });
+    const r = await request(f.path, apply(f, b.revision));
+    expect(r.status).toBe(409);
+    expect(await r.json()).toMatchObject({ ok: false, partial: true, code: "resume_unconfirmed" });
+    expect(db.prepare("SELECT account_home FROM nodes WHERE id=?").get(f.node.id)).toEqual({ account_home: "/changed-after-identity" });
   });
 
   it("names the missing fresh native evidence after a reported successful resume", async () => {

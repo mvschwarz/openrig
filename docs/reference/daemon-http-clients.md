@@ -278,7 +278,8 @@ These routes use the existing terminal bearer token.
    The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
    It returns `revision`, the selected history and current model, effort, cwd, permission and runtime-home
    provenance. `accountHome.authentication: "unconfirmed"` means that the home selection is configuration,
-   not proof of an authenticated account.
+   not proof of an authenticated account. A `daemon_environment` home is the daemon fallback, not a seat setting;
+   `native_default` means the runtime default.
 2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
    `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
    `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
@@ -293,7 +294,8 @@ An unavailable source, changed selection, different occupant, restoring-only res
 identity returns a partial result. Existing occupants stay in place. This selected operation never substitutes
 a fresh conversation. Its current-original check needs the existing qualified occupant, pane and native-record
 evidence; a stored resume token by itself is insufficient. A legacy named history that cannot establish the
-banked native identity remains partial.
+banked native identity remains partial. For Codex, the PID/start-time log and transcript are resolved in the
+current selected runtime home used for launch; another home's copy of the same thread UUID is not selected.
 
 Retain the operation ID after a timeout. Repeating that same request first reconciles current native identity;
 it reports a matching running original or `operation_unconfirmed`, and never dispatches that operation again.

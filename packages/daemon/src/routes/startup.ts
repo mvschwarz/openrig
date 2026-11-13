@@ -412,7 +412,9 @@ async function applySelectedHistory(c: Context, original = false) {
       const revision = current && selectedState(c, rigId, nodeId, refs, current.snapshot);
       return again.ok && !!revision && "review" in revision && revision.review === state.review;
     };
-    if (!beforeEffect()) return c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed during prerequisites. No resume was started." }, 409);
+    if (!beforeEffect()) return original
+      ? partial("selection_changed", "The selected seat or history changed during prerequisites. No resume was started.")
+      : c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed during prerequisites. No resume was started." }, 409);
     let launchedBindingId: string | undefined;
     const beforeNative = (resultSessionId?: string, bindingId?: string) => {
       const rig = repo(c).getRig(rigId);

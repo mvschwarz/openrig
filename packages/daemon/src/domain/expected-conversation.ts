@@ -1,4 +1,7 @@
 import { statSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { effectiveRuntimeHome } from "./seat-runtime-home.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
@@ -16,7 +19,6 @@ export interface ExpectedConversation {
   nativeId: string;
 }
 const census = new ProcessCensus({ freshnessMs: 0 });
-const threads = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
 function unavailable(message: string): never { throw new DeliveryGuardError("expected_identity_unavailable", message); }
 function mismatch(message: string): never { throw new DeliveryGuardError("expected_identity_mismatch", message); }
 
@@ -53,7 +55,11 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
       || bound.tmuxPane !== pane || registry.currentOccupantTenure(expected.nodeId)?.generationUuid !== generation)
       mismatch("The occupant binding changed during the conditional operation.");
   };
-  let nativeId: string, path: string | null, rootPid: number | null;
+  const codexHome = expected.runtime === "codex"
+    ? effectiveRuntimeHome(registry.db, expected.nodeId, "codex", process.env.CODEX_HOME || undefined) ?? path.join(os.homedir(), ".codex")
+    : undefined;
+  const threads = new CodexThreadIdResolver({ codexHome });
+  let nativeId: string, recordPath: string | null, rootPid: number | null;
   try {
     rootPid = await tmux.getPanePid(pane);
     if (!rootPid || rootPid !== (proof.evidence.observedPanePid ?? proof.evidence.observedPid)) unavailable("The pane process no longer matches its verified occupant.");
@@ -65,14 +71,14 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
         occupantBootAt: occupant.bootAt, binding, identity: proof, sidecar: sidecar.ok ? sidecar.data : null }, deps,
         file => { try { return statSync(file).isFile(); } catch { return false; } });
       if (!selected.ok) unavailable(selected.reason);
-      nativeId = selected.id; path = selected.path;
+      nativeId = selected.id; recordPath = selected.path;
     } else {
       let verifiedThread: string | undefined;
       const selected = await resolveLiveCodexThreadId(pane, { ...deps, readThreadIdByPid: async (pid, startedAt) => {
         const id = await deps.readThreadIdByPid(pid, startedAt); if (pid === proof.evidence.observedPid) verifiedThread = id; return id;
       } });
       if (!selected.ok) unavailable(selected.reason);
-      nativeId = selected.id; path = store.readCodexTranscriptPath(nativeId);
+      nativeId = selected.id; recordPath = store.readCodexTranscriptPath(nativeId, codexHome);
       if (proof.evidence.observedPanePid != null && verifiedThread !== nativeId) unavailable("The selected thread is not owned by the verified native process.");
     }
     assertCurrent();
@@ -83,6 +89,6 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
     unavailable(`Native identity could not be resolved: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (nativeId! !== expected.nativeId) mismatch("The current native conversation differs from the expected original.");
-  if (!path!) unavailable("The expected native record is unavailable.");
-  return { identity: { ...expected }, path: path!, generation, pane, assertCurrent };
+  if (!recordPath!) unavailable("The expected native record is unavailable.");
+  return { identity: { ...expected }, path: recordPath!, generation, pane, assertCurrent };
 }
