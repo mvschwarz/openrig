@@ -61,6 +61,7 @@ interface NodeInventoryRead {
   podNamespace?: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  configuredAccount?: string | null;
   model?: string | null;
   /** Configured launch effort and its provenance, served by the node inventory. */
   effort?: string | null;
@@ -240,6 +241,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     nodeId: node.nodeId,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
+    configuredAccount: node.configuredAccount ?? null,
     model: node.model ?? null,
     effort: node.effort ?? null,
     effortSource: node.effortSource ?? null,

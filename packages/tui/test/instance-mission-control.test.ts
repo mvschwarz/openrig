@@ -363,10 +363,10 @@ describe("instance table RIG column (#2848)", () => {
   it.each([
     // [content width, expected RIG width, flexible column, expected flexible width]
     [77, 8, "WORK", 77 - (8 + 5 + 11 + 2 + 5 + 8 + 2 + 7)],
-    [78, 16, "WORK", 78 - 54 - (16 - 10)],
-    [109, 16, "WORK", 109 - 54 - (16 - 10)],
-    [110, LONG.length, "NOW", 110 - 78 - (LONG.length - 13)],
-    [190, LONG.length, "NOW", 190 - 78 - (LONG.length - 13)],
+    [78, 16, "WORK", 78 - 61 - (16 - 10)],
+    [109, 16, "WORK", 109 - 61 - (16 - 10)],
+    [110, LONG.length, "NOW", 110 - 87 - (LONG.length - 13)],
+    [190, LONG.length, "NOW", 190 - 87 - (LONG.length - 13)],
   ] as const)("fits RIG to the longest shown name at content width %i", (contentWidth, rigWidth, flexible, flexibleWidth) => {
     const { header, rigWidth: actual, rowWidth } = table(snapshotWithRigs([LONG]), contentWidth);
     expect(actual).toBe(rigWidth);

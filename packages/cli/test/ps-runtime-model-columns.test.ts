@@ -64,14 +64,14 @@ describe("rig ps — runtime + declared model", () => {
   const filledCells = (widths: number[]) => widths.map((width, i) => String.fromCharCode(97 + i).repeat(width));
 
   it("padCompactNodeRow keeps every column apart when each cell fills its width", () => {
-    const cells = filledCells([22, 38, 11, 17, 6, 4]);
-    const row = (padCompactNodeRow as (...cells: string[]) => string)(...cells.slice(0, 5), "reason", cells[5]!);
+    const cells = filledCells([22, 38, 11, 17, 6, 4, 12]);
+    const row = (padCompactNodeRow as (...cells: string[]) => string)(...cells.slice(0, 5), "reason", cells[5]!, cells[6]!);
     expect(row.split(" ")).toEqual([...cells, "reason"]);
   });
 
   it("padNodeRow keeps every column apart when each cell fills its width", () => {
-    const cells = filledCells([30, 10, 14, 34, 12, 17, 10, 10, 9, 11, 9, 6, 17, 6, 10]);
-    const row = (padNodeRow as (...cells: string[]) => string)(...cells, "error");
+    const cells = filledCells([30, 10, 14, 34, 12, 17, 10, 10, 9, 11, 9, 6, 17, 6, 10, 12]);
+    const row = (padNodeRow as (...cells: string[]) => string)(...cells.slice(0, 15), "error", cells[15]!);
     expect(row.split(" ")).toEqual([...cells, "error"]);
   });
 
@@ -90,6 +90,12 @@ describe("rig ps — runtime + declared model", () => {
     const [compact] = compactNodeProjection([node({ runtime: "codex", model: "gpt-5.6-sol" })] as never);
     expect(compact.runtime).toBe("codex");
     expect(compact.model).toBe("gpt-5.6-sol");
+  });
+
+  it("keeps the complete configured account label in compact JSON", () => {
+    const [compact] = compactNodeProjection([node({ configuredAccount: "account-with-a-long-label" })] as never);
+    expect(compact.configuredAccount).toBe("account-with-a-long-label");
+    expect(padCompactNodeRow("rig", "seat", "running", "idle", "no", "—", "no", "account-with-a-long-label")).toContain("account-wit…");
   });
 
   it("RED: a claude-code seat with no declared model still projects its runtime", () => {

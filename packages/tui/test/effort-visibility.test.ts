@@ -41,6 +41,16 @@ function report(overrides: Partial<SeatEffortRead> = {}): SeatEffortRead {
 }
 
 describe("#1347: per-seat effort with configured/observed provenance", () => {
+  it("shows the configured Claude account in the table and full label in detail", () => {
+    const snap = demoSnapshot();
+    const driver = agents(snap)[0]!;
+    driver.runtime = "claude-code";
+    driver.configuredAccount = "long-account-label";
+    const table = renderScreen(rigView(snap).get(), snap, { cols: 160, rows: 34 }).lines.join("\n");
+    expect(table).toContain("ACCT");
+    expect(table).toContain("long-ac…");
+    expect(agentDetail(snap, driver.name)).toContain("long-account-label");
+  });
   it("labels the effort column as configured and marks each value's source at 160 columns", () => {
     const snap = demoSnapshot();
     const [driver, guard, qa] = agents(snap);

@@ -1,4 +1,5 @@
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { parseClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -57,6 +58,8 @@ interface InventoryRow {
   pod_namespace: string | null;
   role: string | null;
   runtime: string | null;
+  claude_token_ref: string | null;
+  has_claude_token_ref: number;
   model: string | null;
   effort: string | null;
   effort_choice: string | null;
@@ -848,6 +851,8 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       p.namespace as pod_namespace,
       n.role,
       n.runtime,
+      ${nodeColumnOrNull("claude_token_ref")} as claude_token_ref,
+      ${nodeColumns.has("claude_token_ref") ? 1 : 0} as has_claude_token_ref,
       n.model,
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
@@ -1046,6 +1051,10 @@ function buildInventoryItem(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
+    configuredAccount: row.runtime !== "claude-code" ? null
+      : !row.has_claude_token_ref ? null
+      : row.claude_token_ref === null ? "login"
+      : parseClaudeSeatTokenRef(row.claude_token_ref)?.label ?? null,
     ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,

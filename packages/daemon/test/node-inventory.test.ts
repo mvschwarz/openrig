@@ -98,6 +98,20 @@ describe("Node Inventory Projection", () => {
     db.close();
   });
 
+  it("projects only a configured Claude account label, preserving unknowns", () => {
+    seedPodAwareRig(db);
+    const read = () => getNodeInventory(db, "rig-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("login");
+    expect(read().find((n) => n.nodeId === "node-2")?.configuredAccount).toBeNull();
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
+      .run(JSON.stringify({ label: "team-1", tokenFile: "/private/token" }), "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("team-1");
+    expect(JSON.stringify(read())).not.toContain("/private/token");
+    expect(getNodeDetail(db, "rig-1", "dev.impl")?.configuredAccount).toBe("team-1");
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run("invalid", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+  });
+
   // Test 1: Inventory includes all nodes for a pod-aware rig
   it("includes all nodes for a pod-aware rig", () => {
     seedPodAwareRig(db);
