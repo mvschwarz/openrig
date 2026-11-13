@@ -1602,6 +1602,8 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     ["wrapped at a space", [" /home/agent/testes de", " Claude Code v2.1.322"]],
     ["wrapped mid-word", [" /home/agent/labs/versoes-do-cli-claude/", " Claude Code v2.1.322 lab/seat"]],
     ["after a dash", [" /home/agent/labs/old", " -Claude Code v2.1.322"]],
+    ["onto a row that starts with the box-rule glyph", [" /home/agent/labs/old", " ─Claude Code v2.1.322 lab"]],
+    ["onto a row that starts with a logo glyph", [" /home/agent/labs/old", " ▐Claude Code v2.1.322 lab"]],
   ])("a workspace path with 'Claude Code v<x.y.z>' %s by a 40-column pane is still trust_gate", (_case, path) => {
     const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
       .split("\n").filter(row => !row.startsWith("# "));
@@ -1621,6 +1623,17 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
       const later = [plain, "", header, "", "────────────────", "❯ ", "────────────────"].join("\n");
       expect(probe(later).code).not.toBe("trust_gate");
     }
+  });
+
+  it.each([
+    ["bare", "Claude Code v2.1.322"],
+    ["after the logo", " ▐▛███▜▌   Claude Code v2.1.322"],
+    ["in a box border", "╭─── Claude Code v2.0.14 ───────────╮"],
+  ])("Claude's version header alone (%s) drawn after the prompt makes it history", (_form, header) => {
+    // no input frame after the header: the header alone has to end the dialog
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    expect(probe([plain, "", header].join("\n")).code).not.toBe("trust_gate");
   });
 });
 
