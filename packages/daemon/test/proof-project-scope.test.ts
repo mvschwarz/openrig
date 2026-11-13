@@ -230,7 +230,9 @@ describe("project-qualified proof scope (#132)", () => {
       expect(await res.json(), scope).toMatchObject({ error: process.platform === "win32" ? "path_escape" : "scope_missing" });
     }
     // a one-letter prefix with a relative scope is a project only when the catalog has it; here it hasn't
-    expect(await (await f.get(`scope=${encodeURIComponent("C:m0")}`)).json()).toMatchObject({ error: "scope_missing" });
+    const relative = await (await f.get(`scope=${encodeURIComponent("C:m0")}`)).json();
+    // Windows resolves a drive-relative path against that drive's cwd, which may be outside the workspace.
+    expect(process.platform === "win32" ? ["scope_missing", "path_escape"] : ["scope_missing"]).toContain(relative.error);
   });
 
   it("catalog-project reads report the source watcher as unavailable/unverified and name the project; workspace reads don't", async () => {
