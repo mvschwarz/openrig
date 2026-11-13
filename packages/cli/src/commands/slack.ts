@@ -417,7 +417,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
           const forWhom = c.isDefault ? "" : ` for ${c.matches.join(", ")}`;
           if (c.member.isPrivate === false) continue;
           if (c.member.isPrivate !== true) {
-            log(`… private channel privacy unknown for ${c.channel}${forWhom}; private-channel scopes were not assessed.`);
+            log(`… channel privacy unknown for ${c.channel}${forWhom}; private-channel scopes were not assessed.`);
           } else if (c.member.privateScopes.status === "unknown") {
             log(`… private channel grant status unknown for ${c.channel}${forWhom}; Slack did not return an available scope list.`);
           } else if (c.member.privateScopes.status === "missing") {

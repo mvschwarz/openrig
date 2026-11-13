@@ -78,8 +78,8 @@ not fill in; if so, follow the form.
 
 ## What the app asks for
 
-Run `rig slack manifest --json` for the exact list and the reason for each scope. There are two
-groups:
+Run `rig slack manifest --json` for the exact list and the reason for each scope. The default
+manifest has two groups:
 
 - **Baseline scopes**: posting messages, reading message history in public channels the app is
   a member of, and reading channel details.
@@ -103,11 +103,11 @@ If a feature scope was not granted, the effect differs by feature:
 - **Named bots** (`users:read`): Slack refuses the bot lookup, so a named bot's posts are not
   delivered, and the daemon log names the refusal. Nothing else changes.
 
-So after installing, compare the granted scopes Slack shows for the app with all eight scopes that
-`rig slack manifest --json` lists.
+So after installing, compare the granted scopes Slack shows for the app with the eight scopes that
+the default manifest lists.
 
 The app subscribes to messages in public channels it is a member of (`message.channels`), to
-mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). The manifest does
+mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). The default manifest does
 not request direct-message or private-channel access.
 
 ### Using a private channel
@@ -119,14 +119,19 @@ these. Review the private-channel manifest in Slack, reinstall the app, and invi
 private default or mapped channel. This manifest and verify diagnostic do not prove that live
 Slack delivery will work.
 
-`rig slack verify` uses its existing `conversations.info` lookup. For a channel Slack identifies as
-private, it reports the missing private-channel scopes when the grant header is available and
-points to `rig slack manifest --private-channel`. This is diagnostic only: it does not change
-existing readiness or exit behavior. With `--json`, each `member` includes `isPrivate` (`true`,
-`false`, or `null` when privacy is unavailable) and `privateScopes` with `status` (`not-applicable`,
-`unknown`, `missing`, or `complete`) and a `missing` list. A failed or malformed privacy lookup is
-unknown, never evidence that a channel is public; an unavailable grant header also leaves the
-private-scope status unknown.
+`groups:read` is also needed for Slack's `conversations.info` lookup to inspect private-channel
+details. Without access, Slack can refuse the lookup, for example with `missing_scope` or
+`channel_not_found`; the exact error depends on the lookup and access conditions. A failed or
+malformed privacy lookup leaves privacy unknown and does not establish that the channel is public
+or private. `rig slack verify` uses its existing lookup. For a channel Slack identifies as private,
+it reports missing private-channel scopes only when the grant header is available and points to
+`rig slack manifest --private-channel`. This is diagnostic only: it does not change existing
+readiness or exit behavior. Human output says `channel privacy unknown` when privacy is unavailable,
+and `private channel grant status unknown` when privacy is known but Slack did not return an
+available scope list. Both are informational lines, not private-scope warnings. With `--json`, each
+`member` includes `isPrivate` (`true`, `false`, or `null` when privacy is unavailable) and
+`privateScopes` with `status` (`not-applicable`, `unknown`, `missing`, or `complete`) and a `missing`
+list. An unavailable grant header leaves the private-scope status unknown.
 
 If you explicitly want `rig slack verify` to include these scopes in its configured baseline, use
 the existing `--required-scopes` option:
