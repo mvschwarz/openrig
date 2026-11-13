@@ -194,7 +194,9 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
   const retained = json.outcome === "retained" && json.sent === false;
   // An automatic hold's reason is on its held row's own delivery record, where the version keeps one.
   const reason = json.reason ?? held.map((i) => i.delivery?.reason).find(Boolean) ?? null;
-  const heldIds = [...new Set([...(retained ? json.outboxIds ?? [] : []), ...held.filter((i) => i.deliveryState === "retained").map((i) => i.outboxId)])];
+  // The held messages are the ones held-messages lists as retained. An occurrence's outboxIds also name the occurrence
+  // itself, which is no held message and can't be retired.
+  const heldIds = held.filter((i) => i.deliveryState === "retained").map((i) => i.outboxId);
   const delivered = json.ok === true && !retained;
   const seen = { source: at.source, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length };
   // A named reason must be the one recorded; where the version records none, the combination can't be confirmed.

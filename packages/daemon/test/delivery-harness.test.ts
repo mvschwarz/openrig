@@ -247,6 +247,13 @@ describe("delivery harness: D18's attempt evidence (X-F1)", () => {
     expect((await judge(unknown.ctx, args)).notRun).toMatch(/reason isn't recorded/);
     expect(unknown.verdict.result).toBe("PASS"); // the cell then reads NOT RUN, never PASS: see run()
   });
+
+  it("retires only the held messages held-messages lists, never the occurrence that held them", async () => {
+    const { ctx } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "guard-send-1", deliveryState: "retained", body: "Reminder DLV-h-2: an automatic notice." }] }) });
+    const at = { since: 0, source: "watchdog", json: occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["watchdog-occurrence-1", "guard-send-1"] } }) };
+    const judged = await judge(ctx, { mode: "hold", state: "idle", sender: "automatic", marker: "DLV-h-2", attempt: at, expect: { type: "held", reasons: null } });
+    expect(judged.heldIds).toEqual(["guard-send-1"]);
+  });
 });
 
 describe("delivery harness: D18's merge, body and count (X-F2)", () => {
