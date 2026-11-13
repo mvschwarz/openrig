@@ -144,7 +144,8 @@ a replaced installation. `--json` adds the connector's view: each binding's next
 - **The seat has no session:** its hub items stay pending and unclaimed, and the last error says why. They're taken
   once the seat has a session again. A stopped seat still has its session, so it still takes items; they wait for it.
 - **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
-  retries back off, doubling to 5 minutes, with up to 20% jitter either way. A failure on this machine is recorded as local, not as the hub's.
+  retries back off, doubling to 5 minutes by default, or to the poll interval when that is longer, with up to 20%
+  jitter either way. A failure on this machine is recorded as local, not as the hub's.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 
