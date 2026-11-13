@@ -661,7 +661,7 @@ export class SeatHandoverService {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
         // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
         // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -746,7 +746,7 @@ export class SeatHandoverService {
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
         // binding unchanged, seat re-wakeable — never a false complete.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -784,7 +784,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
-      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
     });
   }
 
@@ -1462,10 +1462,6 @@ export class SeatHandoverService {
         };
       }
       committed = outcome;
-      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
-      // oracle sees the swap as its own event, keyed by the durable node id, identified
-      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
-      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
     } catch (err) {
       return {
         ok: false,
@@ -1473,6 +1469,16 @@ export class SeatHandoverService {
         message: `Seat handover commit failed: ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Inspect daemon logs and retry after the seat state is consistent.",
       };
+    }
+
+    // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+    // oracle sees the swap as its own event, keyed by the durable node id, identified
+    // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+    try {
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+    } catch (err) {
+      // A notification failure cannot roll back the committed binding or abandon its grant.
+      console.warn(`Seat activity swap notification failed: ${err instanceof Error ? err.name : typeof err}`);
     }
 
     this.eventBus.notifySubscribers(committed.event);

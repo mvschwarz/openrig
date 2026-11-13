@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
@@ -94,6 +95,7 @@ export type SuccessorLaunchResult =
   | {
       ok: true;
       discoveredId: string;
+      activityGrantId?: string;
       tmuxSession: string;
       tmuxPane: string;
       resumeToken?: string;
@@ -342,6 +344,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
       retireeExit: terminated.path,
       ...(warnings.length ? { warnings } : {}),
     };
@@ -361,7 +364,7 @@ export class SuccessorSessionLauncher {
     occupantGeneration: string;
     onPaneCreated: (pane: string) => void;
     staged: Omit<StagedLaunch, "canonicalSession">;
-  }): Promise<{ ok: true; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
+  }): Promise<{ ok: true; activityGrantId?: string; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
     | { ok: false; code: string; message: string }> {
     const env = compactEnv({
       OPENRIG_NODE_ID: input.node.id,
@@ -411,7 +414,7 @@ export class SuccessorSessionLauncher {
     launchGeneration?: string | null,
     staged?: StagedLaunch,
     preparedBinding?: NodeBinding,
-  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
+  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -468,10 +471,14 @@ export class SuccessorSessionLauncher {
     // Catch it here and return a STRUCTURED ok:false so the caller fails loudly at
     // step=start_agent, exactly like a returned readiness failure. Nothing kills the
     // pane (unwind invariant above): the launched successor may still be running there.
+    const revokeRun = () => {
+      if (launch.activityGrantId) new ActivityGrantStore(this.discoveryRepo.db).revoke({ grantId: launch.activityGrantId }, "successor_readiness_failed");
+    };
     let readiness: ReadinessResult;
     try {
       readiness = await this.waitForReady(adapter, binding);
     } catch (err) {
+      revokeRun();
       return {
         ok: false,
         code: "successor_readiness_failed",
@@ -480,6 +487,7 @@ export class SuccessorSessionLauncher {
       };
     }
     if (!readiness.ready) {
+      revokeRun();
       return {
         ok: false,
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
@@ -488,7 +496,7 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    return { ok: true, resumeToken, resumeType, appliedLaunch: launch.appliedLaunch, ...(notes?.length ? { notes } : {}) };
+    return { ok: true, resumeToken, resumeType, ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...(notes?.length ? { notes } : {}) };
   }
 
   /**
@@ -549,7 +557,8 @@ export class SuccessorSessionLauncher {
    * candidate vanished; the re-wakeable shell stays in the pane and the seat is recoverable from its
    * provider session file. (`tmuxSession` is retained for signature stability + call-site logging.)
    */
-  async cleanup(_tmuxSession: string, discoveredId: string | null): Promise<void> {
+  async cleanup(_tmuxSession: string, discoveredId: string | null, activityGrantId?: string): Promise<void> {
+    if (activityGrantId) new ActivityGrantStore(this.discoveryRepo.db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
     if (discoveredId) this.discoveryRepo.markVanished([discoveredId]);
   }
 }

@@ -8,6 +8,7 @@ import { readHealthArtifact, healthSelectedContext } from "./health-context.js";
 import { validateMissionComposition } from "./lifecycle-manifest.js";
 import { healthHash, type HealthPolicyStore } from "./health-policy.js";
 import type { HealthDetectorObservation, HealthObservationSource, HealthSourceCoverage } from "./health-detectors.js";
+import { isOpenRigSender } from "../lib/pane-envelope.js";
 import { adaptQueueTransitionEvidence, boundHealthEvidence, deriveHealthSourceFreshness, healthEpisodeId, type HealthScope, type PassiveCeremony, type CeremonyProgressAssessment } from "./health-projection.js";
 
 const detector = "process.ceremony-amplification";
@@ -22,9 +23,13 @@ const tagged = (tags: string[], prefix: string) => tags.filter((t) => t.startsWi
  * parked-owner wakes (queue-repository.ts, policies/parked-owner-consumer.ts) are excluded under any actor. */
 const DAEMON_BOOKKEEPING_NOTE_PREFIXES = ["auto-unparked:", "blocker custody moved ", "park wake ", "parked-owner "] as const;
 
-/** The daemon's own actors: `*@system` (watchdog, queue, stuck-sweep, wake-ladder, claim, ...) and the
- * bare `system` that releases or transfers claims when a seat's occupant changes (queue-repository.ts). */
-const isSystemActor = (actor: string) => actor === "system" || actor.endsWith("@system");
+/** The daemon's own actors: `*@system` (watchdog, queue, stuck-sweep, wake-ladder, claim, ...), the
+ * bare `system` that releases or transfers claims when a seat's occupant changes (queue-repository.ts),
+ * and OpenRig's own sender (`isOpenRigSender`): the exact `daemon@kernel` (wake escalations, stream intake,
+ * the Slack gateway, quiet-release, delivery-deferral, ...) and every `system:*` actor (queue fallback
+ * routing, compaction restore notices, health, ...). Other kernel seats (`human@kernel`,
+ * `advisor-lead@kernel`) are seats and still count. */
+const isSystemActor = (actor: string) => actor === "system" || actor.endsWith("@system") || isOpenRigSender(actor);
 
 /** #2762: a coordination transition is one a seat decided; system actors and daemon bookkeeping notes are not. */
 function isCoordinationTransition(t: { actorSession: string; transitionNote: string | null }): boolean {
@@ -85,10 +90,11 @@ export class PassiveCeremonySource implements HealthObservationSource {
         if (!row) throw new Error("health_passive_lineage_parent_unavailable");
       }
     }
-    // Past the limit, evaluate the busiest families instead of none. A family qualifies
-    // by its transition count, so ranking by transitions in the window (then lineage ID,
-    // for a stable order) keeps every family that could qualify unless more than the
-    // limit do. The rest are reported as omitted: unevaluated, never healthy.
+    // Past the limit, evaluate the busiest families instead of none. The ranking counts every
+    // transition in the window, daemon bookkeeping included (then lineage ID, for a stable order).
+    // That raw count bounds the counted transitions a family qualifies by, so a family that could
+    // qualify is left out only when more than the limit reach the threshold on raw traffic.
+    // The rest are reported as omitted: unevaluated, never healthy.
     const selectedFamilies = new Set([...roots.keys()]
       .sort((a, b) => activity.get(b)! - activity.get(a)! || (a < b ? -1 : a > b ? 1 : 0))
       .slice(0, familyLimit));

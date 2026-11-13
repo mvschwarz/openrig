@@ -149,6 +149,19 @@ describe("start-up wake recovery and seats with nothing to receive a wake", () =
     expect({ attempt: t.repo.getById(u!)!.lastNudgeAttempt, transitions: t.transitions(u!) }).toEqual(before);
   });
 
+  it("does not send the first wake to a terminal addressed by its canonical name", async () => {
+    const t = team();
+    t.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-u', 'rig-1', 'dev.u', 'terminal')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u', 'node-u', 'u-phys', 'running')").run();
+    t.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-u', 'node-u', 'tmux', 'u-phys')").run();
+    t.repo.attachTransport({ send: t.send });
+    t.live.add("dev-u@rig1");
+    const id = (await t.repo.create({ sourceSession: "dev-a@rig1", destinationSession: "dev-u@rig1", body: "work" })).qitemId;
+    await vi.waitFor(() => expect(t.state(id)).toBe("failed"));
+    expect(t.repo.getById(id)!.lastNudgeResult).toMatch(/^failed:terminal-seat:/);
+    expect(t.send).not.toHaveBeenCalled();
+  });
+
   it("replays the failed wake once the seat is an agent again (#2939)", async () => {
     const t = team();
     terminalSeat(t);
