@@ -79,7 +79,7 @@ export class DraftAwareDelivery {
       // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
       await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
       result = await this.deliver(session, text, { ...opts,
-        onInputEffect: phase => { inputWritten = true; opts.onInputEffect?.(phase); },
+        onInputEffect: (phase, written) => { inputWritten = true; opts.onInputEffect?.(phase, written); },
         beforeWrite: () => {
           if (opts.queueWake && !this.wakeApplicable?.(entries)) throw new DeliveryGuardError("draft_wake_superseded", "The queue wake is no longer applicable; no further input was written.");
           opts.beforeWrite?.();
@@ -95,7 +95,8 @@ export class DraftAwareDelivery {
         : guardError ? error.message : "The delivery attempt ended without a reliable write result. Repeating the request may duplicate input.";
       result = { ok: false, sessionName: session, outcome: "failed", inputPhase,
         ...(inputWritten || inputPhase === "not_reached" ? { sent: inputWritten } : {}),
-        reason: guardError ? error.code : "delivery_indeterminate", error: detail };
+        reason: guardError ? error.code : "delivery_indeterminate", error: detail,
+        ...(guardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
     if (inputWritten) result = { ...result, sent: true };
     const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded",

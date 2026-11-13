@@ -74,6 +74,8 @@ export interface WebApiResult {
   grantedScopes: string[]; // parsed from x-oauth-scopes response header (item 5)
   json: Record<string, unknown>;
   error?: string;
+  /** A 2xx whose body couldn't be read: the outcome is unknown, not failed (the post may have landed). */
+  responseUnreadable?: true;
 }
 
 /** S10 shape-fix — the per-method REQUEST SHAPE. Slack's read methods (conversations.info /
@@ -136,15 +138,22 @@ export async function callWebApi(
         .map((s) => s.trim())
         .filter(Boolean);
       let json: Record<string, unknown> = {};
+      let unreadable: string | undefined;
       try {
         json = (await res.json()) as Record<string, unknown>;
-      } catch {
-        /* non-JSON */
+      } catch (e) {
+        // A 2xx whose body we couldn't read (a timeout that fired after the headers, say) leaves the outcome
+        // unknown, not failed: keep why, and say so, rather than reporting a bare status.
+        if (res.ok) unreadable = withoutToken((e as Error)?.message ?? String(e), token);
       }
       const ok = res.ok && json.ok === true;
       const retryAfter = Number(res.headers.get("retry-after"));
+      const error = ok ? undefined
+        : unreadable !== undefined ? `response unreadable after HTTP ${res.status}: ${unreadable}`
+        : String(json.error ?? `http ${res.status}`);
       return { ok, status: res.status, grantedScopes, json,
-        ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
+        ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}),
+        ...(unreadable !== undefined ? { responseUnreadable: true as const } : {}), error };
     });
   } catch (e) {
     return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${withoutToken((e as Error).message, token)}` };
@@ -465,13 +474,15 @@ export interface PostChatMessageInput {
   blocks?: unknown[];
   /** Thread reply: the PARENT message's ts (never a reply's ts — the affordance discriminator). */
   thread_ts?: string;
+  unfurl_links?: boolean;
+  unfurl_media?: boolean;
 }
 
 export type PostChatMessageResult =
   /** `threadTs`: where Slack placed the message, from the posted message in its answer: the thread's parent, or null for a
    *  top-level message. Absent when the answer doesn't include the posted message. */
   | { ok: true; status: number; ts: string; threadTs?: string | null }
-  | { ok: false; status: number; error?: string };
+  | { ok: false; status: number; error?: string; responseUnreadable?: true };
 
 /** The longest Retry-After `postChatMessage` waits for inline. A 429 means Slack
  *  rejected the post WITHOUT accepting it, so one bounded wait and one retry can
@@ -496,6 +507,8 @@ export async function postChatMessage(
   const body: Record<string, unknown> = { channel: input.channel, text: input.text };
   if (input.blocks?.length) body.blocks = input.blocks;
   if (input.thread_ts) body.thread_ts = input.thread_ts;
+  if (input.unfurl_links !== undefined) body.unfurl_links = input.unfurl_links;
+  if (input.unfurl_media !== undefined) body.unfurl_media = input.unfurl_media;
   let r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
   if (!r.ok && r.status === 429) {
     const waitMs = (r.retryAfterSeconds ?? 0) * 1000;
@@ -504,7 +517,7 @@ export async function postChatMessage(
       r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
     }
   }
-  if (!r.ok) return { ok: false, status: r.status, error: r.error };
+  if (!r.ok) return { ok: false, status: r.status, error: r.error, ...(r.responseUnreadable ? { responseUnreadable: true as const } : {}) };
   const ts = typeof r.json.ts === "string" ? r.json.ts.trim() : "";
   if (!ts) {
     return { ok: false, status: r.status, error: "chat.postMessage returned ok without a message ts" };

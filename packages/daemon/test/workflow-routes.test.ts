@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -30,6 +31,7 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
+import { workflowInstanceScopeSchema } from "../src/db/migrations/110_workflow_instance_scope.js";
 
 const SPEC = `workflow:
   id: routes-fixture
@@ -84,6 +86,7 @@ describe("workflow routes (PL-004 Phase D)", () => {
       coreSchema, eventsSchema,
       queueItemsSchema, queueTransitionsSchema,
       workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
+      workflowInstanceBoundRigSchema, workflowInstanceScopeSchema,
     ]);
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
@@ -305,6 +308,27 @@ describe("workflow routes (PL-004 Phase D)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Array<unknown>;
     expect(body).toHaveLength(0);
+  });
+
+  it("filters instance scope before the limit and combines exact selectors", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const response = await app.request("/api/workflow/instantiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ specPath, rootObjective: `item ${i}`, createdBySession: "ops@rig" }) });
+      expect(response.status).toBe(201);
+      ids.push(((await response.json()) as { instance: { instanceId: string } }).instance.instanceId);
+    }
+    const update = db.prepare("UPDATE workflow_instances SET scope_json = ?, bound_rig = ?, created_at = ? WHERE instance_id = ?");
+    update.run(JSON.stringify({ project: "p", mission: "other", slice: "s", tags: ["review"] }), "rig", "2026-01-01", ids[0]);
+    update.run(JSON.stringify({ project: "p", mission: "m", slice: "s", tags: ["review", "ready"] }), "rig", "2026-01-02", ids[1]);
+    update.run(JSON.stringify({ project: "p", mission: "m", slice: "s", tags: ["review"] }), "rig", "2026-01-03", ids[2]);
+    const result = await app.request("/api/workflow/list?status=active&project=p&mission=m&slice=s&rig=rig&name=routes-fixture&tag=review&tag=ready&limit=1");
+    expect(result.status).toBe(200);
+    expect(((await result.json()) as Array<{ instanceId: string }>).map((row) => row.instanceId)).toEqual([ids[1]]);
+    const allTags = await app.request("/api/workflow/list?status=active&project=p&mission=m&slice=s&rig=rig&name=routes-fixture&tag=review&tag=ready");
+    expect(allTags.status).toBe(200);
+    expect(((await allTags.json()) as Array<{ instanceId: string }>).map((row) => row.instanceId)).toEqual([ids[1]]);
+    expect((await app.request("/api/workflow/list?limit=0")).status).toBe(400);
+    expect((await app.request("/api/workflow/list?tag=")).status).toBe(400);
   });
 
   it("GET /:instance_id returns 404 for unknown id", async () => {
@@ -582,7 +606,7 @@ describe("workflow routes — WF-2 structured error boundaries", () => {
     migrate(db, [
       outboxEntriesSchema,
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,

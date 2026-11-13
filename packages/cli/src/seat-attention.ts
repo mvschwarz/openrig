@@ -4,7 +4,7 @@
 // never as "nothing needs attention".
 
 import type { DaemonClient } from "./client.js";
-import { attentionReason, type NodeEntry } from "./commands/ps.js";
+import { attentionReason, questionReason, servesQuestion, type NodeEntry } from "./commands/ps.js";
 
 export interface SeatAttention {
   seat: string;
@@ -31,7 +31,7 @@ export async function checkSeatAttention(client: DaemonClient, seats: readonly s
   const check: AttentionCheck = { attention: [], unknown: [] };
   const byRig = new Map<string, Set<string>>();
   for (const seat of seats) {
-    const at = seat.lastIndexOf("@");
+    const at = seat.indexOf("@");
     if (at <= 0 || at === seat.length - 1) { check.unknown.push({ seat, why: "not a seat@rig name" }); continue; }
     const rig = seat.slice(at + 1);
     if (!byRig.has(rig)) byRig.set(rig, new Set());
@@ -69,9 +69,9 @@ export async function checkSeatAttention(client: DaemonClient, seats: readonly s
         found.add(seat);
         if (node.needsAttention === undefined) { check.unknown.push({ seat, why: "the daemon served no attention evidence for it" }); continue; }
         if (!node.needsAttention) continue;
-        // The daemon's own precedence: its arbitrated answer, and the hook only when it has none.
-        const question = node.arbitratedNeedsInput ?? (node.agentActivity?.state === "needs_input");
-        check.attention.push({ seat, reason: attentionReason(node), waitingOnPerson: question });
+        const question = servesQuestion(node);
+        // A live question names its own reason. An older recorded error would describe something else.
+        check.attention.push({ seat, reason: question ? questionReason(node) ?? "reason unavailable" : attentionReason(node), waitingOnPerson: question });
       }
     }
     for (const seat of wanted) {

@@ -78,7 +78,8 @@ describe("rig edge", () => {
     expect(result.out).toHaveLength(1);
     const error = JSON.parse(result.out[0]!).error;
     expect(error).toMatchObject({ fact: expect.any(String), consequence: expect.any(String), action: expect.any(String) });
-    if (causeCode === "ECONNREFUSED") expect(error.fact).toBe("Daemon not running.");
+    // #2860: a refused connection alone isn't proof the daemon is stopped, so rig edge says so only on positive evidence.
+    if (causeCode === "ECONNREFUSED") expect(error.fact).toBe("Daemon did not respond — it may be busy or stopped (state not confirmed).");
     else expect(error).toMatchObject({ causeCode: "EPERM", fact: expect.stringContaining("blocked") });
     expect(client.get).not.toHaveBeenCalled();
     expect(client.post).not.toHaveBeenCalled();

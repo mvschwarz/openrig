@@ -26,9 +26,9 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.5/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.5/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent codex
 ```
 
 Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
@@ -68,11 +68,11 @@ Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Co
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.5` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh
 ```
 
 If the last step isn't ready, the installer reports `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any reported Fix, then rerun `rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider sign-ins, sign in to each selected provider as below and continue.
@@ -328,7 +328,7 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 - **Connect** Slack through an app you create in your own workspace; the experimental `rig slack manifest` prints that app's manifest ([setup guide](docs/reference/slack-app-setup.md))
 - **Evolve** running topologies with `rig grow`, `rig shrink`, `rig launch`, `rig remove`
 
-Every agent runs in a tmux session you can attach to, inspect, and work with directly.
+Every terminal seat runs in a tmux session you can attach to, inspect, and work with directly. [Hosted members](docs/reference/hosted-members.md) join through OpenRig's MCP server and have no pane.
 
 ## Teams
 
@@ -519,6 +519,9 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 
 - **Website**: [openrig.dev](https://openrig.dev)
 - **Docs**: [openrig.dev/docs](https://openrig.dev/docs) ([documentation index for agents](https://openrig.dev/llms.txt))
+- **What's new**: [openrig.dev/whats-new](https://openrig.dev/whats-new) (every release, in plain words)
+- **Features**: [openrig.dev/features](https://openrig.dev/features)
+- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (assistants, harnesses and environments, with setup and test status)
 - **Blog**: [openrig.dev/blog](https://openrig.dev/blog) · [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
 - **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
 - **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)

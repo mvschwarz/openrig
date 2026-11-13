@@ -98,6 +98,18 @@ it("a seat that isn't in this daemon's inventory is unknown, never 'fine'", asyn
     { seat: "x@elsewhere", why: "no rig named elsewhere on this daemon" }]);
 });
 
+it("finds attention for a seat whose rig name contains @", async () => {
+  const { client: c } = client({
+    "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "team@east" }] },
+    "/api/rigs/r1/nodes": { status: 200, data: [
+      { canonicalSessionName: "lead@team@east", needsAttention: true, startupStatus: "attention_required", latestError: LOGIN },
+    ] },
+  });
+  expect(await checkSeatAttention(c, ["lead@team@east"])).toEqual({
+    attention: [{ seat: "lead@team@east", reason: LOGIN, waitingOnPerson: false }], unknown: [],
+  });
+});
+
 it("an unreadable kernel status is reported, not read as no held seat", async () => {
   const { client: c } = client({ "/api/kernel/status": { status: 503, data: { error: "kernel_boot_tracker_unavailable" } } });
   expect(await checkKernelAttention(c)).toEqual({ attention: [],
@@ -108,4 +120,31 @@ it("keeps a long unknown list to one bounded line per reason", () => {
   const unknown = ["a", "b", "c", "d", "e", "f", "g"].map(name => ({ seat: `${name}@r`, why: "down" }));
   expect(attentionLines({ attention: [], unknown }, "pane"))
     .toEqual(["Couldn't check whether a@r, b@r, c@r, d@r, e@r and 2 more need attention: down."]);
+});
+
+it("a seat waiting on a person names its question, not an older recorded error; the needs-attention order is unchanged", async () => {
+  const OLD = "Readiness timeout after 30s — harness did not become interactive: unknown";
+  const seats = [
+    // A live question, served by the arbitrated answer, on a seat that also carries an older startup error.
+    { canonicalSessionName: "asked@r", needsAttention: true, arbitratedNeedsInput: true, startupStatus: "failed", latestError: OLD,
+      activityState: { activity: "needs_input", display: "needs input", needsInput: { count: 1, reason: "permission_prompt" }, decidedBy: "hook" } },
+    // A live question from the hook alone (no arbitrated answer), with the same older error.
+    { canonicalSessionName: "hooked@r", needsAttention: true, arbitratedNeedsInput: null, startupStatus: "failed", latestError: OLD,
+      agentActivity: { state: "needs_input", reason: "elicitation_dialog" } },
+    // A live question whose reason isn't served: never the older error.
+    { canonicalSessionName: "unsaid@r", needsAttention: true, arbitratedNeedsInput: true, startupStatus: "failed", latestError: OLD,
+      activityState: { activity: "needs_input", display: "needs input", needsInput: { count: 1, reason: null }, decidedBy: "hook" } },
+    // No question: the recorded error still leads.
+    { canonicalSessionName: "broad@r", needsAttention: true, arbitratedNeedsInput: false, startupStatus: "failed", latestError: OLD,
+      agentActivity: { state: "needs_input", reason: "permission_prompt" } },
+  ];
+  const { client: c } = client({ "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "r" }] }, "/api/rigs/r1/nodes": { status: 200, data: seats } });
+  const check = await checkSeatAttention(c, ["asked@r", "hooked@r", "unsaid@r", "broad@r"]);
+  expect(check.attention).toEqual([
+    { seat: "asked@r", reason: "permission_prompt", waitingOnPerson: true },
+    { seat: "hooked@r", reason: "elicitation_dialog", waitingOnPerson: true },
+    { seat: "unsaid@r", reason: "reason unavailable", waitingOnPerson: true },
+    { seat: "broad@r", reason: OLD, waitingOnPerson: false },
+  ]);
+  expect(attentionLines(check, "tile")[0]).toBe("asked@r is waiting on a person: permission_prompt. Answer it in its tile, or read it with: rig capture asked@r");
 });

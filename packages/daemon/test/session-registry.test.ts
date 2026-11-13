@@ -51,6 +51,14 @@ describe("SessionRegistry", () => {
     expect(session.createdAt).toBeDefined();
   });
 
+  it("#2895 (a): senderIsSendable follows rig send's own resolution", () => {
+    registry.registerSession("node-1", "r01-dev1-impl");
+    expect(registry.senderIsSendable("r01-dev1-impl")).toBe(true);
+    expect(registry.senderIsSendable("planner@global")).toBe(false);
+    // A three-part origin is a cross-host sender; rig send forwards it, so it stays sendable.
+    expect(registry.senderIsSendable("dev@rig@other-host")).toBe(true);
+  });
+
   it("registerSession with invalid nodeId throws", () => {
     expect(() =>
       registry.registerSession("nonexistent", "r01-dev1-impl")
@@ -360,6 +368,23 @@ describe("SessionRegistry", () => {
     const names = sessions.map((s) => s.sessionName);
     expect(names).toContain("r01-dev1-impl");
     expect(names).toContain("r01-dev1-qa");
+  });
+
+  it("getSessionsForRig preserves insertion order for timestamp ties with the session indexes installed", () => {
+    const indexes = db.prepare("PRAGMA index_list(sessions)").all() as { name: string }[];
+    expect(indexes.map((index) => index.name)).toContain("idx_sessions_node_latest_id");
+    const insert = db.prepare("INSERT INTO sessions(id, node_id, session_name, created_at) VALUES (?, ?, ?, ?)");
+    // Non-monotonic ids distinguish insertion order from either id ordering.
+    insert.run("m-first", "node-1", "first@rig", "2026-01-02");
+    insert.run("z-second", "node-1", "second@rig", "2026-01-02");
+    insert.run("a-third", "node-1", "third@rig", "2026-01-02");
+    insert.run("n-fourth", "node-2", "fourth@rig", "2026-01-02");
+    // Timestamp remains the primary order even when this row was inserted last.
+    insert.run("earlier", "node-2", "earlier@rig", "2026-01-01");
+
+    expect(registry.getSessionsForRig("rig-1").map((session) => session.id)).toEqual([
+      "earlier", "m-first", "z-second", "a-third", "n-fourth",
+    ]);
   });
 
   it("getBindingForNode returns null when unbound", () => {

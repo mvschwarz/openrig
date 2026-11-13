@@ -384,6 +384,7 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        deps.networkConnector?.start();
         deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
@@ -442,6 +443,7 @@ export async function startServer(port?: number) {
       // First, while transport still works: let the delivery in flight finish; the rest wait for the next start.
       ["wake-recovery", () => wakeRecovery.stop()],
       ["terminal-following", () => deps.terminalService?.stop()],
+      ["rex-status", () => deps.rexStatusRelay?.stop()],
       ["timers", () => {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -452,6 +454,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],

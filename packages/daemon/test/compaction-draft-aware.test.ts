@@ -3,6 +3,9 @@
 // per poll, filling the seat's held quota. Real SessionTransport, real draft-aware delivery and outbox on an
 // in-memory database; the tmux adapter records commands instead of running them.
 import Database from "better-sqlite3";
+import { Hono } from "hono";
+import { inputReadDiagnostic } from "../src/domain/input-read-diagnostic.js";
+import { compactionRoutes } from "../src/routes/compaction.js";
 import stringWidth from "string-width";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,7 +86,11 @@ async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"
   const effects = () => ({ compactPastes: writes.filter((w) => w.startsWith("paste:/compact")).length, prepPastes: writes.filter((w) => w.startsWith("paste:") && !w.startsWith("paste:/compact")).length, enters: writes.filter((w) => w === "enter").length });
   const compactRows = (state?: string) => (db.prepare("SELECT outbox_id AS id, delivery_state AS state FROM outbox_entries WHERE body LIKE '/compact%'").all() as Array<{ id: string; state: string }>)
     .filter((r) => !state || r.state === state);
-  return { db, e, transport, tmux, writes, compactRows, rows, effects, stageMap, body: () => body,
+  return { db, e, transport, tmux, writes, compactRows, rows, effects, stageMap, recover: () => {
+    const next = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport,
+      { openrigHome: home, now: () => clock, resolveOccupantGeneration: () => "g1" });
+    next.recoverSeat(input); return next;
+  }, body: () => body,
     onStage: (fn: () => void) => { onStage = fn; }, activity: (s: string) => { activity = s; }, draft: (text: string) => { body = text; } };
 }
 
@@ -155,6 +162,29 @@ it("an opted-in draft refusal protects owed restore input", async () => {
   expect(f.writes.length).toBe(before);
   expect(f.e.getOwedRestore(seat)?.stage).toBe("turn_boundary");
 });
+
+// #2845: a person's restore notice leaves the map path out and points to rig compact <seat> --state, so the owed restore
+// names the map the restore request uses; under --skip-map, only a map the seat completed anyway.
+it.each([{ skipMap: false, written: true }, { skipMap: true, written: false }, { skipMap: true, written: true }])(
+  "the owed restore names the map the restore request uses (skipMap=$skipMap, map written=$written)", async ({ skipMap, written }) => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    let mapPath: string | null = null;
+    const real = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => {
+      const r = await real(s, t, o);
+      if (mapPath === null) { mapPath = f.e.getPreparationState(seat)!.mapPath; if (written) f.stageMap(); }
+      return r;
+    });
+    expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap })).toMatchObject({ triggered: true });
+    // The same answer while the restore request and then the audit are owed: the request landing ends the in-memory carry.
+    for (const stage of ["restore_prompt", "compliance_prompt"]) {
+      expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true });
+      const owed = f.e.getOwedRestore(seat)!;
+      expect(owed.stage).toBe(stage);
+      if (written) expect(owed.mapPath).toBe(skipMap ? `${mapPath}.tmp` : mapPath);
+      else expect(owed).not.toHaveProperty("mapPath");
+    }
+  });
 
 it.each([false, true])("empty composer still permits managed preparation and command (footer=%s)", async footer => {
   const f = await fixture({ pane: "%1", mode: "off", footer });
@@ -337,4 +367,96 @@ it("the managed idle wait treats only a recognized draft according to the ordina
   (f.transport as any).classifySendReadiness = async () => ({ state: "needs_input", reason: "prompt_draft", evidenceSource: "pane_heuristic" });
   expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true })).toMatchObject({ triggered: true });
   expect(f.effects()).toMatchObject({ prepPastes: 1, compactPastes: 1, enters: 2 });
+});
+
+
+it.each(["preparation", "compact"] as const)("records the %s refusal through the existing transport without content or input", async stage => {
+  const f = await fixture({ pane: "%1", mode: stage === "preparation" ? "draft-aware" : "off" });
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport, "send").mockImplementation(async (s, text, opts) => {
+    if (stage === "preparation") {
+      vi.mocked(f.tmux.captureComposerSnapshot).mockResolvedValue({ ...frame("PRIVATE_INPUT https://private.invalid/gateway"), inMode: true });
+    } else if (text.startsWith("/compact")) {
+      vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null,
+        evidence: ["input box reads timed out"], input: { text: "PRIVATE_INPUT" }, hint: "https://private.invalid/gateway" });
+      return send(s, text, { ...opts, preserveInput: true });
+    }
+    return send(s, text, opts);
+  });
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  const state = f.e.getPreparationState(seat)!;
+  const expected = stage === "preparation"
+    ? { stage, check: "draft-aware", status: "unknown", confidence: null, reason: "pane_in_mode", timedOut: null,
+      cursor: { present: true, valid: true, atEnd: false } }
+    : { stage, check: "composer", status: "unknown", confidence: "unknown", reason: "read_timeout", timedOut: true,
+      cursor: { present: false, valid: null, atEnd: null } };
+  expect(state).toMatchObject({ inputReadFailure: expected, compact: "not_sent" });
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: stage === "preparation" ? 0 : 1, enters: stage === "preparation" ? 0 : 1 });
+  const record = readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8");
+  expect(JSON.parse(record)).toMatchObject({ inputReadFailure: expected });
+  const app = new Hono();
+  app.use("*", async (c, next) => { c.set("compactionEnforcer" as never, f.e as never); c.set("db" as never, f.db as never); await next(); });
+  app.route("/api/compaction", compactionRoutes());
+  const response = await app.request(`/api/compaction/state?session=${seat}`);
+  const body = await response.text();
+  expect(response.status).toBe(200);
+  expect(JSON.parse(body)).toMatchObject({ preparation: { inputReadFailure: expected } });
+  expect(record + body).not.toMatch(/PRIVATE_INPUT|private\.invalid/);
+});
+
+it("distinguishes an opted-in composer timeout from the separate draft-aware check", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null,
+    evidence: ["input box reads timed out"], input: { text: "PRIVATE_INPUT" }, suggestion: { text: "PRIVATE_SUGGESTION" }, hint: "https://private.invalid/gateway" });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({ delivery: "not_sent", inputReadFailure: { stage: "preparation", check: "composer", reason: "read_timeout", timedOut: true,
+    status: "unknown", confidence: "unknown", cursor: { present: false, valid: null, atEnd: null } } });
+  const record = readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8");
+  expect(record).not.toMatch(/PRIVATE_INPUT|PRIVATE_SUGGESTION|private\.invalid/);
+  expect(f.writes).toEqual([]);
+});
+
+
+it("retains a held completed map's compact diagnostic across record recovery", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  await f.e.maybeAutoCompact(input); f.stageMap();
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null, evidence: ["cursor unavailable"] });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false, reason: "prepared_awaiting_window" });
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({ prepared: true, compact: "not_sent", inputReadFailure: { stage: "compact", check: "composer", reason: "cursor_unavailable", timedOut: null } });
+  const recordPath = join(dirname(state.mapPath), COMPACTION_RECORD_FILE);
+  const record = JSON.parse(readFileSync(recordPath, "utf8"));
+  // A new enforcer in this process deliberately ignores this process's live record; model a predecessor daemon.
+  writeFileSync(recordPath, JSON.stringify({ ...record, daemon: "previous-daemon" }));
+  expect(f.recover().getPreparationState(seat)?.inputReadFailure).toEqual(state.inputReadFailure);
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 1, enters: 1 });
+});
+
+it("records the same diagnostic on an owed restore step without advancing it", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)?.stage).toBe("restore_prompt");
+  const before = f.effects(), send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null, evidence: ["cursor unavailable"] });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "restore_prompt", lastDelivery: { stage: "restore_prompt", reason: "draft_input_unknown",
+    inputReadFailure: { check: "composer", reason: "cursor_unavailable", timedOut: null } } });
+  expect(f.effects()).toEqual(before);
+});
+
+it.each([
+  { state: "unknown", unknownReason: "invalid_cursor", cursor: { x: -1, y: 0, width: 80, height: 24 }, reason: "invalid_cursor", valid: false },
+  { state: "unknown", unknownReason: "ambiguous_composer", reason: "ambiguous_composer", valid: null },
+  { state: "unknown", unknownReason: "PRIVATE_INPUT https://private.invalid/gateway", reason: "capture_unavailable", valid: null },
+])("diagnostic vocabulary excludes content and reports existing cursor validity ($reason)", ({ reason, valid, ...reading }) => {
+  const safe = inputReadDiagnostic("draft-aware", { ...reading, rows: ["PRIVATE_INPUT"], suggestionRows: ["PRIVATE_SUGGESTION"], frame: "https://private.invalid/gateway" } as any);
+  expect(safe).toMatchObject({ reason, cursor: { valid } });
+  expect(JSON.stringify(safe)).not.toMatch(/PRIVATE_INPUT|PRIVATE_SUGGESTION|private\.invalid|rows|frame/);
 });

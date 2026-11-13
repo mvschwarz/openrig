@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -18,6 +18,16 @@ function mockClient(overrides?: {
   client.postText = overrides?.postText ?? vi.fn(async () => ({ status: 200, data: { valid: true, errors: [] } }));
   return client;
 }
+
+// What a connection that relays a person's request is told when more than one assistant could be the one they mean. With
+// rig_team it lists the team first; pickup is said only where it's true for the path.
+const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.";
+const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your person that seat will pick it up on its own.";
+const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.";
+const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
+const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
+const ASK_REMOVED_FACT = "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.";
 
 describe("MCP Server", () => {
   let mcpClient: Client;
@@ -246,7 +256,8 @@ describe("MCP Server", () => {
     // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
       "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
-    const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
+    // A title is a display name, not a hint (the plain-wording test checks it).
+    const hints = Object.fromEntries(tools.map((tool) => [tool.name, { ...tool.annotations, title: undefined }]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
     for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
     for (const name of additive) expect(hints[name], name).toEqual({ readOnlyHint: false, destructiveHint: false });
@@ -394,6 +405,10 @@ describe("MCP Server", () => {
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // It hands the team the person's work, so which assistant they mean is theirs to say when several fit. Its list shows
+      // team seats and connected assistants: only a running team seat picks a request up on its own.
+      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+      expect(FRONT_DOOR_WORKFLOW).not.toContain("<name>");
       // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
       expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
       const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
@@ -723,7 +738,10 @@ describe("MCP Server", () => {
       ] }));
     fs.writeFileSync(path.join(folder, "b.json"), "{ not json");
     let hostSelfId: string | null = "host-a";
+    let checkIns: unknown = { hostId: "host-a", members: [{ seat: "grok@my-rig", rung: true, status: "check-in-overdue",
+      lastCheckInAt: "2026-10-26T09:00:00.000Z", expectedMinutes: 60, reporter: "openrig-observed" }] };
     const getFn = vi.fn(async (p: string) => {
+      if (p === "/api/queue/hosted-members") return checkIns === null ? { status: 404, data: {} } : { status: 200, data: checkIns };
       if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
       if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "my-rig" }, nodes: [{ id: "n1", logicalId: "dev.impl" }, { id: "n2", logicalId: "dev.qa" }], edges: [], representative: null } };
       if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
@@ -759,7 +777,12 @@ describe("MCP Server", () => {
       expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
         caveat: "Text only", pane: null, activity: "unknown",
         presence: { lastCallAt: "2026-10-26T11:05:00.000Z", lastWakeScope: "the latest ring among its 50 most recent rows",
-          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" } } }]);
+          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" },
+          checkIn: { status: "check-in-overdue", lastCheckInAt: "2026-10-26T09:00:00.000Z", expectedMinutes: 60, onRequest: false } } }]);
+      // A daemon that gives no check-in status (an older one) leaves it unknown, with the reason, never a guess.
+      checkIns = null;
+      expect(((await here.team()).hostedMembers[0] as { presence: { checkIn: unknown } }).presence.checkIn)
+        .toEqual({ status: "unknown", lastCheckInAt: null, expectedMinutes: null, onRequest: false, reason: "this daemon gave no check-in status" });
       // A scoped caller gets a generic note; the file names and errors go to this server's log.
       expect(found.hostedMembersNote).toBe("Some rosters couldn't be read, so hosted members may be missing.");
       expect(log.mock.calls.flat().join(" ")).toContain("b.json");
@@ -868,9 +891,116 @@ describe("MCP Server", () => {
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
     expect(instructions).toContain("You may omit destination");
+    // Asked to "send my Claude assistant one request" on a team with four Claude seats, a client picked one from its own history.
+    // Without rig_team it can't list the team, and its destinations aren't other connected assistants: it's told only to ask.
+    expect(instructions).toContain(ASK_UNLISTED);
+    expect(instructions).not.toContain("list the team's members");
+    expect(instructions).not.toContain("removed from the team");
+    expect(instructions).not.toContain("closed unanswered");
+    expect(instructions).not.toMatch(/picked up|pick it up/);
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
+  });
+
+  it("an external request grant with team/list lists the team before asking which assistant, and says when another connected one picks up", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"], team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+    expect(instructions).not.toContain(ASK_RUNNING_PICKUP);
+    expect(instructions).not.toContain(ASK_SENT_ANYWAY);
+    await external.close();
+    await server.close();
+  });
+
+  it.each([
+    ["a full inbox grant", { queue: ["create", "show", "list", "claim", "update"], team: ["list"] }],
+    ["a narrow inbox grant", { queue: ["claim", "update"] }],
+  ])("%s's instructions name only tools its connection offers", async (_label, objects) => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    const offered = new Set((await external.listTools()).tools.map((tool) => tool.name));
+    const named = [...new Set(instructions.match(/\brig_[a-z_]+/g) ?? [])];
+    expect(instructions).toContain("claim it (rig_queue_claim)");
+    expect(named.filter((tool) => !offered.has(tool))).toEqual([]);
+    expect(instructions).not.toMatch(/rig_whoami|rig_queue_handoff|rig_queue_decide/);
+    expect(instructions.includes("rig_team")).toBe(offered.has("rig_team"));
+    // Only a grant that can hand the team work is told to ask which assistant the person means; with team/list it lists the
+    // team first and may reach another connected assistant, so it's told when that one picks the request up.
+    expect(instructions.includes("ask which")).toBe(offered.has("rig_queue_create"));
+    if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+    await external.close();
+    await server.close();
+  });
+
+  it("a member's instructions keep every shared paragraph word for word", async () => {
+    const instructions = mcpClient.getInstructions() ?? "";
+    for (const paragraph of [
+      "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
+      "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
+      "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+      "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
+    ]) expect(instructions).toContain(paragraph);
+    // A member works items rather than relaying a person's request, so it isn't told to ask which assistant they mean.
+    expect(instructions).not.toContain("ask which");
+  });
+
+  it("shows a connected assistant's person plain titles and openings, keeping each tool's rules and hints", async () => {
+    // What a person sees: each tool's title and the first sentence of its description.
+    const plain: Record<string, [title: string, sentence: string]> = {
+      rig_queue_list: ["List my OpenRig requests", "Lists the requests addressed to this assistant, or that it sent."],
+      rig_queue_show: ["Show one request", "Shows one request, who picked it up, and its answer."],
+      rig_queue_create: ["Send a request", "Sends a request to another assistant on your team."],
+      rig_queue_claim: ["Pick up a request", "Marks a request addressed to this assistant as picked up, so others see it's being worked on."],
+      rig_queue_update: ["Answer a request", "Adds this assistant's answer to a request, or a note while it works."],
+      rig_artifact_read: ["Read a shared file", "Reads a file attached to a request."],
+      rig_team: ["Show my team", "Shows the assistants on your team, each one's address for sending it a request, and which one leads."],
+      rig_whoami: ["Show this connection", "Shows which assistant this connection is and which team it belongs to."],
+    };
+    expect(Object.keys(PLAIN_WORDING).sort()).toEqual(Object.keys(plain).sort());
+    const catalog = async (options?: Parameters<typeof createMcpServer>[1]) => {
+      const server = createMcpServer(mockClient(), options);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "catalog-client", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const { tools } = await client.listTools();
+      await client.close();
+      await server.close();
+      return new Map(tools.map((tool) => [tool.name, tool]));
+    };
+    const local = await catalog();
+    const external = await catalog({ seat: "cus-1-caller@team", access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false,
+      external: { objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"], artifact: ["read"] } } } });
+    for (const [name, [title, sentence]] of Object.entries(plain)) {
+      const own = local.get(name)!;
+      // rig_whoami isn't offered to an external grant, and its plain text is true for every caller, so the local one shows it.
+      const shown = name === "rig_whoami" ? own : external.get(name)!;
+      expect(shown.title, name).toBe(title);
+      expect(shown.annotations?.title, name).toBe(title);
+      expect(shown.description?.slice(0, sentence.length + 1), name).toBe(`${sentence} `);
+      if (name === "rig_whoami") continue;
+      // Only the opening changes: every rule after it, and each hint, is the tool's own.
+      const { replaces, with: opening } = PLAIN_WORDING[name]!;
+      expect(own.description?.startsWith(replaces), name).toBe(true);
+      expect(shown.description, name).toBe(opening + own.description!.slice(replaces.length));
+      expect({ ...shown.annotations, title: undefined }, name).toEqual(own.annotations);
+      // A local caller keeps the tool's own text, which says what only it can do.
+      expect(own.title, name).toBeUndefined();
+      expect(own.annotations?.title, name).toBeUndefined();
+    }
+    expect(local.get("rig_whoami")?.description).toBe("Shows which assistant this connection is and which team it belongs to. It answers with its rig, pod, peers and edges, and caller: authenticated (a validated HTTP credential, with its principal) or declared (OPENRIG_SESSION_NAME where the server was configured, which nothing verifies).");
+    expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {
@@ -1464,6 +1594,33 @@ describe("MCP Server", () => {
       } finally {
         if (prior === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = prior;
       }
+    });
+
+    it("issue2728 rig_queue_list composes exact tags and mission/slice aliases", async () => {
+      const row = { qitemId: "qitem-match", tags: ["review", "mission:launch", "slice:docs"] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row] }));
+      await setup({ get: getFn });
+      const listed = await mcpClient.callTool({
+        name: "rig_queue_list",
+        arguments: { tags: ["review", "mission:launch", "review"], mission: "launch", slice: "docs", all: true },
+      });
+      const params = new URLSearchParams(String(getFn.mock.calls[0]?.[0]).split("?")[1]);
+      expect(params.getAll("tag")).toEqual(["review", "mission:launch", "slice:docs"]);
+      expect(listed.structuredContent).toEqual({ items: [row] });
+      await cleanup();
+    });
+
+    it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
+      const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
+      await setup({ get: getFn });
+      const listed = await mcpClient.callTool({
+        name: "rig_queue_list",
+        arguments: { tags: ["review", "publish"], all: true },
+      });
+      expect(listed.isError).toBe(true);
+      expect(listed.structuredContent).toMatchObject({ ok: false, code: "filter_unsupported" });
+      expect((listed.content as Array<{ text: string }>)[0]!.text).toContain("tag");
+      await cleanup();
     });
 
     it("rig_queue_list asks for a seat instead of guessing one", async () => {

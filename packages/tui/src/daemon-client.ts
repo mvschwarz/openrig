@@ -13,7 +13,14 @@ export interface DaemonClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string> | (() => Record<string, string>);
+  /** Headers for operator-gated writes (answering an ask), which the daemon checks against its operator bearer. Absent:
+   *  the same headers as every other call. */
+  actionHeaders?: Record<string, string> | (() => Record<string, string>);
 }
+
+/** What a person reads when the daemon refuses an answer for want of its operator bearer. Never carries a token. */
+export const ACTION_UNAUTHORIZED = "This daemon refused the answer without its operator bearer token, so nothing was recorded. "
+  + "Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, then answer again.";
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
@@ -69,16 +76,18 @@ export class DaemonClient {
   private readonly fetchImpl: typeof fetch;
   private optionalFetchImpl: typeof fetch;
   private readonly headerSource: Record<string, string> | (() => Record<string, string>);
+  private readonly actionHeaderSource: Record<string, string> | (() => Record<string, string>) | undefined;
 
   constructor(options: DaemonClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? process.env["OPENRIG_URL"] ?? "http://127.0.0.1:7433").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.optionalFetchImpl = this.fetchImpl;
     this.headerSource = options.headers ?? {};
+    this.actionHeaderSource = options.actionHeaders;
   }
 
   forPage(page: PageRead, signal: AbortSignal): DaemonClient {
-    const client = new DaemonClient({ baseUrl: this.baseUrl, headers: this.headerSource,
+    const client = new DaemonClient({ baseUrl: this.baseUrl, headers: this.headerSource, actionHeaders: this.actionHeaderSource,
       fetchImpl: page.fetch(this.fetchImpl, signal) });
     client.optionalFetchImpl = page.fetch(this.fetchImpl, signal, true);
     return client;
@@ -86,6 +95,11 @@ export class DaemonClient {
 
   private get headers(): Record<string, string> {
     return typeof this.headerSource === "function" ? this.headerSource() : this.headerSource;
+  }
+
+  private get actionHeaders(): Record<string, string> {
+    const source = this.actionHeaderSource;
+    return source === undefined ? this.headers : typeof source === "function" ? source() : source;
   }
 
   /** S19 AM-R18 — open the oracle's SSE event stream (FR-8: HTTP stays in THIS module).
@@ -124,13 +138,14 @@ export class DaemonClient {
     return res.json();
   }
 
-  private async post(route: string, body: unknown): Promise<unknown> {
+  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string } = {}): Promise<unknown> {
     const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
       method: "POST",
-      headers: { ...this.headers, "Content-Type": "application/json" },
+      headers: { ...(options.headers ?? this.headers), "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const parsed = await res.json().catch(() => null);
+    if (res.status === 401 && options.unauthorized) throw new Error(options.unauthorized);
     if (!res.ok) {
       const detail = parsed && typeof parsed === "object"
         ? "error" in parsed ? ` — ${(parsed as { error: unknown }).error}`
@@ -404,6 +419,14 @@ export class DaemonClient {
     const query = [item ? `item=${encodeURIComponent(item)}` : null, view ? `view=${encodeURIComponent(view)}` : null].filter(Boolean).join("&");
     return this.get(`/api/attention${query ? `?${query}` : ""}`);
   }
+  /** Connected assistants (roster members outside any terminal) and their check-in. Optional: an older daemon has no
+   *  such route. */
+  /** This daemon's connected assistants, as the status and body it answered; an older daemon answers 404. A failed read
+   *  isn't an empty list, so the caller is given the status to tell them apart. */
+  async hostedMembers(): Promise<{ status: number; body: unknown }> {
+    const res = await this.optionalFetchImpl(`${this.baseUrl}/api/queue/hosted-members`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    return { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
+  }
   queueItem(qitemId: string, options: { optional?: boolean } = {}) {
     return this.get(`/api/queue/${encodeURIComponent(qitemId)}`, options.optional ? this.optionalFetchImpl : this.fetchImpl);
   }
@@ -413,9 +436,18 @@ export class DaemonClient {
   reviewFleet() {
     return this.get(`/api/review/fleet`);
   }
+  /** This host's open pairing requests (read-only; nothing in it is a credential). */
+  pairRequests() { return this.get("/api/hosts/pair-requests") as Promise<{ requests: import("./config/pairing.js").PairRequest[] }>; }
+  /** Decide a pairing request directly, as `rig host approve|deny` does (POST /api/hosts/pair-decision), with the operator's
+   *  action headers. Returns the HTTP outcome; a timeout or a lost connection throws, and then the outcome is unknown. */
+  async pairDecision(request: string, decision: "approve" | "deny"): Promise<{ status: number; body: Record<string, unknown> | null }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/hosts/pair-decision`, { method: "POST",
+      headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
+    return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
+  }
   /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
   missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
-    return this.post("/api/mission-control/action", input) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
+    return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
       answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
   }
   attentionAggregate() {

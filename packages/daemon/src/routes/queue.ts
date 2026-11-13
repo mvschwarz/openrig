@@ -26,7 +26,18 @@ import { eligibleQueueBindings, ineligibleBindingDetail, loadLearnedHostBindings
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type CurrentWorkRow, type MissionsRootResolver, type RoleOrientation } from "../domain/current-work.js";
+import {
+  deriveCurrentWork,
+  deriveCurrentWorkChoice,
+  deriveRole,
+  deriveWorkCandidates,
+  evaluateCreateScope,
+  skippedCreateScopeAdvisory,
+  toCreateScopeAdvisory,
+  type CurrentWorkRow,
+  type MissionsRootResolver,
+  type RoleOrientation,
+} from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
@@ -147,6 +158,32 @@ export function queueRoutes(): Hono {
     // must neither fail that write nor misreport membership as unmatched.
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
+  }
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+    try {
+      const check = evaluateCreateScope(tags, () => {
+        const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
+        const projectTags = flat.filter((tag) => tag.startsWith("project:"));
+        if (projectTags.some((tag) => !tag.slice("project:".length).trim())) return null;
+        const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()))];
+        if (projectIds.length > 1) return null;
+        if (projectIds.length === 1) {
+          const projectId = projectIds[0]!;
+          const { catalog } = projectCatalogPaths(c as never);
+          const entries = readProjectCatalog(catalog);
+          if (!entries) return null;
+          const project = listProjects(c as never).projects.find((entry) => entry.id === projectId);
+          if (!project || project.error || !project.missionsRoot) return null;
+          return project.missionsRoot;
+        }
+        const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+        const value = store?.resolveOne("workspace.slices_root").value;
+        return typeof value === "string" && value.trim() ? value : null;
+      });
+      return check ? toCreateScopeAdvisory(check) : null;
+    } catch {
+      return null;
+    }
   }
   /** An ask (anything but an update) to a shared channel is accepted, with a word to the agent: the channel's replies
    *  come back as correspondence, never as an answer, so nothing there will settle it. Context, not a refusal. */
@@ -656,7 +693,14 @@ export function queueRoutes(): Hono {
         tags: crossHostProvenanceTags(body.tags),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
-      return fwd.ok ? c.json(fwd.payload as Record<string, unknown>, fwd.status as 200) : fwd.response;
+      if (!fwd.ok) return fwd.response;
+      const skippedScope = skippedCreateScopeAdvisory(body.tags);
+      const payload = fwd.payload;
+      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+        return c.json(payload, fwd.status as 200);
+      const objectPayload = payload as Record<string, unknown>;
+      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
     }
 
     try {
@@ -683,7 +727,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
+      const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
@@ -1285,6 +1330,11 @@ export function queueRoutes(): Hono {
   app.get("/list", (c) => {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
+    const rawTags = c.req.queries("tag") ?? [];
+    if (rawTags.some((tag) => tag.trim().length === 0)) {
+      return c.json({ error: "tag_invalid", message: "tag filters cannot be blank" }, 400);
+    }
+    const tags = [...new Set(rawTags)];
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
     const parsedLimit = queryLimit(c);
@@ -1316,6 +1366,7 @@ export function queueRoutes(): Hono {
     if (!attention) {
       const repo = getRepo(c);
       const items = repo.list({
+        tag: tags.length > 0 ? tags : undefined,
         destinationSession,
         sourceSession,
         state,
@@ -1364,6 +1415,7 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).listAttention({
       limit: userLimit,
       state,
+      tag: tags.length > 0 ? tags : undefined,
       destinationSession,
       sourceSession,
       targetRepo,
@@ -1395,6 +1447,11 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);
   });
+
+  // Each connected assistant on this host and whether it's checking its queue, with this daemon's own host id: the check-ins
+  // are this host's, so a reader matches members to it without needing a terminal seat to learn it. A status only:
+  // work addressed to an assistant that isn't checking in still queues and is rung as before. Precedes /:qitemId.
+  app.get("/hosted-members", (c) => c.json({ hostId: getSelfHostId(), members: getRepo(c).hostedMemberCheckIns() }));
 
   // GET /undelivered — surfaces pending create-path nudge failures plus active
   // human-notification episodes whose gateway delivery ledger failed or never posted.
@@ -1501,6 +1558,8 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      answers: repo.answersForAsk(qitemId),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

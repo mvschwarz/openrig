@@ -38,6 +38,7 @@ import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
+import { teamOperationsCapabilities } from "./domain/team-operations.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -84,6 +85,7 @@ import { skillsRoutes } from "./routes/skills.js";
 import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
+import { networkRoutes } from "./routes/network.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
@@ -242,6 +244,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** The outbound network connector (`rig network`); started after the listener binds. */
+  networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
   modelDivergenceMonitor?: import("./domain/model-divergence/model-divergence-monitor.js").ModelDivergenceMonitor;
   /** S10 — the in-daemon gateway subsystem (amended M1 §3: in-process, no second deployable).
@@ -282,6 +286,7 @@ export interface AppDeps {
   reviewGatherer?: import("./domain/review/gather.js").ReviewGatherer;
   // OPR.0.4.6.02 C3 — the terminal-provider-ride composer (herdr/cmux views).
   terminalService?: import("./domain/terminal/terminal-service.js").TerminalService;
+  rexStatusRelay?: import("./domain/terminal/rex-agent-status.js").RexAgentStatusRelay;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   /** User Settings v0 — daemon-side settings store (env > file > default). */
   settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
@@ -634,6 +639,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
+    c.set("networkConnector" as never, deps.networkConnector);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
@@ -791,6 +797,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.route("/api/rigs", rigsRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
+  app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
@@ -872,6 +879,9 @@ export function createApp(deps: AppDeps): Hono {
     "/api/hosts",
     hostsRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
+  // A selected local seat's connections to a remote hub (`rig network`): bindings, status and disconnect. Its writes carry
+  // a participant's token, so they take the same operator-bearer posture as the hosts routes.
+  app.route("/api/network", networkRoutes({ bearerToken: deps.missionControlBearerToken ?? null }));
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
   // Living Notes Packet 2 (OPR.0.4.4.20) — composed-review read contract.

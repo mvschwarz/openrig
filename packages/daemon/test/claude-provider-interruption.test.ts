@@ -23,11 +23,14 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 const require = createRequire(import.meta.url);
 const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") as {
   buildOpenRigPayload: (payload: Record<string, unknown>, env: Record<string, string>, now: () => Date) => Record<string, unknown>;
+  claudeLimitResetAt: (text: string, now: Date) => string | null;
 };
 const SESSION = "dev-worker@limit-fixture";
 const NODE = "node-limit-fixture";
 const GENERATION = "generation-current";
 const T0 = "2025-01-01T12:00:00.000Z";
+// The seat's own Claude session: its resume token, which a hook from the seat's Claude reports as session_id.
+const OWN_CLAUDE_SESSION = "11111111-1111-4111-8111-111111111111";
 const identity = { OPENRIG_SESSION_NAME: SESSION, OPENRIG_NODE_ID: NODE, OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: GENERATION };
 
 describe("Claude provider interruptions (#99)", () => {
@@ -48,7 +51,8 @@ describe("Claude provider interruptions (#99)", () => {
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-limit', 'limit-fixture')").run();
     db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES ('pod-limit', 'rig-limit', 'dev', 'Dev')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, pod_id) VALUES (?, 'rig-limit', 'dev.worker', 'claude-code', 'pod-limit')").run(NODE);
-    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES ('session-limit', ?, ?, 'running', 'ready')").run(NODE, SESSION);
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, resume_type, resume_token) VALUES ('session-limit', ?, ?, 'running', 'ready', 'claude_id', ?)")
+      .run(NODE, SESSION, OWN_CLAUDE_SESSION);
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session) VALUES ('binding-limit', ?, ?)").run(NODE, SESSION);
     const eventBus = new EventBus(db);
     liveGeneration = GENERATION;
@@ -123,6 +127,124 @@ describe("Claude provider interruptions (#99)", () => {
     expect(payload).not.toHaveProperty("error_details");
     expect(payload).not.toHaveProperty("last_assistant_message");
     expect(store.getLatestForNode({ sessionName: SESSION })).toMatchObject({ state: "unknown", reason: "usage_limit" });
+  });
+
+  describe("the reset a Claude limit states (#99)", () => {
+    const WEEKLY = "You've hit your weekly limit · resets Jan 2, 4pm (America/Sao_Paulo)";
+    const reportStated = (text: string, field = "last_assistant_message", sessionId: string | null = OWN_CLAUDE_SESSION) =>
+      report({ hook_event_name: "StopFailure", error: "rate_limit", [field]: text, ...(sessionId ? { session_id: sessionId } : {}) });
+    const latestResetsAt = () => (store.getLatestForNode({ sessionName: SESSION }) as { resetsAt?: string | null } | null)?.resetsAt;
+
+    it.each([
+      // Real messages from a Claude Code 2.1.296 limit, and the older formats.
+      [WEEKLY, "2025-01-02T19:00:00.000Z"],
+      ["5-hour limit reached ∙ resets 8am (UTC)", "2025-01-02T08:00:00.000Z"],
+      ["5-hour limit reached ∙ resets 1:30pm (UTC)", "2025-01-01T13:30:00.000Z"],
+      ["rate limit · resets in 2h 30m", "2025-01-01T14:30:00.000Z"],
+      ["Claude AI usage limit reached|1735740000", "2025-01-01T14:00:00.000Z"],
+    ])("reads %j", (text, expected) => {
+      expect(relay.claudeLimitResetAt(text, new Date(T0))).toBe(expected);
+    });
+
+    it.each([
+      "API Error: Rate limit reached",
+      "resets 3",
+      "resets 4pm (Not/AZone)",
+      "resets 4pm (Not/AZone", // a truncated zone is not the seat's local time
+      "resets 4pm ()",
+      "resets in 2 months", // not two minutes
+      "resets in 2h 30x",
+      "resets in 2h, 30x", // a separator doesn't end the fragment
+      "resets in 2h and 30x",
+      "resets in soon",
+      "resets Feb 30, 4pm (UTC)",
+      "resets Mar 1, 4pm (UTC)", // more than a week away: not a usage window
+      "Claude AI usage limit reached|1735730000", // already past
+    ])("states no reset for %j", text => {
+      expect(relay.claudeLimitResetAt(text, new Date(T0))).toBeNull();
+    });
+
+    it.each([
+      // Close to the impossible date, where only a calendar check (not the distance cap) can reject it.
+      ["2026-02-28T12:00:00.000Z", "resets Feb 30, 4pm (UTC)", null],
+      ["2026-02-28T12:00:00.000Z", "resets Feb 29, 4pm (UTC)", null], // 2026 is not a leap year
+      ["2026-02-28T12:00:00.000Z", "resets Mar 2, 4pm (UTC)", "2026-03-02T16:00:00.000Z"],
+      ["2028-02-28T12:00:00.000Z", "resets Feb 29, 4pm (UTC)", "2028-02-29T16:00:00.000Z"],
+      ["2026-04-29T12:00:00.000Z", "resets Apr 31, 4pm (UTC)", null],
+      // A wall time a DST change repeats or skips names no single instant: no reset rather than one a day late.
+      ["2025-11-02T05:00:00.000Z", "resets 1:30am (America/New_York)", null], // 1:30 happens twice that night
+      ["2025-11-02T05:00:00.000Z", "resets Nov 2, 1:30am (America/New_York)", null],
+      ["2025-03-09T06:00:00.000Z", "resets 2:30am (America/New_York)", null], // 2:30 never happens that night
+      ["2025-03-09T06:00:00.000Z", "resets 3:30am (America/New_York)", "2025-03-09T07:30:00.000Z"],
+      ["2025-11-02T05:00:00.000Z", "resets 3am (America/New_York)", "2025-11-02T08:00:00.000Z"],
+    ])("at %s reads %j as %j", (now, text, expected) => {
+      expect(relay.claudeLimitResetAt(text, new Date(now))).toBe(expected);
+    });
+
+    it("relays only the instant, never the message", () => {
+      const payload = reportStated(WEEKLY);
+      expect(payload).toMatchObject({ subtype: "rate_limit", resetsAt: "2025-01-02T19:00:00.000Z" });
+      expect(JSON.stringify(payload)).not.toContain("weekly");
+      expect(reportStated(WEEKLY, "error_details")).toMatchObject({ resetsAt: "2025-01-02T19:00:00.000Z" });
+    });
+
+    it.each([
+      { hook_event_name: "StopFailure", error: "overloaded", last_assistant_message: WEEKLY },
+      { hook_event_name: "Stop", last_assistant_message: WEEKLY },
+      { hook_event_name: "Notification", notification_type: "rate_limit", message: WEEKLY },
+    ])("reads no reset off another event: %j", payload => {
+      expect(report(payload)).not.toHaveProperty("resetsAt");
+    });
+
+    it("keeps a stated reset only from the seat's own Claude session, not a helper's", async () => {
+      // A helper Claude started from the seat's shell posts as the seat, but under its own session (maybe another login).
+      reportStated(WEEKLY, "last_assistant_message", "22222222-2222-4222-8222-222222222222");
+      expect(latestResetsAt()).toBeUndefined();
+      const model = await service.getReadModel();
+      expect(deriveUsageLimitPools({ signals: model.signals, bindings: model.bindings, now: new Date(), fallbackSeconds: 300 }))
+        .toEqual([expect.objectContaining({ poolKey: "claude:local", source: "config-fallback",
+          expiresAt: new Date(Date.parse(T0) + 300_000).toISOString() })]);
+
+      reportStated(WEEKLY, "last_assistant_message", null);
+      expect(latestResetsAt()).toBeUndefined();
+      reportStated(WEEKLY);
+      expect(latestResetsAt()).toBe("2025-01-02T19:00:00.000Z");
+    });
+
+    it("drops a stated reset past the eight-day cap from any sender", async () => {
+      const result = store.recordHookEvent({ runtime: "claude-code", sessionName: SESSION, hookEvent: "StopFailure", subtype: "rate_limit",
+        occurredAt: T0, generation: GENERATION, sessionId: OWN_CLAUDE_SESSION, resetsAt: "2025-01-10T12:00:00.000Z" });
+      expect(result.ok && result.activity.resetsAt).toBe("2025-01-10T12:00:00.000Z");
+      expect(await events()).toEqual([expect.not.objectContaining({ resetsAt: expect.anything() })]);
+    });
+
+    it("keeps a stated reset only on the typed limit row", () => {
+      const result = store.recordHookEvent({ runtime: "claude-code", sessionName: SESSION, hookEvent: "Stop",
+        resetsAt: "2025-01-02T19:00:00.000Z", generation: GENERATION, sessionId: OWN_CLAUDE_SESSION });
+      expect(result.ok && result.activity).not.toHaveProperty("resetsAt");
+    });
+
+    it("parks pending work until the stated reset instead of the bounded retry", async () => {
+      reportStated(WEEKLY);
+      const model = await service.getReadModel();
+      expect(model.signals.filter(signal => signal.sourceClass === "provider_event"))
+        .toEqual([expect.objectContaining({ provider: "claude", seatSession: SESSION, resetsAt: "2025-01-02T19:00:00.000Z" })]);
+      expect(deriveUsageLimitPools({ signals: model.signals, bindings: model.bindings, now: new Date(), fallbackSeconds: 300 }))
+        .toEqual([{ poolKey: "claude:local", provider: "claude", seatSessions: [SESSION], expiresAt: "2025-01-02T19:00:00.000Z", source: "provider-reset" }]);
+
+      queue.attachWatchdogJobsRepository(new WatchdogJobsRepository(db, () => new Date()));
+      queue.attachOutbox(new OutboxHandler(db));
+      const source = await queue.create({ sourceSession: "sender@limit-fixture", destinationSession: "relay@limit-fixture", body: "work", nudge: false });
+      const { created: baton } = await queue.handoff({ qitemId: source.qitemId, fromSession: "relay@limit-fixture", toSession: SESSION, nudge: false });
+      db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = 'failed:provider limit' WHERE qitem_id = ?")
+        .run(new Date(Date.parse(T0) - 600_000).toISOString(), baton.qitemId);
+      const result = await runWakeLadderTick({ db, queueRepo: queue, attemptWake: vi.fn(async () => "typed"), resolveOrchestrator: () => null,
+        retryIntervalSeconds: 300, usageLimitJitterSeconds: 0, getProviderReadModel: () => service.getReadModel(), log: () => {} });
+      expect(result.actions).toContainEqual({ qitemId: baton.qitemId, action: "park-usage-limit" });
+      const blocker = queue.getById(baton.qitemId)!.blockedOn!;
+      expect(queue.getParkWakeStatus(blocker)).toMatchObject({ kind: "timer", live: true, expiresAt: "2025-01-02T19:00:00.000Z" });
+      expect(queue.transitionLog.listForQitem(blocker).some(row => row.transitionNote?.includes("cause=provider-reset"))).toBe(true);
+    });
   });
 
   it("reports a fresh same-occupant limit without inventing a Claude account, usage meter or reset", async () => {

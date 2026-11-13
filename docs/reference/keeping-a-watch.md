@@ -124,10 +124,12 @@ manual replay. A recurring reminder keeps its next normal cycle under a new occu
 finishing its accounting does not type the same occurrence twice.
 
 Exhausted retries end only the failed occurrence, with its cause and next action; a recurring
-reminder keeps its next normal cycle. A permanent transport failure leaves a terminal job:
-correct the destination and register a replacement reminder. A one-shot park timer records its
-failed or unconfirmed wake on the parked row before it ends. A retryable failure is recorded
-there while the timer stays armed. Deliberately held
+reminder keeps its next normal cycle, and a permanent transport failure leaves it a terminal job:
+correct the destination and register a replacement reminder. A one-shot park timer (`--wake-after`)
+has no later cycle, so neither the retry limit nor a permanent transport failure ends it while its
+task is still set aside: each failure before input is recorded on the parked row while the timer
+stays armed, and it retries until it's delivered or the park ends. If input may have reached the
+seat, it records the unconfirmed wake on the parked row and ends. Deliberately held
 input keeps its existing retained-message custody. Condition watches and parked-owner policy
 behavior are unchanged. This does not replay failed occurrences recorded by older versions.
 
@@ -289,10 +291,41 @@ Unknown: not said yet.
   stopped (the first fire comes one interval after you register it), and it stops when the agent that registered it
   is replaced. It's fine for agent-to-agent reminders. Your own watch timers also show as `periodic-reminder` in
   `rig watchdog list`: that's the one-shot timer `--wake-after` arms, not a registered repeating reminder. It's retired
-  when it fires or when the task stops being set aside. A wake held back because you were typing (a retained
-  delivery) wasn't delivered, so it doesn't use the timer up: it's tried again at each interval until an attempt goes
-  through (delivered or failed), which retires it. A timer another task shares through `--wake-watchdog` stays live
-  for that task when this task is handed off or stopped, and the same rule applies to its wake. None of this is a
-  delivery guarantee.
+  after delivery, when the occurrence ends, or when the task stops being set aside. A wake held back because you were typing (a retained
+  delivery) wasn't delivered, so it doesn't use the timer up. A failure known to have happened before input reached
+  the seat also keeps the same wake owed and retries on the existing cadence until delivery or the park ends. If input
+  may have reached the seat, the occurrence ends without automatic replay; inspect the receipt before retrying.
+  A timer another task shares through `--wake-watchdog` stays live for that task when this task is
+  handed off or stopped, and a held-back wake doesn't use it up. Once this task's park has ended, though,
+  a failure before input to that task is retried only up to `queue.wake_retry_cap` times (a permanent
+  transport failure ends it at once), and then the timer ends. None of this is a delivery guarantee.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance. For an allowance, see "A usage warning" above.
+
+## Recurring reminders for agents
+
+An agent-to-agent reminder can repeat until stopped. This is separate from
+[a person's one-shot watch](#setting-a-watch), which uses `rig queue block --wake-after`.
+
+Save this as `periodic-reminder.yaml`, replacing the example session names with your own:
+
+```yaml
+policy: periodic-reminder
+target:
+  session: worker@my-team
+message: "Finish the current action, then check the pending work."
+```
+
+Register it with all five required flags:
+
+```bash
+rig watchdog register --spec periodic-reminder.yaml --policy periodic-reminder \
+  --target-session worker@my-team --interval-seconds 600 \
+  --registered-by coordinator@my-team
+```
+
+At registration, `--policy` selects the policy; the YAML `policy` field is not the
+selector. YAML `target.session` takes precedence over `--target-session`, so keep them
+aligned. If YAML omits the target, the CLI target is the fallback. Put a non-empty
+`message` in YAML: `--message` is a shortcut only for `context-usage-threshold`.
+The first reminder is due after the interval; this example repeats every 600 seconds.

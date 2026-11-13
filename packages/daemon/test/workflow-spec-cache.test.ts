@@ -81,8 +81,11 @@ describe("WorkflowSpecCache (PL-004 Phase D)", () => {
   it("readThrough returns the same spec_id when content unchanged (hash hit)", () => {
     const path = join(tmp, "spec.yaml");
     writeFileSync(path, SAMPLE_SPEC);
-    const first = cache.readThrough(path);
-    const second = cache.readThrough(path);
+    // Hold observation time fixed so this hash-hit control does not assert that newer reads never advance cached_at.
+    const observedAt = new Date("2035-01-02T03:04:05.100Z");
+    const stableClockCache = new WorkflowSpecCache(db, () => observedAt);
+    const first = stableClockCache.readThrough(path);
+    const second = stableClockCache.readThrough(path);
     expect(second.specId).toBe(first.specId);
     expect(second.cachedAt).toBe(first.cachedAt);
   });

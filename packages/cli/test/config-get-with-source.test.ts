@@ -119,7 +119,7 @@ describe("rig config get --with-source", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(await run(["set", "health.context_pressure.critical_percent", "97"]))
-        .toContain("file override saved; effective value 99 (source: default)");
+        .toContain("file override saved; effective value 99 (source: default");
       expect(JSON.parse(fs.readFileSync(configPath, "utf8")).health.contextPressure.criticalPercent).toBe(97);
       expect(stderr).toHaveBeenCalled();
     } finally { stderr.mockRestore(); }

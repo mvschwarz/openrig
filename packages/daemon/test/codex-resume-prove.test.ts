@@ -119,13 +119,23 @@ describe("#1524 (b): a Codex resume is resumed only when the launched process's 
   });
 
   it("when the window ends, the attention text keeps the last reason a read gave", async () => {
-    const { a } = adapter({
-      resumeProofWindowMs: 40,
-      evidence: () => new Promise<CodexResumeEvidence>((resolve) => setTimeout(() => resolve({ reason: "no_cli_thread" }), 15)),
-    });
-    const r = await resume(a);
-    expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
-    expect(r.ok === false && r.error).toContain("no_cli_thread");
+    // The clock moves only when the second read runs, so the window ends after a read gave its reason, on any runner.
+    let now = Date.parse("2026-10-20T05:00:02Z");
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      let reads = 0;
+      const { a } = adapter({
+        resumeProofWindowMs: 40,
+        evidence: () => {
+          if (++reads > 1) now += 1_000;
+          return { reason: reads === 1 ? "no_cli_thread" : "no_log_row" };
+        },
+      });
+      const r = await resume(a);
+      expect(reads).toBe(2);
+      expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
+      expect(r.ok === false && r.error).toContain("no_cli_thread");
+    } finally { clock.mockRestore(); }
   });
 
   it("a synchronous read that runs past the deadline can't be interrupted, but its late match is rejected", async () => {

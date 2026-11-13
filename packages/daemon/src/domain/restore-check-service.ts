@@ -176,6 +176,7 @@ export interface RestoreCheckOpts {
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
 
 export interface NodeInventoryEntry {
+  codexConfigProfile?: string | null;
   nodeId?: string | null;
   rigId: string;
   rigName: string;
@@ -192,6 +193,16 @@ export interface NodeInventoryEntry {
   tmuxAttachCommand: string | null;
   latestError: string | null;
   cwd?: string | null;
+  /** The seat's recorded restore choice and resume token (the inventory carries them). */
+  restorePolicy?: string | null;
+  resumeType?: string | null;
+  resumeToken?: string | null;
+}
+
+/** The restore's own resume rule: a seat with a resume token, a resume type and the resume policy resumes. */
+function seatResumes(node: NodeInventoryEntry): boolean {
+  return !!node.resumeToken && !!node.resumeType && node.resumeType !== "none" && node.runtime !== "terminal"
+    && (node.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
 }
 
 export interface RestoreCheckDeps {
@@ -365,7 +376,7 @@ export class RestoreCheckService {
         // are not skipping (full, --ready/includeReady, or a non-ready seat).
         const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
 
-        const startupContextCheck = this.checkStartupContext(node);
+        const startupContextCheck = this.checkStartupContext(node, rig.name);
         if ("unknownChecks" in startupContextCheck) {
           return this.buildUnknown([
             ...checks,
@@ -455,6 +466,8 @@ export class RestoreCheckService {
         fsOps: { exists: this.deps.exists },
         servicesRecord: input.servicesRecord,
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries(inventory.filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const { blockers, warnings } = validation;
       return {
@@ -897,7 +910,7 @@ export class RestoreCheckService {
     };
   }
 
-  private checkStartupContext(node: NodeInventoryEntry): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
+  private checkStartupContext(node: NodeInventoryEntry, rigName: string): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.startup-context`;
     const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
@@ -908,6 +921,7 @@ export class RestoreCheckService {
           check,
           runningReady,
           `Startup context cannot be inspected because node id is missing for ${session}`,
+          rigName,
         ),
       };
     }
@@ -925,9 +939,26 @@ export class RestoreCheckService {
           }],
         };
       case "missing":
+        // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore tries its
+        // saved conversation without replaying a saved startup plan, as on any resume (a resume replays no startup context).
+        // A pod-aware seat's restore names the gap; a legacy seat's resume path is unchanged and names none.
+        if (seatResumes(node)) {
+          return {
+            check: {
+              check,
+              status: "yellow",
+              evidence: `${probe.evidence}. Restore tries ${session}'s saved conversation without replaying a saved startup plan${node.podId ? ", and names this gap" : ""}.`,
+              remediation: "No startup-context repair is needed to restore it.",
+              remediationSafe: false,
+            },
+          };
+        }
+        return {
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, rigName),
+        };
       case "malformed":
         return {
-          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence),
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, rigName),
         };
       case "ok":
         break;
@@ -1008,12 +1039,14 @@ export class RestoreCheckService {
     check: string,
     runningReady: boolean,
     evidence: string,
+    rigName: string,
   ): CheckEntry {
     return {
       check,
       status: runningReady ? "yellow" : "red",
       evidence,
-      remediation: "Recreate the seat startup context from the rig or agent spec before trusting replay inputs",
+      // A fresh seat launch reads the saved startup context and refuses without one, so it isn't offered here.
+      remediation: `No command records startup context for this seat yet. To see what restore would do for it, preview with: rig up ${shellQuote(rigName)} --existing --plan (read-only; it records nothing).`,
       remediationSafe: false,
     };
   }
@@ -1201,7 +1234,7 @@ export class RestoreCheckService {
       ? `No saved explicit activity resource or selected core-plugin channel; current desired activity-hook selection is unknown: ${desired.evidence}`
       : desired.selected
         ? "Current desired activity hooks are selected, but neither OpenRig channel is saved for this conversation (stale selection); restore preserves the saved selection and does not adopt the current profile"
-        : "No saved explicit activity resource or selected core-plugin channel, and current desired activity hooks are not selected; inspection is not applicable to these known OpenRig channels (other user hooks are not inspected)";
+        : "No saved explicit activity resource or selected core-plugin channel, and current desired activity hooks are not selected; inspection is not applicable to these known OpenRig channels (other user hooks are not inspected). Without openrig-core, OpenRig's refocus and compaction-restore hooks don't run in this seat; rig seat status shows what its refocus hook has recorded";
     return { check, status: desired.status === "known" && !desired.selected ? "green" : "yellow", evidence, remediation: "" };
   }
 

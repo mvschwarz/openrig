@@ -45,7 +45,9 @@ export class InstallVerifier {
     this.fs = fs;
   }
 
-  verify(installId: string): VerificationResult {
+  /** `skipped`: entries the install deliberately left as they were (its result's notes), so an install whose every entry was
+   *  skipped verifies as that, not as an empty journal. */
+  verify(installId: string, opts: { skipped?: number } = {}): VerificationResult {
     const install = this.installRepo.getInstall(installId);
     if (!install) {
       return {
@@ -75,6 +77,16 @@ export class InstallVerifier {
     // Get applied journal entries (not rollback entries)
     const journal = this.installRepo.getJournalEntries(installId);
     const applyEntries = journal.filter((e) => e.action !== "rollback");
+
+    // Every entry left as it was on purpose, each named in the install's notes: nothing to check, and nothing missing.
+    if (applyEntries.length === 0 && (opts.skipped ?? 0) > 0) {
+      return {
+        passed: true,
+        installId,
+        entries: [],
+        statusCheck: { ...statusCheck, name: "entries_skipped", passed: true, expected: "applied entries, or skips named in notes", actual: `0 applied, ${opts.skipped} skipped` },
+      };
+    }
 
     // Empty journal for applied install is a verification failure
     if (applyEntries.length === 0) {

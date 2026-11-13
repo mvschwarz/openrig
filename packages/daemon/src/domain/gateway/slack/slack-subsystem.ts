@@ -21,13 +21,14 @@ import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from ".
 import { DispatchBuffer } from "../dispatch-buffer.js";
 import { downloadPrivateFile, isSlackHost, lookupBotApp, postChatMessage } from "./slack-api.js";
 import { botInboxProblems } from "./bot-inbox.js";
-import { loadConfig } from "./config.js";
+import { effectiveInboundDestination, inboundDestinationNote, loadConfig } from "./config.js";
+import { resolveDefaultReceiver } from "../../default-receiver.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { SlackAskSettlement } from "./settled-asks.js";
-import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
+import { abortableSleep, POSSIBLY_POSTED_CLASS, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
@@ -43,7 +44,7 @@ import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
 import { humanAnswerText } from "../../human-questions.js";
-import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
+import { formatReplyToChoice, formatArrivalThread, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import {
@@ -310,7 +311,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
-  const inboundRouting = { fallback: "local", destination: cfg.inboundDestination };
+  // Read once, when the connector starts, like the rest of its configuration.
+  const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
+  const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
+  const inboundNote = inboundDestinationNote(inbound, receiver);
+  if (inbound.from === "default") log(`slack inbound: ${inboundNote}`);
+  const inboundRouting = { fallback: "local", destination: inbound.destination, destinationFrom: inbound.from, ...(inboundNote ? { destinationNote: inboundNote } : {}) };
   const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
   const deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"));
   // Retained relays belong to their original host, even after forwarding configuration changes.
@@ -497,11 +503,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         || transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `))
         && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`)).at(-1);
     // A corrected attempt can fail transiently after a permanent rejection, and a
-    // transient failure can be followed by a definite rejection. Preserve both changes.
-    const alreadyRecorded = Boolean(
-      previousFailure?.transitionNote?.startsWith("slack-owner-notification-transport-failed ") &&
-      previousFailure.transitionNote.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks"),
-    );
+    // transient failure can be followed by a definite rejection; an unreadable 2xx
+    // (possibly posted) can follow either. Preserve each change of kind.
+    const previousNote = previousFailure?.transitionNote ?? "";
+    const sameKind = (kind: string) => previousNote.includes(`class=${kind} `) === (failureClass === kind);
+    const alreadyRecorded = previousNote.startsWith("slack-owner-notification-transport-failed ")
+      && sameKind("slack-invalid-blocks") && sameKind(POSSIBLY_POSTED_CLASS);
     if (alreadyRecorded) return;
     opts.queueRepo.update({
       qitemId: p.qitemId,
@@ -537,7 +544,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
         return { kind: "thread", threadTs: root.threadTs };
       }
-      if (!item.replyTo) return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };
+      if (!item.replyTo) {
+        // #2990: this reply has no gate correlation, but its arrival thread was recorded when
+        // it landed. Its answer returns there; the conversation's gate still recognizes only
+        // the newest root. Consult this record only at the end of the replyTo chain.
+        const arrival = opts.queueRepo.arrivalThreadFor(item.qitemId);
+        const root = arrival ? threadMap.resolveByThread(arrival.threadTs, arrival.channel) : null;
+        if (root) {
+          if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
+          if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
+          if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
+          if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
+          return { kind: "thread", threadTs: root.threadTs };
+        }
+        return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };
+      }
       item = opts.queueRepo.getById(item.replyTo);
     }
     return item
@@ -551,14 +572,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // person, a closed root, a live gate) posts top-level in the replying seat's own channel, as before.
   const personRootChannel = (p: OutboundPostPayload): string | null => {
     let item = p.replyTo ? opts.queueRepo.getById(p.replyTo) : null;
+    let lastItem = item;
     for (let depth = 0; item && depth < MAX_REPLY_TO_CHAIN; depth++) {
       const root = threadMap.resolveByConversation(item.qitemId);
       if (root) {
         if (!item.tags?.includes(SLACK_THREAD_ROOT_TAG)) return null;
         return deriveReplyToChoice(p, root.channel).kind === "thread" ? root.channel : null;
       }
+      lastItem = item;
       item = item.replyTo ? opts.queueRepo.getById(item.replyTo) : null;
     }
+    // #2990: A reply in a superseded person-owned root uses that root's channel when a channel map would otherwise move it.
+    const arrival = !item && lastItem ? opts.queueRepo.arrivalThreadFor(lastItem.qitemId) : null;
+    const root = arrival ? threadMap.resolveByThread(arrival.threadTs, arrival.channel) : null;
+    const owner = root ? opts.queueRepo.getById(root.conversationId) : null;
+    if (root && owner?.tags?.includes(SLACK_THREAD_ROOT_TAG) && deriveReplyToChoice(p, root.channel).kind === "thread") return root.channel;
     return null;
   };
   // Decided ONCE and recorded on the row before the first post. Every later attempt reuses
@@ -610,6 +638,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
+        unfurl: cfg.unfurl === "on" ? "on" : "off",
         // P6: each post names the machine it comes from, the daemon's own host id.
         machine: () => getSelfHostId(),
         fetchImpl: opts.fetchImpl,
@@ -1358,14 +1387,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       queue: ports,
       seen: inboundSeen,
       deadLetter: dead,
-      destination: cfg.inboundDestination,
+      destination: inbound.destination,
       reactions: cfg.reactions === "off" ? "off" : "route",
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({
         map: threadMap,
-        unroutedDestination: cfg.inboundDestination,
+        unroutedDestination: inbound.destination,
         // A person's top-level message in a channel the map routes: its `inbound` seat or its rig's representative.
         resolveChannelDestination: (channel) =>
           resolveInboundChannelDestination(cfg, channel, (rig) => resolveRigRepresentative(opts.queueRepo.db, rig)),
@@ -1383,6 +1412,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           });
         } catch (e) {
           log(`thread stamp failed for ${m.conversationId}: ${(e as Error).message}`);
+        }
+      },
+      recordArrivalThread: (input) => {
+        try {
+          opts.queueRepo.update({ qitemId: input.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatArrivalThread(input) });
+        } catch (e) {
+          log(`arrival thread record failed for ${input.qitemId}: ${(e as Error).message}`);
         }
       },
       resolveHumanReply: opts.resolveHumanReply,

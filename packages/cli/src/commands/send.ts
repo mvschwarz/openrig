@@ -61,6 +61,8 @@ export interface EnvelopeMeta {
   /** Twin of pane-envelope's field: the row a person's (@external) message delivers, named in the
    *  reply hint with --reply-to so the answer joins its Slack thread. ABSENT ⇒ the plain hint. */
   replyToQitem?: string;
+  /** Twin of pane-envelope's field (#2895 (a)): false ⇒ the reply line names no `rig send`. ABSENT or true ⇒ today's hint. */
+  senderReachable?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -108,7 +110,9 @@ export function wrapSendBody(
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
-      : `↩ Reply: rig send ${senderLabel} "..."`;
+      : meta?.senderReachable === false
+        ? `↩ No reply by rig send: ${senderLabel} has no session.`
+        : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
 
@@ -1175,7 +1179,7 @@ async function runFanOutSend(params: {
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
-  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}`);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}${heldSuffix(results)}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
@@ -1186,6 +1190,12 @@ async function runFanOutSend(params: {
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }
+}
+
+/** The summary's held count, when any target was held: held work is retained, not delivered and not failed. */
+export function heldSuffix(results: Array<{ outcome?: string }>): string {
+  const held = results.filter((r) => r.outcome === "retained").length;
+  return held > 0 ? `, ${held} held` : "";
 }
 
 function parseWaitForIdleMs(value: string | undefined): number | undefined | null {

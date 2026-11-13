@@ -23,6 +23,24 @@ function mockAdapter(overrides?: {
 }
 
 describe("TmuxOptionDefaultsApplier", () => {
+  it("awaits an asynchronous clipboard lookup without holding unrelated work", async () => {
+    const { adapter, setServerOption } = mockAdapter();
+    let release!: (present: boolean) => void;
+    const pending = new Promise<boolean>(resolve => { release = resolve; });
+    const probe = vi.fn((bin: string) => bin === "wl-copy" ? pending : Promise.resolve(true));
+    let finished = false;
+    const applier = new TmuxOptionDefaultsApplier({ tmuxAdapter: adapter, platform: "linux", hasCommand: probe });
+    const applied = applier.applyToFreshSession("async-clipboard@test").then(value => { finished = true; return value; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(finished).toBe(false);
+      expect(setServerOption).not.toHaveBeenCalledWith("copy-command", expect.anything());
+    } finally { release(false); }
+    expect(await applied).toEqual([]);
+    expect(probe.mock.calls.map(([bin]) => bin)).toEqual(["wl-copy", "xclip"]);
+    expect(setServerOption).toHaveBeenCalledWith("copy-command", "xclip -selection clipboard -i");
+  });
+
   it("sets mouse on + status off (default) on the given session via SESSION scope only", async () => {
     const { adapter, setSessionOption, setServerOption } = mockAdapter();
     // default reader (omitted) → statusBar false.
@@ -109,20 +127,20 @@ describe("TmuxOptionDefaultsApplier", () => {
   });
 });
 
-describe("resolveCopyCommand (pure per-platform table)", () => {
-  it("darwin → pbcopy", () => {
-    expect(resolveCopyCommand("darwin", () => false)).toBe("pbcopy");
+describe("resolveCopyCommand (pure per-platform table)", async () => {
+  it("darwin → pbcopy", async () => {
+    expect(await resolveCopyCommand("darwin", () => false)).toBe("pbcopy");
   });
-  it("linux → wl-copy when present", () => {
-    expect(resolveCopyCommand("linux", (b) => b === "wl-copy")).toBe("wl-copy");
+  it("linux → wl-copy when present", async () => {
+    expect(await resolveCopyCommand("linux", (b) => b === "wl-copy")).toBe("wl-copy");
   });
-  it("linux → xclip when wl-copy absent but xclip present", () => {
-    expect(resolveCopyCommand("linux", (b) => b === "xclip")).toBe("xclip -selection clipboard -i");
+  it("linux → xclip when wl-copy absent but xclip present", async () => {
+    expect(await resolveCopyCommand("linux", (b) => b === "xclip")).toBe("xclip -selection clipboard -i");
   });
-  it("linux → null when neither present (OSC 52 fallback)", () => {
-    expect(resolveCopyCommand("linux", () => false)).toBeNull();
+  it("linux → null when neither present (OSC 52 fallback)", async () => {
+    expect(await resolveCopyCommand("linux", () => false)).toBeNull();
   });
-  it("other platforms → null", () => {
-    expect(resolveCopyCommand("win32", () => true)).toBeNull();
+  it("other platforms → null", async () => {
+    expect(await resolveCopyCommand("win32", () => true)).toBeNull();
   });
 });

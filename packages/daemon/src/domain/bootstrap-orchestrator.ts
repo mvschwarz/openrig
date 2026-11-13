@@ -643,6 +643,9 @@ export class BootstrapOrchestrator {
         if (!outcome.ok) {
           errors.push(`Package install failed for '${ref}' (${runtime}): ${outcome.message}`);
           packageInstallFailed = true;
+        } else {
+          // A file the install left as it is, and why: the rest installed, and the rig still imports.
+          for (const note of outcome.notes ?? []) warnings.push(`Package '${ref}' (${runtime}): ${note}`);
         }
       }
     }

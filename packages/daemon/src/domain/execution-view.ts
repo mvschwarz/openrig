@@ -2,7 +2,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
-import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
@@ -54,6 +54,7 @@ import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
 import { validateMissionComposition } from "./lifecycle-manifest.js";
 import { cooperativeReadFile, readRowsCooperatively } from "./execution-candidate-reader.js";
+import { recordSlowDiagnostic } from "./sync-site-wrap.js";
 
 export const INDETERMINATE = "INDETERMINATE" as const;
 export type Indeterminate = typeof INDETERMINATE;
@@ -748,6 +749,7 @@ async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha
 }
 
 export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string; project?: string }): Promise<Record<string, unknown>> {
+  const projectionStarted = performance.now();
   const now = deps.now ?? (() => new Date());
   const exec = deps.exec ?? defaultExec;
   const buildInfo = deps.buildInfo ?? BUILD_INFO;
@@ -806,23 +808,30 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // post_claim_motion feeds only derivePickup's legacy fallback, which pending and in-progress rows reach: a blocked row
   // returns parked and a closed row terminal before the count is read. Every row and body is still selected here (the
   // ladder, EC-3 and wave-map evidence need historical rows); only their unused history count is skipped.
-  const candidateSql = `SELECT qitem_id, source_session, destination_session, state, tags, body, summary, claimed_at,
+  const candidateSelect = `SELECT qitem_id, source_session, destination_session, state, tags, body, summary, claimed_at,
               last_heartbeat, blocked_on, ts_created, ts_updated,
               CASE WHEN queue_items.state IN ('pending','in-progress') THEN (SELECT COUNT(*) FROM queue_transitions t
                  WHERE t.qitem_id = queue_items.qitem_id
                    AND t.ts > queue_items.claimed_at
                    AND t.transition_note IS NOT 'claimed') ELSE 0 END AS post_claim_motion
-         FROM queue_items
-        WHERE (${missionWhere})`;
+         FROM queue_items`;
   const candidateBinds = missionLikes.flatMap((like) => [like, like]);
-  // On a WAL database file this full scan runs on its own readonly cursor and yields between slices so unrelated
-  // work can run; a native open, prepare or step can still block, since the slice budget is soft. It sees committed
-  // data as of its first step. Inside a transaction, or for a memory or non-WAL database, it stays a synchronous
-  // read on the main handle (no await on that branch).
+  // On a WAL database file this full scan runs on its own readonly connection in rowid windows, yielding between
+  // windows so unrelated work can run even when few rows match; the same filter runs inside each window, so the rows
+  // are the ones the single statement returns. A native open, a large row or a window's matching rows can still
+  // block for a while, since the window bound is soft. It sees committed data as of its first read. Inside a
+  // transaction, or for a memory or non-WAL database, it stays one synchronous read on the main handle (no await on
+  // that branch).
   const cooperativeFile = cooperativeReadFile(deps.db);
-  const candidateRows = cooperativeFile === null
-    ? deps.db.prepare(candidateSql).all(...candidateBinds) as QueueRowLite[]
-    : await readRowsCooperatively<QueueRowLite>(cooperativeFile, candidateSql, candidateBinds);
+  const candidateStarted = performance.now();
+  const candidateRead = cooperativeFile === null
+    ? null
+    : await readRowsCooperatively<QueueRowLite>(cooperativeFile, "queue_items",
+      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds);
+  const candidateRows = candidateRead
+    ? candidateRead.rows
+    : deps.db.prepare(`${candidateSelect} WHERE (${missionWhere})`).all(...candidateBinds) as QueueRowLite[];
+  const candidateMs = performance.now() - candidateStarted;
 
   const rows = candidateRows
     .filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs))
@@ -1357,11 +1366,11 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     df_margin: dfMargin,
   };
 
-  return {
+  const view = {
     ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity; unscoped rows excluded" } : {}),
     view: "execution",
     readiness,
-    project_readiness: missionsRoot ? readProjectReadiness(missionsRoot, readPolicy) : null,
+    project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,
     // Authored guidance is carried verbatim in meaning, never parsed into edges or acceptance.
     planning_guidance: arrangement?.state === "valid" ? arrangement.guidance : [],
     mission,
@@ -1410,4 +1419,19 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     q5_park: q5,
     q6_parallelism: q6,
   };
+  // Measurement only, for a slow projection: its elapsed time, the candidate read's elapsed time, and the candidate
+  // read's longest synchronous stretch, which a whole-view or awaited span cannot show. The main-handle read is one
+  // stretch. Counts and times only; no row content.
+  const projectionMs = performance.now() - projectionStarted;
+  recordSlowDiagnostic(projectionMs, {
+    schema: "openrig.execution-view/v1",
+    utc: new Date().toISOString(),
+    projectionMs,
+    candidateMs,
+    candidateRows: candidateRows.length,
+    candidateRead: candidateRead ? "windowed" : "main-handle",
+    candidateWindows: candidateRead?.windows ?? null,
+    candidateLongestStretchMs: candidateRead?.longestStretchMs ?? candidateMs,
+  });
+  return view;
 }

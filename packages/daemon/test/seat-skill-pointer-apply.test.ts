@@ -198,4 +198,32 @@ describe("B: the seat routes", () => {
       db.close();
     }
   });
+
+  it("#2895 (b): a known seat on a runtime without seat skills reads as a success with the note; apply is still refused", async () => {
+    const { createFullTestDb, createTestApp } = await import("./helpers/test-app.js");
+    const { RigRepository } = await import("../src/domain/rig-repository.js");
+    const { SessionRegistry } = await import("../src/domain/session-registry.js");
+    const db = createFullTestDb();
+    migrate(db, ALL_MIGRATIONS);
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("seat-routes-pi");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "pi-tui", cwd: "/project" });
+      new SessionRegistry(db).registerSession(node.id, "dev-impl@seat-routes-pi");
+      const { app } = createTestApp(db);
+      const seen = await app.request("/api/skills/seat?session=dev-impl%40seat-routes-pi", { headers: { Host: "127.0.0.1:7433" } });
+      expect(seen.status).toBe(200);
+      expect(await seen.json()).toEqual({
+        seat: { sessionName: "dev-impl@seat-routes-pi", runtime: "pi-tui" }, unsupported: true,
+        note: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code and Codex seats",
+        storage: null, skills: [], catalogDigest: null, occupant: null, delivery: null,
+      });
+      const applied = await app.request("/api/skills/seat/apply", { method: "POST", headers: { Host: "127.0.0.1:7433", "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@seat-routes-pi" }) });
+      expect(applied.status).toBe(404);
+      expect(await applied.json()).toEqual({ error: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code and Codex seats" });
+    } finally {
+      db.close();
+    }
+  });
 });

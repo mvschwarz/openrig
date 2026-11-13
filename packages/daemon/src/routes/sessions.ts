@@ -44,9 +44,29 @@ import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
+import { runSyncSiteWhenSlow } from "../domain/sync-site-wrap.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
 const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
+
+/** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
+ *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
+ *  /healthz, a queue read) waited for all of them; now it waits for one step. Steps that await I/O run outside.
+ *  A step that takes the slow threshold or more is named `site` in the slow-operation log. That's its own synchronous
+ *  time, measured once its turn comes: not the wait for the turn, and not the settling of a promise it returns. */
+let inventoryTurn: Promise<void> = Promise.resolve();
+async function inventoryStep<T>(site: string, work: () => T): Promise<Awaited<T>> {
+  const previous = inventoryTurn;
+  let release = () => {};
+  inventoryTurn = new Promise<void>((resolve) => { release = () => resolve(); });
+  try {
+    await previous;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return await runSyncSiteWhenSlow(site, work);
+  } finally {
+    release();
+  }
+}
 
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {
@@ -130,9 +150,9 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
 
   const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
-  const inventory = contextUsageStore
+  const inventory = await inventoryStep("nodes.inventory.build", () => contextUsageStore
     ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore, transcriptStore)
-    : getNodeInventory(deps.rigRepo.db, rigId);
+    : getNodeInventory(deps.rigRepo.db, rigId));
   // Slice 15 — enrich with the two new orthogonal primitives. Order is
   // independent (each enrichment reads its own source), so the chain
   // composes cleanly with attachAgentActivity. The non-inference
@@ -142,7 +162,8 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // capture). Opt into the per-node fallback with ?full=true / ?refresh=true — the
   // latter already implies a fresh sweep above.
   const full = c.req.query("full") === "true" || refresh;
-  const withActivity = await attachAgentActivity(inventory, {
+  // The default path reads no pane, so it is one more synchronous step; a full read awaits pane captures, outside.
+  const attachActivity = () => attachAgentActivity(inventory, {
     ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture),
     tmuxAdapter: deps.tmuxAdapter,
     activityStore: deps.agentActivityStore,
@@ -163,11 +184,12 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
     seatActivity: deps.seatActivityService,
     captureFallback: full,
   });
-  const withTerminalAndWork = attachTerminalActivityAndWork(withActivity, {
+  const withActivity = full ? await attachActivity() : await inventoryStep("nodes.inventory.activity_sync", attachActivity);
+  const withTerminalAndWork = await inventoryStep("nodes.inventory.terminal_work", () => attachTerminalActivityAndWork(withActivity, {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
     agentActivity: deps.agentActivityStore,
-  });
+  }));
   // Slice 13 fix 2 — HOST ATTRIBUTION AT THE SOURCE. A daemon only inventories its own seats, so
   // every row it serves lives on THIS host; stamping the boot-reconciled self-id here means a
   // merged multi-host roster stays attributable row-by-row (a roster missing a host is legible as

@@ -21,6 +21,8 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
+  /** What OpenRig's own refocus hook has recorded for this seat (Claude and Codex seats). */
+  refocus?: { lastRecordedAt: string | null; currentConversation: boolean | "unknown"; noIdentity?: true; detail: string };
   permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
     | { state: "request_observed" | "completed"; command: string; origin: "harness";
         source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false;
@@ -76,6 +78,9 @@ interface SeatStatusResponse {
     ignored?: { source: string; value: string };
   };
   claude_token?: { kind?: "api-key"; label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
+  /** A running Claude or Codex seat: when OpenRig wrote each block in its guidance file, before or after a recorded session
+   *  moment (its startup finish, or when a claimed session was recorded). Chronology only, never what the agent read. */
+  guidance?: { file: string; detail: string; blocks: Array<{ id: string; writtenAt: string | null; written: "before" | "after" | "unknown"; reason?: string }> };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -140,6 +145,7 @@ interface SeatHandoverMutationResult {
   ok: true;
   dryRun: false;
   mutated: true;
+  /** Legacy compatibility field, always false. Read currentStatus.continuityOutcome and sourceOutcome instead. */
   continuityTransferred: false;
   seat: SeatHandoverPlan["seat"];
   source: {
@@ -168,7 +174,8 @@ interface SeatHandoverMutationResult {
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
+        model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
   restorePacket?: { status: "unconfirmed"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
@@ -243,6 +250,7 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Claude ${t.kind === "api-key" ? "API key" : "subscription token"}: ${t.label}, read from ${t.token_file} at each launch (${t.file === "readable" ? "readable now" : "won't apply at the next launch"})`);
     if (t.notice) console.log(`  ${t.notice}`);
   }
+  if (status.guidance) console.log(`Guidance: ${status.guidance.detail}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
     const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");
@@ -273,6 +281,7 @@ function printHuman(status: SeatStatusResponse): void {
     if (rules?.size_cut) console.log("  Suggested-rule evidence is incomplete because of size bounds.");
   }
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
+  if (status.refocus) console.log(`Refocus: ${status.refocus.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions?.account) {
@@ -384,7 +393,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
+    console.log("Rebuild starts a new conversation; durable artifacts carry its context, not a native resume.");
     if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
+    if (outcome.model) {
+      console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
+    }
     if (outcome.primedArtifacts.length > 0) {
       const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
@@ -974,6 +987,47 @@ Examples:
     });
 
   cmd
+    .command("decide-permission")
+    .argument("<request>", "The permission request's id (qitem-runner-permission-…), as the row handed to you names it")
+    .requiredOption("--option <id>", "One of the options the agent offered, by its id")
+    .option("--reason <text>", "Why, recorded with the decision (say what the person meant)")
+    .option("--json", "JSON output for agents")
+    .description("Decide a runner seat's permission request that its person answered: one of the agent's offered options")
+    .addHelpText("after", `
+When a person answers a runner seat's permission request, with a click or in their own
+words, the request goes to this host's receiving agent to decide while the runner waits.
+This records that agent's decision: one of the options the agent offered, which the runner
+then gives its agent. It's recorded as an agent's decision, not the person's, with the
+deciding seat and the reason. A request that's already decided, withdrawn or stale is
+reported as it is, and nothing is written. See docs/reference/harness-runner-contract.md,
+section 7.
+Example:
+  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"`)
+    .action(async (request: string, opts: { option: string; reason?: string; json?: boolean }) => {
+      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string };
+      let res: { status: number; data: Decided };
+      try {
+        res = await new DaemonClient().post<Decided>(`/api/activity/permission-requests/${encodeURIComponent(request.trim())}/decide`,
+          { optionId: opts.option.trim(), reason: opts.reason ?? "" });
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(res.data));
+      if (res.status !== 200 || !res.data?.ok) {
+        if (!opts.json) console.error(res.data?.error ?? `the decision failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) return;
+      const state = res.data.state;
+      console.log(state === "answered" ? `Decided: ${res.data.optionId}. A runner waiting on the request gets it now; one that isn't gets it at its next read.`
+        : state === "refused" ? "Decided: refused. A runner waiting on the request gets the refusal now; one that isn't gets it at its next read."
+        : `Nothing was decided: the request is ${state}.`);
+    });
+
+  cmd
     .command("effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--json", "JSON output for agents")
@@ -1439,9 +1493,10 @@ Examples:
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
-session and leaves its process running), then end that process in its own
-terminal. rig down <rig> ends every seat in its rig, so it is the route only
-for a one-seat rig.
+session and leaves its process running), then end that process and the
+underlying tmux session, including any remaining shell. Closing only its
+viewing window leaves the tmux session running. rig down <rig> leaves a
+session OpenRig didn't start running.
 A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
 adopted and is refused too, until its next launched handover or managed launch;
 the refusal says so. Stopping ends that agent's session and any work in progress:

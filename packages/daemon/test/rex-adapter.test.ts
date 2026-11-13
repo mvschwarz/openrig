@@ -298,6 +298,23 @@ describe("rex adapter: openView", () => {
     expect(res.notes).toBeUndefined();
   });
 
+  it("hands only the local seats whose tiles opened to tilesOpened, after the check", async () => {
+    const { transport } = fakeRex({ closed: ["w1/b1"] });
+    const handed: string[][] = [];
+    const remote = { ...pane("far@r"), host: "box" };
+    await new RexAdapter({ transport, sleep: noWait, tilesOpened: async (seats) => { handed.push(seats); } })
+      .openView(viewOf([pane("a@r"), pane("b@r"), remote]));
+    expect(handed).toEqual([["a@r"]]);
+  });
+
+  it("a failing tilesOpened leaves the open result alone", async () => {
+    const { transport } = fakeRex();
+    const res = await new RexAdapter({ transport, sleep: noWait, tilesOpened: async () => { throw new Error("tmux gone"); } })
+      .openView(viewOf([pane("a@r")]));
+    expect(res.opened).toEqual(["a@r"]);
+    expect(res.ok).toBe(true);
+  });
+
   it("every tile exiting is not ok, and the session is still reported", async () => {
     const { transport } = fakeRex({ exits: { "w1/b0": { exit_code: 1 } } });
     const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf([pane("a@r")]));

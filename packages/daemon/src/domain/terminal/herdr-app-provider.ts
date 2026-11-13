@@ -4,8 +4,8 @@
 // A view opens as:
 //   1. journal (each viewer with its op nonce, before anything starts);
 //   2. viewers started by herdr-core, outside every tab (`hc run --bg --no-parent`, openrig.* labels), each the
-//      view's own tile for its seat (an interactive one mirrors the seat and attaches only while someone types in
-//      it; a read-only one only shows it), each waiting after its tile ends instead of exiting (an exiting viewer
+//      view's own tile for its seat (an interactive local one shows the seat read-only until its gate opens, then
+//      attaches with plain tmux; a read-only one only shows it), each waiting after its tile ends instead of exiting (an exiting viewer
 //      makes herdr collapse the layout), and never `--keep` (that would leave a shell behind in the cell);
 //   3. ONE atomic write of layouts/rig.json: the person's layout with OpenRig's stack beside their tabs, each view an
 //      equal, padded grid with a title row per cell;

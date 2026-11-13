@@ -2,10 +2,11 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { personRegistrationOffer } from "../person-registration-offer.js";
 import {
   startDaemon,
   stopDaemon,
@@ -17,6 +18,7 @@ import {
   OPENRIG_DIR,
   STATE_FILE,
   resolveBindIntent,
+  statusGuardMessage,
 } from "../daemon-lifecycle.js";
 
 interface ProcessAliveDeps {
@@ -37,14 +39,16 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 
 export type SignalOutcome = "sent" | "missing" | "not-permitted";
 
-/** kill(pid, 0) as an outcome. POSIX: only ESRCH means no such process; EPERM means the process
- *  EXISTS but this shell may not signal it (another user's process, or a sandbox such as Codex's). */
+/** kill(pid, 0) as an outcome. POSIX: kill(pid, 0) fails only with ESRCH (no such process) or EPERM
+ *  (the process EXISTS but this shell may not signal it: another user's process, or a sandbox such as
+ *  Codex's). Only ESRCH is "missing"; any other error is not evidence of death, so it reads as
+ *  "not-permitted" (uninspectable), never as a dead process. */
 export function signalProbe(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill): SignalOutcome {
   try {
     kill(pid, 0);
     return "sent";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM" ? "not-permitted" : "missing";
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "not-permitted";
   }
 }
 
@@ -94,7 +98,11 @@ export function realDeps(): LifecycleDeps {
 
   return {
     processLiveness,
-    acquireStartLock: () => acquireDaemonStartLock(OPENRIG_DIR),
+    acquireStartLock: () => {
+      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness });
+      if (lock.archived) console.error(`A start reservation from before this boot was left behind; archived it as ${lock.archived}`);
+      return lock;
+    },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
     fetch: async (url) => {
       const res = await fetchWithTimeout(globalThis.fetch, url, {}, {
@@ -155,6 +163,11 @@ export function realDeps(): LifecycleDeps {
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
+    // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
+    pidNamespace: () => {
+      if (process.platform !== "linux") return "host";
+      try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
+    },
   };
 }
 
@@ -165,7 +178,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("start")
     .description("Start the daemon")
-    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\n")
+    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on.\n")
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
@@ -297,6 +310,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             process.exitCode = 1;
           }
         }
+        if (process.exitCode !== 1) for (const line of await personRegistrationOffer()) console.log(line);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;
@@ -365,6 +379,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
             console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
             console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
+          } else if (status.pidUnseen) {
+            // #2860: the same words as the command guard.
+            const unseen = statusGuardMessage(status);
+            console.log(unseen.fact);
+            console.log(`  ${unseen.consequence}`);
+            console.log(`  ${unseen.action}`);
           } else if (!status.startPending) {
             // A pending start's probe was refused, not inconclusive; its line above says what is known.
             console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");

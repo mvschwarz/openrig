@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +9,8 @@ import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
+import { tmuxOnDaemonServer } from "./tmux-server.js";
+import { TMUX_SERVER_LIMIT_PREFIX } from "../tmux-server-start.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -76,7 +79,7 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 
 export type TmuxResult =
   | { ok: true; warnings?: string[]; stopPhase?: StopPhase }
-  | { ok: false; code: string; message: string; stopPhase?: StopPhase };
+  | { ok: false; code: string; message: string; stopPhase?: StopPhase; inputReadFailure?: InputReadDiagnostic };
 
 /** Furthest external stop boundary reached; an attempted command can have an uncertain effect. */
 export type StopPhase = "none" | "detach_attempted" | "detached" | "kill_attempted";
@@ -245,7 +248,7 @@ function isTmuxTransportAbsentError(err: unknown): boolean {
 }
 
 function classifyWriteError(err: unknown): TmuxResult {
-  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message };
+  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message, ...(err.inputReadFailure ? { inputReadFailure: err.inputReadFailure } : {}) };
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
@@ -277,7 +280,9 @@ function parentSessionEnvWarning(target: string, err: unknown): string {
 /** Shell-quote a string using single quotes (POSIX-safe). */
 /** One pane's text from a batched capture, with the time its chunk was read (#309 review). `text` is null for a
  *  session that is gone or an empty capture. */
-export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true }
+export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true;
+  /** The pane and its process that this capture read, from the same tmux call (#2515). */
+  pane?: { id: string; pid: number } }
 
 /** The most sessions one batched capture chains (#308). Not a byte bound: a chunk whose output overflows exec's buffer
  *  fails and is split in half. */
@@ -489,7 +494,29 @@ export class TmuxAdapter {
       if (probe.state !== "present") return false;
       const panes = await this.listPanes(target.session);
       return panes.length === 1 && panes[0]!.id === target.pane && await this.isPaneDead(target.pane);
-    });
+    }, target => this.lastClientActivity(target.session));
+  }
+
+  /** When a writable tmux client attached to this session last had activity (epoch ms, whole seconds), or null when no
+   *  writable client is attached. tmux's client_activity is session-wide and covers more than text keys, so this is
+   *  recent writable-client activity, not proof of typing in the pane. A read-only client (a viewer tile) can't type
+   *  into the seat and doesn't count. An attach counts: tmux can't tell a key in the attach's second from the attach,
+   *  so a delivery can be held briefly after one. A tmux failure or an unreadable row throws: the guard then holds
+   *  the paste rather than take it for "no activity" (#3076). */
+  async lastClientActivity(session: string): Promise<number | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_readonly}${TMUX_FIELD_SEPARATOR}#{client_activity}`;
+    const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+      `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+    let latest: number | null = null;
+    for (const line of output.split("\n").map(row => row.trim()).filter(row => row !== "")) {
+      const [readonly, activity, ...rest] = line.split(TMUX_FIELD_SEPARATOR);
+      if (rest.length || !/^[01]$/.test(readonly ?? "") || !/^[1-9]\d*$/.test(activity ?? "")) {
+        throw new Error(`tmux list-clients: unreadable client row for ${session}`);
+      }
+      if (readonly === "0") latest = Math.max(latest ?? 0, Number(activity) * 1000);
+    }
+    return latest;
   }
   private readonly freshProbes = new Map<string, string>();
   private readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
@@ -544,7 +571,7 @@ export class TmuxAdapter {
     }
   }
 
-  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
+  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void, nodeId?: string) => Promise<TmuxResult>, allowAbsent = false, inputKind: "control" | "text" | "keys" | "respawn" = "control"): Promise<TmuxResult> {
     const guard = this.deliveryGuard;
     if (!guard) return write(target, () => {});
     try {
@@ -594,10 +621,11 @@ export class TmuxAdapter {
         }
         // Revalidate registry/occupant after the asynchronous observation. Write
         // to the immutable pane ID, not a session name which could be recycled.
-        return guard.input(identity, () => write(pane, () => guard.checkInput(identity)));
+        return guard.input(identity, () => write(pane, () => guard.checkInput(identity), bound.nodeId));
       });
     } catch (error) {
-      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
+      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message),
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
   }
 
@@ -727,7 +755,7 @@ export class TmuxAdapter {
       this.scopeSkipLogged = true;
       return fallback(unavailable);
     }
-    const server = posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    const server = TMUX_SERVER_LIMIT_PREFIX + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
     // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
     // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
     const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
@@ -1075,12 +1103,13 @@ export class TmuxAdapter {
         // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
         // checks pass; they then aren't run a second time.
         beforePaste: async () => {
-          let checked = false;
-          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // This send's own checks can wait (a conversation lookup, an input capture), so they run first, and the
+          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery.
+          await options?.beforePaste?.();
+          const checks = async () => { beforeWrite(); beforeInput?.(); };
           // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
           const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
           if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
-          if (!checked) await options?.beforePaste?.();
         },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
@@ -1308,16 +1337,26 @@ export class TmuxAdapter {
     }
   }
 
-  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill. */
+  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.
+   *  A seat's session is stopped only when it carries that seat's OpenRig marker, and each effect runs only while that
+   *  id still names a session on the server it was read from: a replaced server reuses ids for other terminals. */
   async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {
     let stopPhase: StopPhase = "none";
     if (this.deliveryGuard) {
-      const result = await this.guardedInput(name, async (pane, beforeWrite) => {
-        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
-        const sessionId = stdout.trim();
-        if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+      const result = await this.guardedInput(name, async (pane, beforeWrite, nodeId) => {
+        // The session id and its server (pid and start time) in one read, so the effects below can be held to both.
+        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
+          `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
+        const [sessionId = "", pid = "", start = ""] = stdout.trim().split("|");
+        if (!/^\$\d+$/.test(sessionId) || !/^\d+$/.test(pid) || !/^\d+$/.test(start)) {
+          return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+        }
+        if (nodeId) {
+          const unproven = await this.unprovenSeatSession(name, sessionId, nodeId);
+          if (unproven) return unproven;
+        }
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
+          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -1330,16 +1369,48 @@ export class TmuxAdapter {
     return this.killSessionUnchecked(name);
   }
 
+  /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
+   *  OPENRIG_NODE_ID. One without it (adopted, bound or discovered from outside), or with another seat's, is left
+   *  running and named; nothing is detached or killed. */
+  private async unprovenSeatSession(name: string, sessionId: string, nodeId: string): Promise<TmuxResult | null> {
+    let marker: string | null = null;
+    try {
+      const out = (await this.run(["tmux", "show-environment", "-t", sessionId, "OPENRIG_NODE_ID"])).trim();
+      if (out.startsWith("OPENRIG_NODE_ID=")) marker = out.slice("OPENRIG_NODE_ID=".length);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/unknown variable/i.test(message)) {
+        return { ok: false, code: "guard_target_unknown", message: `'${name}' was left running: its OpenRig marker couldn't be read (${message.trim()}), so nothing was detached or killed.` };
+      }
+    }
+    if (marker === nodeId) return null;
+    const why = marker === null ? "doesn't carry this seat's OpenRig marker (OPENRIG_NODE_ID)" : `carries another seat's OpenRig marker (OPENRIG_NODE_ID=${marker})`;
+    return { ok: false, code: "seat_target_unproven", message: `'${name}' was left running: its tmux session ${sessionId} ${why}, so it can't be shown `
+      + "to be this seat's terminal, and nothing was detached or killed. A session OpenRig didn't create, such as an adopted one, has no marker. "
+      // On the daemon's own tmux server: a person's plain `tmux` can reach another server, and a namesake there.
+      + `If it is this seat's, look first with \`${tmuxOnDaemonServer()} attach -t ${shellQuote(`=${name}`)}\`, then stop it with `
+      + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` and run the command again.` };
+  }
+
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
-  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void): Promise<TmuxResult> {
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void,
+    server?: { pid: string; start: string }): Promise<TmuxResult> {
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
+    // With its server, an effect runs only while this id is that session on that server: tmux checks and acts in one
+    // command, so a server replaced since the read (whose ids name other terminals) is left alone.
+    const changed = "openrig-stop-target-changed";
+    const effect = (verb: string, flag: string): string[] => server
+      ? ["tmux", "if-shell", "-F", "-t", session,
+        `#{&&:#{==:#{session_id},${session}},#{&&:#{==:#{pid},${server.pid}},#{==:#{start_time},${server.start}}}}`,
+        `${verb} ${flag} '${session}'`, `display-message -p ${changed}`]
+      : ["tmux", verb, flag, session];
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
     beforeEffect?.();
     phase?.("detach_attempted");
     try {
-      await this.run(["tmux", "detach-client", "-s", session],
-        `tmux detach-client -s ${shellQuote(session)}`);
+      const out = await this.run(effect("detach-client", "-s"), server ? undefined : `tmux detach-client -s ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); nothing was detached or killed.` };
     } catch (err) {
       // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
       const message = err instanceof Error ? err.message : String(err);
@@ -1349,8 +1420,8 @@ export class TmuxAdapter {
     beforeEffect?.();
     phase?.("kill_attempted");
     try {
-      await this.run(["tmux", "kill-session", "-t", session],
-        `tmux kill-session -t ${shellQuote(session)}`);
+      const out = await this.run(effect("kill-session", "-t"), server ? undefined : `tmux kill-session -t ${shellQuote(session)}`);
+      if (out.includes(changed)) return { ok: false, code: "guard_target_changed", message: `${session} is no longer that session on the tmux server it was read from (the server may have been replaced); it was detached, but nothing was killed.` };
       const pane = this.freshProbes.get(name);
       this.freshProbes.delete(name);
       if (pane) this.freshProbes.delete(pane);
@@ -1781,12 +1852,14 @@ export class TmuxAdapter {
     const captureChunk = async (chunk: string[]): Promise<void> => {
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
+      // The marker line also names the pane and its process that the capture after it reads, in the same call.
+      const header = (k: number) => `${mark(k)} #{pane_id} #{pane_pid}`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", `=${t}:`, header(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
-        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
+        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(header(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
       ).join(" \\; ");
       let output: string;
       let capturedAt: Date;
@@ -1830,14 +1903,18 @@ export class TmuxAdapter {
         return; // a single session that failed: read per target by the caller
       }
       const segments: Array<string[] | null> = chunk.map(() => null);
+      const panes: Array<PaneCapture["pane"]> = chunk.map(() => undefined);
+      const marker = new RegExp(`^__openrig_capture_${nonce}_(\\d+)__(?: (.*))?$`);
       let cur = -1;
       const outLines = output.split("\n");
       if (outLines.length && outLines[outLines.length - 1] === "") outLines.pop(); // the final newline, not a line
       for (const line of outLines) {
-        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? /_(\d+)__$/.exec(line) : null;
-        if (m && line === mark(Number(m[1]))) {
+        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? marker.exec(line) : null;
+        if (m && Number(m[1]) < chunk.length) {
           cur = Number(m[1]);
           segments[cur] = [];
+          const identity = /^(%\d+) (\d+)$/.exec(m[2] ?? "");
+          panes[cur] = identity ? { id: identity[1]!, pid: Number(identity[2]) } : undefined;
         } else if (cur >= 0) {
           segments[cur]!.push(line);
         }
@@ -1847,7 +1924,7 @@ export class TmuxAdapter {
         if (seg == null) return; // its marker never printed: read per target
         // capture-pane prints its lines newline-terminated, as the per-target read returns them
         const text = seg.length ? seg.join("\n") + "\n" : "";
-        out.set(t, { text: text === "" ? null : text, capturedAt });
+        out.set(t, { text: text === "" ? null : text, capturedAt, ...(panes[k] ? { pane: panes[k] } : {}) });
       });
     };
     const unique = [...new Set(targets)];
@@ -2116,6 +2193,25 @@ export class TmuxAdapter {
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
+    }
+  }
+
+  /** The clients attached to a session: each one's terminal device and the terminal type it reported (XTVERSION,
+   *  "" when it reported none). Empty when the session has no clients, or when the session or the server is gone;
+   *  null when tmux can't be read. */
+  async listSessionClientTerminals(session: string): Promise<Array<{ tty: string; termtype: string }> | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_tty}${TMUX_FIELD_SEPARATOR}#{client_termtype}`;
+    try {
+      const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+        `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+      return output.split("\n").flatMap((line) => {
+        const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+        const tty = line.slice(0, Math.max(separator, 0));
+        return tty.startsWith("/dev/") ? [{ tty, termtype: line.slice(separator + TMUX_FIELD_SEPARATOR.length) }] : [];
+      });
+    } catch (err) {
+      return isServerMissingError(err) || isSessionAbsenceError(tmuxReportedError(err)) ? [] : null;
     }
   }
 

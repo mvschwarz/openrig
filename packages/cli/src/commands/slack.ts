@@ -181,13 +181,14 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .command("setup")
     .description("Configure the connector (first-class config; secrets stay in the env file, never here)")
     .option("--channel <id>", "Slack channel id the connector app must be a member of")
-    .option("--inbound-destination <session>", "where inbound human messages land (default operator-agent@kernel)")
+    .option("--inbound-destination <session>", "where a person's unrouted message lands: a seat's session, or default-receiver (the default) for the host's default receiving agent (agents.operator_session, else the kernel operator)")
     .option("--minimum-level-that-posts <level>", "minimum OWNER level posted to Slack: RECORD|NOTICE|ALERT")
     .option("--minimum-level-that-interrupts <level>", "minimum OWNER level that mentions/interrupts: RECORD|NOTICE|ALERT")
     .option("--source-label <label>", "label shown in the posted message footer (where the queue lives)")
     .option("--secrets-env-file <path>", "path to the 0600 env file with SLACK_BOT_TOKEN / SLACK_APP_TOKEN")
     .option("--required-scopes <csv>", "comma-separated bot scopes to require at verify time")
     .option("--reactions <mode>", "what a person's emoji reaction on an OpenRig post does: route (default) makes a row for the seat that asked; off ignores reactions, so an acknowledging emoji costs no agent turn")
+    .option("--unfurl <mode>", "link and media previews on human-row posts: off (default) or on; takes effect when the connector rewires")
     .option("--reason <reason>", "Reason recorded with the configuration change", "configure human delivery")
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (opts) => {
@@ -203,6 +204,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         secretsEnvFile: opts.secretsEnvFile ?? cur.secretsEnvFile,
         requiredScopes: opts.requiredScopes ? String(opts.requiredScopes).split(",").map((s: string) => s.trim()).filter(Boolean) : cur.requiredScopes,
         ...(opts.reactions !== undefined ? { reactions: opts.reactions } : {}),
+        ...(opts.unfurl !== undefined ? { unfurl: opts.unfurl } : {}),
       };
       const { runChannelOperation, channelStateDigest } = await import("@openrig/daemon/gateway-slack");
       const result = await runChannelOperation({
@@ -251,7 +253,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
         const connector = observation.connector as { configurationDigest?: string; inboundReady?: boolean; outboundReady?: boolean;
-          inboundRouting?: { fallback: string; destination: string };
+          inboundRouting?: { fallback: string; destination: string; destinationFrom?: string; destinationNote?: string };
           settlement?: { pending: number; lastFailure: string | null };
           deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string; relayAttemptsInFlight?: number;
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
@@ -268,6 +270,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             if (connector.settlement.lastFailure) log(`  Last ask-edit failure: ${connector.settlement.lastFailure}`);
           }
           if (connector.inboundRouting?.fallback === "local") log(`  Configured routing fallback: local to ${connector.inboundRouting.destination} (after forwarding, thread and channel routes)`);
+          if (connector.inboundRouting?.destinationNote) log(`  ${connector.inboundRouting.destinationFrom === "receiving-agent" ? "Default receiving agent" : "No receiving agent"}: ${connector.inboundRouting.destinationNote}`);
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
           for (const line of socketDeliveryLines(connector.inbound)) log(`  ${line}`);
           const recovery = connector.recovery;

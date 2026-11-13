@@ -1,3 +1,4 @@
+import type { InputReadDiagnostic } from "./input-read-diagnostic.js";
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
@@ -62,6 +63,8 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 // writing the restore map can take a minute+; the wait returns as soon as the
 // seat is idle, so this only bounds a pathological never-idle case.
 export const MANUAL_PREP_WAIT_MS_DEFAULT = 180_000;
+/** How often a manual attempt reads its seat while it waits (for the map, or after a /compact the seat wasn't idle for). */
+export const MANUAL_SEAT_READ_INTERVAL_MS = 5_000;
 // Operational ceiling, not a measured optimum. Existing context polls advance auto preparation.
 export const AUTO_PREP_WAIT_MS_DEFAULT = 25 * 60_000;
 // How long a stopped attempt holds automatic compaction off for its seat before a fresh attempt may begin. Without it one
@@ -223,7 +226,7 @@ export function buildCompactCommand(compactInstruction: string): string {
 }
 
 function buildPreCompactPrepPrompt(input: {
-  usedPercentage: number;
+  usedPercentage: number | null;
   thresholdPercent: number;
   preCompactInstruction?: string | null;
   /** The policy's compaction instruction when it is too long for the /compact command. */
@@ -238,7 +241,7 @@ function buildPreCompactPrepPrompt(input: {
     ]
     : [
       "OpenRig automatic compaction preparation is now required.",
-      `Current context usage is ${input.usedPercentage}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+      `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
       `The ${AUTO_PREP_WAIT_MS_DEFAULT / 60_000}-minute ceiling starts after preparation delivery returns; completing the restore map and becoming idle must fit within it.`,
     ];
   pieces.push(
@@ -252,6 +255,7 @@ function buildPreCompactPrepPrompt(input: {
   pieces.push(
     `Write this attempt's complete restore map to ${JSON.stringify(input.preparation.mapPath + ".tmp")}, using your ordinary file-edit tool. Append the exact completion marker below as its LAST line, then finish and close the file. OpenRig will atomically publish it to ${JSON.stringify(input.preparation.mapPath)}; do not run a shell command to rename or publish it. Never write the final file incrementally.`,
     `Completion marker: ${input.preparation.marker}`,
+    "To avoid one cause of approval prompts, which hold /compact until someone answers them: write files with your file-edit tool (acceptEdits covers your working directory, not a preparation root outside it), and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variable assignment or command substitution, so an allow rule for rig commands can match it.",
     "The marker identifies this attempt and occupant; it does not certify the map's quality. Keep the normal ranked restore-map content.",
     `Near the top of the map, copy this note word for word; the restore request will have you read it: ${MANAGED_COMPACT_TRUST_NOTE}`,
     ...(input.overflowCompactInstruction?.trim()
@@ -397,7 +401,7 @@ export function buildPostCompactRestorePrompt(input: {
 
 function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string | null): string {
   const pieces = [
-    "Now audit your compaction restore before doing any other work.",
+    "Now audit your compaction restore: read the required items below before acting on the restored work, and keep any hold you verified as live.",
   ];
   const instruction = postRestoreAuditInstruction?.trim();
   if (instruction) {
@@ -408,7 +412,7 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
     "Include the refocusing skill and the topology and work trace sources. Account for the current traces actually delivered during restore; do not rerun Python to duplicate them. If no current trace arrived, report that delivery gap. Read required notes and full sources with the native file-read tool; pointers, compact summaries and truncated extracts do not count as full source reads.",
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
-    "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
+    "Read every required item that is not FULL in full now, without skimming. Report the final read-depth table and the reconnect note as you resume; don't hold unaffected work for them.",
   );
   return pieces.join(" ");
 }
@@ -425,6 +429,7 @@ type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_
 
 /** Safe delivery diagnostics: never retain pane contents or an exception message. */
 export interface RestoreDeliveryAttempt {
+  inputReadFailure?: InputReadDiagnostic;
   stage: PendingPostCompactStage;
   at: string;
   ok: boolean;
@@ -461,6 +466,7 @@ export interface ObservedCompaction {
   detail: string;
 }
 export interface PreparationState {
+  inputReadFailure?: InputReadDiagnostic & { stage: "preparation" | "compact" };
   /** The reading that held this preparation send; never includes draft text. */
   inputBox?: SendResult["heldInputBoxReading"];
   policyActor?: TerminalActor;
@@ -495,6 +501,10 @@ export interface PreparationState {
   mapUsedPercentage?: number;
   /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
   supersedes?: StrandedCompaction;
+  /** A manual attempt's latest reading of its seat showed a prompt (a permission request its preparation turn reached,
+   *  say) that holds /compact: since when, and when it was last seen. `current` is false when a later reading couldn't
+   *  establish the seat's state, so the prompt is an earlier observation. Cleared when a reading shows idle or work. */
+  awaitingInput?: { since: number; reason: string; observedAt: number; current: boolean };
 }
 /** An open record from before a restart, too old to resume: the seat's restore steps may still be owed. */
 export interface StrandedCompaction { attemptId: string; mapPath: string; phase: string; recordedAt: string }
@@ -529,6 +539,14 @@ interface PreparationAttempt extends PreparationState {
  *  path and marker are kept so the restore can name a map the seat completed anyway, or say none was required. */
 interface RestoreCarry { mapPath: string | null; compactInstruction: string | null; skipMap?: { mapPath: string; marker: string } }
 
+/** Under --skip-map, a map the seat completed at the attempt path anyway, or null. Nothing publishes the .tmp under
+ *  --skip-map, so the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
+function completedSkippedMap({ mapPath, marker }: { mapPath: string; marker: string }): string | null {
+  return [mapPath, `${mapPath}.tmp`].find((file) => {
+    try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(marker); } catch { return false; }
+  }) ?? null;
+}
+
 /** The file, beside an attempt's restore map, where the daemon records what it last did for that attempt. The agent
  *  never writes it. A restarted daemon reads it to pick the attempt up again. */
 export const COMPACTION_RECORD_FILE = "COMPACTION-STATE.json";
@@ -557,6 +575,7 @@ interface PreparationFailureRun {
 }
 
 interface CompactionRecord {
+  inputReadFailure?: PreparationState["inputReadFailure"];
   preparationFailures?: PreparationFailureRun;
   inputBox?: PreparationState["inputBox"];
   /** The daemon process that last wrote it. */
@@ -854,13 +873,18 @@ export class ClaudeCompactionEnforcer {
 
   /** The restore step OpenRig owes this seat next, or null. After a /compact whose outcome is unknown (see
    *  `afterUncertainCompact`) it also gives what the input box last read (`not_checked` before the first check) and
-   *  whether the step is held for it. */
-  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string; lastDelivery?: RestoreDeliveryAttempt } | null {
+   *  whether the step is held for it. It names the attempt's restore map, which a person's restore notice leaves out. */
+  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string; lastDelivery?: RestoreDeliveryAttempt; mapPath?: string } | null {
     const stage = this.pendingPostCompactRestore.get(sessionName);
     if (!stage) return null;
-    const lastDelivery = this.records.get(sessionName)?.record.lastDelivery;
+    const record = this.records.get(sessionName)?.record;
+    const lastDelivery = record?.lastDelivery;
     const failed = !!lastDelivery && lastDelivery.failures > 0;
-    const last = lastDelivery ? { lastDelivery } : {};
+    // The map the restore request names: under --skip-map only one the seat completed anyway, never a path with no map.
+    // The record keeps the --skip-map choice through every owed stage; the in-memory carry ends once the request lands.
+    const skipMap = record?.restoreCarry?.skipMap;
+    const mapPath = skipMap ? completedSkippedMap(skipMap) : record?.mapPath;
+    const last = { ...(lastDelivery ? { lastDelivery } : {}), ...(mapPath ? { mapPath } : {}) };
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
     const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
       ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
@@ -987,6 +1011,7 @@ export class ClaudeCompactionEnforcer {
     } catch (error) {
       this.recordRestoreFailure(input.sessionName, stage, record, {
         ok: false, reason: error instanceof DeliveryGuardError ? error.code : "send_failed",
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
       }, error instanceof Error ? error.name : typeof error);
       if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
       throw error;
@@ -1014,7 +1039,7 @@ export class ClaudeCompactionEnforcer {
   private recordRestoreFailure(
     session: string, stage: PendingPostCompactStage | undefined,
     record: { file: string; record: CompactionRecord } | undefined,
-    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox">, errorClass?: string,
+    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox" | "inputReadFailure">, errorClass?: string,
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
@@ -1029,6 +1054,7 @@ export class ClaudeCompactionEnforcer {
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
       ...(result.outcome ? { outcome: result.outcome } : {}),
+      ...(result.inputReadFailure ? { inputReadFailure: result.inputReadFailure } : {}),
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
       ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
@@ -1390,7 +1416,6 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" };
     }
     if (input.runtime !== "claude-code") return this.recordManualFailure(input.sessionName, "runtime_filter");
-    if (input.usedPercentage == null) return this.recordManualFailure(input.sessionName, "no_usage_data");
     // The preparation prompt cannot be written to such a seat either, so the whole attempt is refused up front.
     if (this.paneUnknownProtected(input.sessionName)) return this.recordManualFailure(input.sessionName, "pane_unknown_protected");
     const actor = opts.actor ?? { source: "caller" as const, session: null };
@@ -1410,34 +1435,69 @@ export class ClaudeCompactionEnforcer {
     };
     this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
     await this.deliverPreparation(input, attempt);
+    // Manual preparation can pause for an ordinary approval, before or after the map is complete. OpenRig never answers
+    // it. It keeps the latest completed reading of the seat on the attempt (awaitingInput), recorded before deadline
+    // reconciliation, so --state and the expiry reason describe the seat now rather than an earlier prompt.
+    const observe = (reading: { ok: boolean; reason?: string; activity?: { state?: string } } | null) => {
+      const state = reading === null ? "unknown" : reading.ok ? "idle"
+        : reading.reason === "target_needs_input" ? "needs_input" : reading.activity?.state ?? "unknown";
+      if (state === "needs_input") {
+        attempt.awaitingInput = { since: attempt.awaitingInput?.since ?? this.now(), reason: "target_needs_input", observedAt: this.now(), current: true };
+      } else if (state === "unknown") {
+        if (attempt.awaitingInput) attempt.awaitingInput = { ...attempt.awaitingInput, current: false };
+      } else delete attempt.awaitingInput;
+    };
+    // While the map is written, one bounded reading every MANUAL_SEAT_READ_INTERVAL_MS, never one per map check. The first
+    // comes an interval after delivery: a reading taken as the preparation turn starts tells nothing.
+    let nextRead = this.now() + MANUAL_SEAT_READ_INTERVAL_MS;
     while (attempt.status === "waiting" && !opts.skipMap && !this.mapReady(attempt)) {
+      const remaining = attempt.deadlineAt! - this.now();
+      if (remaining > 0 && this.now() >= nextRead) {
+        let reading;
+        try { reading = await this.sessionTransport.waitUntilIdle(input.sessionName, Math.min(remaining, CAPTURE_READABLE_BUDGET_MS), attempt.controller.signal, { singleObservation: true, allowDraft: true }); }
+        catch { reading = null; }
+        observe(reading);
+        nextRead = this.now() + MANUAL_SEAT_READ_INTERVAL_MS;
+      }
       this.reconcilePreparations();
       if (attempt.status !== "waiting") break;
       await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
     }
     if (attempt.status !== "waiting") return failed(attempt.reason ?? "preparation_incomplete");
-    // Manual preparation can pause for an ordinary approval after the map is complete.
-    // Keep the same classifier/deadline and wait outside the input lease; never answer it.
-    let idle;
-    do {
-      const remaining = attempt.deadlineAt! - this.now();
-      if (remaining <= 0) return failed(this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
-      try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
-      catch { idle = { ok: false, reason: "transport_unavailable" }; }
-      this.reconcilePreparations();
-      if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
-      await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
-      this.reconcilePreparations();
-    } while (attempt.status === "waiting");
-    if (!idle.ok || attempt.status !== "waiting") {
-      // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
-      const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
-        : idle.reason === "wait_for_idle_timeout"
-          ? this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete"
-          : idle.reason);
-      return failed(reason);
+    // The budget ran out: name a prompt the latest reading showed, else as before.
+    const expired = () => attempt.awaitingInput?.current ? "preparation_needs_input"
+      : this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete";
+    let compact: { ok: boolean; reason?: string; deferredBy?: { reason?: string; activity?: { state?: string } } };
+    for (;;) {
+      let idle;
+      do {
+        const remaining = attempt.deadlineAt! - this.now();
+        if (remaining <= 0) return failed(expired());
+        // The wait can run to the deadline. Each reading it completes reaches the attempt as it lands, so a --state read or
+        // deadline reconciliation during the wait never takes an answered prompt for a current one.
+        try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal,
+          { allowDraft: true, onObservation: (activity) => observe({ ok: false, activity }) }); }
+        catch { idle = { ok: false, reason: "transport_unavailable" }; }
+        observe(idle);
+        this.reconcilePreparations();
+        if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
+        await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
+        this.reconcilePreparations();
+      } while (attempt.status === "waiting");
+      if (!idle.ok || attempt.status !== "waiting") {
+        // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
+        const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
+          : idle.reason === "wait_for_idle_timeout" ? expired() : idle.reason);
+        return failed(reason);
+      }
+      compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
+      // The seat wasn't idle at the send after all (its preparation turn reached a prompt, or did more work): nothing was
+      // written, so wait again within this attempt's deadline rather than disarm. The send reads the pane while the idle
+      // wait can take a hook's idle, so pause one reading interval first: a disagreement can't loop sends without a break.
+      if (compact.ok || compact.reason !== "waiting_for_idle") break;
+      observe({ ok: false, ...compact.deferredBy });
+      await this.sleep(Math.min(MANUAL_SEAT_READ_INTERVAL_MS, Math.max(1, attempt.deadlineAt! - this.now())));
     }
-    const compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
     if (!compact.ok) {
       const outcome = failed(compact.reason ?? "send_failed");
       // A /compact whose result was lost still owes its restore steps, and this request authorizes them.
@@ -1571,7 +1631,7 @@ export class ClaudeCompactionEnforcer {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
       prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
-        usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
+        usedPercentage: input.usedPercentage ?? null, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }), { openrigNotice: true, allowDraftWhileIdle: true, ...idleGate, beforeWrite: () => {
         this.reconcilePreparations();
@@ -1585,7 +1645,7 @@ export class ClaudeCompactionEnforcer {
       if (error instanceof DeliveryGuardError) {
         const written = (error as { inputWritten?: boolean }).inputWritten === true;
         const attempted = (error as { inputAttempted?: boolean }).inputAttempted === true;
-        prep = { ok: false, sent: written, reason: error.code,
+        prep = { ok: false, sent: written, reason: error.code, inputReadFailure: error.inputReadFailure,
           inputPhase: written ? "written" as const : attempted ? "attempted" as const : "not_reached" as const };
       } else prep = null;
     }
@@ -1598,7 +1658,8 @@ export class ClaudeCompactionEnforcer {
     // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
     attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
     attempt.inputBox = prep?.heldInputBoxReading;
-    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox });
+    if (prep?.inputReadFailure) attempt.inputReadFailure = { stage: "preparation", ...prep.inputReadFailure };
+    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox, inputReadFailure: attempt.inputReadFailure });
     // The replacement request went out (or may have): the ended attempt's gate is used up.
     if (!notSent && attempt.afterEnded !== undefined && this.pendingPreCompactPrep.get(input.sessionName) === attempt) this.lastEnded.delete(input.sessionName);
     if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
@@ -1614,7 +1675,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
   }
 
-  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string}> {
+  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string; deferredBy?: { reason?: string; activity?: { state?: string } }}> {
     const check = () => {
       this.reconcilePreparations();
       this.checkAttemptPolicy(input, attempt);
@@ -1648,7 +1709,7 @@ export class ClaudeCompactionEnforcer {
       return this.sessionTransport.send(input.sessionName, composed.command,
         { openrigNotice: true, allowDraftWhileIdle: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: attempt.prepared ? idleWait : Math.max(1, Math.min(idleWait, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
-    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase" | "activity" | "heldInputBox">;
+    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase" | "activity" | "heldInputBox" | "inputReadFailure">;
     let guardRefused = false;
     try {
       const guard = this.sessionTransport.deliveryGuard;
@@ -1659,11 +1720,16 @@ export class ClaudeCompactionEnforcer {
       const attempted = (error as { inputAttempted?: boolean } | null)?.inputAttempted === true;
       guardRefused = error instanceof DeliveryGuardError && !written && !attempted;
       result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain",
+        ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
         ...(written ? { sent: true, inputPhase: "written" as const } : attempted ? { inputPhase: "attempted" as const } : {}) };
     } finally {
       delete attempt.compactInFlight;
     }
     if (!result.ok || result.outcome === "retained") {
+      if (result.inputReadFailure) {
+        attempt.inputReadFailure = { stage: "compact", ...result.inputReadFailure };
+        this.persist(input.sessionName, attempt.attemptId, { inputReadFailure: attempt.inputReadFailure });
+      }
       const phase = result.inputPhase;
       // A write that was issued, or text already in the input, is never "nothing sent".
       const writeAttempted = phase === "attempted" || phase === "written" || result.sent === true;
@@ -1680,13 +1746,15 @@ export class ClaudeCompactionEnforcer {
       if (notSent && typeof windowReason === "string" && HOLD_REASONS.has(windowReason) && this.holdPrepared(input.sessionName, attempt, windowReason)) {
         return { ok: false, reason: PREPARED_AWAITING_WINDOW };
       }
-      // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
-      // marks those `not_reached`. Reconciliation still bounds the idle grace and stops on an occupant change.
+      // Only a known pre-input idle deferral keeps the attempt armed: an automatic one for a later poll, a manual one for
+      // the rest of its deadline (its caller waits again). The transport marks those `not_reached`. Reconciliation still
+      // bounds the idle grace and stops on an occupant change.
       // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
       // as not sent, and a fresh attempt may begin after the retry cooldown.
       const draftHold = policyDraftHold || (typeof result.reason === "string" && result.reason.startsWith("draft_"));
-      if (attempt.mode === "automatic" && attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold) {
-        return { ok: false, reason: "waiting_for_idle" };
+      if (attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold
+        && (attempt.mode === "automatic" || this.now() < attempt.deadlineAt!)) {
+        return { ok: false, reason: "waiting_for_idle", deferredBy: { reason: result.reason, activity: result.activity } };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
       attempt.compact = notSent ? "not_sent" : "uncertain";
@@ -1729,16 +1797,12 @@ export class ClaudeCompactionEnforcer {
     this.pendingStageGeneration.set(sessionName, attempt.occupantGeneration);
   }
 
-  /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path
-   *  anyway, or a plain statement that none was required. Nothing publishes the .tmp under --skip-map, so
-   *  the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
+  /** The map the restore request names. With --skip-map: a map the seat completed anyway (`completedSkippedMap`),
+   *  or a plain statement that none was required. */
   private restoreMapFields(sessionName: string): { attemptMapPath: string | null; noMapRequired: boolean } {
     const carry = this.restoreCarry.get(sessionName);
     if (!carry?.skipMap) return { attemptMapPath: carry?.mapPath ?? null, noMapRequired: false };
-    const { mapPath, marker } = carry.skipMap;
-    const completed = [mapPath, `${mapPath}.tmp`].find((file) => {
-      try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(marker); } catch { return false; }
-    });
+    const completed = completedSkippedMap(carry.skipMap);
     return completed ? { attemptMapPath: completed, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
   }
 
@@ -1769,7 +1833,9 @@ export class ClaudeCompactionEnforcer {
       else if (!attempt.prepared && attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
         const ready = this.mapReady(attempt);
         if (!(ready && this.holdPrepared(session, attempt, "map_complete_seat_never_idle"))) {
-          this.stopPreparation(session, ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
+          // A manual attempt whose latest reading is a prompt says so (only the manual wait records awaitingInput).
+          this.stopPreparation(session, attempt.awaitingInput?.current ? "preparation_needs_input"
+            : ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
         }
       }
       if (enabled) attempt.policyWasEnabled = true;
@@ -1918,7 +1984,7 @@ export class ClaudeCompactionEnforcer {
         compact: "not_sent", sends: record.sends,
         deadlineAt: record.deadlineAt ?? (record.delivery === "not_sent" ? null : record.updatedAt + AUTO_PREP_WAIT_MS_DEFAULT),
         policyWasEnabled: true, preparationRoot: record.preparationRoot, controller: new AbortController(),
-        compactInstruction: record.compactInstruction, inputBox: record.inputBox,
+        compactInstruction: record.compactInstruction, inputBox: record.inputBox, inputReadFailure: record.inputReadFailure,
         // A held attempt comes back held, with its recorded hold (never stamped again) and its map's age and usage.
         ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt, preparedReason: record.preparedReason ?? "map_complete_seat_never_idle" } : {}),
         ...(held ? { mapReadyAt: record.mapReadyAt ?? record.preparedAt ?? record.updatedAt } : record.mapReadyAt !== undefined ? { mapReadyAt: record.mapReadyAt } : {}),

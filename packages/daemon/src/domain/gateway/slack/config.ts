@@ -13,6 +13,7 @@ import { BASELINE_REQUIRED_SCOPES } from "./capabilities.js";
 import { unsupportedChannelMapFields, validateChannelMap, type ChannelMapEntry } from "./channel-map.js";
 import { botInboxProblems, type BotInboxConfig } from "./bot-inbox.js";
 import { forwardChannelProblems, type ForwardChannel } from "./forwarding.js";
+import { describeDefaultReceiver, type DefaultReceiver } from "../../default-receiver.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -60,14 +61,40 @@ export interface SlackConnectorConfig {
    * "off" = reactions are ignored, so an acknowledging emoji costs no agent turn. Not in DEFAULT_CONFIG, like `channelMap`.
    */
   reactions?: SlackReactionsMode;
+  /** Link and media previews on human-row posts; absent defaults to off. */
+  unfurl?: "on" | "off";
 }
 
 export const SLACK_REACTIONS_MODES = ["route", "off"] as const;
 export type SlackReactionsMode = typeof SLACK_REACTIONS_MODES[number];
 
+/** The inbound destination that means "the host's default receiving agent". It's never written to the file: a saved config
+ *  without `inboundDestination` inherits it (so an older daemon reading that file uses its own default), and
+ *  `rig slack setup --inbound-destination default-receiver` returns to it. A destination already saved in the file is kept
+ *  as chosen, `operator-agent@kernel` included: nothing records whether a person chose it. */
+export const INHERIT_INBOUND_DESTINATION = "default-receiver";
+/** Where an inherited destination goes when the host has no receiving agent: the kernel operator's address, as before. */
+export const LEGACY_INBOUND_DESTINATION = "operator-agent@kernel";
+
+/** Where a person's unrouted Slack message goes: the destination saved in the config, else the host's receiving agent, else
+ *  the kernel operator's address. Thread and channel routes still come first. */
+export function effectiveInboundDestination(cfg: Pick<SlackConnectorConfig, "inboundDestination">, receiver: string | null): { destination: string; from: "config" | "receiving-agent" | "default" } {
+  if (cfg.inboundDestination !== INHERIT_INBOUND_DESTINATION) return { destination: cfg.inboundDestination, from: "config" };
+  return receiver ? { destination: receiver, from: "receiving-agent" } : { destination: LEGACY_INBOUND_DESTINATION, from: "default" };
+}
+
+/** What the status says about an inherited destination: the receiving agent and its recorded state, or, with none, that the
+ *  kernel operator's address is kept for compatibility, so it isn't presented as a resolved receiver. Nothing for a
+ *  destination saved in the config. */
+export function inboundDestinationNote(inbound: { destination: string; from: "config" | "receiving-agent" | "default" }, receiver: DefaultReceiver | null): string | undefined {
+  if (inbound.from === "config") return undefined;
+  const who = receiver ? describeDefaultReceiver(receiver) : "OpenRig couldn't tell whether this host has a receiving agent.";
+  return inbound.from === "receiving-agent" ? who : `${who} Unrouted messages go to ${inbound.destination} for compatibility, as before.`;
+}
+
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
   enabled: false,
-  inboundDestination: "operator-agent@kernel",
+  inboundDestination: INHERIT_INBOUND_DESTINATION,
   outboundDestinations: [],
   sourceLabel: "openrig",
   channel: null,
@@ -94,6 +121,9 @@ function validateConfig(cfg: SlackConnectorConfig, opts: { reading?: boolean } =
   if (!opts.reading && cfg.reactions !== undefined && !SLACK_REACTIONS_MODES.includes(cfg.reactions)) {
     throw new Error(`reactions must be one of ${SLACK_REACTIONS_MODES.join(", ")} (got ${String(cfg.reactions)})`);
   }
+  if (!opts.reading && cfg.unfurl !== undefined && cfg.unfurl !== "on" && cfg.unfurl !== "off") {
+    throw new Error(`unfurl must be on or off (got ${String(cfg.unfurl)})`);
+  }
 }
 
 export function configPathFor(home?: string): string {
@@ -118,7 +148,9 @@ export function saveConfig(cfg: SlackConnectorConfig, home?: string): string {
   validateConfig(cfg);
   const p = configPathFor(home);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+  // An inherited destination is left out of the file, so the file records only a destination someone chose.
+  const { inboundDestination, ...rest } = cfg;
+  fs.writeFileSync(p, JSON.stringify(inboundDestination === INHERIT_INBOUND_DESTINATION ? rest : cfg, null, 2) + "\n");
   return p;
 }
 
@@ -146,8 +178,10 @@ export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean,
     { ok: hasBotToken, label: "bot-token", detail: hasBotToken ? "resolved" : "unset (outbound cannot post; scope/membership verify unavailable)" },
     { ok: hasAppToken, label: "app-token (Socket Mode)", detail: hasAppToken ? "resolved" : "unset (inbound cannot connect)" },
     { ok: cfg.channel !== null, label: "channel", detail: cfg.channel ?? "unset (outbound cannot post)" },
-    { ok: Boolean(cfg.inboundDestination), label: "inbound-destination", detail: cfg.inboundDestination },
+    { ok: Boolean(cfg.inboundDestination), label: "inbound-destination",
+      detail: cfg.inboundDestination === INHERIT_INBOUND_DESTINATION ? `${INHERIT_INBOUND_DESTINATION} (the host's default receiving agent)` : cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
+    { ok: true, label: "human-row previews", detail: cfg.unfurl === "on" ? "on" : "off" },
     ...channelMapReadiness(cfg),
     ...botInboxReadiness(cfg),
     ...forwardReadiness(cfg),

@@ -123,6 +123,11 @@ export interface Session {
 
 // -- Event types --
 
+/** What a delivery-evidence record says was admitted: the outbox rows that exist, none, or unknown when they couldn't be read. */
+export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
+/** A send's own screen check as it reported it, or nulls when none ran. */
+export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -182,6 +187,24 @@ export type RigEvent =
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
+  /** What one send's own result says was admitted, written and seen on screen, for the seat and
+   *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
+   *  result shows reached the input; `terminalObserved` is today's screen check, verbatim; `inputBoundary` is unknown:
+   *  no harness here reports a prompt's origin, so no hook attributes one. Never acceptance, a claim or completion. It names no node, so a node's own event
+   *  reads never see it: the session and occupant generation name the seat. */
+  | { type: "transport.delivery_evidence"; sessionName: string; seatKind: "tmux" | "external_cli" | "unknown";
+      pane: string | null; occupantGeneration: string | null; messageId: string; attemptId: string;
+      admitted: DeliveryEvidenceAdmitted;
+      written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
+      terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+  /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
+   *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
+   *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
+   *  input boundary stays unknown. It names no node. */
+  | { type: "transport.prompt_observation"; sessionName: string; occupantGeneration: string | null; runtime: string | null;
+      source: "UserPromptSubmit"; nativeSessionId: string | null; nativePromptId: string | null; nativeTurnId: string | null;
+      promptSha256: string; promptBytes: number; observedAt: string | null }
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
@@ -307,6 +330,10 @@ export type RigEvent =
   // consumers on /api/views/:name/sse when ANY queue state mutation
   // changes a view result-set, not just create/handoff/claim/unclaim.
   | { type: "queue.updated"; qitemId: string; fromState: string; toState: string; closureReason: string | null; closureTarget: string | null; actorSession: string; summary: string | null }
+  // A person's clicked answer recorded on an ask with questions: `answered` of `questions` now have an answer, and
+  // `complete` says whether that's all of them. A partial set is a change to the ask, not its answer: the ask stays open
+  // until the set is complete and returned.
+  | { type: "queue.answer_recorded"; qitemId: string; actorSession: string; questionId: string; answered: number; questions: number; complete: boolean; summary: string | null }
   // Coordination primitive (PL-004 Phase B) — project (classifier) / view.
   // project.classified: emitted when a stream item is successfully projected.
   // classifier.lease_*: lifecycle of the daemon-enforced single-writer lease.
@@ -628,6 +655,9 @@ export interface AgentActivity {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
   livenessSeconds?: number | null;
+  /** #99: when a Claude usage limit (StopFailure/rate_limit) says it resets, read by the relay from Claude's own
+   *  message. Only the instant is kept, never the message. */
+  resetsAt?: string | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
@@ -784,6 +814,9 @@ export interface NodeInventoryEntry {
   /** Effective mode; inherited non-default sockets also have server arguments. */
   tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;
+  /** Codex: label explaining whether the displayed resume flags match the seat's recorded current-generation launch,
+   *  differ from it, or come from current settings because no launch record applies; null otherwise. */
+  resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
   // Extended fields

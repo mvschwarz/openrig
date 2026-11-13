@@ -160,14 +160,17 @@ describe("ordinary transport under current and historical questions", () => {
         const staleWaiting = hook.name === "send_stale_permission" || hook.name === "display_stale_permission";
         const currentQuestion = ["picker160", "picker100", "picker12", "picker13"].includes(shape)
           || shape === "footer_in_multiline_draft";
-        const freshRunningNeedsInput = hook.name === "fresh_running" && currentQuestion;
-        const sent = hook.name === "fresh_permission" || freshRunningNeedsInput ? false
+        // A fresh running, idle or unknown (SessionStart) hook reads the pane once for a current dialog: a picker
+        // opened after Stop or SessionStart fires no hook.
+        const freshDialogCheck = hook.name === "fresh_running" || hook.name === "fresh_idle" || hook.name === "fresh_unknown";
+        const freshCurrentQuestion = freshDialogCheck && currentQuestion;
+        const sent = hook.name === "fresh_permission" || freshCurrentQuestion ? false
           : hook.name.startsWith("fresh_") ? true : state !== "attention" && !(staleWaiting && state === "unknown");
         expect(result.ok).toBe(sent);
         expect(paste).toHaveBeenCalledTimes(sent ? 1 : 0);
         expect(enter).toHaveBeenCalledTimes(sent ? 1 : 0);
         if (!sent) expect(result.reason).toBe("target_needs_input");
-        expect(capture).toHaveBeenCalledTimes(hook.name === "fresh_running" ? 1 : hook.name.startsWith("fresh_") ? 0 : 1);
+        expect(capture).toHaveBeenCalledTimes(freshDialogCheck ? 1 : hook.name.startsWith("fresh_") ? 0 : 1);
       } finally { db.close(); }
     });
   }

@@ -30,6 +30,8 @@ on an OpenRig team load `openrig-core` instead.
 1. OpenRig is installed and runs a team on this machine: `rig ps` lists it.
 2. Pick an address for this app on that team, such as `cursor@my-team`. The queue takes work for it; nothing is
    launched. To tell the team what it's for, add it to a roster as a hosted member (`docs/reference/hosted-members.md`).
+3. **Claude Code 2.1.119 or later.** On earlier versions, while the plugin's OpenRig seat is blank, Claude Code silently
+   drops its MCP server: the skill loads, but your agent has no OpenRig tools.
 
 ## Install
 

@@ -41,6 +41,8 @@ export interface SubsystemSlackDeliveryOpts {
    *  (no map) nothing is recorded and the channel is resolved as before. */
   pinChannel?: boolean;
   sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
+  /** Human-row previews; absent defaults off. */
+  unfurl?: "on" | "off";
   /** This daemon's machine name, read per post, shown after a seat sender (message.ts `machine`). */
   machine?: () => string | null;
   bodyExcerpt?: number;
@@ -104,6 +106,8 @@ export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 export type LocalAttachment = { bytes: Uint8Array; filename: string } | { skipped: string };
 const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
 const INVALID_BLOCKS_CLASS = "slack-invalid-blocks";
+/** Slack answered 2xx but its body couldn't be read: the post may be in the channel. */
+export const POSSIBLY_POSTED_CLASS = "possibly-posted";
 const PAYLOAD_ATTEMPT_PREFIX = "::payload-attempt::";
 /** #192: `<decisionId>::channel::<channel>` in the attempted store = the channel this post's first
  *  attempt was decided for (see pinChannel). Keyed like the transport-failure receipt. */
@@ -330,7 +334,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     };
     const postInput = (possibleRepeat = false) => {
       const shown = render(possibleRepeat, q.stateUnconfirmed === true, q.quietUnreadable === true);
-      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
+      const unfurl = opts.unfurl === "on";
+      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs, unfurl_links: unfurl, unfurl_media: unfurl };
     };
     const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
@@ -441,7 +446,10 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     );
     if (!res.ok) {
       const permanent = res.status === 200 && res.error === "invalid_blocks";
-      const failureClass = permanent ? INVALID_BLOCKS_CLASS : res.status === 0 ? "transport" : `http-${res.status}`;
+      // An unreadable 2xx may have posted: the replay reconciles by marker before any resend, as for a lost response.
+      const failureClass = permanent ? INVALID_BLOCKS_CLASS
+        : res.responseUnreadable ? POSSIBLY_POSTED_CLASS
+        : res.status === 0 ? "transport" : `http-${res.status}`;
       if (permanent) log(`Slack rejected ${q.qitemId ?? decision.decisionId}: invalid_blocks — permanent failure; this payload will not be reposted`);
       // Persist the receipt input before the row write. A throwing row write
       // stays repairable across restart and blocks any later resend until the

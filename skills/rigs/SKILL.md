@@ -62,7 +62,9 @@ person needs in their project or home folder and name that path.
   start" in https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md#before-you-start. Setup
   checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen harness (with npm) if
   either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`), and adds an OpenRig
-  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
+  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`. A login it reports
+  missing isn't harmless: say which one, and that a team may need it (`starter` runs its reviewer on Codex). Pass it on
+  in the handoff so the operator fits the team before anything starts.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -72,7 +74,8 @@ person needs in their project or home folder and name that path.
 
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
-  Keep it.
+  Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on
+  the person's yes ("Who answers OpenRig's questions" below).
 - **If the person uses Codex:** now that OpenRig is running, make the one-time offer under "Codex: one offer, once,
   after OpenRig starts" at the end of this step.
 - **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
@@ -124,8 +127,8 @@ person needs in their project or home folder and name that path.
   joining as optional, with the effects below. Ask the person yes or no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
   - In a plain shell, joining writes no files in your project or personal settings.
-  - Inside tmux on 0.6.11, my sender and reply address is your existing tmux session name, even a number like `0`.
-    `rig attach --self` returns that address and `rig whoami` confirms it; `--display-name` does not change it.
+  - Inside tmux, my sender and reply address is `<member>@<rig>`, even when your tmux session is named `0`;
+    `rig attach --self` returns it and `rig whoami` confirms it; `--display-name` does not change it.
   - Inside tmux, other agents can type into this window, and stopping the team (`rig down`) also closes this tmux
     session (both from source, not hand-tested). Transcript recording and, for Claude Code, writing
     `.openrig/context-collector.cjs` and `.claude/settings.local.json` for the status line were hand-tested on 0.6.11.
@@ -144,22 +147,99 @@ person needs in their project or home folder and name that path.
   `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
   A declared name is a claim, not a seat's own identity: for a team that acts only on seat identity, the attached
-  shell above is the route.
+  shell above is the route. For work whose questions and result must come back to this session, use a return
+  address ("If the person stays with you" below), not a declared name.
+- **Who answers OpenRig's questions:** read `rig gateway participants` (its `default:` line) before the handoff.
+  - A default person is there: say requests and asks that name nobody go to them (a pairing request or an ask can
+    name someone else), and don't offer again.
+  - Several people with no default: ask which should get requests nobody is named for (`rig gateway default <id>`),
+    or leave it. Never pick one yourself.
+  - Nobody is registered: offer it in a sentence or two. OpenRig's questions, such as another machine asking to pair,
+    need a person to reach. Ask the name to use (their login name is only a suggestion). On yes, run
+    `rig gateway human add <id> --display-name "<name>" --delivery-class B --default`: they're reached in the TUI's Feed
+    and Steering, and Slack can be added later. On no or not now, register nothing and say that questions to a person
+    can't reach anyone until someone is registered, with that command for later.
+  - Never pass `--default` over an existing default, or `--replace`, unless they ask. Their own words decide: a
+    different name, Slack now, or not now.
+  - An agent reads their answers: the kernel operator, or the agent chosen in `agents.operator_session`. If the kernel
+    isn't running here and no agent is chosen, offer to choose the team's lead (`rig config set agents.operator_session
+    <seat>@<rig>`), on their yes only.
+  - A machine they'll pair with needs its own person: registering here doesn't give that machine one.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
-  If the person stays here, replace "The person will answer in your pane" with "The person stays with me; send me your questions and
-  results to relay." Carry their constraints and any declined permission choices in either handoff.
+  If the person stays here, hand the goal over as a task from your own address instead, so the operator's questions
+  and the result come back to you ("If the person stays with you" below). Carry their constraints, which logins they
+  have (an installed provider that isn't signed in doesn't count), and any permission choice they made, chosen or
+  declined, in either handoff.
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
-- **Relay the operator's questions** unless the person declined the Codex offer below and explicitly chose the operator route: the operator asks in its own pane, and the person may not be looking there.
-  After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
-  something (start this team? which folder? which option?), ask them here in the operator's words and send their
-  answer back with `rig send`, or tell them to answer in the operator's pane. Unlike a prompt or a menu, a question
-  doesn't show up as a stopped seat, so don't leave it to a background wait.
+- **If you start a team yourself** instead of through the operator, do its fit check first. A built-in team can need a
+  sign-in the person doesn't have: `starter` runs its reviewer on Codex, so someone on Claude Code alone stops at a Codex
+  sign-in just when the review should start. `rig specs preview <team> --kind rig --json` lists each seat's runtime.
+  Check those logins (`claude auth status`, `codex login status`), or go by what the person told you. If one is missing
+  or you can't tell, say so before launching and let them choose: the operator adapts the team to the logins they have,
+  or they sign in first.
+- **If the person stays with you** (unless they declined the Codex offer below and explicitly chose the operator
+  route), you're their front door to the team: you hand it the goal, bring its questions to them and bring back what
+  it produced, through the task queue rather than the operator's screen.
+  - **Your return address:** if this session joined the team (above), it's the `OPENRIG_SESSION_NAME` that
+    `rig attach` printed. Otherwise agree one with the person on the kernel's rig, such as `claude-app@kernel` or
+    `codex-app@kernel`. It's an address the queue takes tasks for; nothing is launched for it and no file is written.
+    If the person keeps more than one of these conversations, give each its own address (for example
+    `claude-app-2@kernel`); one address shares its questions.
+    To tell the team what it's for, the person can add it to a roster as a hosted member
+    (`docs/reference/hosted-members.md` in the OpenRig package).
+    Put it in front of every `rig queue` command: `OPENRIG_SESSION_NAME=<address> rig queue ...` (add
+    `OPENRIG_HOME=<home>` when OpenRig doesn't use the default home). A `--source` name only labels the one task it's
+    on: claiming and answering the team's questions need the address in `OPENRIG_SESSION_NAME`.
+  - **Hand over the goal:** write it to a file with what the message above carries (that you're the agent that
+    installed OpenRig and the person stays with you, the goal, folder, branch, constraints, logins and permission
+    choices), and end it with this paragraph, filling in your address:
+
+    > To ask me anything, create a queue item to `<address>` (`rig queue create --destination <address> ...`), then
+    > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
+    > check it when the person asks. Don't ask in your own terminal: the person isn't there. If you hand this item on,
+    > copy this paragraph into the new item. When you finish, put the outcome in this item's resolution and any file in
+    > its evidence ref.
+
+    Then run
+    `OPENRIG_SESSION_NAME=<address> rig queue create --destination <canonicalSessionName> --summary "<the goal in a sentence>" --body-file <file> --verify`.
+    Tell the person the task ID it prints, and keep the goal, your address and that ID: they're how you find this work
+    again.
+  - **The team's questions** come to your address as tasks:
+    `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
+    (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
+    tell you, a condition included ("yes, but only on a branch"): claim it, then
+    `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution "<their words>"`.
+    Add no label, quotation marks or notes of your own, and don't turn their words into a yes or a no: the agent that
+    asked decides what they mean. You speak as yourself, never as the person. If they aren't there to answer, leave
+    it open and tell them it's waiting; never answer for them.
+  - **A question only on the operator's screen:** if the operator asks in its pane and nothing reached your address,
+    read it with `rig capture <canonicalSessionName>`, show the person, and send their words as a new task to the
+    operator that names your task's ID, not as keys typed into its pane.
+  - **Delivery isn't the task's state.** A task's state says where the work is: pending (created and readable, not
+    yet claimed), claimed or in progress (an agent took it), handed off (follow the next item) or done (read its
+    resolution). Whether its agent was woken is a separate fact, the wake outcome `--verify` reports: `verified` (it
+    rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
+    proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
+    isn't retried automatically: wake the task's destination once its input is free with
+    `rig send <destination> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
+    owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
+    before you wake it again). A pending task with no wake isn't lost or done.
+  - **Nothing wakes this chat** when the team asks or finishes: check your address when the person asks or comes back.
+- **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
+  Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
+  passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
+  yes, run
+  `rig seat set-runtime <canonicalSessionName> --runtime claude-code --reason "<model> isn't available to this Codex account"`
+  (`--dry-run` first). If it isn't, or you can't tell, say so and offer their choices: sign in to Claude Code, or give the
+  seat a model their account can run with `rig seat set-model`, then start it again with
+  `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. Either way the operator starts a
+  new conversation without your handoff, so send it again: the goal, folder, branch, constraints and permission choices.
 - **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.
@@ -167,7 +247,8 @@ person needs in their project or home folder and name that path.
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>`. A permission prompt is the person's to answer: show it to them, with any
-  others waiting, one line each (seat, exact action, the choices offered). Before sending their choice, capture that
+  others waiting, one line each (seat, exact action, the choices offered). For a commit, also say whether the team's
+  review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
   (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
@@ -175,11 +256,14 @@ person needs in their project or home folder and name that path.
   whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
   not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
   their project doesn't show what the action touches. Their instruction changes no permission setting.
+  Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
+  team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
+  that keep asking, for their project only (`applying-a-permission-policy`); tell it what they chose.
   Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
-- **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
-  `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
-  `rig capture <seat>@<rig>`.
+- **Replies:** in a plain shell, other agents can't type into this session. Their questions and work for you arrive
+  at your return address ("If the person stays with you" above). `rig capture <seat>@<rig>` shows what an agent is
+  doing; it isn't how answers reach you.
 
 ### Codex: one offer, once, after OpenRig starts
 
@@ -218,21 +302,29 @@ offer, so the person sees the real file, not a placeholder:
 
 Follow these steps by default. Only when the person declined the Codex offer above and explicitly chose the operator route does the operator own this follow-through.
 
-- **Find the team's task:** the operator gives the goal to the team's lead as a queue task: `dev-build@starter`, or
-  `orch-lead` in `workshop` and `factory` (for starter and factory, `rig specs preview <name> --kind rig` says what
-  each seat does; for a running team, `rig ps --nodes --rig <rig>`). Find it with
-  `rig queue list --destination <seat>@<rig> -a`.
+- **Find the team's task:** if you gave the operator a task, start from it: when the operator hands it to the team's
+  lead, `rig queue show <id> --json` lists the next item under `successors`. Otherwise, or if the operator started a
+  new task for the lead (`dev-build@starter`, or `orch-lead` in `workshop` and `factory`; for starter and factory,
+  `rig specs preview <name> --kind rig` says what each seat does; for a running team, `rig ps --nodes --rig <rig>`),
+  find it with `rig queue list --destination <seat>@<rig> -a`.
 - **Follow it to the result:** a task that changed hands isn't finished. `rig queue show <id> --full` names the seat it
   went to, and that seat's next task is the one whose `handedOffFrom` is that ID
-  (`rig queue list --destination <seat>@<rig> -a -o json`). Follow each handoff until an agent reports the result, and
-  use `rig capture <seat>@<rig>` to see what it's doing. Then read what it produced and tell the person what the team
-  actually did (the branch, commit, review or PR text), not just that you sent it.
+  (`rig queue list --destination <seat>@<rig> -a -o json`). Follow each handoff until an agent reports the result,
+  and report what the record says; `rig capture <seat>@<rig>` only shows what an agent is doing right now. Then read
+  what it produced and tell the person what the team actually did (the branch, commit, review or PR text), not just
+  that you sent it.
 - **Give the team more work:** write the goal to a file: what to change, in which repository and branch, what done
-  looks like, and that the result comes back to you (the branch or commit, the review, any PR text). Then
-  `rig queue create --source <your name> --destination <seat>@<rig> --summary "<the goal in a sentence>" --body-file <file>`, and tell that agent with
-  `rig send <seat>@<rig> "task <id> is yours"`. A message informs, and a queue task is the work someone owns.
-  `--source` names you when this session hasn't joined the team.
+  looks like, and that the result comes back to you (the branch or commit, the review, any PR text), ending with the
+  reply paragraph above. Then
+  `OPENRIG_SESSION_NAME=<address> rig queue create --destination <seat>@<rig> --summary "<the goal in a sentence>" --body-file <file> --verify`.
+  A message informs, and a queue task is the work someone owns. Read its wake outcome as above before you send
+  anything else.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
+- **Coming back later:** in a new session, use the same return address and the task IDs you gave the person. Read
+  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above;
+  `OPENRIG_SESSION_NAME=<address> rig queue list --mine -a` lists everything this address sent or owns, finished work
+  included (without `-a` it shows only open items). Follow that work rather than creating it again.
+  Adding OpenRig's MCP plugin to this app later starts a new session; it doesn't carry this conversation over.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
 

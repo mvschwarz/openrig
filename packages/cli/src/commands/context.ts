@@ -42,6 +42,8 @@ import {
 import { realDeps } from "./daemon.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { resolveRecapSeat, type RigSeat } from "../recap-seat.js";
+import { parseSessionName } from "../session-name.js";
 import type { StatusDeps } from "./status.js";
 import { reconstructionCommand } from "./context-reconstruction.js";
 
@@ -424,6 +426,28 @@ Examples:
     return deps.clientFactory(getDaemonUrl(status));
   }
 
+  /** A rig's seats as the daemon records them, for mapping a recap's --seat by identity. Never starts the daemon. */
+  async function rigSeats(rig: string): Promise<RigSeat[] | { unavailable: string }> {
+    try {
+      const client = await getClient();
+      const rigs = await client.get<Array<{ rigId: string; name: string }>>("/api/ps");
+      if (rigs.status !== 200 || !Array.isArray(rigs.data)) return { unavailable: `the daemon's rig list returned HTTP ${rigs.status}` };
+      const ids = rigs.data.filter((entry) => entry.name === rig).map((entry) => entry.rigId);
+      if (ids.length !== 1) return { unavailable: ids.length ? `${ids.length} rigs are named ${rig}` : `the daemon has no rig named ${rig}` };
+      const nodes = await client.get<Array<{ logicalId: string; podNamespace?: string | null; canonicalSessionName: string | null }>>(
+        `/api/rigs/${encodeURIComponent(ids[0]!)}/nodes`);
+      if (nodes.status !== 200 || !Array.isArray(nodes.data)) return { unavailable: `the daemon's seat list returned HTTP ${nodes.status}` };
+      return nodes.data.flatMap((node) => {
+        const session = node.canonicalSessionName ? parseSessionName(node.canonicalSessionName) : undefined;
+        if (session?.kind !== "canonical") return [];
+        const pod = node.podNamespace;
+        return [{ logicalId: node.logicalId, member: pod && node.logicalId.startsWith(`${pod}.`) ? node.logicalId.slice(pod.length + 1) : node.logicalId, folder: session.member }];
+      });
+    } catch (err) {
+      return { unavailable: (err as Error).message };
+    }
+  }
+
   // OPR.0.5.3.6 — the productized chain-file trace. Daemon-independent by
   // design: the walk is a config read + filesystem reads, so it works on a
   // box whose daemon is down (orientation is exactly when that happens).
@@ -786,14 +810,21 @@ Examples:
   // tree (a sandboxed seat) hands the same recap to the daemon, which owns it.
   cmd.command("recap-write")
     .description("Write this seat's authored RECAP (decisions-with-rationale) at the handover boundary; supersedes the previous recap into the seat's chain")
-    .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
-    .requiredOption("--seat <seat>", "Seat id (the seats/<seat> altitude)")
+    .option("--rig <rig>", "Rig name (the rigs/<rig> altitude; default: this seat's rig, from OPENRIG_SESSION_NAME)")
+    .option("--seat <seat>", "The seat's folder: the part of its session name before @, e.g. dev-qa (default: this seat). A seat's recorded logical id or member id maps to its folder when the daemon can check it")
     .requiredOption("--file <path>", "Markdown file containing the recap content")
-    .action(async (opts: { rig: string; seat: string; file: string }) => {
+    .action(async (opts: { rig?: string; seat?: string; file: string }) => {
       try {
         const { writeSeatRecapAt, validateRecapContract } = await import("@openrig/daemon/seat-recap-store");
         const content = readFileSync(opts.file, "utf-8");
         const topologyRoot = String(new ConfigStore().resolveWithSource("topology.root").value);
+        const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+        const own = sessionName ? parseSessionName(sessionName) : undefined;
+        const rigName = opts.rig ?? (own?.kind === "canonical" ? own.rig : undefined);
+        // A named seat is checked against the rig's recorded seats when the daemon answers; a failed check doesn't stop the write.
+        const seats = opts.seat !== undefined && rigName ? await rigSeats(rigName) : undefined;
+        const target = resolveRecapSeat({ rig: opts.rig, seat: opts.seat, topologyRoot, sessionName, seats });
+        if ("error" in target) { console.error(target.error); process.exitCode = 1; return; }
         for (const f of validateRecapContract(content)) {
           console.error(f.kind === "no-decisions-section"
             ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."
@@ -801,7 +832,7 @@ Examples:
         }
         let written: { path: string; superseded: number; daemonUrl?: string };
         try {
-          written = writeSeatRecapAt({ topologyRoot, rig: opts.rig, seat: opts.seat, content });
+          written = writeSeatRecapAt({ topologyRoot, rig: target.rig, seat: target.seat, content });
         } catch (err) {
           if (!WRITE_REFUSED_CODES.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
           // The daemon owns the topology tree (it primes RECAP.md at the next rebuild): it writes the same recap through
@@ -809,12 +840,13 @@ Examples:
           // that can't be reached is reported with its reason.
           console.error(`Note: this process can't write the topology tree (${(err as Error).message}), so the daemon writes the recap instead.`);
           const client = await getClient();
-          const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: opts.rig, seat: opts.seat, content });
+          const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: target.rig, seat: target.seat, content });
           if (res.status !== 200 || typeof res.data.path !== "string") throw new Error(res.data.message ?? `Daemon returned HTTP ${res.status}`);
           written = { path: res.data.path, superseded: res.data.superseded ?? 0, daemonUrl: client.baseUrl };
         }
         console.log(`Recap written: ${written.path}${written.superseded > 0 ? ` (${written.superseded} superseded predecessor${written.superseded === 1 ? "" : "s"} retained)` : ""}`
           + (written.daemonUrl ? `, by the daemon at ${written.daemonUrl}` : ""));
+        for (const note of target.notes) console.error(`Note: ${note}`);
       } catch (err) {
         // A daemon write that timed out says its outcome is unknown, so it's checked before a retry supersedes it again.
         if (!renderCaughtTransportError(err)) console.error((err as Error).message);

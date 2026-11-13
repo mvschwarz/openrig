@@ -1845,8 +1845,9 @@ export class WorkflowRuntime {
   /** List instances (optionally filtered) with the deadline verdict attached. */
   listInstancesWithDeadline(
     status?: "active" | "waiting" | "completed" | "failed" | "aborted",
+    filters?: Omit<Parameters<WorkflowInstanceStore["listFiltered"]>[0], "status">,
   ): WorkflowInstanceWithInspection[] {
-    const rows = status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
+    const rows = filters ? this.instanceStore.listFiltered({ ...filters, status }) : status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
     return rows.map((row) => {
       const inspected = this.inspect(row.instanceId);
       return {

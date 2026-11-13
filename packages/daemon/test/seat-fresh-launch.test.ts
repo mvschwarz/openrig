@@ -16,6 +16,7 @@ import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -24,6 +25,7 @@ import { deriveOriented } from "../src/domain/startup-proof.js";
 import { deriveRehydrateSessionIdByNode } from "../src/domain/active-occupant.js";
 import { readFreshOccupantRelations } from "../src/domain/fresh-occupant-relation.js";
 import type { NativeProcessLister, NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import type { ProcessTableRow } from "../src/domain/process-table.js";
 
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
@@ -59,6 +61,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
   let listProcesses: NativeProcessLister;
+  let readProcesses: () => Promise<ProcessTableRow[]>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -131,6 +134,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
+    readProcesses = async () => [];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,
@@ -139,6 +143,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       listProcesses: () => listProcesses(),
+      readProcesses: () => readProcesses(),
       nodeLauncher,
       startupOrchestrator,
       runtimeAdapters,
@@ -493,14 +498,15 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.startServer).not.toHaveBeenCalled();
   });
 
-  it("preserves the adopted seat name and names the release and rig down routes in plans and execution", async () => {
+  it("preserves the adopted seat name and names the release route in plans and execution", async () => {
     const seat = seedSeat({ adopted: true });
     const expected = {
       code: "claimed_session",
       message: `Seat "${seat.sessionName}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-      // B5: rig unclaim releases it (the process keeps running); rig down ends it with its rig.
-      guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process yourself, then launch fresh. "
-        + "Or end it with rig down 'fresh-rig' (this rig has one seat, so it stops only this session; rig up 'fresh-rig' --existing brings the rig back).",
+      // B5: rig unclaim releases it (the process keeps running); rig down leaves a session OpenRig didn't start.
+      guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process and the underlying tmux session, "
+        + "including any remaining shell, then launch fresh. Closing only its viewing window leaves the tmux session running. "
+        + "rig down 'fresh-rig' leaves a session OpenRig didn't start running.",
     };
     const before = db.serialize();
     expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true }))
@@ -510,6 +516,17 @@ describe("SeatLifecycleService.launchFresh", () => {
       .toMatchObject({ ok: false, ...expected });
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("names only the release route for an adopted seat joined with rig attach as an external CLI, since rig down leaves it running", async () => {
+    const seat = seedSeat({ adopted: true });
+    sessionRegistry.updateBinding(seat.node.id, { attachmentType: "external_cli", externalSessionName: seat.sessionName });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fixture" });
+    expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.guidance).toContain("rig unclaim 'dev-impl@fresh-rig'");
+    expect(result.guidance).not.toContain("rig down");
+    expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
   it("keeps stop effects unknown when pane identity cannot be observed", async () => {
@@ -675,6 +692,11 @@ describe("SeatLifecycleService.launchFresh", () => {
     alive.add(seat.sessionName);
     const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, stop: true, reason: "x" });
     expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+    // A session someone released with rig unclaim and left open is the usual cause: say how to clear it.
+    expect(result).toMatchObject({
+      guidance: "If you released this session with rig unclaim, end that underlying tmux session, including any remaining shell, "
+        + "then launch again. Closing only its viewing window doesn't end the session.",
+    });
     expect(killed).toEqual([]);
     expect(alive.has(seat.sessionName)).toBe(true);
   });
@@ -824,6 +846,105 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(server).toEqual({ up: true, starts: 1 });
       expect(tmux.createSession).toHaveBeenCalledTimes(1);
       expect(alive.has(seat.sessionName)).toBe(true);
+    });
+
+    // `rig unclaim` releases an adopted session (its row detached, its binding cleared) and leaves its process running;
+    // the person then ends it and its tmux session. When that was the server's last session, tmux exits with it.
+    const releaseAdopted = (seat: ReturnType<typeof seedSeat>) => {
+      sessionRegistry.markDetached(seat.session!.id);
+      sessionRegistry.clearBinding(seat.node.id);
+    };
+
+    it("reopens an empty tmux server after rig unclaim released the seat's last session", async () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      releaseAdopted(seat);
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
+    });
+
+    it("still refuses a released seat's fresh launch when its session is live behind a transport blip", async () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      releaseAdopted(seat);
+      // The released process is still running in its session; only the first probe fails.
+      vi.mocked(tmux.probeSession).mockResolvedValueOnce({ state: "transport_unavailable", cause: "probe blip" });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+      expect(server.starts).toBe(0);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(alive.has(seat.sessionName)).toBe(true);
+    });
+
+    // Unclaim doesn't end the process, and tmux can lose its socket while its server keeps running: the probe then
+    // can't reach the server, and a server started at that path is a new, empty one. So the model keeps the two apart:
+    // `alive` and `server.up` are what the socket answers, and the process table is what still runs.
+    const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const lstart = (d: Date) => `${DAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} `
+      + `${[d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":")} ${d.getFullYear()}`;
+    const processRow = (pid: number, ppid: number, startedAt: Date, command: string): ProcessTableRow =>
+      ({ pid, ppid, pgid: pid, tpgid: -1, executableName: command.split(" ")[0]!, startedAt: lstart(startedAt), command });
+    const observed = new Date(Date.now() - 60_000);
+    const releasedWithLostSocket = async () => {
+      const seat = seedSeat({ adopted: true });
+      const server = modelServerLifetime();
+      // Recorded while the adopted seat ran; then released, and the daemon's identity sweep (every 5 s) runs.
+      new SeatIdentityStore(db).upsert({
+        nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%old", observedPid: 5151, observedPanePid: 5150, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: seat.sessionName, observedAt: observed.toISOString(),
+      });
+      releaseAdopted(seat);
+      const blindPoll = { listSessions: async () => [] } as unknown as ConstructorParameters<typeof SeatIdentityReconciler>[0]["tmux"];
+      await new SeatIdentityReconciler({ db, tmux: blindPoll }).reconcileAll();
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+      return { seat, server };
+    };
+
+    it("keeps refusing a released seat's fresh launch while its recorded process still runs behind a lost socket", async () => {
+      const { seat } = await releasedWithLostSocket();
+      const before = new Date(observed.getTime() - 10 * 60_000);
+      readProcesses = async () => [processRow(5150, 900, before, "zsh"), processRow(900, 1, before, "tmux new-session")];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("last ran as process 5150, which is still running") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it.each([
+      { name: "its recorded process has ended", rows: async () => [] as ProcessTableRow[] },
+      { name: "its pid now belongs to a later process",
+        rows: async () => [processRow(5150, 1, new Date(observed.getTime() + 30_000), "vim")] },
+      { name: "the process table can't be read", rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
+    ])("reopens the server for a released seat when $name", async ({ rows }) => {
+      const { seat, server } = await releasedWithLostSocket();
+      readProcesses = rows;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
     });
 
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
@@ -1118,6 +1239,26 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(delivered.every((f) => f.required)).toBe(true);
     const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ absolutePath: string }>;
     expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
+  });
+
+  // A selection saved before the context-entry floor: the fresh launch delivers the floor beside openrig-start.md, from the
+  // running install, and records what it delivered, so the floor is saved once. Checked at the adapter, not the plan.
+  it("a fresh launch from a selection saved before the context-entry floor delivers it and saves it once", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldAssets = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
+    const running = path.resolve(import.meta.dirname, "../assets");
+    const stored = [{ path: "openrig-start.md", absolutePath: `${oldAssets}/guidance/openrig-start.md`, ownerRoot: oldAssets,
+      deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; deliveryHint: string; appliesOn: string[] }> = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...(files as typeof delivered)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "context-entry floor" });
+    expect(result.ok).toBe(true);
+    expect(delivered.map((f) => f.path)).toEqual(["openrig-start.md", "openrig-context-entry.md"]);
+    expect(delivered[1]).toMatchObject({ absolutePath: `${running}/guidance/openrig-context-entry.md`, ownerRoot: running,
+      required: false, deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"] });
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ path: string }>;
+    expect(persisted.filter((f) => f.path === "openrig-context-entry.md")).toHaveLength(1);
   });
 
   // #261 extension: shipped-spec projection resources follow the running install; a plugin stored

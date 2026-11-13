@@ -1135,6 +1135,23 @@ describe("RestoreOrchestrator", () => {
     ])).toBe("fully_restored");
   });
 
+  it("a full restore launches a seat whose stored kind is neither tmux nor external CLI on OpenRig's own path, as it does today", async () => {
+    const rig = rigRepo.createRig("r99");
+    const worker = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const old = sessionRegistry.registerSession(worker.id, "r99-worker");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateBinding(worker.id, { tmuxSession: "r99-worker" });
+    db.prepare("UPDATE bindings SET attachment_type = 'herdr' WHERE node_id = ?").run(worker.id);
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => false) } as unknown as TmuxAdapter;
+
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["worker"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "worker", status: "fresh-primed" })]);
+  });
+
   it("a missing startup file doesn't hold a seat joined with rig attach as an external CLI, or the restore, since nothing launches it", async () => {
     const rig = rigRepo.createRig("r99");
     const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
@@ -2806,6 +2823,113 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) expect(result.result.nodes.map((node) => node.status)).toEqual(["attention_required", "attention_required", "attention_required"]);
     expect(seen).toHaveLength(3);
     for (const opts of seen) expect(Object.keys(opts).sort()).toEqual(["name", "resumeToken", "resumeType"]);
+  });
+
+  // A seat that only ever resumed or was attached has a resume token but no saved startup context. A resume replays none
+  // anyway, so restore resumes it with an empty plan and names the gap, rather than stopping it.
+  function seatWithoutStartupContext(runtime: "claude-code" | "codex", token: string | null, savedEmptyContext = false) {
+    const rigName = savedEmptyContext ? "saved-rig" : "test-rig";
+    const rig = rigRepo.createRig(rigName);
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run(`pod-${rigName}`, rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.moved", { runtime, podId: `pod-${rigName}` });
+    const session = sessionRegistry.registerSession(node.id, `dev-moved@${rigName}`);
+    sessionRegistry.updateStatus(session.id, "running");
+    if (token) sessionRegistry.updateResumeToken(session.id, runtime === "codex" ? "codex_id" : "claude_id", token);
+    if (savedEmptyContext) {
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", "[]", "[]", runtime);
+    }
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const adapter = {
+      runtime,
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async (_binding: unknown, opts: { resumeToken?: string }) => ({
+        ok: true as const, resumeToken: opts.resumeToken ?? "fresh-token", resumeType: runtime === "codex" ? "codex_id" : "claude_id" })),
+    };
+    return { node, snap, adapter };
+  }
+
+  it.each(["claude-code", "codex"] as const)("a pod-aware %s seat with a resume token and no saved startup context resumes with an empty plan and a named gap", async (runtime) => {
+    const token = runtime === "codex" ? "019a0000-0000-7000-8000-00000000c0de" : "00000000-0000-4000-8000-0000000c1a0d";
+    const { node, snap, adapter } = seatWithoutStartupContext(runtime, token);
+    const orch = createOrchestrator({ listProcesses: nativeLineage(runtime, token) });
+    const result = await orch.restore(snap.id, { adapters: { [runtime]: adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
+    const node0 = result.result.nodes[0]!;
+    expect(node0.error ?? "").not.toContain("no startup context");
+    // It ends where the same seat with a saved (empty) startup context ends: the resume is the same, only the gap differs.
+    const saved = seatWithoutStartupContext(runtime, token, true);
+    const withContext = await createOrchestrator({ listProcesses: nativeLineage(runtime, token) })
+      .restore(saved.snap.id, { adapters: { [runtime]: saved.adapter } });
+    expect(withContext.ok).toBe(true);
+    if (!withContext.ok) return;
+    const savedNode = withContext.result.nodes[0]!;
+    expect({ status: node0.status, error: node0.error?.replaceAll("test-rig", "saved-rig") }).toEqual({ status: savedNode.status, error: savedNode.error });
+    expect(savedNode.restoreGaps).toBeUndefined();
+    if (runtime === "claude-code") expect(node0.status).toBe("resumed");
+    expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."]);
+    expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
+    // Nothing is replayed or projected, and no startup context is written for it.
+    for (const [plan] of adapter.project.mock.calls as unknown as Array<[{ entries: unknown[] }]>) expect(plan.entries).toEqual([]);
+    for (const [files] of adapter.deliverStartup.mock.calls as unknown as Array<[unknown[]]>) expect(files).toEqual([]);
+    expect(db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(node.id)).toBeUndefined();
+  });
+
+  // The gap is named before the resume's outcome is known, so it never claims one: a resume that finds no conversation,
+  // or fails, keeps the same attempt-neutral words and its own status.
+  it.each([
+    ["finds no conversation", { ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const }, "awaiting-decision"],
+    ["fails to start", { ok: false as const, error: "Claude resume failed: the harness exited" }, "failed"],
+  ] as const)("with no saved startup context, a resume that %s keeps its status and claims no resume", async (_label, launch, status) => {
+    const token = "00000000-0000-4000-8000-0000000ba5e1";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    adapter.launchHarness.mockResolvedValueOnce(launch as never);
+    const result = await createOrchestrator({ listProcesses: nativeLineage("claude-code", token) }).restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node0 = result.result.nodes[0]!;
+    expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
+    expect(node0.status).toBe(status);
+    // A fresh seat launch refuses without a saved startup context, so the rollback offers none.
+    expect(node0.error ?? "").not.toContain("--fresh");
+    if (status === "awaiting-decision") expect(node0.error).toContain("This seat has no saved startup context, and no command records one for it yet, so no fresh start is offered here. Restore the original session manually.");
+    expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."]);
+    expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
+    expect([...(node0.restoreGaps ?? []), ...result.result.warnings].filter((line) => line.includes("startup context"))
+      .some((line) => /\bresumed\b/.test(line))).toBe(false);
+  });
+
+  it("with no saved startup context, a seat with no resume token still waits for a decision, and starts no harness", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", null);
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "awaiting-decision", error: expect.stringContaining("no resume token was captured") });
+    expect(result.result.nodes[0]!.restoreGaps).toBeUndefined();
+    expect(adapter.launchHarness).not.toHaveBeenCalled();
+  });
+
+  it("with no saved startup context, a deliberate fresh start isn't turned into a resume: it stops at the gate as before", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", error: "Harness not started: no startup context for dev.moved." });
+    expect(result.result.nodes[0]!.restoreGaps).toBeUndefined();
+    expect(adapter.launchHarness).not.toHaveBeenCalled();
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
@@ -5800,6 +5924,25 @@ describe("RestoreOrchestrator", () => {
       expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
     });
 
+    // This saved selection predates the context-entry floor: the replay delivers it right after openrig-start.md, from the
+    // running install and not required. The fresh launch then records what it delivered, so the floor is saved once.
+    it("fresh replay of a selection saved before the context-entry floor delivers the floor beside openrig-start.md", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; appliesOn: string[]; deliveryHint: string }>);
+      const paths = delivered.map((f) => f.path);
+      expect(paths[paths.indexOf("openrig-start.md") + 1]).toBe("openrig-context-entry.md");
+      expect(delivered.filter((f) => f.path === "openrig-context-entry.md")).toEqual([{
+        path: "openrig-context-entry.md", absolutePath: `${RUNNING_ASSETS}/guidance/openrig-context-entry.md`, ownerRoot: RUNNING_ASSETS,
+        required: false, appliesOn: ["fresh_start", "restore"], deliveryHint: "guidance_merge",
+      }]);
+      const saved = db.prepare("SELECT resolved_files_json FROM node_startup_context").get() as { resolved_files_json: string };
+      expect((JSON.parse(saved.resolved_files_json) as Array<{ path: string }>).filter((f) => f.path === "openrig-context-entry.md")).toHaveLength(1);
+    });
+
     it("re-anchors even while the old install still exists (current shipped guidance is selected)", async () => {
       const { snap, deliverStartup, adapter } = seedPodAware(false);
       const result = await createOrchestrator().restore(snap.id, {
@@ -5896,7 +6039,49 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each([
+    "Run-bound reporting unavailable; using existing unbound install-token reporting.",
+    "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed.",
+  ])("surfaces direct Pi restore limitation warnings without repeating resume: %s", async warning => {
+    const rig = rigRepo.createRig("pi-warning");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi", cwd: "/repo/pi" });
+    const session = sessionRegistry.registerSession(node.id, "r99-pi-warning");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("pi_session_file", "/tmp/pi-warning.jsonl", "resume_if_possible", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const resume = vi.fn(async (_session: string) => ({ ok: true as const, warnings: [warning] }));
+    const orch = createOrchestrator({ pi: {
+      canResume: vi.fn((type: string | null) => type === "pi_session_file"), resume,
+    } as unknown as PiResumeAdapter });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(result.result.warnings).toContain(`${resume.mock.calls[0]![0]}: ${warning}`);
+  });
+
   describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
+    it.each(["replace", "clear"])("legacy Codex restore reads the live filesystem selection after snapshot (%s)", async change => {
+      const rig = rigRepo.createRig("fs-restore");
+      const oldPolicy = { approval: "never", filesystem: { ":minimal": "read", "/old": "write" }, network_access: false } satisfies import("../src/domain/codex-member-permissions.js").CodexFilesystemPermissions;
+      const currentPolicy = { approval: "never", filesystem: { ":minimal": "read", "/current": "write", "/current/private": "deny" }, network_access: false };
+      const node = rigRepo.addNode(rig.id, "codex-worker", { runtime: "codex", cwd: "/repo/codex", codexPermissions: oldPolicy });
+      const session = sessionRegistry.registerSession(node.id, "dev-worker@fs-restore");
+      db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'fs-thread', restore_policy = 'resume_if_possible' WHERE id = ?").run(session.id);
+      sessionRegistry.updateStatus(session.id, "running");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+      db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(change === "replace" ? JSON.stringify(currentPolicy) : null, node.id);
+      sessionRegistry.updateStatus(session.id, "exited");
+      const codexResume = mockCodexResume({ ok: true as const });
+      expect(await createOrchestrator({ codex: codexResume, listProcesses: nativeLineage("codex", "fs-thread") }).restore(snap.id))
+        .toMatchObject({ ok: true });
+      const call = vi.mocked(codexResume.resume).mock.calls[0]!;
+      expect(call[12]).toEqual(change === "replace" ? currentPolicy : undefined);
+    });
+
     it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
       const rig = rigRepo.createRig("r99");
       const piNode = rigRepo.addNode(rig.id, "pi-worker", {
@@ -5931,7 +6116,17 @@ describe("RestoreOrchestrator", () => {
 
       const piResume = {
         canResume: vi.fn((type: string | null, token: string | null) => type === "pi_session_file" && !!token),
-        resume: vi.fn(async () => ({ ok: true as const })),
+        resume: vi.fn(async (session: string) => {
+          // The production Pi grant resolver must see the newly committed restore row, not the exited snapshot row.
+          const owners = db.prepare(`SELECT b.node_id AS nodeId, s.id AS sessionId, s.status FROM bindings b JOIN nodes n ON n.id=b.node_id
+            JOIN sessions s ON s.node_id=n.id AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
+            WHERE b.tmux_session=? AND s.session_name=? AND n.runtime='pi' AND s.status NOT IN ('superseded','detached','exited')`)
+            .all(session, session) as Array<{ nodeId: string; sessionId: string; status: string }>;
+          expect(owners).toHaveLength(1);
+          expect(owners[0]).toMatchObject({ nodeId: piNode.id, status: "running" });
+          expect(owners[0]!.sessionId).not.toBe(piSess.id);
+          return { ok: true as const };
+        }),
       } as unknown as PiResumeAdapter;
       const codexResume = mockCodexResume({ ok: true as const });
 

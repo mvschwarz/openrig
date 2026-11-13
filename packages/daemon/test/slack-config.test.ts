@@ -14,11 +14,21 @@ describe("Slice-11 config — first-class + honest unconfigured (item 5)", () =>
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  it("keeps human-row previews off by default and accepts an explicit choice", () => {
+    expect(staticReadiness(loadConfig(home), true, true).find(r => r.label === "human-row previews")?.detail).toBe("off");
+    saveConfig({ ...DEFAULT_CONFIG, unfurl: "on" }, home);
+    expect(loadConfig(home).unfurl).toBe("on");
+    expect(staticReadiness(loadConfig(home), true, true).find(r => r.label === "human-row previews")?.detail).toBe("on");
+    expect(() => saveConfig({ ...DEFAULT_CONFIG, unfurl: "bad" } as never, home)).toThrow(/unfurl must be on or off/);
+    expect(loadConfig(home).unfurl).toBe("on");
+  });
+
   it("loadConfig returns defaults when absent (no throw); inbound-dest first-class default", () => {
     expect(configFileExists(home)).toBe(false);
     const cfg = loadConfig(home);
     expect(cfg.enabled).toBe(false);
-    expect(cfg.inboundDestination).toBe("operator-agent@kernel");
+    // Unchosen: the host's default receiving agent, resolved when the connector starts.
+    expect(cfg.inboundDestination).toBe("default-receiver");
     expect(cfg).not.toHaveProperty("alertTag");
   });
 

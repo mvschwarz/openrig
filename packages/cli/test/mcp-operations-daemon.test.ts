@@ -96,7 +96,8 @@ describe("MCP operation table against the daemon", () => {
       external: { objects: { question: ["read", "answer"] }, person: "ada" } } });
     const personTools = (await asPerson.listTools()).tools;
     expect(personTools.map((tool) => tool.name).sort()).toEqual(MCP_OPERATIONS.filter((op) => op.access === "person").map((op) => op.tool).sort());
-    const hints = Object.fromEntries([...tools, ...personTools].map((tool) => [tool.name, tool.annotations]));
+    // A title is a display name, not a hint.
+    const hints = Object.fromEntries([...tools, ...personTools].map((tool) => [tool.name, { ...tool.annotations, title: undefined }]));
     for (const op of MCP_OPERATIONS) {
       expect(hints[op.tool], op.tool).toEqual(HINTS[op.effect]);
       // Every tool says who an authenticated HTTP caller must be to be offered it.

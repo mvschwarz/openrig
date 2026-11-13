@@ -30,7 +30,8 @@ import { buildLedgerExplorer } from "./crash-cart/ledger-explorer.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
-import { hostLabel } from "./topology/host-label.js";
+import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
+import { connectedAssistantLines } from "./connected-assistants.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
@@ -48,6 +49,8 @@ interface ContentLine {
   zones?: Array<{ start: number; end: number; action: Action }>;
   /** slice-17: token segments for canvas-rendered rows (graph view) */
   segs?: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>;
+  /** Row of a labelled group. The first visible row of each group shows `text` when set, so a scrolled group keeps its label. */
+  sticky?: { group: string; text?: string };
 }
 
 function pad(text: string | number | null | undefined, width: number): string {
@@ -94,17 +97,24 @@ function agentColumns(contentWidth: number): AgentColumn[] {
   ];
 }
 
-function instanceAgentColumns(contentWidth: number): AgentColumn[] {
-  if (contentWidth >= 110) return [
-    ["rig", "RIG", 13, "left"], ["pod", "POD", 8, "left"], ["seat", "SEAT", 14, "left"],
-    ["runtime", "RT", 3, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 10, "left"],
-    ["queue", "Q", 2, "right"], ["work", "WORK", 12, "left"], ["now", "NOW", Math.max(18, contentWidth - 78), "left"],
-  ];
-  if (contentWidth >= 78) return [
-    ["rig", "RIG", 10, "left"], ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"],
-    ["runtime", "RT", 3, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"],
-    ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(8, contentWidth - 54), "left"],
-  ];
+/** RIG fits the longest rig name shown, between the tier's old width and its cap; NOW or WORK gives up the difference. */
+function instanceAgentColumns(contentWidth: number, longestRigName = 0): AgentColumn[] {
+  if (contentWidth >= 110) {
+    const rig = Math.min(Math.max(longestRigName, 13), 24);
+    return [
+      ["rig", "RIG", rig, "left"], ["pod", "POD", 8, "left"], ["seat", "SEAT", 14, "left"],
+      ["runtime", "RT", 3, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 10, "left"],
+      ["queue", "Q", 2, "right"], ["work", "WORK", 12, "left"], ["now", "NOW", Math.max(18, contentWidth - 78 - (rig - 13)), "left"],
+    ];
+  }
+  if (contentWidth >= 78) {
+    const rig = Math.min(Math.max(longestRigName, 10), 16);
+    return [
+      ["rig", "RIG", rig, "left"], ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"],
+      ["runtime", "RT", 3, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"],
+      ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(8, contentWidth - 54 - (rig - 10)), "left"],
+    ];
+  }
   const fixed = 8 + 5 + 11 + 2 + 5 + 8 + 2 + 7;
   return [
     ["rig", "RIG", 8, "left"], ["pod", "POD", 5, "left"], ["seat", "SEAT", 11, "left"],
@@ -709,7 +719,7 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     : `  (no rigs served by ${host.name})`;
 }
 
-/** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG repeats on every row so scrolled rows keep it. */
+/** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG shows on a rig's first visible row so scrolled rows keep it. */
 function instanceContentLines(
   state: ViewState,
   snap: FleetSnapshot,
@@ -788,7 +798,7 @@ function instanceContentLines(
     ...lines,
     healthSummaryLine(snap, scope, contentWidth),
     ...wrapDetailLines([
-      { text: `host ${host.name} · ${host.reachable ? "reachable" : "not reachable"}` },
+      { text: `host ${host.name} · ${hostReachabilityLabel(host)}` },
       { text: `Its seats aren't read in this view: rig ps --host ${host.name} --nodes -A` },
     ], contentWidth),
     { text: "" },
@@ -801,7 +811,12 @@ function instanceContentLines(
   lines.push(healthSummaryLine(snap, scope, contentWidth));
   lines.push(...queueSampleLines(snap, contentWidth));
   lines.push({ text: state.filter ? `/ filter instance rows: ${state.filter} · / replace · esc clear` : "/ filter instance rows…" });
-  const columns = instanceAgentColumns(contentWidth);
+  const shownRigs = host.rigs.map((rig) => ({
+    rig,
+    agents: rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
+      .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter)),
+  })).filter(({ rig, agents }) => !state.filter || agents.length > 0 || rig.name.includes(state.filter));
+  const columns = instanceAgentColumns(contentWidth, Math.max(0, ...shownRigs.map(({ rig }) => rig.name.length)));
   lines.push({ text: tableRow(columns, { rig: "RIG", pod: "POD", seat: "SEAT", runtime: "RT", context: "CTX", status: "STATE", queue: "Q", work: "WORK", now: "NOW" }) });
   lines.push({ text: "━".repeat(columnsWidth(columns)) });
   let seatCount = 0;
@@ -810,10 +825,7 @@ function instanceContentLines(
   let attentionUnknown = 0;
   let openCount = 0;
   let firstRig = true;
-  for (const rig of host.rigs) {
-    const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
-      .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
-    if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
+  for (const { rig, agents } of shownRigs) {
     if (!firstRig) lines.push({ text: "─".repeat(columnsWidth(columns)) });
     firstRig = false;
     const rigAction: Action = { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } };
@@ -825,7 +837,7 @@ function instanceContentLines(
       continue;
     }
     let previousPod: string | null = null;
-    for (const { pod, agent } of agents) {
+    for (const [index, { pod, agent }] of agents.entries()) {
       const firstInPod = pod !== previousPod;
       if (firstInPod && previousPod != null) lines.push({ text: "┈".repeat(columnsWidth(columns)) });
       previousPod = pod;
@@ -836,23 +848,27 @@ function instanceContentLines(
       if (agent.needsAttention === true) attentionCount += 1;
       else if (agent.needsAttention == null) attentionUnknown += 1;
       openCount += queue.count;
+      const cells = {
+        rig: rig.name,
+        pod: firstInPod ? pod : "",
+        seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
+        runtime: runtimeShort(agent.runtime),
+        context: contextCompact(agent.context, contentWidth < 110),
+        status: stateCell.word,
+        queue: queueCount(snap, queue.count),
+        work: queue.work,
+        now: queue.now,
+      };
+      const named = tableRow(columns, cells);
       lines.push({
-        text: tableRow(columns, {
-          rig: rig.name,
-          pod: firstInPod ? pod : "",
-          seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
-          runtime: runtimeShort(agent.runtime),
-          context: contextCompact(agent.context, contentWidth < 110),
-          status: stateCell.word,
-          queue: queueCount(snap, queue.count),
-          work: queue.work,
-          now: queue.now,
-        }),
+        text: index === 0 ? named : tableRow(columns, { ...cells, rig: "" }),
+        sticky: { group: `rig:${rig.name}`, ...(index === 0 ? {} : { text: named }) },
         action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod } },
         zones: [{ start: 0, end: columns[0]![2], action: rigAction }],
       });
     }
   }
+  lines.push(...connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable, null, state.filter, contentWidth, state.timeZone));
   lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention${attentionUnknown ? ` · ${attentionUnknown} attention unknown` : ""} · ${openCount}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
   lines.push(...recentLines(snap, scope, contentWidth, false, state.timeZone));
   return lines;
@@ -942,7 +958,11 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
     ];
     if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}…` }];
-    if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} · refresh to Retry` }];
+    if (rig.inventoryUnavailable) return [
+      { text: `Inventory unavailable for ${rig.name} · refresh to Retry` },
+      ...(leaf?.kind === "pod" ? [] : connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable,
+        rig.name, state.filter, contentWidth, state.timeZone)),
+    ];
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all
@@ -1093,6 +1113,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         zones,
       });
     }
+    if (!podFilter) lines.push(...connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable, rig.name, state.filter, contentWidth, state.timeZone));
     lines.push({ text: "" });
     const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
     const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
@@ -1944,7 +1965,12 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   const contentRows = content.length > bodyRows ? Math.max(bodyRows - 1, 0) : bodyRows;
   const maxContentOffset = Math.max(content.length - contentRows, 0);
   const contentStart = Math.min(state.contentOffset, maxContentOffset);
-  const visibleContent = content.slice(contentStart, contentStart + contentRows);
+  const labelledGroups = new Set<string>();
+  const visibleContent = content.slice(contentStart, contentStart + contentRows).map((line) => {
+    if (!line.sticky || labelledGroups.has(line.sticky.group)) return line;
+    labelledGroups.add(line.sticky.group);
+    return line.sticky.text == null ? line : { ...line, text: line.sticky.text };
+  });
   if (content.length > bodyRows) {
     const scrollText = `scroll ↑/↓ · ${contentStart + 1}-${contentStart + visibleContent.length} of ${content.length}`;
     const up = scrollText.indexOf("↑");

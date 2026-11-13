@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import { ConfigStore, ENV_MAP, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
 import { initWorkspaceCommand } from "./config-init-workspace.js";
 
 function formatRow(key: string, value: unknown): string {
@@ -8,6 +8,40 @@ function formatRow(key: string, value: unknown): string {
 
 function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
   return store.resolveAllWithSource();
+}
+
+interface ContextPressureFallbackInfo {
+  effectiveValue: number;
+  explanation: string;
+}
+
+/**
+ * Returns fallback explanation and effective default value if setting/resetting a context-pressure
+ * key caused an inverted threshold pair to be rejected and fall back to 95/99 defaults in this shell.
+ * Returns null if no pair rejection occurred.
+ */
+function getContextPressureFallbackInfo(store: ConfigStore, key: string): ContextPressureFallbackInfo | null {
+  if (key !== "health.context_pressure.warning_percent" && key !== "health.context_pressure.critical_percent") {
+    return null;
+  }
+  const state = store.resolveContextPressurePolicyState();
+  if (!state.rejectedPair) {
+    return null;
+  }
+
+  const warnKey = "health.context_pressure.warning_percent" as const;
+  const critKey = "health.context_pressure.critical_percent" as const;
+  const envSources: string[] = [];
+  if (state.warning.source === "env") {
+    envSources.push(`${ENV_MAP[warnKey].primary}=${state.warning.value}`);
+  }
+  if (state.critical.source === "env") {
+    envSources.push(`${ENV_MAP[critKey].primary}=${state.critical.value}`);
+  }
+  const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
+  const explanation = `; inverted pair ${state.rejectedPair.warning}/${state.rejectedPair.critical}${envDetails} falls back to 95/99 defaults in this shell`;
+  const effectiveValue = key === warnKey ? 95 : 99;
+  return { effectiveValue, explanation };
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
@@ -76,9 +110,11 @@ Keys:
   health.context_pressure.*        context-pressure warning/critical percentages (defaults 95/99)
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
-  ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
+  ui.timezone            IANA timezone for the TUI's times, the Feed's included (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
+  ui.terminal.max_live_terminals
+                         cap on simultaneously-live web-client terminals (effective default 2)
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
@@ -101,7 +137,7 @@ Keys:
                            permission prompts still reach a person,
                            choice prompts follow this setting; unavailable human delivery stays a visible row;
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
-  retention.*            enabled, transitions_days, watchdog_days,
+  retention.*            enabled, transitions_days, watchdog_days, usage_samples_days,
                          watchdog_keep_per_job, batch_size
   retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
                          than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
@@ -136,6 +172,7 @@ Keys:
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
                          --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
+  output.rebuild_recaps  superseded recap paths previewed in rebuild briefings (default 3; 0 lists all)
   bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
   provider.selected      the providers chosen at rig setup --providers (claude, codex or claude,codex); kernel boot uses only these (default empty: every signed-in provider)
@@ -217,11 +254,16 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.set(key, value);
         const resolved = store.resolveWithSource(key);
-        console.log(resolved.source === "env"
-          ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
-          : resolved.source === "default"
-            ? `${key} file override saved; effective value ${resolved.value} (source: default)`
-            : `${key} = ${resolved.value}`);
+        const fallbackInfo = getContextPressureFallbackInfo(store, key);
+        if (fallbackInfo) {
+          console.log(`${key} file override saved; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation})`);
+        } else {
+          console.log(resolved.source === "env"
+            ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
+            : resolved.source === "default"
+              ? `${key} file override saved; effective value ${resolved.value} (source: default)`
+              : `${key} = ${resolved.value}`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(resolved.source === "env"
@@ -243,9 +285,14 @@ Precedence: CLI flag > environment variable > config file > default`)
         store.reset(key);
         if (key) {
           const resolved = store.resolveWithSource(key);
-          console.log(resolved.source === "env"
-            ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
-            : `${key} reset to default (${resolved.value}).`);
+          const fallbackInfo = getContextPressureFallbackInfo(store, key);
+          if (fallbackInfo) {
+            console.log(`${key} file override cleared; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation}).`);
+          } else {
+            console.log(resolved.source === "env"
+              ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
+              : `${key} reset to default (${resolved.value}).`);
+          }
         } else {
           let envKeys: string[] = [];
           try {

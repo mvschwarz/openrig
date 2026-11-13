@@ -193,6 +193,10 @@ edges:
 ### Starting one materialized seat
 
 `rig import ./team.yaml --materialize-only` records the team without starting its harnesses.
+For an automated preparation that may retry, save a UUID first and pass
+`--operation-id <uuid> --json`; keep that same UUID, spec text, source root and other options on a retry.
+Both receipts identify the original rig and nodes through `operation`; see
+[HTTP operation correlation](operation-correlation.md#cli-no-launch-preparation) for capability checks and incomplete receipts.
 For a seat that has never started, use its positional logical ID:
 
 ```bash
@@ -319,6 +323,90 @@ that Codex enforces them, so check the seat's actual behaviour before relying on
 envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after a downgrade
 the seat launches without it. The field is also supported on legacy flat Codex nodes; other
 runtimes reject it.
+
+For an explicit filesystem policy, use `filesystem` **instead of** `sandbox` and its
+workspace-write fields. This is the same per-seat selection and audited setter:
+
+```yaml
+cwd: /workspace/shared
+env:
+  CODEX_HOME: /accounts/codex       # existing account home; never copied
+codex_permissions:
+  approval: never
+  filesystem:
+    ":minimal": read
+    ":workspace_roots": write
+    "/workspace/shared/private": deny
+  network_access: false
+```
+
+The mapping accepts native `read`, `write` and `deny` values at absolute paths,
+`~/path`, or `:root`, `:minimal`, `:workspace_roots` (alias `:project_roots`),
+`:tmpdir` and `:slash_tmp`.
+It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
+of this option. Omitted network access becomes `false`. Include the read access
+your tools and installed Codex executable need; this custom profile adds no
+workspace, temporary, queue-state, seat-folder or Git-directory write grants of
+its own. Native Codex decides whether the host can enforce the supplied rules.
+Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
+approval is rejected before the selection is saved.
+
+OpenRig emits the policy as invocation-local `permissions.openrig-seat` and
+`default_permissions` overrides, with the selected approval. It writes no policy
+file, so two seats can share both `CODEX_HOME` and `cwd` without overwriting each
+other. Clearing the selection changes only that seat's record. Existing
+account-scoped `codex_config_fragment` resources and their root-key rejection
+stay unchanged.
+
+Before dispatch, OpenRig compares Codex's native configuration with the seat's
+selection. Positive evidence of access widening, a conflicting profile or
+approval choice, an excluding managed allowlist, or a missing/empty selected
+profile refuses launch. Compatible managed defaults and allowlists, harmless
+descriptions and provably narrower flat rules are accepted. Legacy sandbox
+settings are inert under the invocation's explicit permission-profile selection.
+Null fields are treated as absent, including unfamiliar optional fields.
+Managed `defaultPermissions` is a fallback, not a forced selection; the
+effective profile and managed allowlist determine whether the agent's choice holds.
+
+A timeout, reader failure, unfamiliar representation or unsupported managed
+requirement continues with the authored flags and reports `policy not verified:
+<reason>` in the launch observation and status. The policy is never dropped or
+swapped, and account/project settings are never edited to make the check pass.
+Absent selection or approval fields, unfamiliar approval strings or profile formats,
+and unclear overlap between native selectors and authored path rules are also unverified.
+An authored selector that may cover an extra grant is considered before a literal
+ancestor would reject that grant, except that an explicit non-root deny ancestor
+always takes precedence over possible selector coverage. A full-root deny, written
+as `/` or `:root`, is a default narrower grants may refine: possible authored
+selector coverage stays unverified, while a proven outside grant still refuses.
+Codex 0.167.2's `:minimal` adds system read defaults, not `/home` or `/Users`
+user-data coverage; extra grants there under a root deny or with no root rule still refuse unless
+another authored rule may cover them. Other minimal-path coverage stays unexpanded.
+Duplicate aliases from a
+lower layer leave their own coverage unverified; they do not hide a known widening
+at another path.
+Inconclusive coverage warnings name the extra rule and access. An excluding managed
+allowlist is reported before an effective selection or approval mismatch.
+Concrete refusals name the conflicting rule and offer a remedy; handover preserves
+that remedy while leaving the predecessor running.
+Without an explicit `CODEX_HOME`, OpenRig resolves the normal account home and
+pins it for both the read and launch; an unresolvable home is reported as
+unverified. A named `codex_config_profile` is retained but unverified because the
+native reader cannot load that layer on this path. A `launch_wrapper` is also
+retained and unverified: it may change the effective home/configuration, so a
+read without that wrapper cannot certify the launch.
+
+The filesystem selection replaces permission-mode and team/kernel defaults,
+including ambient YOLO. Fresh launches, both resume paths and restore emit the
+same selection. Hand-resuming from the command shown by `rig ps` does not yet
+carry this filesystem policy. A rebuild uses the saved filesystem policy ahead of an observed
+predecessor sandbox; clearing or replacing the policy after a snapshot takes
+effect on restore. Status reports the plan and its limits, not observed native
+enforcement. Handover checks the successor's filesystem selection before
+signaling the predecessor; a concrete conflict leaves that predecessor running.
+Configuration can change between the preflight and native startup;
+the read and launch are not atomic. Codex's sandbox governs local command
+execution, not every connector, account or external service.
 
 For an existing seat, put the envelope in a JSON file, or change its profile, with the existing
 audited permission command:
@@ -695,7 +783,7 @@ first turn. Check `/status` after a real tool turn to confirm the authentication
 
 For Codex, a saved native API-key login is selected with the existing `--to-account <name>`
 path, exactly like a saved subscription login. Prepare it using native `codex login --with-api-key`
-with the key on stdin, then `rig auth save --codex-home <home> <name>`; never put a key in argv.
+with the key on stdin, then `CODEX_HOME=<home> rig auth save <name>`; never put a key in argv.
 Use the seat's existing home. Preparing a login replaces that home's active credentials, so do it
 before running seats there, or prepare/import a native auth profile separately. Switches preserve
 an outgoing credential copy and report peers sharing the home. A native keyring or administrator
@@ -1087,6 +1175,20 @@ Removal also supports `--plan` and `--json`. Removing an edge that is already go
 and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports not found, not success.
 Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
+
+Managed Claude compaction also uses the delegation parent for two diagnostic notices: repeated
+unsent preparation attempts and repeated restore-delivery failures. If the seat has no recorded
+parent session (including when it is outside the recorded topology), these notices go to the
+configured registered human operator, or the default registered person when no operator is set.
+If no registered person can be selected, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
+preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+to the seat; declare one when an agent should receive these notices. With multiple parents, the
+parent session with the latest creation time is selected; `escalates_to` is not used for these
+notices. The restore-delivery notice to a person omits local paths and
+points to `rig compact <seat> --state` on the host; the preparation notice includes its state-file
+evidence reference and attempt details. Treat these notices and any chat relay accordingly. Existing
+notices retain their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's

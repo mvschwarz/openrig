@@ -1,3 +1,4 @@
+import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -7,6 +8,12 @@ import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_li
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
 import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
+import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
+import { networkReceiptsSchema } from "./migrations/161_network_receipts.js";
+import { sessionAddressReadIndexesSchema } from "./migrations/162_session_address_read_indexes.js";
+import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
+import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
+import { queueListReadIndexesSchema } from "./migrations/166_queue_list_read_indexes.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -321,4 +328,11 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueErasureBatchesSchema,
   queueInboxCheckinsSchema,
   queueItemsHandedOffFromIndexSchema,
+  networkBindingsSchema,
+  networkReceiptsSchema,
+  sessionAddressReadIndexesSchema,
+  networkInstallationsSchema,
+  queueItemsReplyToIndexSchema,
+  runBoundActivityGrantsSchema,
+  queueListReadIndexesSchema,
 ];

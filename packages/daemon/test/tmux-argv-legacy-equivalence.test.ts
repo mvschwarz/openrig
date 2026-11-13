@@ -47,15 +47,16 @@ function respond(cmd: string, failing: string[], composer = false): string {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
     case "display-message":
-      return cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
-    case "show-environment": return "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
+      return cmd.includes("#{pid}") ? "$7|4242|1700000000\n" : cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
+    // tmux prints just the variable asked for, or every one when none is named.
+    case "show-environment": return cmd.endsWith(" OPENRIG_NODE_ID") ? "OPENRIG_NODE_ID=n1\n" : "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
     case "new-session": case "source-file": case "start-server": return "%1\n";
     default: return "";
   }
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; nodeId?: string } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
@@ -69,8 +70,8 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   }, fileOps);
   if (opts.guard) {
     adapter.deliveryGuard = {
-      maybeTarget: () => TARGET,
-      target: () => TARGET,
+      maybeTarget: () => ({ ...TARGET, nodeId: opts.nodeId ?? TARGET.nodeId }),
+      target: () => ({ ...TARGET, nodeId: opts.nodeId ?? TARGET.nodeId }),
       ownsLifecycle: () => false,
       checkInput: () => {},
       input: (_name: string, fn: () => Promise<unknown>) => fn(),
@@ -156,13 +157,16 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.readAllPaneProcesses();
   await a.readPaneLastActivity(SESSION);
   await a.listClients();
+  await a.listSessionClientTerminals(SESSION);
+  await a.lastClientActivity(SESSION);  // #3076: the client activity read right before an automatic paste
   await a.switchClient("/dev/ttys001", SESSION);
   // A runtime switch's exchange: two session-id reads, then the guarded if-shell swap (nested quoting); and its env writes.
   await a.swapRuntimeSwitchPanes({ nodeId: "n1", stagingSession: "staging'q a", canonicalSession: SESSION, canonicalPane: "%1", stagedPane: "%1" });
   await a.setRuntimeSwitchEnvironment(SESSION, "claude-code", "gen 'q 1");
-  // A failed paste deletes the loaded buffer; the guarded kill reads the session id first.
+  // A failed paste deletes the loaded buffer. The guarded kill reads the session id and server, then the seat's marker
+  // (the session's OPENRIG_NODE_ID, n1 here), and runs each effect held to that id and server.
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
-  await recordingAdapter(calls, { guard: true }).killSession(SESSION);
+  await recordingAdapter(calls, { guard: true, nodeId: "n1" }).killSession(SESSION);
   await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
   const scoped = recordingAdapter(calls);
   scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });

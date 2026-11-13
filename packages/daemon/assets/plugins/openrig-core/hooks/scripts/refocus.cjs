@@ -12,6 +12,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const { recordRefocusResult } = require("./refocus-health.cjs");
+const { openRefocusState, processExists } = require("./refocus-state.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
 const childEnv = { ...process.env, PATH: [process.env.PATH, path.dirname(process.execPath)].filter(Boolean).join(path.delimiter) };
@@ -45,6 +46,18 @@ const lookupTimeout = (reserve = 0) => SELECTED_BUDGET ? Math.min(LOOKUP_CAP_MS,
 // Normal managed restore advances on ~30 s polls with a 10 s idle wait.
 // A lost daemon stage must not suppress this occupant's refocus indefinitely.
 const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
+const DELIVERY_CLAIM_MS = 60_000;
+
+function liveDelivery(claim) {
+  if (!claim) return false;
+  const age = Date.now() - claim.at;
+  try {
+    if (Number.isSafeInteger(claim.pid) && claim.pid > 0
+      && age >= 0 && age < DELIVERY_CLAIM_MS && processExists(claim.pid)) return true;
+  } catch {}
+  process.stderr.write("refocus: prior delivery owner could not be confirmed. Attempting the pending refocus\n");
+  return false;
+}
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -373,8 +386,6 @@ function runsForThisSeatsProject(env = process.env) {
   const seat = process.env.OPENRIG_SESSION_NAME || "unknown-seat";
   const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || "/tmp", ".openrig");
   const transcriptPath = input.transcript_path || input.transcriptPath || "";
-  let size = 0;
-  try { size = fs.statSync(transcriptPath).size; } catch {}
 
   const stateDir = path.join(home, "refocus");
 
@@ -434,80 +445,139 @@ function runsForThisSeatsProject(env = process.env) {
   } catch {}
 
   const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
-  let state = null;
-  try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch {}
-  const persist = () => {
-    try {
-      fs.mkdirSync(stateDir, { recursive: true });
-      fs.writeFileSync(stateFile, JSON.stringify(state));
-    } catch {}
-  };
-
-  if (state === null) {
-    // First observation for this occupant: the baseline is its OWN current size —
-    // growth accumulates from here; nothing is inherited. A zero-size read means
-    // the transcript is absent/unreadable, which is instrument absence, not a
-    // baseline: record zero only when that is what was genuinely measured.
-    state = { lastBytes: size, baselineAt: new Date().toISOString() };
-    persist();
-  } else if (size > 0 && size < Number(state.lastBytes || 0)) {
-    // Shrink invalidates growth-based due state, not an exact PostCompact event
-    // awaiting its actionable restore turn.
-    if (state.pendingOn !== "PostCompact") {
-      delete state.pendingOn;
-      delete state.pendingAt;
-      delete state.pendingFailure;
-    }
-    state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
-    state.lastBytes = size;
-    persist();
-    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset; PostCompact pending retained if present\n`);
-  }
-
-  const lastBytes = Number(state.lastBytes || 0);
-  const grown = size > lastBytes ? size - lastBytes : 0;
+  // Only the two state transitions need exclusive access. Trace rendering and
+  // stdout run outside the guard so an arriving PostCompact can record its work.
+  const start = openRefocusState(stateFile);
+  const promptId = firstString(input.prompt_id);
   const onDemand = enabled(process.env.OPENRIG_REFOCUS_NOW, false);
-  const thresholdDue = harness === "claude" && grown >= threshold();
-  const due = onDemand
-    || event === "PostCompact"
-    || Boolean(state.pendingOn)
-    || thresholdDue;
-  if (!due) process.exit(0);
-
-  if (event !== "UserPromptSubmit") {
-    if (event === "PostCompact" && harness === "claude") {
-      // PreCompact records whether THIS compact was initiated by the enforcer.
-      // A manual /compact overwrites the marker with false; other occupants
-      // cannot hold this session. Read the early sentinel first if it survives.
-      state.managedRestorePending = false;
-      for (const suffix of [".expected.json", ".json"]) {
-        try {
-          const marker = JSON.parse(fs.readFileSync(path.join(home, "compaction", "restore-pending", seatKey + suffix), "utf8"));
-          if (marker.sessionName !== seat || (marker.sessionId ? marker.sessionId !== identity : !transcriptPath || marker.transcriptPath !== transcriptPath)) continue;
-          state.managedRestorePending = marker.managedRefocusPending === true;
-          break;
-        } catch {}
+  let state, size = 0, grown, claimed;
+  const claim = { id: crypto.randomUUID(), pid: process.pid, at: Date.now(), promptId };
+  try {
+    state = start.read();
+    try { size = fs.statSync(transcriptPath).size; } catch {}
+    if (state === null) {
+      // First observation for this occupant: the baseline is its OWN current size —
+      // growth accumulates from here; nothing is inherited. A zero-size read means
+      // the transcript is absent/unreadable, which is instrument absence, not a
+      // baseline: record zero only when that is what was genuinely measured.
+      state = { lastBytes: size, baselineAt: new Date().toISOString() };
+      if (start.exclusive) start.write(state);
+    } else if (size > 0 && size < Number(state.lastBytes || 0)) {
+      // Shrink invalidates growth-based due state, not an exact PostCompact event
+      // awaiting its actionable restore turn.
+      if (state.pendingOn !== "PostCompact") {
+        delete state.pendingOn;
+        delete state.pendingAt;
+        delete state.pendingFailure;
+        delete state.pendingRevision;
       }
-      if (state.managedRestorePending) state.managedRestorePendingAt = new Date().toISOString();
-      else delete state.managedRestorePendingAt;
+      state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
+      state.lastBytes = size;
+      if (start.exclusive) start.write(state);
+      process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset; PostCompact pending retained if present\n`);
     }
-    // A new compaction is a fresh obligation, not a retry of the refocus before it.
-    if (event === "PostCompact") delete state.pendingFailure;
-    if (event === "PostCompact" || !state.pendingOn) state.pendingOn = event;
-    state.pendingAt ||= new Date().toISOString();
-    persist();
-    process.exit(0);
-  }
 
-  if (harness === "claude" && state.managedRestorePending) {
-    const heldFor = Date.now() - Date.parse(state.managedRestorePendingAt);
-    // Missing/invalid timestamps from older state, or a clock moving backwards,
-    // cannot establish a live hold. No timer or extra turn is created here.
-    if (heldFor >= 0 && heldFor < MANAGED_RESTORE_HOLD_MS
-      && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
-    delete state.managedRestorePending;
-    delete state.managedRestorePendingAt;
-    persist();
+    // An event that could not take the guard records its pending work separately.
+    // The delivery callback never writes these slots.
+    for (const kind of ["other", "compact"]) {
+      const deferred = start.readDeferred(kind);
+      if (!deferred?.pendingRevision || state.seenDeferred?.[kind] === deferred.pendingRevision) continue;
+      state.pendingRevision = deferred.pendingRevision;
+      if (kind === "compact" || !state.pendingOn) {
+        state.pendingOn = deferred.pendingOn;
+        state.pendingAt = deferred.pendingAt;
+      }
+      if (kind === "compact") {
+        delete state.pendingFailure;
+        state.managedRestorePending = deferred.managedRestorePending;
+        state.managedRestorePendingAt = deferred.managedRestorePendingAt;
+      }
+      state.seenDeferred = { ...state.seenDeferred, [kind]: deferred.pendingRevision };
+      if (start.exclusive) start.write(state);
+    }
+
+    const lastBytes = Number(state.lastBytes || 0);
+    grown = size > lastBytes ? size - lastBytes : 0;
+    const growthThreshold = threshold();
+    const thresholdDue = harness === "claude" && grown >= growthThreshold;
+    const due = onDemand
+      || event === "PostCompact"
+      || Boolean(state.pendingOn)
+      || thresholdDue;
+    if (start.exclusive && event === "UserPromptSubmit" && promptId && state.lastPromptId === promptId) {
+      process.stderr.write("refocus: another handler already wrote refocus output for this prompt\n");
+      return;
+    }
+    if (!due) return;
+
+    if (event !== "UserPromptSubmit") {
+      if (event === "PostCompact" && harness === "claude") {
+        // PreCompact records whether THIS compact was initiated by the enforcer.
+        // A manual /compact overwrites the marker with false; other occupants
+        // cannot hold this session. Read the early sentinel first if it survives.
+        state.managedRestorePending = false;
+        for (const suffix of [".expected.json", ".json"]) {
+          try {
+            const marker = JSON.parse(fs.readFileSync(path.join(home, "compaction", "restore-pending", seatKey + suffix), "utf8"));
+            if (marker.sessionName !== seat || (marker.sessionId ? marker.sessionId !== identity : !transcriptPath || marker.transcriptPath !== transcriptPath)) continue;
+            state.managedRestorePending = marker.managedRefocusPending === true;
+            break;
+          } catch {}
+        }
+        if (state.managedRestorePending) state.managedRestorePendingAt = new Date().toISOString();
+        else delete state.managedRestorePendingAt;
+      }
+      // A new compaction is a fresh obligation, not a retry of the refocus before it.
+      const compact = event === "PostCompact";
+      if (compact) delete state.pendingFailure;
+      const newWork = compact || !state.pendingOn || onDemand
+        || (thresholdDue && size - (state.deliveryClaim?.bytes ?? lastBytes) >= growthThreshold);
+      if (newWork) state.pendingRevision = crypto.randomUUID();
+      if (compact || !state.pendingOn) state.pendingOn = event;
+      state.pendingAt ||= new Date().toISOString();
+      if ((!start.exclusive || !start.write(state)) && newWork) {
+        start.writeDeferred(compact ? "compact" : "other", {
+          pendingOn: event,
+          pendingRevision: state.pendingRevision,
+          pendingAt: state.pendingAt,
+          ...(compact ? {
+            managedRestorePending: state.managedRestorePending,
+            managedRestorePendingAt: state.managedRestorePendingAt,
+          } : {}),
+        });
+      }
+      return;
+    }
+
+    if (start.exclusive && liveDelivery(state.deliveryClaim)) {
+      if (onDemand && promptId && state.deliveryClaim.promptId && promptId !== state.deliveryClaim.promptId) {
+        const pending = {
+          pendingOn: state.pendingOn || event,
+          pendingAt: state.pendingAt || new Date().toISOString(),
+          pendingRevision: crypto.randomUUID(),
+        };
+        Object.assign(state, pending);
+        if (!start.write(state)) start.writeDeferred("other", pending);
+      }
+      process.stderr.write("refocus: another hook is delivering. Any later pending work stays queued\n");
+      return;
+    }
+    if (harness === "claude" && state.managedRestorePending) {
+      const heldFor = Date.now() - Date.parse(state.managedRestorePendingAt);
+      // Missing/invalid timestamps from older state, or a clock moving backwards,
+      // cannot establish a live hold. No timer or extra turn is created here.
+      if (heldFor >= 0 && heldFor < MANAGED_RESTORE_HOLD_MS
+        && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) return;
+      delete state.managedRestorePending;
+      delete state.managedRestorePendingAt;
+    }
+
+    state.pendingOn ||= event;
+    state.pendingAt ||= new Date().toISOString();
+    state.deliveryClaim = { ...claim, bytes: size };
+    claimed = start.exclusive && start.write(state);
+  } finally {
+    start.close();
   }
 
   // Run the public trace before resolving a context ref. Besides keeping the
@@ -560,10 +630,30 @@ function runsForThisSeatsProject(env = process.env) {
         "",
         ...body,
       ]).join("\n");
+  let additionalContext = payload;
+  let contextOutput;
+  if (runtime() === "codex") {
+    // Keep the handler declaration unchanged; Codex's default is 2,500 tokens, ceil(UTF-8 bytes / 4).
+    const limitTokens = 2_500;
+    const bytes = Buffer.from(payload);
+    contextOutput = { status: "full", limitTokens, originalBytes: bytes.length, outputBytes: bytes.length, omittedBytes: 0 };
+    if (bytes.length > limitTokens * 4) {
+      let fullPath = `${stateFile}.${crypto.randomUUID()}.context.txt`;
+      try { fs.writeFileSync(fullPath, payload, { flag: "wx", mode: 0o600 }); }
+      catch { fullPath = null; }
+      const location = fullPath ? `Full text saved to: ${fullPath}` : "Full text could not be saved.";
+      // Reserve the notice before taking the prefix; streaming decode drops an incomplete final UTF-8 character.
+      const prefix = new TextDecoder().decode(bytes.subarray(0, Math.max(0, limitTokens * 4 - Buffer.byteLength(location) - 256)), { stream: true });
+      const prefixBytes = Buffer.byteLength(prefix);
+      const omittedBytes = bytes.length - prefixBytes;
+      additionalContext = `${prefix}\n\n[REFOCUS SHORTENED: omitted ${omittedBytes} trailing UTF-8 bytes from the assembled trace, role and standing instructions. ${location}]`;
+      contextOutput = { status: "shortened", limitTokens, originalBytes: bytes.length, outputBytes: Buffer.byteLength(additionalContext), prefixBytes, omittedBytes, fullPath };
+    }
+  }
   const output = JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
-      additionalContext: payload,
+      additionalContext,
     },
   });
   process.stdout.write(output, (error) => {
@@ -571,22 +661,39 @@ function runsForThisSeatsProject(env = process.env) {
     // their fixed caps, so a default attempt can run past its 4.5 s budget).
     recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error), env: childEnv,
       deadlineMs: Math.max(BUDGET_MS, Math.floor(process.uptime() * 1_000)) + REPORT_MS });
-    if (failed || error) {
-      state.pendingOn ||= event;
-      state.pendingAt ||= new Date().toISOString();
-      const failure = rendered.failure
-        || (configured.failure ? `content ref ${configured.contentRef}: ${configured.failure}` : null)
-        || `the refocus could not be written: ${String(error?.message ?? error).replace(/\s+/g, " ").trim()}`;
-      state.pendingFailure = failure.length > PENDING_FAILURE_MAX ? `${failure.slice(0, PENDING_FAILURE_MAX - 1)}…` : failure;
-      persist();
-      return;
+    if (!claimed) return;
+    const finish = openRefocusState(stateFile);
+    try {
+      if (!finish.exclusive) return;
+      const latest = finish.read();
+      if (latest?.deliveryClaim?.id !== claim.id) return;
+      delete latest.deliveryClaim;
+      if (!error && promptId) latest.lastPromptId = promptId;
+      const samePending = latest.pendingRevision === state.pendingRevision;
+      if (failed || error) {
+        if (samePending) {
+          const failure = rendered.failure
+            || (configured.failure ? `content ref ${configured.contentRef}: ${configured.failure}` : null)
+            || `the refocus could not be written: ${String(error?.message ?? error).replace(/\s+/g, " ").trim()}`;
+          latest.pendingFailure = failure.length > PENDING_FAILURE_MAX ? `${failure.slice(0, PENDING_FAILURE_MAX - 1)}…` : failure;
+        }
+      } else {
+        if (size > 0 && latest.lastReset?.at === state.lastReset?.at) latest.lastBytes = size;
+        latest.firedAt = new Date().toISOString();
+        latest.firedOn = event;
+        // Writer completion, not a model-context receipt. A shortened output names its omitted tail and full-text file.
+        if (contextOutput) latest.contextOutput = contextOutput;
+        else delete latest.contextOutput;
+        if (samePending) {
+          delete latest.pendingOn;
+          delete latest.pendingAt;
+          delete latest.pendingFailure;
+          delete latest.pendingRevision;
+        }
+      }
+      finish.write(latest);
+    } finally {
+      finish.close();
     }
-    if (size > 0) state.lastBytes = size;
-    state.firedAt = new Date().toISOString();
-    state.firedOn = event;
-    delete state.pendingOn;
-    delete state.pendingAt;
-    delete state.pendingFailure;
-    persist();
   });
 })();

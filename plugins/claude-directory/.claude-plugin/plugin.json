@@ -1,0 +1,14 @@
+{
+  "name": "openrig",
+  "version": "0.1.2",
+  "description": "Work with your OpenRig team from Claude Code: hand it work, follow it, answer its questions and read what it returns, through the rig command.",
+  "author": {
+    "name": "Mike Schwarz",
+    "url": "https://github.com/mvschwarz"
+  },
+  "homepage": "https://openrig.dev",
+  "repository": "https://github.com/mvschwarz/openrig",
+  "license": "Apache-2.0",
+  "keywords": ["openrig", "agents", "team", "delegation"],
+  "skills": "./skills"
+}

@@ -84,6 +84,7 @@ export interface RiggedConfig {
     /** Serve the web UI and its terminal WebSocket. Off by default; the daemon reads it at start. */
     enabled: boolean;
     timezone: string;
+    terminal: { maxLiveTerminals: number };
     preview: {
       refreshIntervalSeconds: number;
       maxPins: number;
@@ -180,6 +181,8 @@ export interface RiggedConfig {
     compact: boolean;
     /** With compact on, how many peers `rig whoami --json` lists (edge peers first). */
     whoamiPeers: number;
+    /** Optional recap paths shown on rebuild; 0 keeps the full list. */
+    rebuildRecaps: number;
   };
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
   // off). Read by the daemon; the CLI key is the lockstep twin.
@@ -218,6 +221,7 @@ export interface RiggedConfig {
     enabled: boolean;
     transitionsDays: number;
     watchdogDays: number;
+    usageSamplesDays: number;
     watchdogKeepPerJob: number;
     streamDays: number;
     streamMaxItems: number;
@@ -306,6 +310,10 @@ const DEFAULTS = {
   ui: {
     enabled: false,
     timezone: "America/Los_Angeles",
+    // The daemon store leaves its own resolver value unset for this key and the web
+    // client falls back to 2 (settings-browser names that fallback), so the CLI reports
+    // the same effective default rather than inventing a third answer.
+    terminal: { maxLiveTerminals: 2 },
     preview: {
       refreshIntervalSeconds: 3,
       maxPins: 4,
@@ -381,6 +389,7 @@ const DEFAULTS = {
   output: {
     compact: false,
     whoamiPeers: 8,
+    rebuildRecaps: 3,
   },
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
@@ -416,6 +425,8 @@ const DEFAULTS = {
     enabled: true,
     transitionsDays: 30,
     watchdogDays: 14,
+    // Usage samples age out after this many days; the daemon's own default.
+    usageSamplesDays: 14,
     watchdogKeepPerJob: 50,
     streamDays: 30,
     streamMaxItems: 20000,
@@ -499,6 +510,9 @@ export const VALID_KEYS = [
   "ui.preview.default_lines",
   "ui.timezone",
   "ui.enabled",
+  // The legacy web client's cap on simultaneously-live terminals. The daemon store
+  // resolves it (SETTINGS_VALID_KEYS), so `rig config` must accept it too.
+  "ui.terminal.max_live_terminals",
   "recovery.auto_drive_provider_prompts",
   "recovery.provider_auth_env_allowlist",
   // V1 Phase 4 SC-29 exception — allowlist-only additions.
@@ -546,6 +560,7 @@ export const VALID_KEYS = [
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
+  "output.rebuild_recaps",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
   // The providers chosen at rig setup --providers, which kernel boot honours; lockstep with the daemon twin.
@@ -568,6 +583,8 @@ export const VALID_KEYS = [
   "retention.enabled",
   "retention.transitions_days",
   "retention.watchdog_days",
+  // How long the daemon keeps usage samples; lockstep with the daemon twin.
+  "retention.usage_samples_days",
   "retention.watchdog_keep_per_job",
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
@@ -643,6 +660,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
   "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
+  "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
@@ -683,6 +701,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
+  "output.rebuild_recaps": { primary: "OPENRIG_OUTPUT_REBUILD_RECAPS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   "provider.selected": { primary: "OPENRIG_PROVIDER_SELECTED" },
   "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
@@ -699,6 +718,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
+  "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
@@ -758,6 +778,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
   "ui.enabled": ["ui", "enabled"],
+  "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
@@ -793,6 +814,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
+  "output.rebuild_recaps": ["output", "rebuildRecaps"],
   "provider.usage_windows": ["provider", "usageWindows"],
   "provider.selected": ["provider", "selected"],
   "bundle.services_enabled": ["bundle", "servicesEnabled"],
@@ -808,6 +830,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
+  "retention.usage_samples_days": ["retention", "usageSamplesDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
@@ -1088,6 +1111,7 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       new Intl.DateTimeFormat("en-US", { timeZone: value });
     } catch { throw new Error("Invalid ui.timezone: use an IANA timezone such as America/Los_Angeles or Europe/London"); }
   },
+  "ui.terminal.max_live_terminals": positiveIntegerConstraint("ui.terminal.max_live_terminals"),
   "health.context_pressure.warning_percent": percentageConstraint("health.context_pressure.warning_percent"),
   "health.context_pressure.critical_percent": percentageConstraint("health.context_pressure.critical_percent"),
   "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
@@ -1159,6 +1183,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
   // is a boolean (coerceValue enforces true/false) — no constraint entry.
   // Slice 15 P5 — the whoami peer bound; lockstep with the daemon twin.
+  "output.rebuild_recaps": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid value for output.rebuild_recaps: must be an integer >= 0, got "${raw}"`);
+    }
+  },
   "output.whoami_peers": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
@@ -1172,6 +1201,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "retention.watchdog_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.watchdog_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  // Same bound and message as the daemon twin's KEY_CONSTRAINTS entry.
+  "retention.usage_samples_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.usage_samples_days: must be an integer >= 1, got "${raw}"`);
     }
   },
   "retention.watchdog_keep_per_job": (raw, coerced) => {
@@ -1282,6 +1317,12 @@ export interface ResolvedSetting {
   value: string | number | boolean;
   source: SettingSource;
   defaultValue: string | number | boolean;
+}
+
+export interface ContextPressurePolicyState {
+  warning: ResolvedSetting;
+  critical: ResolvedSetting;
+  rejectedPair: { warning: number; critical: number } | null;
 }
 
 export class ConfigStore {
@@ -1397,6 +1438,7 @@ export class ConfigStore {
       ui: {
         enabled: v("ui.enabled") as boolean,
         timezone: v("ui.timezone") as string,
+        terminal: { maxLiveTerminals: v("ui.terminal.max_live_terminals") as number },
         preview: {
           refreshIntervalSeconds: v("ui.preview.refresh_interval_seconds") as number,
           maxPins: v("ui.preview.max_pins") as number,
@@ -1462,6 +1504,7 @@ export class ConfigStore {
       output: {
         compact: v("output.compact") as boolean,
         whoamiPeers: v("output.whoami_peers") as number,
+        rebuildRecaps: Number(v("output.rebuild_recaps")),
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
@@ -1487,6 +1530,7 @@ export class ConfigStore {
         enabled: v("retention.enabled") as boolean,
         transitionsDays: v("retention.transitions_days") as number,
         watchdogDays: v("retention.watchdog_days") as number,
+        usageSamplesDays: v("retention.usage_samples_days") as number,
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
         streamDays: v("retention.stream_days") as number,
         streamMaxItems: v("retention.stream_max_items") as number,
@@ -1547,6 +1591,34 @@ export class ConfigStore {
     return out;
   }
 
+  /** Inspect resolved context-pressure policy and whether an inverted pair was rejected. */
+  resolveContextPressurePolicyState(
+    fileConfig?: Record<string, unknown>,
+    workspaceRoot?: string,
+  ): ContextPressurePolicyState {
+    const fc = fileConfig ?? this.readConfigFile();
+    const wr = workspaceRoot ?? (this.resolveOne("workspace.root", fc, DEFAULT_WORKSPACE_ROOT).value as string);
+    return this.resolveContextPressureStateRaw(fc, wr);
+  }
+
+  private resolveContextPressureStateRaw(
+    fileConfig: Record<string, unknown>,
+    workspaceRoot: string,
+  ): ContextPressurePolicyState {
+    const warningKey = "health.context_pressure.warning_percent" as const;
+    const criticalKey = "health.context_pressure.critical_percent" as const;
+    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
+    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
+    if ((warning.value as number) < (critical.value as number)) {
+      return { warning, critical, rejectedPair: null };
+    }
+    return {
+      warning,
+      critical,
+      rejectedPair: { warning: warning.value as number, critical: critical.value as number },
+    };
+  }
+
   private resolveOne(key: ValidKey, fileConfig: Record<string, unknown>, workspaceRoot: string): ResolvedSetting {
     if (key === "health.context_pressure.warning_percent" || key === "health.context_pressure.critical_percent") {
       return this.resolveContextPressurePair(fileConfig, workspaceRoot)[key];
@@ -1560,13 +1632,12 @@ export class ConfigStore {
   ): Record<"health.context_pressure.warning_percent" | "health.context_pressure.critical_percent", ResolvedSetting> {
     const warningKey = "health.context_pressure.warning_percent" as const;
     const criticalKey = "health.context_pressure.critical_percent" as const;
-    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
-    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
-    if ((warning.value as number) < (critical.value as number)) {
-      return { [warningKey]: warning, [criticalKey]: critical };
+    const state = this.resolveContextPressureStateRaw(fileConfig, workspaceRoot);
+    if (!state.rejectedPair) {
+      return { [warningKey]: state.warning, [criticalKey]: state.critical };
     }
     process.stderr.write(
-      `[openrig-config] context-pressure policy rejected: warning (${warning.value}) must be less than critical (${critical.value}); falling back to 95/99 defaults\n`,
+      `[openrig-config] context-pressure policy rejected: warning (${state.warning.value}) must be less than critical (${state.critical.value}); falling back to 95/99 defaults\n`,
     );
     return {
       [warningKey]: { value: 95, source: "default", defaultValue: 95 },

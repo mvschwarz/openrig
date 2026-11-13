@@ -21,6 +21,7 @@ import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { resolveLaunchCwd } from "./cwd-resolution.js";
 import type { RecordCreated } from "./operation-correlation.js";
+import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -551,7 +552,7 @@ export class PodRigInstantiator {
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string; recordCreated?: RecordCreated },
   ): Promise<MaterializeOutcome> {
     let raw: unknown;
     try {
@@ -697,9 +698,9 @@ export class PodRigInstantiator {
         if (!materializedRigId) {
           const rig = this.deps.rigRepo.createRig(rigSpec.name);
           materializedRigId = rig.id;
-          opts?.recordCreated?.(rig.id);
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
+        opts?.recordCreated?.(materializedRigId);
 
         // PL-007: persist the rig's typed workspace block when declared.
         if (rigSpec.workspace) {
@@ -1412,7 +1413,7 @@ export class PodRigInstantiator {
         name = typeof parsed?.name === "string" ? parsed.name : null;
       } catch { /* the import below reports the parse error */ }
     }
-    if (!name) return this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+    if (!name) return this.instantiateBuilding(rigSpecYaml, rigRoot, opts);
     let inFlight = importsInFlight.get(this.db);
     if (!inFlight) importsInFlight.set(this.db, (inFlight = new Set()));
     if (inFlight.has(name)) {
@@ -1420,9 +1421,24 @@ export class PodRigInstantiator {
     }
     inFlight.add(name);
     try {
-      return await this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+      return await this.instantiateBuilding(rigSpecYaml, rigRoot, opts);
     } finally {
       inFlight.delete(name);
+    }
+  }
+
+  /** {@link instantiateOnce}, with the new rig marked as still being built from its creation until every seat and edge
+   *  has been written (#2871), so a seat that asks who's on its team in between is told the team isn't complete yet. */
+  private async instantiateBuilding(rigSpecYaml: string, rigRoot: string, opts?: Parameters<PodRigInstantiator["instantiate"]>[2]) {
+    const marked: string[] = [];
+    const recordCreated: RecordCreated = (rigId, nodeId) => {
+      if (nodeId === undefined) { markRigBuilding(this.db, rigId); marked.push(rigId); }
+      opts?.recordCreated?.(rigId, nodeId);
+    };
+    try {
+      return await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated });
+    } finally {
+      for (const rigId of marked) unmarkRigBuilding(this.db, rigId);
     }
   }
 
@@ -2680,7 +2696,8 @@ export class PodRigInstantiator {
       nodeId: input.nodeId,
       tmuxSession: launchResult.binding.tmuxSession,
       tmuxWindow: null,
-      tmuxPane: null,
+      // Only the run-grant launch owners need this anchor; unrelated builtins keep their existing session target.
+      tmuxPane: input.member.runtime === "pi" || isCommunityHarnessRuntime(input.member.runtime) ? launchResult.binding.tmuxPane : null,
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",
@@ -3134,6 +3151,16 @@ export class PodRigInstantiator {
     files.push({
       path: "openrig-start.md",
       absolutePath: onboardingPath,
+      ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
+      deliveryHint: "guidance_merge",
+      required: false,
+      appliesOn: ["fresh_start", "restore"],
+    });
+    // The context-entry floor: where skills, help and declared context are. Not gated by the onboarding pack, so every
+    // seat gets it; a restore of a seat saved before it existed gets it beside openrig-start.md (withContextEntryFloor).
+    files.push({
+      path: "openrig-context-entry.md",
+      absolutePath: nodePath.resolve(import.meta.dirname, "../../assets/guidance/openrig-context-entry.md"),
       ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
       deliveryHint: "guidance_merge",
       required: false,
