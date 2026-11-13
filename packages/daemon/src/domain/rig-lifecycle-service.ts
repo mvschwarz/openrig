@@ -574,8 +574,11 @@ export class RigLifecycleService {
     let rosterEvent: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
     const tx = this.db.transaction(() => {
       const remaining = this.activeQitemIdsForSessionNames(addressedSessions);
-      if (remaining.length > 0 && sessionStopped && node.latest_session_id) {
+      if (sessionStopped && node.latest_session_id && node.latest_session_name) {
         this.sessionRegistry.markIntentionallyStopped(node.latest_session_id);
+        this.eventBus.persistWithinTransaction({ type: "session.stopped", rigId, nodeId: node.node_id,
+          sessionId: node.latest_session_id, sessionName: node.latest_session_name,
+          operator: "rig remove", reason: "node_removal" });
         this.sessionRegistry.clearBinding(node.node_id);
       }
       if (node.latest_session_name && !keepSession) {

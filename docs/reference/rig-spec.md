@@ -753,6 +753,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `summary` | string | no | — | Pod description. |
 | `continuity_policy` | ContinuityPolicy | no | — | Pod-level continuity/restore policy, validated and stored with the pod (see "Continuity Policy"). |
 | `startup` | StartupBlock | no | — | Pod-level startup files and actions. Applied to all members in this pod via the startup layering model. |
+| `cold_start` | boolean | no | `false` | Pod-level default for member `cold_start` (queue-driven cold start). A member's own value, including an explicit `false`, wins. See [Queue-driven cold start](#queue-driven-cold-start). |
 | `members` | Member[] | yes | — | The pod's members. It must be an array; validation doesn't refuse an empty one. |
 | `edges` | PodLocalEdge[] | no | `[]` | Edges between members within this pod. Must use unqualified member IDs (not `pod.member`). |
 
@@ -792,11 +793,58 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `plugin_channels` | list | no | — | Claude members only. Plugin channels this agent registers for, as `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch; see [Claude plugin channels](#claude-plugin-channels-runtime-claude-code). |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
+| `cold_start` | boolean | no | `false` | Opt in to queue-driven cold start for this seat: when queued work targets the seat, its rig is running, and the seat's runner is not live, the daemon launches just this seat through the existing single-seat launch path (resuming its conversation when a resume token exists). Never fires for a seat stopped intentionally (a human `rig seat stop`, `rig down`, a removal), a seat removed from the spec, or a rig with no other live seat. A resource-reclaiming daemon stop (the idle reaper's `daemon:seat-reaper`/`idle_reap`) is revivable. A member's explicit value wins over the pod's `cold_start`. See [Queue-driven cold start](#queue-driven-cold-start). |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+
+### Queue-driven cold start
+
+A seat with `cold_start: true` (member, or pod-level default) does not keep a
+runner alive for nothing: when queued work targets the seat and the queue cannot
+deliver — the seat has no live runner — the daemon launches just that seat through
+the existing single-seat launch path, resuming its saved conversation when a resume
+token exists and never silently replacing a live conversation with a fresh one.
+
+The daemon cold-starts a seat only when all of these hold:
+
+- the seat opted in and is still in the rig's current spec (a removed seat never starts);
+- the seat's rig is running — some other seat of the rig is live (a down rig keeps
+  whole-rig restore as the operator's choice);
+- the seat's latest stop was **not** an intentional stop. Eligibility is keyed on who
+  stopped the seat, not merely that it is stopped:
+  - a human `rig seat stop`, `rig down`, or a seat removal records a deliberate end
+    state, and cold start never revives it;
+  - the only revivable stop is a resource-reclaiming daemon stop — the idle reaper (a
+    separate feature) stops a seat as operator `daemon:seat-reaper` with reason
+    `idle_reap` precisely so new work can wake it again;
+  - a seat that was never stopped intentionally (a crash, a lost session) is dormant;
+  - a rolled-back launch (`superseded` row, a failed start) is retryable only if no
+    intentional stop was recorded afterward, under the same backoff as any other attempt;
+- the seat's tmux session is gone.
+
+Stop attribution is tied to the exact session id, not its reusable tmux name. An old
+reaper stop cannot authorize reviving a later generation stopped by a person or `rig down`.
+A rig whose **only seat is dormant never cold-starts**: the running-rig gate requires
+a live peer. Start that seat explicitly with `rig launch`; this flag does not start down rigs.
+
+The launch is the ordinary single-seat door (`rig launch`), so it takes the
+delivery-guard lifecycle lease, rechecks stop intent, opt-in and seat identity under that
+lease, and applies the normal restore decision: a
+`resume_if_possible` seat with a usable token resumes its conversation, and a seat
+whose conversation cannot be resumed parks as `awaiting-decision` with no session
+started rather than being silently replaced by a fresh one.
+
+Simultaneous arrivals are coalesced into one launch, attempts are at least a minute
+apart, and a seat that fails to start three times in a row stops cold-starting
+until liveness is observed or 15 minutes have passed since the last attempt. Refusal
+evaluations coalesce per seat within each queue drain pass, with a one-second TTL;
+the next pass checks liveness again. Once the seat is running, the queue's existing
+unroutable-wake retry delivers the waiting rows; no new scheduler is involved.
+Idle stopping and reaping are a separate feature and not part of this opt-in.
 
 ### Claude MCP loading (`runtime: claude-code`)
 

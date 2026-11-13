@@ -569,10 +569,12 @@ seatRoutes.get("/stop-precondition/:seatRef", c => {
 
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  // Neither body claims nor the caller-controlled transport header may name an internal daemon actor.
+  const operator = transportSenderSession(c);
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator: operator?.startsWith("daemon:") ? null : operator ?? null,
     ...(Object.prototype.hasOwnProperty.call(body, "expected") ? { expected: body["expected"] } : {}),
   });
   if (result.ok) return c.json(result);
