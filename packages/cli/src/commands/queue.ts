@@ -67,7 +67,7 @@ export interface GatewayDeliveryResult extends DeliveryResultBase {
 export interface TerminalDeliveryResult extends DeliveryResultBase {
   receiptSource: "terminal";
   /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
-   *  retained:*; failed:* or unroutable:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
+   *  retained:*; failed:*, unroutable:* or awaiting-pickup:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
    *  (still-pending); or no wake requested by --no-nudge (not-requested). */
   outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
   /** The row's lastNudgeResult as recorded; null before any wake result. */
@@ -140,7 +140,7 @@ function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
   if (wakeResult === null) return "still-pending";
   if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
-  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:")) return "failed";
+  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:") || wakeResult.startsWith("awaiting-pickup:")) return "failed";
   if (wakeResult.startsWith("retained:")) return "retained";
   return "indeterminate";
 }

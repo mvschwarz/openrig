@@ -57,6 +57,13 @@ export interface ClassifyDeps {
   isHostedMember?: (destination: string) => boolean;
 }
 
+/** Whether a recorded wake result says no transport could take the wake: an address nothing holds (`unroutable:`), or a
+ *  hosted member with no wake trigger, whose work waits until it reads its queue (`awaiting-pickup:`). Every reader of a
+ *  recorded no-route result reads both the same way. */
+export function recordsNoWakeRoute(recorded: string | null | undefined): boolean {
+  return !!recorded && (recorded.startsWith("unroutable:") || recorded.startsWith("awaiting-pickup:"));
+}
+
 export function classifyDestination(destination: string, deps: ClassifyDeps): DestinationClass {
   const parsed = parseSessionName(destination);
   if (parsed.kind === "external") {
@@ -73,11 +80,12 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
   const wake = deps.hostedWake?.(destination) ?? null;
   if (wake) return { class: "hosted", wake };
   if (deps.isHostedMember?.(destination)) {
-    // The member reads this teaching too: the address is right, and it isn't a person to register.
+    // The member reads this teaching too: the address is right, and it isn't a person to register. A requester's
+    // assistant repeats it, so it says the work waits, not that it can't be delivered.
     return {
       class: "unroutable",
-      teaching: `unroutable: '${destination}' is a hosted member with no wake trigger, so nothing can push work to it. ` +
-        `It picks up its work when its person asks it to, or on a schedule they set.`,
+      teaching: `awaiting-pickup: '${destination}' is a hosted member with no wake trigger, so no wake is sent. The work waits ` +
+        `in its queue until the member reads it: when its person asks it to, on a schedule they set, or through a local seat connected to it.`,
     };
   }
   return {
