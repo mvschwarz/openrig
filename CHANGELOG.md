@@ -45,11 +45,13 @@ release doesn't fix.
   retained, without recording the daemon. Inspect the address and log it
   prints. The child may later answer, and status can then report it running,
   but that does not finish this start's recording or release its reservation.
-  Don't start it again. To return to a normal start, follow the restart steps
-  in the message: stop the named child PID and wait for exit, inspect
-  `daemon-start.lock`, and only when both recorded launcher and child PIDs are
-  absent, archive the lock and run `rig daemon start`. `rig daemon stop` cannot
-  stop that unpublished child.
+  Don't start it again until the steps below are done. The message's restart
+  steps stop that child and clear the reservation: stop the named child PID and
+  wait for it to exit, inspect `daemon-start.lock`, and only when both recorded
+  launcher and child PIDs are absent, archive the lock and run
+  `rig daemon start`. On a large database the new start can be reported pending
+  again; reaching a recorded start this way hasn't been tested.
+  `rig daemon stop` cannot stop that unpublished child.
 - **The `openrig` plugin carries the CLI's version, 0.7.14; openrig-core stays
   0.1.29.**
 
@@ -156,10 +158,11 @@ release doesn't fix.
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic OpenRig notice can still be left beside
   a draft started during delivery. In the reproduced paste-window cases the person's draft
   stayed intact and no Enter was sent, but OpenRig's text stayed in the input.
-  Those cases don't cover a later window: in an isolated test with a scripted
-  terminal, characters typed while OpenRig ran its last checks before Enter were
-  submitted together with the notice, and the send reported success. The same
-  test reproduces it on 0.7.13. It hasn't been tested with a real client or model.
+  Those cases don't cover a later window. On a conditional send, one that names
+  the conversation it expects, an isolated test with a scripted terminal showed
+  characters typed while OpenRig ran its last checks before Enter submitted
+  together with OpenRig's text, and the send reported success. The same test
+  reproduces it on 0.7.13. It hasn't been tested with a real client or model.
 - **The TUI's tables** can drop a connected assistant's check-in line when its
   rig's seat inventory can't be read; `rig roster` still prints it. ([#3105](https://github.com/mvschwarz/openrig/pull/3105) isn't in this release)
 - **Repository guidance on restore:** rigs without pods, old or unknown Codex

@@ -30,11 +30,13 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   retained, without recording the daemon. Inspect the address and log it
   prints. The child may later answer, and status can then report it running,
   but that does not finish this start's recording or release its reservation.
-  Don't start it again. To return to a normal start, follow the restart steps
-  in the message: stop the named child PID and wait for exit, inspect
-  `daemon-start.lock`, and only when both recorded launcher and child PIDs are
-  absent, archive the lock and run `rig daemon start`. `rig daemon stop` cannot
-  stop that unpublished child.
+  Don't start it again until the steps below are done. The message's restart
+  steps stop that child and clear the reservation: stop the named child PID and
+  wait for it to exit, inspect `daemon-start.lock`, and only when both recorded
+  launcher and child PIDs are absent, archive the lock and run
+  `rig daemon start`. On a large database the new start can be reported pending
+  again; reaching a recorded start this way hasn't been tested.
+  `rig daemon stop` cannot stop that unpublished child.
 - **The plugins:** openrig-core stays 0.1.29. The `openrig` plugin's manifests
   carry the CLI's version, 0.7.14.
 
@@ -93,9 +95,10 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   active work showed no gain, one case was slower, and writes weren't measured.
   ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic notice can still be left beside a
-  draft started during delivery. In an isolated test with a scripted terminal,
-  characters typed while OpenRig ran its last checks before Enter were also
-  submitted with the notice; that hasn't been tested with a real client or model.
+  draft started during delivery. On a conditional send, one that names the
+  conversation it expects, an isolated test with a scripted terminal also showed
+  characters typed during OpenRig's last checks before Enter submitted with
+  OpenRig's text; that hasn't been tested with a real client or model.
 - **The TUI's tables** can drop a connected assistant's check-in line when its
   rig's seat inventory can't be read; `rig roster` still prints it.
 - **Repository guidance on restore:** rigs without pods, old or unknown Codex
@@ -128,17 +131,17 @@ version. Without a running daemon, read the packaged
 
 ### After the upgrade
 
-- **Back up the database, then restart the daemon.** Three migrations run on the
-  daemon's first start: 160 and 161 (network bindings and receipts, for the
-  experimental hub connector) and 162 (indexes for current-session reads). If
-  `$OPENRIG_DB` isn't backed up yet: `rig daemon stop` (seats keep running, so
-  don't use `rig down`), copy that file (`rig config get db.path` shows it),
-  then `rig daemon start`. Going back to 0.7.12 after these migrations isn't
-  established.
+- **Back up the database, install 0.7.13, then restart the daemon:** `rig daemon stop`,
+  copy the database file (`rig config get db.path` prints its path), install
+  OpenRig 0.7.13 using your existing installation method, then `rig daemon start`.
+  Your agents keep running through a daemon restart; don't use `rig down`, which
+  ends them. Three migrations run on the daemon's first start: 160 and 161 (for
+  the experimental hub connector below) and 162 (indexes for session reads).
+  Going back to 0.7.12 after them isn't established.
 - **The plugins:** openrig-core moves from 0.1.28 to 0.1.29 (its activity relay
   and refocus hooks changed). The `openrig` plugin's manifests now carry the
-  CLI's version, 0.7.13. A Codex session kept running across the upgrade can ask
-  for hook approval until it's relaunched.
+  CLI's version, 0.7.13. A Codex seat can ask for hook approval after the
+  upgrade; see Codex hook review after an upgrade below.
 
 ### Answers, setup and seats
 
@@ -247,7 +250,9 @@ version. Without a running daemon, read the packaged
   restored without review. The cause of the difference is not established.
 - **A first team with Codex installed but signed out:** a Claude person's starter
   team includes a Codex reviewer that waits for a Codex sign-in, and the person
-  isn't told beforehand. If Codex is installed, have them sign in first.
+  isn't told beforehand. If Codex is installed, tell the person about the
+  possible sign-in wait before the team starts; signing in first was not tested
+  as a remedy.
 - **The hub connector isn't inert:** it starts, sweeps leftover credential
   folders and schedules local rounds even with no binding; only the hub pass is
   absent. Don't describe it as off. ([#2993](https://github.com/mvschwarz/openrig/pull/2993))
