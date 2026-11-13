@@ -1616,10 +1616,27 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 
+  it.each([
+    ["'No, '", " No, folder/"],
+    ["'Yes, '", " Yes, folder/"],
+    ["the exact 'No, exit'", " No, exit"],
+    ["the exact 'Yes, I trust this folder'", " Yes, I trust this folder"],
+  ])("a workspace path wrapped onto a row that reads %s before a header-like row is still trust_gate", (_case, row) => {
+    // The walk up from the header-like row reaches "Accessing workspace:": a wrapped row that reads like an option, even
+    // an exact one, is the dialog's text; only the footer closes the real options block.
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const wrapped = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", ["/tmp/long", row, " ─Claude Code v2.1.322 lab"].join("\n"));
+    expect(wrapped).toContain(`${row}\n ─Claude Code v2.1.322 lab`);
+    expect(probe(wrapped)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [wrapped, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed).code).not.toBe("trust_gate");
+  });
+
   it("Claude's version header drawn after the prompt still makes it history", () => {
     const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
       .split("\n").filter(row => !row.startsWith("# ")).join("\n").replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
-    for (const header of [" ▐▛███▜▌   Claude Code v2.1.322", "Claude Code v2.1.322"]) {
+    for (const header of [" ▐▛███▛█▄╱✦  Claude Code v2.1.323", " ▐▛███▜▌   Claude Code v2.1.322", "Claude Code v2.1.322"]) {
       const later = [plain, "", header, "", "────────────────", "❯ ", "────────────────"].join("\n");
       expect(probe(later).code).not.toBe("trust_gate");
     }
@@ -1627,7 +1644,8 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
 
   it.each([
     ["bare", "Claude Code v2.1.322"],
-    ["after the logo", " ▐▛███▜▌   Claude Code v2.1.322"],
+    ["after the logo, as a live 2.1.323 pane draws it", " ▐▛███▛█▄╱✦  Claude Code v2.1.323"],
+    ["after the 2.1.322 logo", " ▐▛███▜▌   Claude Code v2.1.322"],
     ["in a box border", "╭─── Claude Code v2.0.14 ───────────╮"],
   ])("Claude's version header alone (%s) drawn after the prompt makes it history", (_form, header) => {
     // no input frame after the header: the header alone has to end the dialog

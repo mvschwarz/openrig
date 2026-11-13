@@ -553,39 +553,31 @@ function claudeDrawnAfter(rows: string[]): boolean {
   return hasClaudeInputFrame(rows) || rows.some((line) => isClaudeVersionHeader(line) || /^[●⏺]/.test(line));
 }
 
-/** A row drawn like Claude's version header (CLAUDE_VERSION_HEADER). The substring test first lets every other row,
- *  a full-width rule of box characters included, skip the pattern, whose optional prefix backtracks on such rows. */
+/** A row that reads like Claude's version header ("Claude Code v2.1.323" after any logo or border). The same words
+ *  inside a trust dialog (a pre-approved grant, the workspace path, a path or a title that a narrow pane wraps) are
+ *  the dialog's text: claudeCurrentRows skips them there (insideClaudeTrustDialog), not by the row's shape, which
+ *  the logo's glyphs vary from one version to the next. */
 function isClaudeVersionHeader(line: string): boolean {
-  return line.includes("Claude Code v") && CLAUDE_VERSION_HEADER.test(line);
+  return line.includes("Claude Code v");
 }
 
 /** Whether row `at` sits inside the content of a trust dialog drawn on these rows (#2820): below the dialog's heading
- *  ("Accessing workspace:") or a mark of the gated-grants backstop, with no option row, footer or reply of Claude's
- *  between them, and above the dialog's own "Yes, I trust this folder" option. A workspace path or a title that a
- *  narrow pane wraps onto a row that starts with one of the header's glyphs (" ─Claude Code v2.1.322 lab") is drawn
- *  like the header there; Claude's real header after a dialog closes sits below the dialog's options, so it still
- *  ends the dialog. */
+ *  ("Accessing workspace:") or a mark of the gated-grants backstop, with neither the dialog's footer nor a reply of
+ *  Claude's between them, and above the dialog's own "Yes, I trust this folder" option. Claude's real header after a
+ *  dialog closes sits below the dialog's options and footer, so it still ends the dialog. A row of the dialog's text
+ *  can read like an option ("No, exit", "Yes, I trust this folder": a path or a title that a narrow pane wraps), so an
+ *  option-like row never stops the walk; the footer, which closes the real options block, does. */
 function insideClaudeTrustDialog(rows: string[], at: number): boolean {
   let heading = -1;
   for (let index = at - 1; index >= 0 && heading < 0; index--) {
     const row = rows[index]!;
-    if (CLAUDE_TRUST_OPTION_ROW.test(row) || row.trim() === CLAUDE_TRUST_FOOTER || /^[●⏺]/.test(row)) return false;
+    if (row.trim() === CLAUDE_TRUST_FOOTER || /^[●⏺]/.test(row)) return false;
     if (row.trim() === "Accessing workspace:" || CLAUDE_GATED_GRANTS_MARK_ROW.test(row)) heading = index;
   }
   return heading >= 0
     && !hasClaudeInputFrame(rows.slice(heading, at))
     && rows.slice(at + 1).some((row) => CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES);
 }
-
-// Claude's version header row: "Claude Code v<x.y.z>" at column 0, or after Claude's logo or a box border (with any
-// blanks around them), and a blank, a border or the row's end after it ("Claude Code v2.1.303",
-// " ▐▛███▜▌   Claude Code v2.1.322", "╭─── Claude Code v2.0.14 ───╮"). The same words inside a dialog are not the
-// header: a pre-approved grant ("Bash(echo Claude Code v*)"), the workspace path ("/tmp/Claude Code v2/lab") or a
-// path or a title that a narrow pane wraps onto an indented row (" Claude Code v2.1.322 lab") would cut the screen
-// inside a live prompt.
-const CLAUDE_HEADER_GLYPHS = "▐▛▜▌▙▟▀▄█▝▘▗▖╭╮─│✻";
-const CLAUDE_VERSION_HEADER = new RegExp(
-  `^(?:[\\s${CLAUDE_HEADER_GLYPHS}]*[${CLAUDE_HEADER_GLYPHS}][\\s${CLAUDE_HEADER_GLYPHS}]*)?Claude Code v\\d+\\.\\d+\\.\\d+(?=$|[\\s─╮╯│])`, "u");
 
 // On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
 const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;
