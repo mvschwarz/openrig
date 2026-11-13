@@ -32,7 +32,7 @@ function writeFile(p: string, content: string): void {
 }
 
 it("uses only the rig association as the default, preserving explicit targets", () => {
-  const dir = mktemp();
+  const dir = fs.realpathSync(mktemp());
   const alpha = path.join(dir, "alpha"), beta = path.join(dir, "beta"), shared = path.join(dir, "shared");
   for (const root of [alpha, beta, shared]) fs.mkdirSync(path.join(root, "missions"), { recursive: true });
   const catalog = path.join(dir, "workspace.yaml");

@@ -57,9 +57,23 @@ export function proofRoutes(): Hono {
     if (expectedMissionsRoot !== undefined && typeof expectedMissionsRoot !== "string") throw new JudgmentError("judgment_invalid", "expectedMissionsRoot must be the missions root a prepared read returned");
     let qualified = rawScope === undefined || path.win32.isAbsolute(rawScope) ? null : QUALIFIED_SCOPE.exec(rawScope);
     if (qualified) {
-      // The literal path wins where it exists: under the named project (--project) or else the selected workspace.
+      // Disambiguate against the caller's selected project before treating a colon as a prefix.
       const flagged = project !== undefined ? catalogued(c, project) : null;
-      const literalRoot = flagged ? flagged.missionsRoot : project === undefined ? workspaceRoot(c) : null;
+      let literalRoot = flagged ? flagged.missionsRoot : project === undefined ? workspaceRoot(c) : null;
+      if (project === undefined) {
+        const rig = rigFromSession(transportSenderSession(c as never));
+        if (rig && c.get("settingsStore" as never)) {
+          try {
+            const selected = selectRigProject(projectCatalogPaths(c).catalog, rig);
+            if (selected) literalRoot = projectById(c, selected.id).missionsRoot;
+          } catch (e) {
+            // An explicit prefix can still select a project when the rig default is ambiguous or unavailable.
+            // An unqualified path goes through selection below and reports that error there.
+            if (!(e instanceof ProjectReadError)) throw e;
+            literalRoot = null;
+          }
+        }
+      }
       if (existsAt(literalRoot, rawScope!) || !catalogued(c, qualified[1]!)) qualified = null;
     }
     if (qualified && project !== undefined && project !== qualified[1]) throw new JudgmentError("project_conflict", `Scope names project ${qualified[1]} but --project names ${project}; select one project`);

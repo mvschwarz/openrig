@@ -53,6 +53,34 @@ function fixture(alphaMissions = "missions") {
 }
 
 describe("project-qualified proof scope (#132)", () => {
+  it("resolves a literal colon path in the caller's rig project before a catalog prefix", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const trial = join(f.beta.missions, "alpha:trial"), slice = join(trial, "slices", "01-t001");
+    write(join(trial, "mission.yaml"), { kind: "mission", metadata: { name: "alpha:trial", status: "active" }, composition: { slices: [{ ref: "slices/01-t001/slice.yaml", order: 1, active: true }] } });
+    write(join(slice, "slice.yaml"), { kind: "slice", metadata: { id: "01-t001", status: "draft" } });
+    write(join(slice, "SPEC.md"), "---\nid: 01-t001\n---\n# trial\n\n## Proof contract\n- [ ] Prove beta trial.\n");
+    write(join(slice, "proof/evidence.md"), "Observed.\n");
+    const scope = "alpha:trial/slices/01-t001";
+    const response = await f.get(`scope=${encodeURIComponent(scope)}`, "judge@rig");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.project).toMatchObject({ id: "beta", selectedBy: "rig" });
+    expect(body.items[0].text).toContain("Prove beta trial.");
+    const judged = await f.judge(scope, {}, slice);
+    expect(judged.status).toBe(201);
+    expect(fs.existsSync(join(slice, "proof/judgments/00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.alpha.slice, "proof/judgments"))).toBe(false);
+    const explicit = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`, "judge@rig")).json();
+    expect(explicit.items[0].text).toContain("Prove alpha.");
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const ambiguousDefault = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`, "judge@rig")).json();
+    expect(ambiguousDefault.items[0].text).toContain("Prove alpha.");
+  });
   it("defaults the caller's rig to its associated project while explicit targets win", async () => {
     const f = fixture();
     write(join(f.workspace, "workspace.yaml"), { projects: [
