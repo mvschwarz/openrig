@@ -616,7 +616,7 @@ export class WorkflowRuntime {
     if (boundRig !== null) {
       for (const step of specRow.spec.steps) {
         const rolesToCover: string[] = [];
-        if (declaredTargetsOf(step.actor_role) === 0) rolesToCover.push(step.actor_role);
+        if (declaredTargetsOf(step.actor_role) === 0 && !(step === entryStep && !step.gate && input.entryOwnerSession)) rolesToCover.push(step.actor_role);
         if (step.gate && !isHumanSeatSession(step.gate.target) && declaredTargetsOf(step.gate.target) === 0) {
           rolesToCover.push(step.gate.target);
         }
