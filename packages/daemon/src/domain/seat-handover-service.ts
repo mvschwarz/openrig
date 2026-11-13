@@ -1000,7 +1000,8 @@ export class SeatHandoverService {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
     const onlyPane = async () => {
-      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession);
+      // Every window of the session (tmux list-panes -s): a pane in another window is a second pane too.
+      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
       return panes.length === 1 && panes[0]?.id === attempt.pane;
     };
     // #3044 review S1: proven as the adapter's readiness proves the launch (claude-code-adapter assessManagedProbe): with

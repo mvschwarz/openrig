@@ -55,6 +55,8 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   let nativeAt: number;
   let paneProcesses: () => NativeProcessRow[];
   let panes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
+  /** Panes of the seat's session in its other windows: tmux lists them only with `-s` (listPanes(target, true)). */
+  let otherWindowPanes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
   const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn(), signalPaneProcess: vi.fn() };
   const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
   const startedAt = "Tue Nov 10 16:21:00 2026";
@@ -71,7 +73,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     return {
       hasSession: vi.fn(async () => true),
       createSession: vi.fn(async () => ({ ok: true })),
-      listPanes: vi.fn(async () => panes()),
+      listPanes: vi.fn(async (_target: string, allWindows = false) => (allWindows ? [...panes(), ...otherWindowPanes()] : panes())),
       killSession: vi.fn(async (...a: unknown[]) => { calls.killSession(...a); return { ok: true }; }),
       respawnPane: vi.fn(async (...a: unknown[]) => { calls.respawnPane(...a); return { ok: true }; }),
       setRemainOnExit: vi.fn(async () => ({ ok: true })),
@@ -180,6 +182,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     nativeAt = ISSUE_NATIVE_AT;
     managedLaunch = null;
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    otherWindowPanes = () => [];
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       ...(running() ? [claudeIn(successorToken)] : []),
@@ -294,6 +297,15 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     ];
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true },
       { id: "%10", index: 1, cwd: "/project", width: 80, height: 24, active: false }];
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    expect(state()).toEqual(before);
+  });
+
+  // CodeRabbit on the merge head (:1003): a pane in another window of the seat's session is a second pane too.
+  it("refuses when the seat's session has a second window, its pane the only one of the active window", async () => {
+    await failedHandover();
+    const before = state();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
     expect(state()).toEqual(before);
   });
@@ -817,6 +829,19 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         expect(resumeTarget()).toBe(previousToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "none",
           limit: expect.stringContaining(`the retiring occupant's conversation, not its fork parent ${PARENT}'s`) });
+      });
+
+      // SH-B of the delta review: a fork of another seat, its parent resolved, on a distinct conversation, no parent in
+      // the argv: distinct from the parent now, but not compared with the one the launch forked from, and it says so.
+      it("a fork of another seat on a distinct conversation with no parent in the argv says the launch's parent was not checked", async () => {
+        await failedFork(`fork:${PARENT}`, null);
+        pidFile({ name: SEAT, sessionId: otherToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(otherToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "captured",
+          limit: expect.stringContaining("could not be read from its process") });
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "forked" });
       });
 
       it("the same with a parent that can't be resolved again says the parent was not checked", async () => {
