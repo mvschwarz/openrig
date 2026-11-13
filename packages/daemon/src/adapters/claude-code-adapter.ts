@@ -19,7 +19,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
-import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
@@ -498,13 +498,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
-    const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options);
+    const listProcesses = options?.observationPass
+      ? options.observationPass.lister(this.listProcesses ?? listNativeProcessesOrThrow, this.listProcesses ?? listNativeProcesses)
+      : this.listProcesses;
+    const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
     const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
     // is not a return to a shell. Say so only for a proven idle shell (the rule Codex's checkReady uses).
     if (probe.code === "returned_to_shell"
-      && !await verifyPaneIdleShell({ target: binding.tmuxSession, tmux: this.tmux, listProcesses: this.listProcesses })) {
+      && !await verifyPaneIdleShell({ target: binding.tmuxSession, tmux: this.tmux, listProcesses })) {
       return {
         ready: false,
         reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Claude.",
@@ -571,7 +574,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return current;
   }
 
-  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string, options?: ReadinessOptions & { requireCurrentLaunch?: boolean }) {
+  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string, options?: ReadinessOptions & { requireCurrentLaunch?: boolean }, listProcesses = this.listProcesses) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
     let probe = assessNativeResumeProbe(input);
     // Headerless managed launches (including bypass mode) use the same readiness
@@ -598,7 +601,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // conversation are the proof's inputs. A record for another launch keeps today's result below.
     if (!launch) {
       if (options?.requireCurrentLaunch) return probe;
-      return await this.proveWithoutLaunch(binding, options) ? { ...verifiedProbe, provedWithoutLaunch: true } : probe;
+      return await this.proveWithoutLaunch(binding, options, listProcesses) ? { ...verifiedProbe, provedWithoutLaunch: true } : probe;
     }
     if (!binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
@@ -638,14 +641,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** The observation `rig seat clear-attention` uses: the pane's one foreground Claude names exactly `resumeToken`, the
    *  same process in two samples, with no frozen executable, in the session's only pane with an unchanged PID. Reads
    *  only. Anything missing or inconclusive is not proof. */
-  private async proveWithoutLaunch(binding: NodeBinding, options: ReadinessOptions | undefined): Promise<boolean> {
+  private async proveWithoutLaunch(binding: NodeBinding, options: ReadinessOptions | undefined, listProcesses = this.listProcesses): Promise<boolean> {
     const token = options?.resumeToken?.trim();
     if (!token || !binding.tmuxPane || !binding.tmuxSession) return false;
     try {
       const panes = await this.tmux.listPanes(binding.tmuxSession);
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return false;
       const native = await verifyClaudePaneProcess({ target: binding.tmuxPane, tmux: this.tmux,
-        listProcesses: this.listProcesses, expectedToken: token, rotation: options?.resumeRotation ?? null });
+        listProcesses, expectedToken: token, rotation: options?.resumeRotation ?? null });
       if (!native) return false;
       const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
       return currentPanes.length === 1 && currentPanes[0]?.id === binding.tmuxPane
