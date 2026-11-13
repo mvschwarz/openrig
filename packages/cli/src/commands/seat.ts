@@ -1022,8 +1022,8 @@ Example:
       }
       if (opts.json) return;
       const state = res.data.state;
-      console.log(state === "answered" ? `Decided: ${res.data.optionId}. The runner gives it to its agent at its next read.`
-        : state === "refused" ? "Decided: refused. The runner gives its agent the refusal at its next read."
+      console.log(state === "answered" ? `Decided: ${res.data.optionId}. A runner waiting on the request gets it now; one that isn't gets it at its next read.`
+        : state === "refused" ? "Decided: refused. A runner waiting on the request gets the refusal now; one that isn't gets it at its next read."
         : `Nothing was decided: the request is ${state}.`);
     });
 

@@ -423,10 +423,10 @@ Each startup file and action specifies when it applies:
 - a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
 - an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
 
-**A file keeps one copy of each block.**
+**A file keeps one copy of each distinct block text, and tidying the copies never removes a text you wrote.**
 - **Touched markers:** a marker an editor or formatter rewrapped, with spaces or line breaks inside the comment, still reads as its block, and the next write puts it back in OpenRig's form.
-- **Collected copies:** they're reduced to the first. Beside a copy you edited, OpenRig's own unedited copies and exact repeats are removed, and every different edited copy stays (`guidance_block_copies_removed`).
-- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write keeps one block. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
+- **Collected copies:** a copy that repeats an earlier one exactly is removed. Beside a copy you edited, OpenRig's own unedited copies are removed too, and every different edited copy stays (`guidance_block_copies_removed`).
+- **A marker that lost its pair:** OpenRig can't tell where that block starts or ends, so it adds no copy beside it and names it (`guidance_block_markers_damaged`). Put back the missing marker or remove the partial block, and OpenRig's next write treats that block like any other. `rig package install` leaves such a file as it is, names it in its result (`notes`), and installs the rest. A marker without its pair beside a complete block is named too (`guidance_block_marker_unpaired`), and the block is written.
 
 An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 

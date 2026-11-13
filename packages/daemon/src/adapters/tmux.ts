@@ -494,7 +494,29 @@ export class TmuxAdapter {
       if (probe.state !== "present") return false;
       const panes = await this.listPanes(target.session);
       return panes.length === 1 && panes[0]!.id === target.pane && await this.isPaneDead(target.pane);
-    });
+    }, target => this.lastClientActivity(target.session));
+  }
+
+  /** When a writable tmux client attached to this session last had activity (epoch ms, whole seconds), or null when no
+   *  writable client is attached. tmux's client_activity is session-wide and covers more than text keys, so this is
+   *  recent writable-client activity, not proof of typing in the pane. A read-only client (a viewer tile) can't type
+   *  into the seat and doesn't count. An attach counts: tmux can't tell a key in the attach's second from the attach,
+   *  so a delivery can be held briefly after one. A tmux failure or an unreadable row throws: the guard then holds
+   *  the paste rather than take it for "no activity" (#3076). */
+  async lastClientActivity(session: string): Promise<number | null> {
+    const exact = exactTarget(session, "session");
+    const format = `#{client_readonly}${TMUX_FIELD_SEPARATOR}#{client_activity}`;
+    const output = await this.run(["tmux", "list-clients", "-t", exact, "-F", format],
+      `tmux list-clients -t ${shellQuote(exact)} -F "${format}"`);
+    let latest: number | null = null;
+    for (const line of output.split("\n").map(row => row.trim()).filter(row => row !== "")) {
+      const [readonly, activity, ...rest] = line.split(TMUX_FIELD_SEPARATOR);
+      if (rest.length || !/^[01]$/.test(readonly ?? "") || !/^[1-9]\d*$/.test(activity ?? "")) {
+        throw new Error(`tmux list-clients: unreadable client row for ${session}`);
+      }
+      if (readonly === "0") latest = Math.max(latest ?? 0, Number(activity) * 1000);
+    }
+    return latest;
   }
   private readonly freshProbes = new Map<string, string>();
   private readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
@@ -1081,12 +1103,13 @@ export class TmuxAdapter {
         // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
         // checks pass; they then aren't run a second time.
         beforePaste: async () => {
-          let checked = false;
-          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // This send's own checks can wait (a conversation lookup, an input capture), so they run first, and the
+          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery.
+          await options?.beforePaste?.();
+          const checks = async () => { beforeWrite(); beforeInput?.(); };
           // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
           const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
           if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
-          if (!checked) await options?.beforePaste?.();
         },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;

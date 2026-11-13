@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, isAbsolute } from "node:path";
 import { getOpenRigHome } from "../../openrig-compat.js";
-import { SETTINGS_VALID_KEYS, type SettingsStore, type ResolvedSetting } from "./settings-store.js";
+import { SETTINGS_VALID_KEYS, describeSettingKey, type SettingKeyDescription, type SettingsStore, type ResolvedSetting } from "./settings-store.js";
 import { connectionsProjection, readConnectionConfiguration } from "../gateway/connections-projection.js";
 import { DEFAULT_CONFIG, INHERIT_INBOUND_DESTINATION, LEGACY_INBOUND_DESTINATION } from "../gateway/slack/config.js";
 import { projectionPath } from "../gateway/human-registry.js";
@@ -13,7 +13,13 @@ import { describeDefaultReceiver, type DefaultReceiver } from "../default-receiv
 type Value = string | number | boolean | null;
 type State = "available" | "missing" | "malformed" | "unavailable";
 type Kind = "scalar" | "text" | "path" | "identity" | "url" | "names" | "paths" | "withheld";
-export interface BrowserEntry {
+/** Each is optional and separate: the rules a value must meet, whether a write route exists for the key, when a change is
+ * known to take effect, and (above, on the entry) whether this caller is shown the value. None implies another. */
+export interface BrowserEntryMetadata extends SettingKeyDescription {
+  /** "daemon_restart" when the application guidance says so; otherwise "unknown": OpenRig does not guess. */
+  appliesAt: "daemon_restart" | "unknown";
+}
+export interface BrowserEntry extends BrowserEntryMetadata {
   key: string;
   group: "general" | "slack" | "people" | "hosts" | "health";
   value: Value;
@@ -90,6 +96,8 @@ function sourceFile(file: string): { state: State; bytes: string | null } {
   try { return { state: "available", bytes: readFileSync(file, "utf8") }; }
   catch (error) { return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unavailable", bytes: null }; }
 }
+/** The keys whose guidance below says a daemon restart or startup applies them. The browser test ties this to that text. */
+const DAEMON_RESTART_KEYS = new Set(["terminal.tmux_server", "retention.enabled"]);
 function application(key: string): string {
   if (key === "terminal.tmux_server") return "Selected at daemon restart; surviving sessions keep their previous server until deliberately stopped. See terminal status for the effective choice.";
   if (key === "ui.terminal.max_live_terminals") return "Legacy web client; unset resolver value, consumer fallback 2. No TUI limit implied.";
@@ -119,7 +127,8 @@ export function settingsBrowser(store: SettingsStore, gateway: Record<string, un
     const d = safeValue(defaultValue, kind, redact);
     entries.push({ key, group, value: v.value, defaultValue: d.value, defaultKnown: defaultValue !== undefined && !["people", "hosts"].includes(group), source,
       visibility: source === "unavailable" ? "unavailable" : v.value === null && v.reason ? "withheld" : "shown",
-      reason: v.reason ?? d.reason, scope, application: applied });
+      reason: v.reason ?? d.reason, scope, application: applied,
+      ...describeSettingKey(key), appliesAt: DAEMON_RESTART_KEYS.has(key) ? "daemon_restart" : "unknown" });
   }
   const file = sourceFile(store.configPath);
   let generalState = file.state;
