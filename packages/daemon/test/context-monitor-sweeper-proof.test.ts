@@ -7,6 +7,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { autoScreen, name, recordRotation, requestedToken, rotatedToken, rotation, rowsWith, seat, token } from "./helpers/claude-sweeper-seat.js";
@@ -59,7 +60,7 @@ describe("ContextMonitor proves a banner-less auto-mode Claude with no launch re
     const [binding, options] = check.mock.calls[0] as unknown as [NodeBinding, { resumeToken?: string }];
     expect(binding).toMatchObject({ nodeId: node.id, tmuxSession: name, tmuxPane: "%1", id: registry.getBindingForNode(node.id)!.id });
     expect(binding.launchGeneration).toBe((db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1").get(node.id) as { generation_uuid: string }).generation_uuid);
-    expect(options).toEqual({ resumeToken: token });
+    expect(options).toEqual({ resumeToken: token, observationPass: expect.any(ObservationPass) });
     expect(status(session.id)).toBe("attention_required");
   });
 
@@ -82,7 +83,7 @@ describe("ContextMonitor proves a banner-less auto-mode Claude with no launch re
     recordRotation(db, session.id);
     const check = vi.fn(async () => ({ ready: false }));
     await monitorWith(check).pollOnce();
-    expect(check.mock.calls[0]![1]).toEqual({ resumeToken: rotatedToken, resumeRotation: rotation });
+    expect(check.mock.calls[0]![1]).toEqual({ resumeToken: rotatedToken, resumeRotation: rotation, observationPass: expect.any(ObservationPass) });
     const { adapter } = seat();
     await monitorWith((binding, opts) => adapter.checkReady(binding, opts)).pollOnce();
     expect(status(session.id)).toBe("ready");
@@ -144,10 +145,10 @@ describe("ContextMonitor proves a banner-less auto-mode Claude with no launch re
     });
   });
 
-  it("passes no options when the session records no token", async () => {
+  it("passes only the observation pass when the session records no token", async () => {
     seed("attention_required", null);
     const check = vi.fn(async () => ({ ready: false }));
     await monitorWith(check).pollOnce();
-    expect(check.mock.calls[0]).toHaveLength(1);
+    expect(check.mock.calls[0]![1]).toEqual({ observationPass: expect.any(ObservationPass) });
   });
 });
