@@ -24,9 +24,9 @@ committed change. Two repairs aren't in this release: see Known limits.
 
 ### Before you upgrade
 
-- **Back up the database, then restart the daemon:** `rig daemon stop`, copy the
-  database file (`rig config get db.path` prints its path), then
-  `rig daemon start`. Your agents keep running through a daemon restart; don't
+- **Back up the database, install 0.7.13, then restart the daemon:** `rig daemon stop`,
+  copy the database file (`rig config get db.path` prints its path), install
+  OpenRig 0.7.13 using your existing installation method, then `rig daemon start`. Your agents keep running through a daemon restart; don't
   use `rig down`, which ends them. Three migrations run on the daemon's first start: 160 and 161 (for the experimental hub connector below)
   and 162 (indexes for session reads). Going back to 0.7.12 after them isn't
   established. ([#2993](https://github.com/mvschwarz/openrig/pull/2993), [#2997](https://github.com/mvschwarz/openrig/pull/2997))
