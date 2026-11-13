@@ -233,6 +233,21 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(await service().recover({ seatRef: SEAT, reason: "again" })).toMatchObject({ ok: false, code: "no_handover_to_recover" });
   });
 
+  // CodeRabbit on #3044 (the activity grant): only a Claude successor is adopted, and the Claude launch issues no
+  // run-bound activity grant, so the failure revoked none and the recovered seat has none to restore. The recovery
+  // refuses any other runtime, which keeps it that way.
+  it("adopts a Claude successor with no activity grant to restore, and refuses a seat whose runtime is no longer Claude", async () => {
+    await failedHandover();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id = ?").get(nodeId)).toEqual({ n: 0 });
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(nodeId);
+    const before = state();
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "recover_runtime_unsupported" });
+    expect(state()).toEqual(before);
+    db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE id = ?").run(nodeId);
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id = ?").get(nodeId)).toEqual({ n: 0 });
+  });
+
   it("#3044: the recovered successor keeps the applied-launch observation its launch returned", async () => {
     const generation = await failedHandover();
     // The failed attempt records what the launch applied, though only readiness failed.
