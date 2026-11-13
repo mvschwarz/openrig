@@ -227,7 +227,7 @@ describe("project-qualified proof scope (#132)", () => {
     for (const scope of ["C:\\Users\\x\\missions\\m0\\slices\\01-t001", "C:/Users/x/missions/m0/slices/01-t001"]) {
       const res = await f.get(`scope=${encodeURIComponent(scope)}`);
       // resolved against the selected workspace like any unqualified scope (there it doesn't exist), never as project "C"
-      expect(await res.json(), scope).toMatchObject({ error: "scope_missing" });
+      expect(await res.json(), scope).toMatchObject({ error: process.platform === "win32" ? "path_escape" : "scope_missing" });
     }
     // a one-letter prefix with a relative scope is a project only when the catalog has it; here it hasn't
     expect(await (await f.get(`scope=${encodeURIComponent("C:m0")}`)).json()).toMatchObject({ error: "scope_missing" });

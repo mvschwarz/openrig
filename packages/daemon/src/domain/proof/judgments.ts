@@ -304,8 +304,13 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   try {
     try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.linkSync(temporary, target);
-    const directory = fs.openSync(home, "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    // Node cannot fsync an opened directory on Windows (EPERM). The receipt's
+    // contents are already synced before exclusive publication; Windows does
+    // not provide the directory durability guarantee used on POSIX here.
+    if (process.platform !== "win32") {
+      const directory = fs.openSync(home, "r");
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
