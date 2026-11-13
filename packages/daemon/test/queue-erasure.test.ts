@@ -39,11 +39,13 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
-/** A row whose every content field and linked copy carries `secret-<id>`, with its history at chosen ages. */
-async function row(id: string, source: string, destination: string, history: Array<{ state: string; daysAgo: number }> = []) {
+/** A row whose every content field and linked copy carries `secret-<id>`, with its history at chosen ages. `openrig`:
+ *  OpenRig created it (a sweep finding, an escalation), so the create stages its wake from OpenRig's own session. */
+async function row(id: string, source: string, destination: string, history: Array<{ state: string; daysAgo: number }> = [],
+  wakeTrigger?: "openrig") {
   const secret = `secret-${id}`;
   await repo.create({ qitemId: id, sourceSession: source, destinationSession: destination, body: `${secret} body`, summary: `${secret} summary`,
-    tags: [`${secret}-tag`] });
+    tags: [`${secret}-tag`], wakeTrigger });
   db.prepare("UPDATE queue_transitions SET ts = ?, transition_note = ? WHERE qitem_id = ?").run(ago(400), `${secret} created`, id);
   for (const step of history) {
     const { transitionId } = log.append({ qitemId: id, state: step.state, actorSession: destination, transitionNote: `${secret} note` });
@@ -680,5 +682,112 @@ describe("round 3 controls", () => {
     expect(report.clean).toBe(false);
     expect(marker("l2-new")).toBeUndefined();
     expect(everything()).toContain("secret-l2-new body");
+  });
+});
+
+describe("OpenRig's own wakes and notices", () => {
+  const DAEMON = "daemon@kernel";
+  const HEALTH = "system:health";
+  const members = { kind: "members" as const, members: [A, B] };
+  const wakeOf = (id: string) => db.prepare("SELECT sender_session AS from_, destination_session AS to_ FROM outbox_entries WHERE outbox_id = ?")
+    .get(`wake-intent-${id}`);
+  const loose = (table: "outbox_entries" | "inbox_entries", id: string, from: string, to: string, body: string) => {
+    if (table === "outbox_entries") {
+      db.prepare(`INSERT INTO outbox_entries (outbox_id, sender_session, destination_session, body, ts_dispatched) VALUES (?, ?, ?, ?, ?)`)
+        .run(id, from, to, body, NOW);
+    } else {
+      db.prepare(`INSERT INTO inbox_entries (inbox_id, sender_session, destination_session, body, ts_dropped) VALUES (?, ?, ?, ?, ?)`)
+        .run(id, from, to, body, NOW);
+    }
+  };
+
+  it("an OpenRig-triggered finding to a member erases clean, with OpenRig's wake for it and its notices", async () => {
+    await row("f-finding", A, A, [], "openrig");
+    // The premise: the finding's wake is staged from OpenRig, not from the member named as its source.
+    expect(wakeOf("f-finding")).toEqual({ from_: DAEMON, to_: A });
+    await row("f-escalation", DAEMON, B, [], "openrig");
+    await row("f-health", HEALTH, A, [{ state: "done", daysAgo: 2 }], "openrig");
+    loose("outbox_entries", "o-notice", DAEMON, A, "secret-loose-notice");
+    loose("inbox_entries", "i-notice", HEALTH, B, "secret-loose-inbox");
+    const dry = await eraseQueue(db, { scope: members, apply: false, nowIso: NOW });
+    const report = await eraseQueue(db, { scope: members, apply: true, nowIso: NOW });
+    expect({ ...report, applied: false }).toEqual(dry);
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["f-escalation", "f-finding", "f-health"]);
+    expect(report.mixed).toEqual([]);
+    expect(report.keptCopies).toEqual([]);
+    expect(report.unlinked).toMatchObject({ outbox: 1, inbox: 1, mixedEntries: 0 });
+    expect(report.clean).toBe(true);
+    const all = everything();
+    expect(all).not.toContain("secret-f-");
+    expect(all).not.toContain("secret-loose-");
+  });
+
+  it("an OpenRig wake to another account's seat is kept, and a row OpenRig woke with one member endpoint stays mixed", async () => {
+    await row("f-own", A, B, [], "openrig");
+    await row("x-finding", OUT, OUT, [], "openrig");
+    await row("x-escalation", DAEMON, OUT, [], "openrig");
+    await row("x-mixed", OUT, A, [], "openrig");
+    loose("outbox_entries", "o-elsewhere", DAEMON, OUT, "secret-loose-elsewhere");
+    const report = await eraseQueue(db, { scope: members, apply: true, nowIso: NOW });
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["f-own"]);
+    expect(report.mixed).toEqual([{ qitemId: "x-mixed", memberEndpoint: "destination" }]);
+    expect(report.unlinked).toMatchObject({ outbox: 0, mixedEntries: 0 });
+    expect(report.clean).toBe(false);
+    const all = everything();
+    for (const id of ["x-finding", "x-escalation", "x-mixed"]) {
+      expect(exists(id)).toBe(true);
+      expect(all).toContain(`secret-${id} body`);
+    }
+    expect(wakeOf("x-finding")).toEqual({ from_: DAEMON, to_: OUT });
+    expect(wakeOf("x-mixed")).toEqual({ from_: DAEMON, to_: A });
+    expect(all).toContain("secret-loose-elsewhere");
+    expect(all).not.toContain("secret-f-own");
+  });
+
+  it("OpenRig's entries with itself are untouched, and a session that only looks like OpenRig's is outside the account", async () => {
+    await row("f-own", A, B, [], "openrig");
+    loose("outbox_entries", "o-self", DAEMON, DAEMON, "secret-loose-self");
+    loose("outbox_entries", "o-health", HEALTH, DAEMON, "secret-loose-health");
+    loose("inbox_entries", "i-self", HEALTH, DAEMON, "secret-loose-inbox-self");
+    // isOpenRigSender is exact: "System:" isn't OpenRig's prefix.
+    loose("outbox_entries", "o-lookalike", "System:health", A, "secret-loose-lookalike");
+    const report = await eraseQueue(db, { scope: members, apply: true, nowIso: NOW });
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["f-own"]);
+    expect(report.unlinked).toMatchObject({ outbox: 0, inbox: 0, mixedEntries: 1 });
+    expect(report.clean).toBe(false);
+    const all = everything();
+    for (const body of ["secret-loose-self", "secret-loose-health", "secret-loose-inbox-self", "secret-loose-lookalike"]) expect(all).toContain(body);
+    expect(all).not.toContain("secret-f-own");
+  });
+
+  it("rerunning the same plan over what an earlier daemon left removes it: the erased row's OpenRig wake, and its OpenRig rows", async () => {
+    await row("r-finding", A, A, [], "openrig");
+    await row("r-escalation", DAEMON, B, [], "openrig");
+    // What an earlier daemon's run leaves: it deleted r-finding but kept OpenRig's wake for it as mixed, and left
+    // r-escalation untouched as a mixed row. Built here by deleting r-finding and restoring its wake as it was.
+    const wake = db.prepare("SELECT * FROM outbox_entries WHERE outbox_id = 'wake-intent-r-finding'").get() as Record<string, unknown>;
+    await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "r-finding", action: "delete" }] }, apply: true, nowIso: NOW });
+    const columns = Object.keys(wake);
+    db.prepare(`INSERT OR REPLACE INTO outbox_entries (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
+      .run(...columns.map((c) => wake[c]));
+    expect([exists("r-finding"), marker("r-finding") !== undefined, exists("r-escalation")]).toEqual([false, true, true]);
+    expect(everything()).toContain("secret-r-finding summary");
+
+    const rerun = await eraseQueue(db, { scope: members, apply: true, nowIso: NOW });
+    expect(rerun.qitems.map((q) => q.qitemId)).toEqual(["r-escalation"]);
+    expect(rerun.unlinked).toMatchObject({ outbox: 1, mixedEntries: 0 });
+    expect(rerun.clean).toBe(true);
+    expect(everything()).not.toContain("secret-r-");
+  });
+
+  it("routine retention deletes OpenRig's wake for a row with the row, and OpenRig's own rows keep theirs together", async () => {
+    await row("t-old", A, B, [{ state: "done", daysAgo: 40 }], "openrig");
+    await row("t-self", DAEMON, DAEMON, [{ state: "done", daysAgo: 40 }], "openrig");
+    expect(wakeOf("t-old")).toEqual({ from_: DAEMON, to_: B });
+    const report = await eraseQueue(db, { scope: { kind: "routine", contentDays: 0, metadataDays: 30 }, apply: true, nowIso: NOW });
+    expect(report.qitems.map((q) => [q.qitemId, q.action])).toEqual([["t-old", "delete"], ["t-self", "delete"]]);
+    expect(report.keptCopies).toEqual([]);
+    expect(report.clean).toBe(true);
+    expect(everything()).not.toContain("secret-t-");
   });
 });

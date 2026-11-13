@@ -244,6 +244,46 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     expect(openFor(q).length).toBeGreaterThan(0);
   });
 
+  it.each(["parent", "own"] as const)("a readable %s notice reports its row again after a transient typing hold clears", async (kind) => {
+    if (kind === "parent") lane("dev1"); else seat("lane", "pool.dev1", "dev1@lane");
+    const to = kind === "parent" ? "owner@lane" : "dev1@lane";
+    const row = await work("dev1@lane", 90);
+    await sweep();
+    const [notice] = findingsTo(to);
+    expect(notice!.body).toContain(`Every row this notice stands for: ["${row.qitemId}"]`);
+    const before = queue.getById(row.qitemId)!;
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+    expect(findingsTo(to).filter(isOpen)).toHaveLength(0);
+    // No new row transition, timestamp or wake attempt: ending the temporary custody is the new fact.
+    db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    await sweep();
+    const open = findingsTo(to).filter(isOpen);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.body).toContain(row.qitemId);
+    expect(open[0]!.qitemId).not.toBe(notice!.qitemId);
+    expect(queue.getById(row.qitemId)).toMatchObject({ state: "pending", claimedAt: null,
+      tsUpdated: before.tsUpdated, lastNudgeAttempt: before.lastNudgeAttempt });
+  });
+
+  it.each(["parent", "own"] as const)("a dismissed %s notice still holds back its row across a transient typing hold", async (kind) => {
+    if (kind === "parent") lane("dev1"); else seat("lane", "pool.dev1", "dev1@lane");
+    const to = kind === "parent" ? "owner@lane" : "dev1@lane";
+    const row = await work("dev1@lane", 90);
+    await sweep();
+    const [notice] = findingsTo(to);
+    await queue.update({ qitemId: notice!.qitemId, actorSession: to, state: "done",
+      closureReason: "no-follow-on", transitionNote: "seen" });
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    expect(findingsTo(to)).toHaveLength(1);
+    expect(findingsTo(to).filter(isOpen)).toHaveLength(0);
+  });
+
   // Review of #3049: the route is rechecked at the fold, not only the finding's state: a parent resolution that changes
   // or becomes ambiguous while the notice is being written leaves the per-row finding open and unmarked.
   it.each(["ambiguous", "gone"] as const)("a fold rechecks the route: a parent that becomes %s while the notice is written folds nothing", async (change) => {

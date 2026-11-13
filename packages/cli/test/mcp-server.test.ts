@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -246,7 +246,8 @@ describe("MCP Server", () => {
     // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
       "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
-    const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
+    // A title is a display name, not a hint (the plain-wording test checks it).
+    const hints = Object.fromEntries(tools.map((tool) => [tool.name, { ...tool.annotations, title: undefined }]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
     for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
     for (const name of additive) expect(hints[name], name).toEqual({ readOnlyHint: false, destructiveHint: false });
@@ -879,6 +880,54 @@ describe("MCP Server", () => {
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
+  });
+
+  it("shows a connected assistant's person plain titles and openings, keeping each tool's rules and hints", async () => {
+    // What a person sees: each tool's title and the first sentence of its description.
+    const plain: Record<string, [title: string, sentence: string]> = {
+      rig_queue_list: ["List my OpenRig requests", "Lists the requests addressed to this assistant, or that it sent."],
+      rig_queue_show: ["Show one request", "Shows one request, who picked it up, and its answer."],
+      rig_queue_create: ["Send a request", "Sends a request to another assistant on your team."],
+      rig_queue_claim: ["Pick up a request", "Marks a request addressed to this assistant as picked up, so others see it's being worked on."],
+      rig_queue_update: ["Answer a request", "Adds this assistant's answer to a request, or a note while it works."],
+      rig_artifact_read: ["Read a shared file", "Reads a file attached to a request."],
+      rig_team: ["Show my team", "Shows the assistants on your team, each one's address for sending it a request, and which one leads."],
+      rig_whoami: ["Show this connection", "Shows which assistant this connection is and which team it belongs to."],
+    };
+    expect(Object.keys(PLAIN_WORDING).sort()).toEqual(Object.keys(plain).sort());
+    const catalog = async (options?: Parameters<typeof createMcpServer>[1]) => {
+      const server = createMcpServer(mockClient(), options);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "catalog-client", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const { tools } = await client.listTools();
+      await client.close();
+      await server.close();
+      return new Map(tools.map((tool) => [tool.name, tool]));
+    };
+    const local = await catalog();
+    const external = await catalog({ seat: "cus-1-caller@team", access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false,
+      external: { objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"], artifact: ["read"] } } } });
+    for (const [name, [title, sentence]] of Object.entries(plain)) {
+      const own = local.get(name)!;
+      // rig_whoami isn't offered to an external grant, and its plain text is true for every caller, so the local one shows it.
+      const shown = name === "rig_whoami" ? own : external.get(name)!;
+      expect(shown.title, name).toBe(title);
+      expect(shown.annotations?.title, name).toBe(title);
+      expect(shown.description?.slice(0, sentence.length + 1), name).toBe(`${sentence} `);
+      if (name === "rig_whoami") continue;
+      // Only the opening changes: every rule after it, and each hint, is the tool's own.
+      const { replaces, with: opening } = PLAIN_WORDING[name]!;
+      expect(own.description?.startsWith(replaces), name).toBe(true);
+      expect(shown.description, name).toBe(opening + own.description!.slice(replaces.length));
+      expect({ ...shown.annotations, title: undefined }, name).toEqual(own.annotations);
+      // A local caller keeps the tool's own text, which says what only it can do.
+      expect(own.title, name).toBeUndefined();
+      expect(own.annotations?.title, name).toBeUndefined();
+    }
+    expect(local.get("rig_whoami")?.description).toBe("Shows which assistant this connection is and which team it belongs to. It answers with its rig, pod, peers and edges, and caller: authenticated (a validated HTTP credential, with its principal) or declared (OPENRIG_SESSION_NAME where the server was configured, which nothing verifies).");
+    expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {

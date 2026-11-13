@@ -76,7 +76,7 @@ Keys:
   health.context_pressure.*        context-pressure warning/critical percentages (defaults 95/99)
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
-  ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
+  ui.timezone            IANA timezone for the TUI's times, the Feed's included (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
   ui.terminal.max_live_terminals

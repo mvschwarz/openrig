@@ -96,6 +96,8 @@ describe("Slack sweep selection", () => {
   it("keeps a legacy schema without owner classification quiet", async () => {
     row("legacy");
     for (const table of ["queue_transitions", "queue_transitions_archive"]) {
+      // The simulated pre-classification schema also predates its partial index.
+      db.exec(`DROP INDEX idx_${table}_owner_notification_qitem`);
       db.exec(`ALTER TABLE ${table} DROP COLUMN owner_notification_level; ALTER TABLE ${table} DROP COLUMN owner_notification_kind`);
     }
     repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
