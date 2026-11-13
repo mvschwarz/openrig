@@ -18,7 +18,11 @@ type TransitionsRead = (call: number) => { status: number; data: unknown } | und
 let database: Database.Database;
 let repo: QueueRepository;
 
-async function runUpdate(qitemId: string, args: string[], transform: UpdateTransform = (body) => body, transitionsRead?: TransitionsRead) {
+/** The selected daemon as the CLI sees it: the sender header it stamps, and the id the daemon's /healthz answers with. */
+interface Endpoint { sender?: string; selfHostId?: string }
+
+async function runUpdate(qitemId: string, args: string[], transform: UpdateTransform = (body) => body, transitionsRead?: TransitionsRead,
+  endpoint: Endpoint = {}) {
   let transitionReads = 0;
   let posts = 0;
   let exits = 0;
@@ -41,8 +45,10 @@ async function runUpdate(qitemId: string, args: string[], transform: UpdateTrans
       isProcessAlive: () => true,
     },
     clientFactory: () => ({
-      senderIdentity: async () => ({ session: "reviewer@fixture", originUnknown: false }),
-      get: async (route: string) => route.endsWith("/transitions")
+      senderIdentity: async () => ({ session: endpoint.sender ?? "reviewer@fixture", originUnknown: false }),
+      get: async (route: string) => route === "/healthz"
+        ? { status: 200, data: { selfHostId: endpoint.selfHostId } }
+        : route.endsWith("/transitions")
         ? transitionsRead?.(transitionReads++) ?? { status: 200, data: repo.listTransitions(qitemId) }
         : { status: 200, data: repo.getById(qitemId) },
       post: async (_route: string, rawBody: unknown) => {
@@ -250,6 +256,30 @@ describe("queue update canonical read-back against daemon domain semantics", () 
     const said = JSON.parse(result.errors.join("\n")) as { error: string; message: string };
     expect(said.error).toBe("queue_update_readback_failed");
     expect(said.message).toContain('no newer canonical transition carried requested note "must persist" from "reviewer@fixture"');
+  });
+
+  // A seat on host-a writing to a daemon at a direct endpoint sends reviewer@fixture@host-a. Only a daemon whose own id is
+  // host-a drops that suffix; any other daemon keeps it, and its own reviewer@fixture is a different seat.
+  it("doesn't take the selected daemon's own same-named seat for a dropped note's writer", async () => {
+    const qitemId = await claimedRow();
+    const result = await runUpdate(qitemId, ["--note", "must persist"], () => {
+      repo.update({ qitemId, actorSession: "reviewer@fixture", transitionNote: "must persist" });
+      return null;
+    }, undefined, { sender: "reviewer@fixture@host-a", selfHostId: "host-b" });
+
+    expect(result.code).toBe(1);
+    const said = JSON.parse(result.errors.join("\n")) as { error: string; message: string };
+    expect(said.message).toContain('from "reviewer@fixture@host-a"');
+    expect(said.message).not.toContain('or "reviewer@fixture"');
+  });
+
+  it("accepts the bare actor when the selected daemon answers with the sender's own host id", async () => {
+    const qitemId = await claimedRow();
+    const result = await runUpdate(qitemId, ["--note", "must persist"], undefined, undefined,
+      { sender: "reviewer@fixture@host-a", selfHostId: "host-a" });
+
+    expect(result.code, result.errors.join("\n")).toBe(0);
+    expect(result.transitions.at(-1)).toMatchObject({ actorSession: "reviewer@fixture", transitionNote: "must persist" });
   });
 
   it("accepts the summary suffix the daemon adds to a note", async () => {

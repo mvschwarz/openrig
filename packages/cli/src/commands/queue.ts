@@ -736,13 +736,19 @@ function noteRecordedAs(actual: string, note: string, requested: Record<string, 
   });
 }
 
-/** Who the daemon records as this write's actor: the sender header as sent (on this host's own daemon also without this
- *  host's id, which the daemon drops), else the actor the body declares. Empty when neither is known. */
-async function updateActors(client: Pick<DaemonClient, "senderIdentity">, bodyActor: unknown, remote: boolean): Promise<string[]> {
+/** Who the daemon records as this write's actor: the sender header as sent, else the actor the body declares. Empty when
+ *  neither is known. A daemon drops a sender's host suffix only when it's that daemon's own id, so the bare form is
+ *  this write's only where the selected daemon answers with that id; nothing else (an absent --host included) shows it. */
+async function updateActors(client: Pick<DaemonClient, "senderIdentity" | "get">, bodyActor: unknown): Promise<string[]> {
   const { session } = await client.senderIdentity();
   if (session) {
     const parts = session.split("@");
-    return parts.length === 3 && !remote ? [session, `${parts[0]}@${parts[1]}`] : [session];
+    if (parts.length !== 3) return [session];
+    let daemonId: unknown;
+    try {
+      daemonId = (await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 })).data?.selfHostId;
+    } catch { /* Unanswered: the suffix stays unproven, so only the full actor counts. */ }
+    return daemonId === parts[2] ? [session, `${parts[0]}@${parts[1]}`] : [session];
   }
   return typeof bodyActor === "string" && bodyActor.trim() ? [bodyActor.trim()] : [];
 }
@@ -1649,7 +1655,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
         }
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, requested, target.options);
         if (res.status < 400) {
-          const actors = await updateActors(target.client, requested.actorSession, target.remote !== undefined);
+          const actors = await updateActors(target.client, requested.actorSession);
           const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown, actors);
           if (!verified.ok) {
             emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false);

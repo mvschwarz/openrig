@@ -92,12 +92,17 @@ describe("cross-host queue writes wait for the daemon's answer", () => {
   }
 
   it("a create that gets no answer in time reads as unknown, never as a failure, with the ID to reconcile by", async () => {
-    await expect(run(["create", "--destination", "dev@rig-b@vps-b", "--body", "b", "--summary", "s"],
-      [new DaemonTimeoutError("Request to http://localhost:7433/api/queue/create timed out after 15000ms")])).rejects.toThrow();
+    let thrown: unknown;
+    await run(["create", "--destination", "dev@rig-b@vps-b", "--body", "b", "--summary", "s"],
+      [new DaemonTimeoutError("Request to http://localhost:7433/api/queue/create timed out after 15000ms")]).catch((e: unknown) => { thrown = e; });
     const all = stderr.join("\n");
     expect(all).toContain("queue request got no answer in time (routing to host 'vps-b')");
     expect(all).not.toContain("queue transport failure");
     expect(all).toContain("The write outcome is INDETERMINATE");
-    expect(all).toMatch(/repeat the same create with --id 'qitem-\d{14}-[0-9a-f]{16}'/);
+    // The final timeout error carries the same-ID instruction itself, not only the request line printed before the write.
+    const id = /Queue create request ID: (qitem-\d{14}-[0-9a-f]{16})/.exec(all)?.[1];
+    expect(id).toBeDefined();
+    expect(thrown).toBeInstanceOf(DaemonTimeoutError);
+    expect((thrown as Error).message).toContain(`repeat the same create with --id '${id}' and unchanged source, destination, body and options`);
   });
 });
