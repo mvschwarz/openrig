@@ -398,7 +398,7 @@ export function buildPostCompactRestorePrompt(input: {
 
 function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string | null): string {
   const pieces = [
-    "Now audit your compaction restore before doing any other work.",
+    "Now audit your compaction restore: read the required items below before acting on the restored work, and keep any hold you verified as live.",
   ];
   const instruction = postRestoreAuditInstruction?.trim();
   if (instruction) {
@@ -409,7 +409,7 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
     "Include the refocusing skill and the topology and work trace sources. Account for the current traces actually delivered during restore; do not rerun Python to duplicate them. If no current trace arrived, report that delivery gap. Read required notes and full sources with the native file-read tool; pointers, compact summaries and truncated extracts do not count as full source reads.",
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
-    "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
+    "Read every required item that is not FULL in full now, without skimming. Report the final read-depth table and the reconnect note as you resume; don't hold unaffected work for them.",
   );
   return pieces.join(" ");
 }

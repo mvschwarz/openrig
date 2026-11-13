@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -159,6 +160,40 @@ describe("StartupOrchestrator", () => {
       ...overrides,
     };
   }
+
+  it.each([false, true])("revokes its exact run grant on later readiness failure, replacement=%s", async replace => {
+    const seed = seedSession();
+    db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(seed.nodeId);
+    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('bound',?,'r01-impl','%1')").run(seed.nodeId);
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: seed.nodeId, generation: sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid,
+      issuedBy: "launch", run: { runId, sessionId: seed.sessionId, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    const first = issue("first"); grants.activate(first.grantId);
+    let replacement: ReturnType<typeof issue> | undefined;
+    const adapter = mockAdapter({ runtime: "pi", launchHarness: vi.fn(async () => ({ ok: true, activityGrantId: first.grantId })),
+      checkReady: vi.fn(async () => { if (replace) { replacement = issue("replacement"); grants.activate(replacement.grantId); } throw new Error("readiness unavailable"); }) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter,
+      binding: { ...makeBinding(), nodeId: seed.nodeId, tmuxPane: "%1" } }));
+    expect(result.startupStatus).toBe("failed");
+    expect(grants.get(first.grantId)?.revokedAt).not.toBeNull();
+    if (replacement) expect(grants.standing(replacement.grantId)).toBe("current");
+  });
+
+  it("revokes its run when context delivery reveals a definitive readiness gate", async () => {
+    const seed = seedSession();
+    db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(seed.nodeId);
+    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('bound',?,'r01-impl','%1')").run(seed.nodeId);
+    const grants = new ActivityGrantStore(db);
+    const grant = grants.issue({ nodeId: seed.nodeId, generation: sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid,
+      issuedBy: "launch", run: { runId: "first", sessionId: seed.sessionId, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    grants.activate(grant.grantId);
+    const adapter = mockAdapter({ runtime: "pi", launchHarness: vi.fn(async () => ({ ok: true, activityGrantId: grant.grantId })),
+      checkReady: vi.fn().mockResolvedValueOnce({ ready: true }).mockResolvedValue({ ready: false, code: "login_required", reason: "login needed" }) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter, startupActions: [makeAction({ type: "send_text", value: "startup text" })],
+      binding: { ...makeBinding(), nodeId: seed.nodeId, tmuxPane: "%1" } }));
+    expect(result.startupStatus).toBe("attention_required");
+    expect(grants.get(grant.grantId)?.revokedAt).not.toBeNull();
+  });
 
   it("community contract: launch surfaces undelivered startup files without placing or pasting them", async () => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-startup-files-"));

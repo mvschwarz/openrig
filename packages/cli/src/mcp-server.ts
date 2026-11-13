@@ -1823,7 +1823,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.", READ_ONLY),
       inputSchema: z.object({
-        rigId: z.string().optional().describe("Rig name or identifier; optional for an external grant to discover its team"),
+        rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
     },
     async ({ rigId }) => {
@@ -1840,7 +1840,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           rigId = rigs[0]!;
         }
         // An external caller names one of its grant's rigs, so a lookup never answers about another workspace's rig.
-        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`);
+        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`, "Leave rigId out to see this connection's own team.");
         const rig = await rigIdFor(client, rigId);
         if ("content" in rig) return rig;
         if (inferred && !rig.resolved) {

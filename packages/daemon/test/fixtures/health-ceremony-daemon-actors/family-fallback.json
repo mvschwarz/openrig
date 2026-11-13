@@ -1,0 +1,276 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family fallback). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "fallback",
+  "lineageId": "fc-75d937e8e3e7-1794369652",
+  "now": "2026-11-11T11:15:02.406Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "handedOffFrom": null,
+      "sourceSession": "coordenacao-orquestrador-tech@fabrica",
+      "destinationSession": "build-dev-1-s10@fabrica",
+      "tags": [
+        "new-task",
+        "mission:family-fallback"
+      ]
+    },
+    {
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "handedOffFrom": "fc-75d937e8e3e7-1794369652",
+      "sourceSession": "build-dev-1-s10@fabrica",
+      "destinationSession": "build-dev-10@fabrica",
+      "tags": [
+        "new-task",
+        "mission:family-fallback"
+      ]
+    },
+    {
+      "qitemId": "qitem-20261111111354-7ee72c9b",
+      "handedOffFrom": "qitem-20261111081824-2a385e85",
+      "sourceSession": "build-dev-10@fabrica",
+      "destinationSession": "build-dev-1-s10@fabrica",
+      "tags": [
+        "new-task",
+        "mission:family-fallback"
+      ]
+    },
+    {
+      "qitemId": "qitem-20261111111445-8772f875",
+      "handedOffFrom": "qitem-20261111111354-7ee72c9b",
+      "sourceSession": "build-dev-1-s10@fabrica",
+      "destinationSession": "coordenacao-orquestrador-tech@fabrica",
+      "tags": [
+        "new-task",
+        "mission:family-fallback"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 179738,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T04:00:52.239Z",
+      "state": "pending",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "created",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 180991,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T05:11:36.858Z",
+      "state": "pending",
+      "actorSession": "system:queue-fallback",
+      "transitionNote": "fallback-routed: build-dev-1@fabrica → build-dev-1-s10@fabrica (seat pool 01M71XNDSMNNYZ7CKNFJ7Z1GY2: build-dev-1@fabrica had not taken it; build-dev-1-s10@fabrica was free)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 180992,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T05:11:46.865Z",
+      "state": "in-progress",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "claimed",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 181141,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T05:17:31.372Z",
+      "state": "blocked",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "parked on external:pronto-t005467",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 182496,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T06:17:32.258Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M74GMCVAP0QE68TJ63CFH27P; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 182507,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T06:17:46.964Z",
+      "state": "blocked",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "parked on external:pronto-t005467",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 183598,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T07:17:04.397Z",
+      "state": "blocked",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "parked on external:passos-t005467",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 184733,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T08:17:05.919Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M74QF9RBWCE48E20X0J8BHF0; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 184736,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T08:17:18.591Z",
+      "state": "blocked",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "parked on external:passos-t005467",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 184760,
+      "qitemId": "fc-75d937e8e3e7-1794369652",
+      "ts": "2026-11-11T08:18:24.024Z",
+      "state": "handed-off",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "handed off to build-dev-10@fabrica",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 184761,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T08:18:24.027Z",
+      "state": "pending",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "handoff from fc-75d937e8e3e7-1794369652",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 184774,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T08:18:38.333Z",
+      "state": "in-progress",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 184937,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T08:29:03.696Z",
+      "state": "blocked",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "parked on external:pronto-t5467",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 185897,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T09:29:04.621Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M74VK3TEJRDTXC9X04Z2B265; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 185898,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T09:29:10.663Z",
+      "state": "blocked",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "parked on external:pronto-t5467-depois-t4139",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 186999,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T10:29:12.206Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M74Z1685DNGGNH2GACG0T127; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 187008,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T10:29:27.376Z",
+      "state": "blocked",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "parked on external:ci-base-71ad95a20",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187550,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T10:59:28.483Z",
+      "state": "blocked",
+      "actorSession": "watchdog@system",
+      "transitionNote": "park wake fired: watchdog 01M752FJ6EBC2BDK9BNCXSN3KM; delivery=ok; awaiting owner consumption",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 187571,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T11:00:46.707Z",
+      "state": "blocked",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "parked on external:ci-revert-5da2b6666",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187880,
+      "qitemId": "qitem-20261111081824-2a385e85",
+      "ts": "2026-11-11T11:13:54.577Z",
+      "state": "handed-off",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "handed off to build-dev-1-s10@fabrica",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187881,
+      "qitemId": "qitem-20261111111354-7ee72c9b",
+      "ts": "2026-11-11T11:13:54.580Z",
+      "state": "pending",
+      "actorSession": "build-dev-10@fabrica",
+      "transitionNote": "handoff from qitem-20261111081824-2a385e85",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187893,
+      "qitemId": "qitem-20261111111354-7ee72c9b",
+      "ts": "2026-11-11T11:14:08.828Z",
+      "state": "in-progress",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "claimed",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187913,
+      "qitemId": "qitem-20261111111354-7ee72c9b",
+      "ts": "2026-11-11T11:14:45.119Z",
+      "state": "handed-off",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "handed off to coordenacao-orquestrador-tech@fabrica",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187914,
+      "qitemId": "qitem-20261111111445-8772f875",
+      "ts": "2026-11-11T11:14:45.120Z",
+      "state": "pending",
+      "actorSession": "build-dev-1-s10@fabrica",
+      "transitionNote": "handoff from qitem-20261111111354-7ee72c9b",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 187923,
+      "qitemId": "qitem-20261111111445-8772f875",
+      "ts": "2026-11-11T11:15:02.406Z",
+      "state": "done",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

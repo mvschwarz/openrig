@@ -5932,6 +5932,30 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each([
+    "Run-bound reporting unavailable; using existing unbound install-token reporting.",
+    "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed.",
+  ])("surfaces direct Pi restore limitation warnings without repeating resume: %s", async warning => {
+    const rig = rigRepo.createRig("pi-warning");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi", cwd: "/repo/pi" });
+    const session = sessionRegistry.registerSession(node.id, "r99-pi-warning");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("pi_session_file", "/tmp/pi-warning.jsonl", "resume_if_possible", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const resume = vi.fn(async (_session: string) => ({ ok: true as const, warnings: [warning] }));
+    const orch = createOrchestrator({ pi: {
+      canResume: vi.fn((type: string | null) => type === "pi_session_file"), resume,
+    } as unknown as PiResumeAdapter });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(result.result.warnings).toContain(`${resume.mock.calls[0]![0]}: ${warning}`);
+  });
+
   describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
     it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
       const rig = rigRepo.createRig("r99");
@@ -5967,7 +5991,17 @@ describe("RestoreOrchestrator", () => {
 
       const piResume = {
         canResume: vi.fn((type: string | null, token: string | null) => type === "pi_session_file" && !!token),
-        resume: vi.fn(async () => ({ ok: true as const })),
+        resume: vi.fn(async (session: string) => {
+          // The production Pi grant resolver must see the newly committed restore row, not the exited snapshot row.
+          const owners = db.prepare(`SELECT b.node_id AS nodeId, s.id AS sessionId, s.status FROM bindings b JOIN nodes n ON n.id=b.node_id
+            JOIN sessions s ON s.node_id=n.id AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
+            WHERE b.tmux_session=? AND s.session_name=? AND n.runtime='pi' AND s.status NOT IN ('superseded','detached','exited')`)
+            .all(session, session) as Array<{ nodeId: string; sessionId: string; status: string }>;
+          expect(owners).toHaveLength(1);
+          expect(owners[0]).toMatchObject({ nodeId: piNode.id, status: "running" });
+          expect(owners[0]!.sessionId).not.toBe(piSess.id);
+          return { ok: true as const };
+        }),
       } as unknown as PiResumeAdapter;
       const codexResume = mockCodexResume({ ok: true as const });
 

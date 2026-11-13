@@ -391,15 +391,15 @@ describe("native resume probe", () => {
     ).toBe("claude --permission-mode acceptEdits --resume 'abc-123' --name 'dev-impl@demo-rig'");
   });
 
-  it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag", () => {
+  it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag and operational launch arg", () => {
     expect(buildNativeResumeCommand("codex", "019d-token")).toBe(
-      "codex -s workspace-write resume '019d-token'"
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume '019d-token'"
     );
   });
 
-  it("builds a Codex profile resume with -p flag", () => {
+  it("builds a Codex profile resume with -p flag and operational launch arg", () => {
     expect(buildNativeResumeCommand("codex", "019d-token", null, "my-profile")).toBe(
-      "codex -p 'my-profile' resume '019d-token'"
+      "codex -p 'my-profile' '-c' 'check_for_update_on_startup=false' resume '019d-token'"
     );
   });
 

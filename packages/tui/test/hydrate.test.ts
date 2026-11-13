@@ -782,6 +782,34 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(instanceLines).not.toContain("not shown");
   });
 
+  it("shows inherited-property check-in statuses as unknown", async () => {
+    const hosted = { members: ["constructor", "toString"].map((status, i) => ({
+      seat: `guest${i}@myrig`, status, reason: "unrecognized reason",
+    })) };
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/queue/hosted-members": hosted }));
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const lines = renderScreen(view.get(), snap, { cols: 160, rows: 60 }).lines.join("\n");
+    expect(lines).toContain("guest0@myrig  unknown");
+    expect(lines).toContain("guest1@myrig  unknown");
+    expect(lines).not.toContain("unrecognized reason");
+  });
+
+  it("shows connected check-ins beside a failed rig nodes read", async () => {
+    const hosted = { members: [
+      { seat: "chat@myrig", status: "on-request", lastCheckInAt: null },
+      { seat: "other@downrig", status: "checking-in", lastCheckInAt: null },
+    ] };
+    const snap = await hydrateSnapshot(fixtureClient({ "/api/rigs/01JRIG/nodes": { status: 500 } },
+      { "/api/queue/hosted-members": hosted }));
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const lines = renderScreen(view.get(), snap, { cols: 160, rows: 60 }).lines.join("\n");
+    expect(lines).toContain("Inventory unavailable for myrig");
+    expect(lines).toContain("chat@myrig  on request:");
+    expect(lines).not.toContain("other@downrig");
+  });
+
   it("a known-empty list of connected assistants stays quiet", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.hosts[0]!.connectedAssistants).toEqual([]);
