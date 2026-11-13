@@ -737,7 +737,7 @@ export class WorkflowRuntime {
       );
     }
 
-    assertBoundWorkflowTarget(entryOwner);
+    assertBoundWorkflowTarget(entryOwner, this.queueRepo);
 
     const createdAt = this.now().toISOString();
     const preallocatedEntryQitemId = newQitemId();
@@ -1218,6 +1218,8 @@ export class WorkflowRuntime {
         );
       }
 
+      assertBoundWorkflowTarget(owner, this.queueRepo);
+
       // Fresh frontier packet — the redrive delivery. The --decision
       // text lands durably in the packet body (the resumer’s
       // instruction reaches the step owner).
@@ -1451,6 +1453,7 @@ export class WorkflowRuntime {
       if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
       const owner = resolveDefaultOwner(specRow.spec, step, (session) => nodeRuntimeOf(this.db, session), roleResolutionContext(this.db, instance.boundRig));
       if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
+      assertBoundWorkflowTarget(owner, this.queueRepo);
       const redrivePacketId = newQitemId();
       const created = this.queueRepo.createWithinTransaction({
         qitemId: redrivePacketId,
