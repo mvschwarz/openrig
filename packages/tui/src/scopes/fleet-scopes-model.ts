@@ -95,10 +95,32 @@ export function fleetScopesLines(state: ViewState, snap: FleetSnapshot, width: n
     { text: `  ${FLEET_SCOPES_HINT}` },
   ];
   const read = snap.fleetScopes;
+  // The selected slice's detail is drawn FIRST, before the fleet list: opening
+  // a slice from a fleet longer than the screen shows the detail at the top of
+  // the pane (the scroll offset resets on open), not the head of the list again.
+  // It also keeps rendering when the LIST read failed — a successful detail
+  // read is still good, whatever the surrounding list state is.
+  const sel = state.fleetSelected;
+  if (sel) {
+    const view0 = read && "view" in read.status ? read.status.view : null;
+    const origin = view0?.missions.find(m => m.hostId === sel.hostId && m.mission === sel.mission);
+    lines.push(sectionRule("Slice detail", width));
+    lines.push({ text: `  origin ${sel.hostId} · project ${origin?.project ?? "workspace"} · mission ${sel.mission} · slice ${sel.slice}` });
+    const detail = snap.fleetSliceDetail;
+    if (!detail) lines.push({ text: "  Reading the slice detail from its origin host…" });
+    else if ("error" in detail) lines.push({ text: `  ! detail unavailable from ${sel.hostId}: ${detail.error}` });
+    else lines.push(...scopesContentLines(detail.detail, sel.mission, {
+      collapseReqs: state.scopesCollapseReqs,
+      narrative: false,
+      width,
+      suppressHints: true,
+    }));
+    lines.push({ text: "" });
+  }
   if (!read) return wrapDetailLines([...lines, { text: "" }, { text: "  Not read yet." }], width);
   if (!("view" in read.status)) {
     const failure = read.status;
-    return wrapDetailLines([...lines, { text: "" }, {
+    return wrapDetailLines([...lines, {
       text: failure.status === 404
         ? "  This daemon doesn't serve the fleet Projects view (HTTP 404)."
         : `  Fleet Projects unavailable: ${failure.error}. Nothing is inferred from the missing read.`,
@@ -111,9 +133,9 @@ export function fleetScopesLines(state: ViewState, snap: FleetSnapshot, width: n
   for (const h of view.hosts) lines.push(...hostLines(h));
   for (const s of view.skipped ?? []) lines.push({ text: `  ${s.hostId}  skipped: ${s.reason}` });
   lines.push(sectionRule("Missions · grouped by origin host; native ids as each host served them", width));
+  lines.push({ text: "  Workspace-root listing: catalog projects selected on each host are not listed here yet." });
   if (view.missions.length === 0) lines.push({ text: "  No missions served from any host." });
 
-  const sel = state.fleetSelected;
   for (const host of view.hosts) {
     const missions = view.missions.filter(m => m.hostId === host.hostId);
     if (host.status === "ok" && missions.length === 0) continue;
@@ -125,20 +147,5 @@ export function fleetScopesLines(state: ViewState, snap: FleetSnapshot, width: n
     }
   }
 
-  // The DETAIL keeps its origin host: the composite identity opens the read, and the
-  // origin line names the host, project context and native id explicitly.
-  if (sel) {
-    const origin = view.missions.find(m => m.hostId === sel.hostId && m.mission === sel.mission);
-    lines.push(sectionRule("Slice detail", width));
-    lines.push({ text: `  origin ${sel.hostId} · project ${origin?.project ?? "workspace"} · mission ${sel.mission} · slice ${sel.slice}` });
-    const detail = snap.fleetSliceDetail;
-    if (!detail) lines.push({ text: "  Reading the slice detail from its origin host…" });
-    else if ("error" in detail) lines.push({ text: `  ! detail unavailable from ${sel.hostId}: ${detail.error}` });
-    else lines.push(...scopesContentLines(detail.detail, sel.mission, {
-      collapseReqs: state.scopesCollapseReqs,
-      narrative: false,
-      width,
-    }));
-  }
   return wrapDetailLines(lines, width);
 }

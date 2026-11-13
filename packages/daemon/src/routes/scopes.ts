@@ -146,15 +146,34 @@ export function scopesRoutes(): Hono {
   // HTTP host contributes its own rows, host-attributed, beside per-host status.
   // The local routes above are untouched.
   app.get("/fleet", async (c) => {
-    const r = rootOf(c);
-    if ("error" in r) return r.error;
     const selected = selectedProject(c);
+    // The local root is resolved WITHOUT failing the route: an operator-only
+    // machine (no missions root configured) still sees every remote host, with
+    // the local leg labelled unavailable instead of a 503 hiding the fleet.
+    const localRoot = (): { root: string } | { reason: string } => {
+      if (selected) return { root: selected.missionsRoot };
+      const indexer = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
+      if (!indexer) return { reason: "slices indexer unavailable on this daemon" };
+      if (!indexer.isReady()) return { reason: "no local missions root configured" };
+      return { root: indexer.slicesRoot };
+    };
     const listLocalScopes = (): LocalScopesCounts => {
-      const missionNames = realFs.listDir(r.root).filter((e) => realFs.isDirectory(path.join(r.root, e)));
+      const root = localRoot();
+      if ("reason" in root) return { project: selected?.id ?? null, missions: [], error: root.reason };
+      let missionNames: string[];
+      try {
+        missionNames = fs.readdirSync(root.root).filter((e) => fs.statSync(path.join(root.root, e)).isDirectory());
+      } catch (err) {
+        // ENOENT is an empty-but-honest workspace; any other read failure
+        // (EACCES, EIO…) is the local leg's own error state, never an empty
+        // list stamped ok.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return { project: selected?.id ?? null, missions: [] };
+        return { project: selected?.id ?? null, missions: [], error: `local missions read failed: ${(err as Error).message}` };
+      }
       const missions = missionNames.map((name) => {
         try {
           if (selected) projectMission(selected, name);
-          const dir = path.join(r.root, name);
+          const dir = path.join(root.root, name);
           const rows: Record<string, unknown>[] = [];
           for (const s of realFs.listDir(path.join(dir, "slices")).filter((e) => realFs.isDirectory(path.join(dir, "slices", e)))) {
             const row = countsRow(s, path.join(dir, "slices", s), selected);

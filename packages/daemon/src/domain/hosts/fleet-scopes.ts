@@ -48,6 +48,7 @@ export type FleetScopesStatusKind =
   | "unreachable"
   | "auth-failed"
   | "unsupported"
+  | "unavailable"
   | "unsupported-transport";
 
 export interface FleetScopesHostStatus {
@@ -97,10 +98,14 @@ export interface FleetScopesPayload {
   observedAt: string;
 }
 
-/** The local leg's shape (the counts projection the local route serves). */
+/** The local leg's shape (the counts projection the local route serves).
+ *  `error` marks the whole local leg failed (no root configured, or the
+ *  directory read itself failed): the local host is then reported with its
+ *  own failure state and NO missions — never as a healthy empty host. */
 export interface LocalScopesCounts {
   project: string | null;
   missions: Array<{ mission: string; error?: string; slices: Array<Record<string, unknown>> }>;
+  error?: string;
 }
 
 export interface FleetScopesDeps {
@@ -174,33 +179,39 @@ async function readHostScopes(
   label: string,
   reg: HostRegistryLoadResult,
   deps: FleetScopesDeps,
-  observedAt: string,
+  budgetMs: number,
+  nowFn: () => string,
 ): Promise<HostOutcome> {
   const cache = deps.cache ?? fleetScopesCache;
-  const cached = cache.get(hostId);
-  const fromCache = (status: FleetScopesStatusKind, error: string): HostOutcome => {
-    if (cached) return { status: { hostId, status: "stale", observedAt, lastSuccessAt: cached.at, error }, missions: cached.missions };
-    return { status: { hostId, status, observedAt, lastSuccessAt: null, error }, missions: [] };
+  const fromCache = (key: string, status: FleetScopesStatusKind, error: string): HostOutcome => {
+    const at = nowFn();
+    const cached = cache.get(key);
+    if (cached) return { status: { hostId, status: "stale", observedAt: at, lastSuccessAt: cached.at, error }, missions: cached.missions };
+    return { status: { hostId, status, observedAt: at, lastSuccessAt: null, error }, missions: [] };
   };
-  if (!reg.ok) return fromCache("unreachable", reg.error);
+  if (!reg.ok) return fromCache(hostId, "unreachable", reg.error);
   const resolved = resolveHost(reg.registry, hostId);
-  if (!resolved.ok) return fromCache("unreachable", resolved.error);
+  if (!resolved.ok) return fromCache(hostId, "unreachable", resolved.error);
+  // Key the last-known-good store by the resolved address, not the registry
+  // alias: an alias repointed elsewhere must not serve the old host's rows.
+  const cacheKey = resolved.host.transport === "http" && resolved.host.url ? resolved.host.url : hostId;
   if (resolved.host.transport !== "http") {
     return fromCache(
+      hostId,
       "unsupported-transport",
       `host '${hostId}' is SSH-declared; the fleet Projects read requires an http-transport registry entry (url; bearer optional)`,
     );
   }
   const res = await remoteJsonRequest(resolved.host, "/api/scopes?counts=1", {
     method: "GET",
-    timeoutMs: deps.timeoutMs ?? FLEET_SCOPES_HOST_TIMEOUT_MS,
+    timeoutMs: Math.min(deps.timeoutMs ?? FLEET_SCOPES_HOST_TIMEOUT_MS, budgetMs),
     fetchImpl: deps.fetchImpl,
     env: deps.env,
     readFile: deps.readFile,
   });
   if (res.ok) {
     const counts = remoteCounts(res.payload);
-    if (!counts.ok) return fromCache("unreachable", `remote scopes read answered HTTP ${res.status} but ${counts.reason}`);
+    if (!counts.ok) return fromCache(cacheKey, "unreachable", `remote scopes read answered HTTP ${res.status} but ${counts.reason}`);
     // The counts read carries the selected project (null when the host serves its
     // default workspace); the row's project context is that id, never invented.
     const rawProject = (res.payload as Record<string, unknown>)["project"];
@@ -208,25 +219,27 @@ async function readHostScopes(
       ? ((rawProject as Record<string, unknown>)["id"] as string)
       : null;
     const missions = counts.missions.map((m) => stampRows(hostId, label, project, m));
-    cache.set(hostId, { at: observedAt, missions, project });
-    return { status: { hostId, status: "ok", observedAt, lastSuccessAt: observedAt }, missions };
+    const done = nowFn();
+    cache.set(cacheKey, { at: done, missions, project });
+    return { status: { hostId, status: "ok", observedAt: done, lastSuccessAt: done }, missions };
   }
   switch (res.kind) {
     case "bearer":
-      return fromCache("auth-failed", res.detail);
+      return fromCache(cacheKey, "auth-failed", res.detail);
     case "http":
-      if (res.status === 401 || res.status === 403) return fromCache("auth-failed", `HTTP ${res.status}${res.detail ? `: ${res.detail}` : ""}`);
-      if (res.status === 404) return fromCache("unsupported", `HTTP 404: the remote daemon does not serve the scopes read model`);
-      return fromCache("unreachable", `HTTP ${res.status}${res.detail ? `: ${res.detail}` : ""}`);
+      if (res.status === 401 || res.status === 403) return fromCache(cacheKey, "auth-failed", `HTTP ${res.status}${res.detail ? `: ${res.detail}` : ""}`);
+      if (res.status === 404) return fromCache(cacheKey, "unsupported", `HTTP 404: the remote daemon does not serve the scopes read model`);
+      return fromCache(cacheKey, "unreachable", `HTTP ${res.status}${res.detail ? `: ${res.detail}` : ""}`);
     case "timeout":
       return fromCache(
+        cacheKey,
         "unreachable",
         res.phase === "body"
           ? `read timed out: response headers arrived (HTTP ${res.status}) but the body never completed`
-          : `read timed out after ${deps.timeoutMs ?? FLEET_SCOPES_HOST_TIMEOUT_MS}ms`,
+          : `read timed out after ${Math.min(deps.timeoutMs ?? FLEET_SCOPES_HOST_TIMEOUT_MS, budgetMs)}ms`,
       );
     case "network":
-      return fromCache("unreachable", res.detail);
+      return fromCache(cacheKey, "unreachable", res.detail);
   }
 }
 
@@ -239,8 +252,12 @@ export async function aggregateFleetScopes(deps: FleetScopesDeps): Promise<Fleet
   const observedAt = now();
 
   const local = deps.listLocalScopes();
-  const hosts: FleetScopesHostStatus[] = [{ hostId: selfId, status: "ok", observedAt, lastSuccessAt: observedAt }];
-  const missions: FleetScopesMission[] = local.missions.map((m) => stampRows(selfId, selfId, local.project, m));
+  // The local host is one leg with its own failure state: a failed local read
+  // never hides the remote hosts, and never reads as a healthy empty host.
+  const hosts: FleetScopesHostStatus[] = [local.error
+    ? { hostId: selfId, status: "unavailable", observedAt, lastSuccessAt: null, error: local.error }
+    : { hostId: selfId, status: "ok", observedAt, lastSuccessAt: observedAt }];
+  const missions: FleetScopesMission[] = local.error ? [] : local.missions.map((m) => stampRows(selfId, selfId, local.project, m));
   const skipped: FleetScopesPayload["skipped"] = [];
 
   const reg = deps.loadRegistry();
@@ -270,16 +287,19 @@ export async function aggregateFleetScopes(deps: FleetScopesDeps): Promise<Fleet
       const i = cursor++;
       if (i >= entries.length) return;
       const entry = entries[i]!;
+      const remaining = deadline - Date.now();
       // A leg that cannot start inside the view deadline reports honestly
       // instead of stretching the read — stale when last-known rows exist.
-      if (Date.now() >= deadline) {
+      if (remaining <= 0) {
         const cached = (deps.cache ?? fleetScopesCache).get(entry.id);
         outcomes[i]!.outcome = cached
           ? { status: { hostId: entry.id, status: "stale", observedAt: now(), lastSuccessAt: cached.at, error: "fleet view deadline exceeded before this host was read" }, missions: cached.missions }
           : { status: { hostId: entry.id, status: "unreachable", observedAt: now(), lastSuccessAt: null, error: "fleet view deadline exceeded before this host was read" }, missions: [] };
         continue;
       }
-      outcomes[i]!.outcome = await readHostScopes(entry.id, entry.id, reg, deps, now());
+      // Each request is bounded by the time REMAINING in the view, so a late
+      // host cannot stretch the read past the deadline by a full timeout.
+      outcomes[i]!.outcome = await readHostScopes(entry.id, entry.id, reg, deps, remaining, now);
     }
   };
   await Promise.all(Array.from({ length: Math.min(cap, entries.length) }, () => worker()));

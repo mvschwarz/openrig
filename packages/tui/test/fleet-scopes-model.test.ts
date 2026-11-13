@@ -135,3 +135,39 @@ describe("fleetScopesLines — the detail keeps its origin host", () => {
     expect(text).toContain("detail unavailable from host-b: HTTP 502");
   });
 });
+
+describe("fleetScopesLines — the selected slice's detail is visible on open", () => {
+  const detailSnap = {
+    dirName: "build-s1", id: "build-s1", displayName: "BUILD-S1", status: "building", stage: "spec",
+    locks: { spec: null, delivery: null }, proof: { paired: 0, total: 0 },
+    intent: "Do the thing.", miniRequirements: [], proofContract: [], narrative: null,
+  } as unknown as SliceScopeSnap;
+
+  it("draws the detail before the fleet list, so a fleet longer than the screen opens on the detail", () => {
+    const sel = { hostId: "host-b", mission: "alpha", slice: "build-s1" };
+    const lines = fleetScopesLines(state(sel), snapWith(view(), { detail: detailSnap }), 120);
+    const texts = lines.map(l => l.text ?? "");
+    const detailAt = texts.findIndex(t => t.includes("Slice detail"));
+    const hostsAt = texts.findIndex(t => t.includes("Hosts"));
+    expect(detailAt).toBeGreaterThan(-1);
+    expect(hostsAt).toBeGreaterThan(detailAt);
+    // The first visible content after the pane header is the detail's origin line.
+    expect(texts.slice(0, detailAt + 2).some(t => t.includes("origin host-b"))).toBe(true);
+  });
+
+  it("keeps a successful slice detail rendered when the list read failed", () => {
+    const sel = { hostId: "host-b", mission: "alpha", slice: "build-s1" };
+    const snap = { ...snapWith(null, { detail: detailSnap }), fleetScopes: { status: { status: 503, error: "unavailable" } } } as FleetSnapshot;
+    const lines = fleetScopesLines(state(sel), snap, 120);
+    const texts = lines.map(l => l.text ?? "");
+    expect(texts.some(t => t.includes("Slice detail"))).toBe(true);
+    expect(texts.some(t => t.includes("origin host-b"))).toBe(true);
+    expect(texts.some(t => t.includes("Fleet Projects unavailable"))).toBe(true);
+  });
+
+  it("suppresses the local-pane N/M key hints the fleet pane doesn't honour", () => {
+    const sel = { hostId: "host-b", mission: "alpha", slice: "build-s1" };
+    const lines = fleetScopesLines(state(sel), snapWith(view(), { detail: detailSnap }), 120);
+    expect(lines.map(l => l.text ?? "").some(t => t.includes("N narrative"))).toBe(false);
+  });
+});

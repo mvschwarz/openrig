@@ -3,13 +3,20 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 
 const reads = vi.hoisted(() => [] as string[]);
+const failReaddir = vi.hoisted(() => ({ path: null as string | null }));
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
   const readFileSync = ((p: Parameters<typeof real.readFileSync>[0], ...rest: unknown[]) => {
     reads.push(String(p));
     return (real.readFileSync as (...a: unknown[]) => unknown)(p, ...rest);
   }) as typeof real.readFileSync;
-  return { ...real, readFileSync, default: { ...real, readFileSync } };
+  const readdirSync = ((p: Parameters<typeof real.readdirSync>[0], ...rest: unknown[]) => {
+    if (failReaddir.path !== null && String(p) === failReaddir.path) {
+      throw Object.assign(new Error("EACCES: permission denied, scandir '" + String(p) + "'"), { code: "EACCES" });
+    }
+    return (real.readdirSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof real.readdirSync;
+  return { ...real, readFileSync, readdirSync, default: { ...real, readFileSync, readdirSync } };
 });
 
 const fs = await import("node:fs");
@@ -138,4 +145,63 @@ describe("GET /api/scopes/fleet — local leg + registry honesty", () => {
     expect(byName(releaseX, "hostId", "host-b").slices[0]).toMatchObject({ dirName: "01-thing", hostId: "host-b" });
     expect(body.hosts.find((h) => h.hostId === "host-b")?.status).toBe("ok");
   });
+
+  it("an operator-only machine with NO local missions root still shows the remote hosts, local leg labelled", async () => {
+    const remote = { ok: true, registry: { hosts: [{ id: "host-b", transport: "http" as const, url: "http://host-b:7433" }] } };
+    const fetchImpl = (async () => Response.json({
+      missions: [{ mission: "release-x", slices: [{ dirName: "01-thing", id: "OPR.01-thing", displayName: "01-thing", status: "spec", stage: "building", locks: { spec: null, delivery: null } }] }],
+      project: null,
+    })) as typeof fetch;
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("sliceIndexer" as never, { isReady: () => false, slicesRoot: "" } as never);
+      c.set("hostRegistryLoader" as never, () => remote);
+      c.set("remoteFetchImpl" as never, fetchImpl);
+      await next();
+    });
+    app.route("/api/scopes", scopesRoutes());
+    const res = await app.request("/api/scopes/fleet");
+    expect(res.status).toBe(200); // the old shape 503'd here, hiding every remote host
+    const body = await res.json() as {
+      missions: Array<{ hostId: string }>;
+      hosts: Array<{ hostId: string; status: string; error?: string }>;
+    };
+    expect(body.missions.map((m) => m.hostId)).toEqual(["host-b"]);
+    const local = body.hosts.find((h) => h.hostId !== "host-b")!;
+    expect(local.status).toBe("unavailable");
+    expect(local.error).toContain("no local missions root");
+    expect(body.hosts.find((h) => h.hostId === "host-b")!.status).toBe("ok");
+  });
+
+  it("a failed local directory read (EACCES) reports the local leg as its own error, not a healthy empty host", async () => {
+    failReaddir.path = root;
+    try {
+      const remote = { ok: true, registry: { hosts: [{ id: "host-b", transport: "http" as const, url: "http://host-b:7433" }] } };
+      const fetchImpl = (async () => Response.json({ missions: [], project: null })) as typeof fetch;
+      const body = await (await appWith(root, { registry: remote, fetchImpl }).request("/api/scopes/fleet")).json() as {
+        missions: unknown[];
+        hosts: Array<{ hostId: string; status: string; error?: string }>;
+      };
+      expect(body.missions).toEqual([]);
+      const local = body.hosts.find((h) => h.hostId !== "host-b")!;
+      expect(local.status).toBe("unavailable");
+      expect(local.error).toContain("EACCES");
+      expect(body.hosts.find((h) => h.hostId === "host-b")!.status).toBe("ok");
+    } finally {
+      failReaddir.path = null;
+    }
+  });
+
+  it("a really empty, readable local root still reads ok", async () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "scopes-empty-"));
+    const body = await (await appWith(empty, { registry: { ok: true, registry: { hosts: [] } } }).request("/api/scopes/fleet")).json() as {
+      missions: unknown[];
+      hosts: Array<{ hostId: string; status: string; error?: string }>;
+    };
+    expect(body.missions).toEqual([]);
+    expect(body.hosts).toHaveLength(1);
+    expect(body.hosts[0]).toMatchObject({ status: "ok" });
+    expect(body.hosts[0]!.error).toBeUndefined();
+  });
 });
+
