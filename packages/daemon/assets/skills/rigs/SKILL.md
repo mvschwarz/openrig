@@ -127,8 +127,8 @@ person needs in their project or home folder and name that path.
   joining as optional, with the effects below. Ask the person yes or no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
   - In a plain shell, joining writes no files in your project or personal settings.
-  - Inside tmux on 0.6.11, my sender and reply address is your existing tmux session name, even a number like `0`.
-    `rig attach --self` returns that address and `rig whoami` confirms it; `--display-name` does not change it.
+  - Inside tmux, my sender and reply address is `<member>@<rig>`, even when your tmux session is named `0`;
+    `rig attach --self` returns it and `rig whoami` confirms it; `--display-name` does not change it.
   - Inside tmux, other agents can type into this window, and stopping the team (`rig down`) also closes this tmux
     session (both from source, not hand-tested). Transcript recording and, for Claude Code, writing
     `.openrig/context-collector.cjs` and `.claude/settings.local.json` for the status line were hand-tested on 0.6.11.
@@ -189,6 +189,8 @@ person needs in their project or home folder and name that path.
   - **Your return address:** if this session joined the team (above), it's the `OPENRIG_SESSION_NAME` that
     `rig attach` printed. Otherwise agree one with the person on the kernel's rig, such as `claude-app@kernel` or
     `codex-app@kernel`. It's an address the queue takes tasks for; nothing is launched for it and no file is written.
+    If the person keeps more than one of these conversations, give each its own address (for example
+    `claude-app-2@kernel`); one address shares its questions.
     To tell the team what it's for, the person can add it to a roster as a hosted member
     (`docs/reference/hosted-members.md` in the OpenRig package).
     Put it in front of every `rig queue` command: `OPENRIG_SESSION_NAME=<address> rig queue ...` (add
@@ -206,7 +208,8 @@ person needs in their project or home folder and name that path.
 
     Then run
     `OPENRIG_SESSION_NAME=<address> rig queue create --destination <canonicalSessionName> --summary "<the goal in a sentence>" --body-file <file> --verify`.
-    Tell the person the task ID it prints, and keep the goal and that ID: they're how you find this work again.
+    Tell the person the task ID it prints, and keep the goal, your address and that ID: they're how you find this work
+    again.
   - **The team's questions** come to your address as tasks:
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
@@ -223,8 +226,8 @@ person needs in their project or home folder and name that path.
     resolution). Whether its agent was woken is a separate fact, the wake outcome `--verify` reports: `verified` (it
     rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
     proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
-    isn't retried automatically: wake it once the seat's input is free with
-    `rig send <canonicalSessionName> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
+    isn't retried automatically: wake the task's destination once its input is free with
+    `rig send <destination> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
     owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: check your address when the person asks or comes back.
@@ -317,8 +320,10 @@ Follow these steps by default. Only when the person declined the Codex offer abo
   A message informs, and a queue task is the work someone owns. Read its wake outcome as above before you send
   anything else.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
-- **Coming back later:** in a new session, use the same return address and the task IDs you gave the person
-  (`OPENRIG_SESSION_NAME=<address> rig queue list --mine`), and follow that work rather than creating it again.
+- **Coming back later:** in a new session, use the same return address and the task IDs you gave the person. Read
+  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above;
+  `OPENRIG_SESSION_NAME=<address> rig queue list --mine -a` lists everything this address sent or owns, finished work
+  included (without `-a` it shows only open items). Follow that work rather than creating it again.
   Adding OpenRig's MCP plugin to this app later starts a new session; it doesn't carry this conversation over.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
