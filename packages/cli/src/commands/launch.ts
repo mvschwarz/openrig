@@ -340,7 +340,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         const heldIds = (res.data.held ?? []).map((n) => `${n.logicalId} (${n.reason})`).join(", ");
         if (running.length) console.log(`Launched: ${running.map((n) => n.logicalId).join(", ")}`);
         if (heldIds) console.log(`Held: ${heldIds}`);
-        // Launch saw only a live session that isn't a bare shell: the pane is kept, and no agent is proven running there.
+        // Launch saw only a live session not proved to be a bare shell: the pane is kept, and no agent is proven running there.
         if (res.data.alreadyRunning?.length) {
           console.log(`Not relaunched, live session (its agent isn't proven running): ${res.data.alreadyRunning.map((n) => n.logicalId).join(", ")}`);
         }
