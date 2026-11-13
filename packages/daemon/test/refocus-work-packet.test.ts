@@ -238,6 +238,23 @@ describe("frontmatterIntent — folded and literal intents", () => {
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {
+  it("reports the current-state timestamp instead of the file modification time", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "PROGRESS.md"), '---\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Progress\n\n## Current state\n\nWaiting\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Waiting");
+  });
+  it("includes a readme-only rail in the work packet", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "SPEC.md"), '---\nintent: Work\nprogress_rail: readme-only\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Slice\n\n## Current state\n\nReady\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("PROGRESS · SPEC.md");
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Ready");
+  });
   it("shows one direct candidate as the work, labelled with its source, without a root fallback (W2)", () => {
     const w = world();
     const evidence = deriveWorkCandidates([{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-a"] }], w.missions, nothingElse);

@@ -245,6 +245,21 @@ def age_cue(path, text):
     return f"OLD NOTES — {path}, {age:.0f} days old, source {source}, threshold {threshold:g} days"
 
 
+def current_state_cue(text):
+    """Use the state stamp, never the file mtime (other edits change it)."""
+    match = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---", text or "", re.S)
+    stamp = re.search(r'^current_state_updated:[ \t]*["\']?(\d{4}-\d\d-\d\dT[^\s"\']+)', match.group(1), re.M) if match else None
+    if stamp:
+        try:
+            updated = datetime.datetime.fromisoformat(stamp.group(1).replace("Z", "+00:00"))
+            if updated.tzinfo is not None:
+                hours = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() / 3600
+                return f"CURRENT STATE — written {stamp.group(1)} ({hours:.1f} hours ago)"
+        except ValueError:
+            pass
+    return "CURRENT STATE — write time unknown"
+
+
 def render_topology(start, root, depth, failures, packet=False):
     output = ["## TOPOLOGY TRACE", f"root: {root}", f"start: {start}"]
     nodes, error = ascent(start, root)
@@ -335,12 +350,14 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
         # as text when present. Its absence is not a gap: many nodes have no PROGRESS.md.
         progress_path = node / "PROGRESS.md"
         progress_text = read(progress_path) if packet else None
+        if packet and progress_text is None and spec is not None:
+            frontmatter = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---", text, re.S)
+            if frontmatter and re.search(r"^progress_rail:[ \t]*['\"]?readme-only['\"]?[ \t]*\r?$", frontmatter.group(1), re.M):
+                progress_path, progress_text = spec, text
         if progress_text is not None:
             progress_body = progress_text.strip() if depth == "full" else by_section(progress_text, NOTES_STATE_HEADINGS, progress_path)
-            output.append(f"\nPROGRESS · PROGRESS.md\n{progress_body}")
-            cue = age_cue(progress_path, progress_text)
-            if cue:
-                output.append(cue)
+            output.append(f"\nPROGRESS · {progress_path.name}\n{progress_body}")
+            output.append(current_state_cue(progress_text))
     return "\n".join(output)
 
 

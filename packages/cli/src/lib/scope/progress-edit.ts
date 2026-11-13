@@ -92,6 +92,37 @@ export interface ProgressEditResult {
   changed: boolean;
 }
 
+/** Replace the current-state section without touching other sections. */
+export function setCurrentState(content: string, value: string): ProgressEditResult {
+  const text = value.replace(/\r\n/g, "\n").trim();
+  if (!text) throw new ScopeCliError({ fact: "The --current-state text is empty.", consequence: "No progress update was made.", action: "Pass non-empty current state text." });
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split("\n");
+  const visible = progressLines(lines);
+  const matches = visible.flatMap((line, i) => {
+    const heading = line.match(HEADING_RE);
+    return heading && heading[1] === "##" && heading[2]!.trim().toLowerCase() === "current state" ? [i] : [];
+  });
+  if (matches.length > 1) throw new ScopeCliError({ fact: "Multiple Current state sections found.", consequence: "No progress update was made.", action: "Keep one Current state section and retry." });
+  if (!matches.length) {
+    const separator = content.endsWith(newline + newline) ? "" : content.endsWith(newline) ? newline : newline + newline;
+    return { content: content + separator + "## Current state" + newline + newline + text.replace(/\n/g, newline) + newline, changed: true };
+  }
+  const start = matches[0]! + 1;
+  let end = start;
+  while (end < lines.length) {
+    const heading = visible[end]!.match(HEADING_RE);
+    if (heading && heading[1]!.length <= 2) break;
+    end++;
+  }
+  const oldBody = lines.slice(start, end).join("\n").replace(/\r\n/g, "\n").trim();
+  if (oldBody === text) return { content, changed: false };
+  const prefix = lines.slice(0, start).join("\n") + "\n";
+  const suffix = lines.slice(end).join("\n");
+  const body = newline + text.replace(/\n/g, newline) + newline + (suffix ? newline : "");
+  return { content: prefix + body + suffix, changed: true };
+}
+
 /**
  * Append a `- [<indicator>] <text>` row under `## <section>`.
  * - Creates the `## <section>` heading (appended after the last existing

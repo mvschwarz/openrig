@@ -88,12 +88,17 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
+  fs.writeFileSync(absPath, editFrontmatter(original, updates, absPath), "utf8");
+}
+
+export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
+    if (strict && /^---[ \t]*\r?\n/.test(original)) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
-    const separator = original.startsWith("\n") ? "" : "\n";
-    fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
-    return;
+    const newline = original.includes("\r\n") ? "\r\n" : "\n";
+    const separator = original.startsWith(newline) ? "" : newline;
+    return `---${newline}${yaml}${newline}---${newline}${separator}${original}`;
   }
 
   const originalBlock = match[1]!;
@@ -105,14 +110,14 @@ export function updateFrontmatter(
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
   } catch (error) {
     if (!(error instanceof ScopeCliError)) throw error;
+    if (strict) throw error;
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
     const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-    fs.writeFileSync(absPath, updated, "utf8");
-    return;
+    return updated;
   }
-  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+  return original.slice(0, blockStart) + block + original.slice(blockEnd);
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */
