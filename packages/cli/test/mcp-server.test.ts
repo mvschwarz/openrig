@@ -26,7 +26,8 @@ const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your pers
 const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.";
 const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
 const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
-const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway, go ahead.";
+const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
+const ASK_REMOVED_FACT = "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.";
 
 describe("MCP Server", () => {
   let mcpClient: Client;
@@ -406,7 +407,7 @@ describe("MCP Server", () => {
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
       // It hands the team the person's work, so which assistant they mean is theirs to say when several fit. Its list shows
       // team seats and connected assistants: only a running team seat picks a request up on its own.
-      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD}`);
+      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
       expect(FRONT_DOOR_WORKFLOW).not.toContain("<name>");
       // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
       expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
@@ -895,6 +896,7 @@ describe("MCP Server", () => {
     expect(instructions).toContain(ASK_UNLISTED);
     expect(instructions).not.toContain("list the team's members");
     expect(instructions).not.toContain("removed from the team");
+    expect(instructions).not.toContain("closed unanswered");
     expect(instructions).not.toMatch(/picked up|pick it up/);
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
@@ -909,7 +911,7 @@ describe("MCP Server", () => {
     await server.connect(serverTransport);
     await external.connect(clientTransport);
     const instructions = external.getInstructions() ?? "";
-    expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD}`);
+    expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
     expect(instructions).not.toContain(ASK_RUNNING_PICKUP);
     expect(instructions).not.toContain(ASK_SENT_ANYWAY);
     await external.close();
@@ -936,7 +938,7 @@ describe("MCP Server", () => {
     // Only a grant that can hand the team work is told to ask which assistant the person means; with team/list it lists the
     // team first and may reach another connected assistant, so it's told when that one picks the request up.
     expect(instructions.includes("ask which")).toBe(offered.has("rig_queue_create"));
-    if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD}`);
+    if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
     await external.close();
     await server.close();
   });

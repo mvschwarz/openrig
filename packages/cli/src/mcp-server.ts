@@ -669,7 +669,8 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
     ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
     "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
     ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
-    "If your person names one clearly, or says to send it anyway, go ahead.",
+    "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
+    "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.",
   ].join(" ");
 }
 
