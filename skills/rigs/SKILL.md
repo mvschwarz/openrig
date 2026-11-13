@@ -212,8 +212,10 @@ person needs in their project or home folder and name that path.
   the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
   review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
-  `rig send <seat>@<rig> "<their choice>" --dangerously-interact --reason "<their choice, in a few words>"`
-  (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
+  `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "<their choice, in their words>"`, where `<key>` is
+  the digit or letter that capture shows for their choice, never their words: the text is typed as keys, and a letter
+  can pick a menu's shortcut. If the screen shows no key for their choice, ask them
+  (`rig send --help` says how to send Escape to a prompt). A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
   whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
