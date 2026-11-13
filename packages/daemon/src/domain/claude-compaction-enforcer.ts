@@ -63,6 +63,8 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 // writing the restore map can take a minute+; the wait returns as soon as the
 // seat is idle, so this only bounds a pathological never-idle case.
 export const MANUAL_PREP_WAIT_MS_DEFAULT = 180_000;
+/** How often a manual attempt reads its seat while it waits (for the map, or after a /compact the seat wasn't idle for). */
+export const MANUAL_SEAT_READ_INTERVAL_MS = 5_000;
 // Operational ceiling, not a measured optimum. Existing context polls advance auto preparation.
 export const AUTO_PREP_WAIT_MS_DEFAULT = 25 * 60_000;
 // How long a stopped attempt holds automatic compaction off for its seat before a fresh attempt may begin. Without it one
@@ -253,7 +255,7 @@ function buildPreCompactPrepPrompt(input: {
   pieces.push(
     `Write this attempt's complete restore map to ${JSON.stringify(input.preparation.mapPath + ".tmp")}, using your ordinary file-edit tool. Append the exact completion marker below as its LAST line, then finish and close the file. OpenRig will atomically publish it to ${JSON.stringify(input.preparation.mapPath)}; do not run a shell command to rename or publish it. Never write the final file incrementally.`,
     `Completion marker: ${input.preparation.marker}`,
-    "Keep this turn free of approval prompts, which would hold /compact: write files with your file-edit tool, and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variables or command substitution.",
+    "To avoid one cause of approval prompts, which hold /compact until someone answers them: write files with your file-edit tool (acceptEdits covers your working directory, not a preparation root outside it), and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variable assignment or command substitution, so an allow rule for rig commands can match it.",
     "The marker identifies this attempt and occupant; it does not certify the map's quality. Keep the normal ranked restore-map content.",
     `Near the top of the map, copy this note word for word; the restore request will have you read it: ${MANAGED_COMPACT_TRUST_NOTE}`,
     ...(input.overflowCompactInstruction?.trim()
@@ -499,9 +501,10 @@ export interface PreparationState {
   mapUsedPercentage?: number;
   /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
   supersedes?: StrandedCompaction;
-  /** A manual attempt waiting for its seat to answer a prompt (a permission request its preparation turn reached, say)
-   *  before /compact can go: since when, and the seat's own reason. Cleared when the seat reads idle. */
-  awaitingInput?: { since: number; reason: string };
+  /** A manual attempt's latest reading of its seat showed a prompt (a permission request its preparation turn reached,
+   *  say) that holds /compact: since when, and when it was last seen. `current` is false when a later reading couldn't
+   *  establish the seat's state, so the prompt is an earlier observation. Cleared when a reading shows idle or work. */
+  awaitingInput?: { since: number; reason: string; observedAt: number; current: boolean };
 }
 /** An open record from before a restart, too old to resume: the seat's restore steps may still be owed. */
 export interface StrandedCompaction { attemptId: string; mapPath: string; phase: string; recordedAt: string }
@@ -1432,21 +1435,39 @@ export class ClaudeCompactionEnforcer {
     };
     this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
     await this.deliverPreparation(input, attempt);
+    // Manual preparation can pause for an ordinary approval, before or after the map is complete. OpenRig never answers
+    // it. It keeps the latest completed reading of the seat on the attempt (awaitingInput), recorded before deadline
+    // reconciliation, so --state and the expiry reason describe the seat now rather than an earlier prompt.
+    const observe = (reading: { ok: boolean; reason?: string; activity?: { state?: string } } | null) => {
+      const state = reading === null ? "unknown" : reading.ok ? "idle"
+        : reading.reason === "target_needs_input" ? "needs_input" : reading.activity?.state ?? "unknown";
+      if (state === "needs_input") {
+        attempt.awaitingInput = { since: attempt.awaitingInput?.since ?? this.now(), reason: "target_needs_input", observedAt: this.now(), current: true };
+      } else if (state === "unknown") {
+        if (attempt.awaitingInput) attempt.awaitingInput = { ...attempt.awaitingInput, current: false };
+      } else delete attempt.awaitingInput;
+    };
+    // While the map is written, one bounded reading every MANUAL_SEAT_READ_INTERVAL_MS, never one per map check. The first
+    // comes an interval after delivery: a reading taken as the preparation turn starts tells nothing.
+    let nextRead = this.now() + MANUAL_SEAT_READ_INTERVAL_MS;
     while (attempt.status === "waiting" && !opts.skipMap && !this.mapReady(attempt)) {
+      const remaining = attempt.deadlineAt! - this.now();
+      if (remaining > 0 && this.now() >= nextRead) {
+        let reading;
+        try { reading = await this.sessionTransport.waitUntilIdle(input.sessionName, Math.min(remaining, CAPTURE_READABLE_BUDGET_MS), attempt.controller.signal, { singleObservation: true, allowDraft: true }); }
+        catch { reading = null; }
+        observe(reading);
+        nextRead = this.now() + MANUAL_SEAT_READ_INTERVAL_MS;
+      }
       this.reconcilePreparations();
       if (attempt.status !== "waiting") break;
       await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
     }
     if (attempt.status !== "waiting") return failed(attempt.reason ?? "preparation_incomplete");
-    // Manual preparation can pause for an ordinary approval, before or after the map is complete.
-    // Keep the same classifier/deadline and wait outside the input lease; never answer it.
-    const awaiting = (reason: string | undefined) => {
-      if (reason === "target_needs_input") attempt.awaitingInput ??= { since: this.now(), reason: "target_needs_input" };
-    };
-    // The budget ran out: name a prompt the seat was still at, else as before.
-    const expired = () => attempt.awaitingInput ? "preparation_needs_input"
+    // The budget ran out: name a prompt the latest reading showed, else as before.
+    const expired = () => attempt.awaitingInput?.current ? "preparation_needs_input"
       : this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete";
-    let compact: { ok: boolean; reason?: string; needsInput?: boolean };
+    let compact: { ok: boolean; reason?: string; deferredBy?: { reason?: string; activity?: { state?: string } } };
     for (;;) {
       let idle;
       do {
@@ -1454,9 +1475,8 @@ export class ClaudeCompactionEnforcer {
         if (remaining <= 0) return failed(expired());
         try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
         catch { idle = { ok: false, reason: "transport_unavailable" }; }
+        observe(idle);
         this.reconcilePreparations();
-        if (idle.ok) delete attempt.awaitingInput;
-        else awaiting(idle.reason);
         if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
         await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
         this.reconcilePreparations();
@@ -1469,9 +1489,11 @@ export class ClaudeCompactionEnforcer {
       }
       compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
       // The seat wasn't idle at the send after all (its preparation turn reached a prompt, or did more work): nothing was
-      // written, so wait again within this attempt's deadline rather than disarm.
+      // written, so wait again within this attempt's deadline rather than disarm. The send reads the pane while the idle
+      // wait can take a hook's idle, so pause one reading interval first: a disagreement can't loop sends without a break.
       if (compact.ok || compact.reason !== "waiting_for_idle") break;
-      if (compact.needsInput) awaiting("target_needs_input");
+      observe({ ok: false, ...compact.deferredBy });
+      await this.sleep(Math.min(MANUAL_SEAT_READ_INTERVAL_MS, Math.max(1, attempt.deadlineAt! - this.now())));
     }
     if (!compact.ok) {
       const outcome = failed(compact.reason ?? "send_failed");
@@ -1650,7 +1672,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
   }
 
-  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string; needsInput?: boolean}> {
+  private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string; deferredBy?: { reason?: string; activity?: { state?: string } }}> {
     const check = () => {
       this.reconcilePreparations();
       this.checkAttemptPolicy(input, attempt);
@@ -1729,7 +1751,7 @@ export class ClaudeCompactionEnforcer {
       const draftHold = policyDraftHold || (typeof result.reason === "string" && result.reason.startsWith("draft_"));
       if (attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold
         && (attempt.mode === "automatic" || this.now() < attempt.deadlineAt!)) {
-        return { ok: false, reason: "waiting_for_idle", needsInput: result.reason === "target_needs_input" };
+        return { ok: false, reason: "waiting_for_idle", deferredBy: { reason: result.reason, activity: result.activity } };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
       attempt.compact = notSent ? "not_sent" : "uncertain";
@@ -1808,8 +1830,8 @@ export class ClaudeCompactionEnforcer {
       else if (!attempt.prepared && attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
         const ready = this.mapReady(attempt);
         if (!(ready && this.holdPrepared(session, attempt, "map_complete_seat_never_idle"))) {
-          // A manual attempt still waiting at a prompt says so (only the manual wait records awaitingInput).
-          this.stopPreparation(session, attempt.awaitingInput ? "preparation_needs_input"
+          // A manual attempt whose latest reading is a prompt says so (only the manual wait records awaitingInput).
+          this.stopPreparation(session, attempt.awaitingInput?.current ? "preparation_needs_input"
             : ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
         }
       }

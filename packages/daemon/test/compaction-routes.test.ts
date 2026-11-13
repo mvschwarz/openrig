@@ -3,7 +3,7 @@ import { TerminalPolicyStore } from "../src/domain/terminal-policy.js";
 //
 // Proves: the route resolves the target + reads the EXISTING context-usage
 // projection BEFORE calling the enforcer (known usage permits a manual request
-// independently of the threshold); non-Claude → 422 runtime_filter; unknown usage → 409 no_usage_data
+// independently of the threshold); non-Claude → 422 runtime_filter; unknown usage still prepares and compacts
 // (route passes null, never invents a value); ambiguous → 409; missing field →
 // 400; enforcer-unwired → 503. Reuses the shipped SessionTransport + the SAME
 // ClaudeCompactionEnforcer (no second path).

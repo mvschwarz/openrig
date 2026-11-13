@@ -5,7 +5,7 @@ import {compactionRoutes} from '../src/routes/compaction.js';
 import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
-import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT, MANUAL_SEAT_READ_INTERVAL_MS} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport, CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
@@ -857,6 +857,42 @@ it('manual unresolved attention consumes the deadline and never revives',async()
  expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_needs_input'});
  expect(f.clock()).toBe(start+1000);expect(compacts(f)).toHaveLength(0);
  f.activity('idle');stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+});
+// The manual wait reads the seat while the map is written too, and the attempt keeps only the latest reading: a prompt
+// is reported while it's there and named at expiry only when the latest reading still shows it.
+const readsBy=(ms:number)=>Math.floor(ms/MANUAL_SEAT_READ_INTERVAL_MS)+1;
+it('manual: a prompt before the map is reported in --state and names the expiry',async()=>{
+ const f=fixture(20_000);const seen:any[]=[];
+ f.onSleep(async()=>{f.activity('needs_input');seen.push(f.e.getPreparationState(seat)?.awaitingInput);});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_needs_input'});
+ expect(seen).toContainEqual(expect.objectContaining({reason:'target_needs_input',current:true}));
+ expect(compacts(f)).toHaveLength(0);
+});
+it('manual: a prompt before the map, answered, then the completed map compacts on the same attempt',async()=>{
+ const f=fixture(20_000);let n=0;let attempt='';const seen:any[]=[];
+ f.onSleep(async()=>{n++;attempt||=f.e.getPreparationState(seat)!.attemptId;seen.push(f.e.getPreparationState(seat)?.awaitingInput);
+  if(n<30)f.activity('needs_input');else{f.activity('idle');stageMap(f);}});
+ expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(true);
+ expect(seen).toContainEqual(expect.objectContaining({current:true}));
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:attempt,status:'compact-sent'});
+ expect(compacts(f)).toHaveLength(1);
+});
+it.each(['running','unknown'] as const)('manual: a prompt answered into %s is not reported as current at expiry',async(after)=>{
+ const f=fixture(20_000);let n=0;
+ f.onSleep(async()=>{n++;stageMap(f);f.activity(n<8?'needs_input':after);});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
+ const state=f.e.getPreparationState(seat)!;
+ if(after==='running')expect(state.awaitingInput).toBeUndefined();
+ else expect(state.awaitingInput).toMatchObject({reason:'target_needs_input',current:false});
+ expect(compacts(f)).toHaveLength(0);
+});
+it('manual: prompt, then idle, then busy before the map is done: no stale prompt, the map expiry as before',async()=>{
+ const f=fixture(20_000);let n=0;
+ f.onSleep(async()=>{n++;f.activity(n<30?'needs_input':n<50?'idle':'running');});
+ expect(readsBy(20_000)).toBeGreaterThanOrEqual(4);
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_incomplete'});
+ expect(f.e.getPreparationState(seat)!.awaitingInput).toBeUndefined();
+ expect(compacts(f)).toHaveLength(0);
 });
 it('manual default accepts a map after120s but before180s',async()=>{
  expect(MANUAL_PREP_WAIT_MS_DEFAULT).toBe(180_000);
