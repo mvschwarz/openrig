@@ -717,10 +717,14 @@ async function namedSeats(client: DaemonClient, rigName: string, name: string, a
     const { logicalId, rigName: inRig, canonicalSessionName } = (entry ?? {}) as Record<string, unknown>;
     if (typeof logicalId !== "string" || inRig !== rigName) throw new Error(`the node list for ${rigName} has a malformed entry`);
     const dot = logicalId.indexOf(".");
-    if (dot <= 0 || dot === logicalId.length - 1) throw new Error(`the node list for ${rigName} has a malformed entry`);
-    const podMember = `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
-    const session = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
-      && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : `${podMember}@${rigName}`;
+    if (dot === 0 || dot === logicalId.length - 1) throw new Error(`the node list for ${rigName} has a malformed entry`);
+    const recorded = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
+      && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : null;
+    // A seat of a rig without pods has no pod in its logical id: it's named only by its recorded session, and one with
+    // none yet can't be named, so it's left out rather than read as a broken team.
+    if (dot === -1 && !recorded) continue;
+    const podMember = dot === -1 ? null : `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
+    const session = recorded ?? `${podMember}@${rigName}`;
     const own = session.slice(0, -(rigName.length + 1));
     if (!addressable(session)) continue;
     if (name === own) byOwn.add(session);

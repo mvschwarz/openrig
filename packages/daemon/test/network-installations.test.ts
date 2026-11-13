@@ -15,8 +15,9 @@ import { readNetworkCredential, readPrivateToken } from "../src/domain/network/n
 import { networkInstallationKeyFile, type AccountFetch } from "../src/domain/network/network-installations.js";
 import { networkRoutes } from "../src/routes/network.js";
 
-/** Makes removing a path with this ending fail, the way a busy file does. */
+/** Makes removing a path with this ending fail, the way a busy file does; and moving one, the way a read-only disk does. */
 const failRemoval = vi.hoisted(() => ({ suffix: null as string | null }));
+const failRename = vi.hoisted(() => ({ suffix: null as string | null }));
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
   return {
@@ -24,6 +25,10 @@ vi.mock("node:fs", async (importOriginal) => {
     rmSync: (...args: Parameters<typeof real.rmSync>) => {
       if (failRemoval.suffix && String(args[0]).endsWith(failRemoval.suffix)) throw Object.assign(new Error("EBUSY: resource busy or locked, rm"), { code: "EBUSY" });
       return real.rmSync(...args);
+    },
+    renameSync: (...args: Parameters<typeof real.renameSync>) => {
+      if (failRename.suffix && String(args[0]).endsWith(failRename.suffix)) throw Object.assign(new Error("EROFS: read-only file system, rename"), { code: "EROFS" });
+      return real.renameSync(...args);
     },
   };
 });
@@ -120,7 +125,7 @@ beforeEach(() => {
   app.use("*", async (c, next) => { c.set("rigRepo" as never, rigs as never); await next(); });
   app.route("/api/network", networkRoutes({ home, accountFetch: account.fetch, selfHostId: () => hostId, accountTimeoutMs: 1000 }));
 });
-afterEach(() => { failRemoval.suffix = null; db.close(); rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { failRemoval.suffix = null; failRename.suffix = null; db.close(); rmSync(home, { recursive: true, force: true }); });
 
 function seat(session: string): void {
   const rig = rigs.listRigs().find((r) => r.name === "lab") ?? rigs.createRig("lab");
@@ -462,6 +467,28 @@ it("a replace whose old binding can't be ended changes nothing here: the switch 
   expect(await replace()).toMatchObject({ status: 500, data: { error: "replace_failed" } });
   expect(readPrivateToken(keyFile, () => "missing")).toBe(oldKey);
   expect(readdirSync(dirname(keyFile))).toEqual(["key.json"]);
+  const now = await status();
+  expect(now.installations.map((i) => i.installationId)).toEqual(["inst-1"]);
+  expect(now.bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "active" });
+});
+
+it("a failed replace whose old key can't be put back says which file to move, not that nothing changed", async () => {
+  seat("a@lab");
+  const first = await enroll();
+  const alpha = await connect("a@lab", "alpha");
+  const keyFile = networkInstallationKeyFile(home, first.data.id);
+  const oldKey = readPrivateToken(keyFile, () => "missing");
+  db.exec("CREATE TRIGGER fail_end BEFORE UPDATE OF state ON network_bindings BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  failRename.suffix = "key.json.prev";
+  const failed = await replace();
+  failRename.suffix = null;
+  expect(failed).toMatchObject({ status: 500, data: { error: "replace_failed" } });
+  expect(failed.data.message).toContain("only its key file changed. The earlier key couldn't be put back (EROFS");
+  expect(failed.data.message).toContain(`move ${keyFile}.prev back to ${keyFile} before you go on.`);
+  expect(failed.data.message).toContain("a new installation whose key nothing here holds");
+  expect(failed.data.message).not.toContain("nothing here changed");
+  expect(readdirSync(dirname(keyFile)).sort()).toEqual(["key.json", "key.json.prev"]);
+  expect(readPrivateToken(`${keyFile}.prev`, () => "missing")).toBe(oldKey);
   const now = await status();
   expect(now.installations.map((i) => i.installationId)).toEqual(["inst-1"]);
   expect(now.bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "active" });

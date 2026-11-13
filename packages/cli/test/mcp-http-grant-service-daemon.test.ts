@@ -279,6 +279,22 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(rows()).toBe(1);
     });
 
+    it("still reads a team whose older seats have no pod, naming them by their recorded session", async () => {
+      namedSeat("team-a", "lead", "lead@team-a");
+      const rig = setup.rigRepo.listRigs().find((r: { name: string }) => r.name === "team-a")!;
+      const flat = setup.rigRepo.addNode(rig.id, "r01-dev", { role: "worker" });
+      setup.sessionRegistry.registerSession(flat.id, "r01-dev@team-a");
+      // No session yet: it can't be named, and it doesn't turn every name into "try again".
+      setup.rigRepo.addNode(rig.id, "r02-qa", { role: "worker" });
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-pod-seat", destination: "lead", body: "Pod seat" })).isError).toBe(false);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-flat-seat", destination: "r01-dev", body: "Flat seat" })).isError).toBe(false);
+      expect(repo.getById("qitem-flat-seat")).toMatchObject({ destinationSession: "r01-dev@team-a" });
+      expect((await ask("rig_queue_create", { destination: "r02-qa", body: "Unnamed" })).structured.code).toBe("destination_not_found");
+      expect(rows()).toBe(2);
+    });
+
     it("an exact name wins over another seat's slug twin, as a name alone and as the configured receiver", async () => {
       namedSeat("team-a", "lead", "pod-lead@team-a");
       namedSeat("team-a", "other", "Pod.Lead@team-a");

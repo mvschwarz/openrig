@@ -183,11 +183,19 @@ export class NetworkInstallationStore {
         bindings.markDisconnected(ending.map((b) => b.id), REPLACED_REASON);
       })();
     } catch (error) {
-      if (!hadKey) rmSync(file, { force: true });
-      else if (existsSync(kept)) renameSync(kept, file);
+      // Putting the key back can fail too (a full or read-only disk); then say which file needs moving, not "nothing changed".
+      let byHand = "";
+      try {
+        if (!hadKey) rmSync(file, { force: true });
+        else if (existsSync(kept)) renameSync(kept, file);
+      } catch (restore) {
+        const why = (restore as Error).message.slice(0, 200);
+        byHand = hadKey ? ` The earlier key couldn't be put back (${why}): move ${kept} back to ${file} before you go on.`
+          : ` The new key couldn't be removed (${why}): delete ${file} by hand.`;
+      }
       cleanup();
       throw new NetworkBindingError("replace_failed",
-        `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)}), so nothing here changed. The account now has a new installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.`, 500);
+        `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)}), so ${byHand ? `only its key file changed.${byHand}` : "nothing here changed."} The account now has a new installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.`, 500);
     }
     const problems: string[] = [];
     try {

@@ -4,7 +4,7 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
-import { currentClaudeModelMenu, currentCodexModelPicker } from "./native-model-picker.js";
+import { currentClaudeModelMenu, currentCodexModelPicker, isModelPickerHeader } from "./native-model-picker.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
@@ -2086,6 +2086,13 @@ function clearAttentionHint(sessionName: string, reason: string): string {
     : "";
 }
 
+/** The way past a refused prompt. A program's own /model picker is closed, not driven: text typed there picks a model. */
+function promptRoute(sessionName: string, prompt: Pick<AgentActivity, "reason" | "evidence">): string {
+  return prompt.reason === "selection_prompt" && isModelPickerHeader(prompt.evidence)
+    ? ` A model picker is open (${prompt.evidence}): close it (Esc) in that pane, then send again.`
+    : ` To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".`;
+}
+
 /** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
 function callerSignal(opts?: SendOpts): AbortSignal | undefined {
   return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
@@ -3477,7 +3484,7 @@ export class SessionTransport {
             recheck.state === "needs_input"
               ? {
                   reason: "target_needs_input",
-                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it.${promptRoute(sessionName, recheck)}${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
                 }
               : recheck.state === "unknown"
                 ? {
@@ -3597,7 +3604,7 @@ export class SessionTransport {
             reason: "target_needs_input",
             sent: false, inputPhase: "not_reached",
             activity: readiness,
-            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
+            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it.${promptRoute(sessionName, readiness)}${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
