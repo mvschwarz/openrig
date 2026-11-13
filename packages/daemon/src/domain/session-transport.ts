@@ -1909,16 +1909,21 @@ function codexSeatIdle(pane: string): boolean {
 // (`Update available! 0.160.0 -> 0.162.1`). These are only what the frames show; nothing here discovers a version. A frame where one of them names another version is not read as these
 // layouts. Most frames name no version (the banner and header scroll away), and then a matching layout is evidence
 // about the layout only, not proof of the client version: another version that draws the same rows reads the same.
-const RECORDED_CLIENT_VERSION: Record<"claude-code" | "codex", string> = { "claude-code": "2.1.296", codex: "0.160.0" };
+// Codex 0.167's numbered patches count as 0.167: 0.167.1 and 0.167.2 changed no TUI code from 0.167.0
+// (openai/codex rust-v0.167.0...rust-v0.167.2). A prerelease or a later minor is another version.
+const RECORDED_CLIENT_VERSIONS: Record<"claude-code" | "codex", RegExp> = {
+  "claude-code": /^2\.1\.296$/,
+  codex: /^(?:0\.160\.0|0\.167\.\d+)$/,
+};
 const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
   "claude-code": [/Claude Code v(\d[\w.+-]*)/g],
   codex: [/OpenAI Codex \(v(\d[\w.+-]*)\)/g, /Update available! (\d[\w.+-]*) -> /g],
 };
 
-/** Whether a frame visibly names a client version other than the recorded one (see RECORDED_CLIENT_VERSION). */
+/** Whether a frame visibly names a client version other than the recorded ones (see RECORDED_CLIENT_VERSIONS). */
 export function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
   return VISIBLE_CLIENT_VERSION[runtime].some((pattern) =>
-    [...pane.matchAll(pattern)].some((match) => match[1] !== RECORDED_CLIENT_VERSION[runtime]));
+    [...pane.matchAll(pattern)].some((match) => !RECORDED_CLIENT_VERSIONS[runtime].test(match[1]!)));
 }
 
 /** The seat before the paste (see SeatReading), read from the capture the transport already takes before it.
@@ -1936,7 +1941,7 @@ export function readSeatBeforePaste(pane: string | null, runtime: "claude-code" 
  *  placeholders (Claude's queued label and Try suggestion, collapsed pastes, Codex's empty-box placeholder) are
  *  checked before the sent text, so none of them can read as `exact`. The sent text is `exact` only with its word
  *  boundaries kept, and `ambiguous` where the box's row breaks leave them uncertain (boxHoldsText). A frame that
- *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSION).
+ *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSIONS).
  *
  *  An empty box also reads `queued` where the frames say the message may wait behind a turn: Codex's
  *  pending-input rows above the box, rows between Codex's running-turn status row and the box, or
