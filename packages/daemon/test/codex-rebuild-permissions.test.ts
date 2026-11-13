@@ -49,12 +49,13 @@ describe("the live predecessor record", () => {
     const pad2 = (n: number) => String(n).padStart(2, "0");
     return `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${d.getFullYear()}`;
   }
-  function fixture(options: { wrongThread?: boolean; stale?: boolean; incompleteLatest?: boolean; turnover?: boolean; argv?: string[] | null } = {}) {
+  function fixture(options: { wrongThread?: boolean; stale?: boolean; postBootPreLaunch?: boolean; incompleteLatest?: boolean; turnover?: boolean; argv?: string[] | null } = {}) {
     const root = mkdtempSync(join(tmpdir(), "codex-rebuild-")); roots.push(root);
     const path = join(root, "record.jsonl");
     writeFileSync(path, [
       { type: "session_meta", payload: { id: options.wrongThread ? "another" : "fixture-thread", base_instructions: "x".repeat(40_000) } },
-      { type: "turn_context", timestamp: options.stale ? "2026-10-20T04:59:59Z" : "2026-10-20T05:01:00Z", payload },
+      { type: "turn_context", timestamp: options.stale ? "2026-10-20T04:59:59Z"
+        : options.postBootPreLaunch ? "2026-10-20T05:00:00.500Z" : "2026-10-20T05:01:00Z", payload },
       ...(options.incompleteLatest ? [{ type: "turn_context", timestamp: "2026-10-20T05:02:00Z", payload: { cwd: "/project", approval_policy: "never" } }] : []),
     ].map(row => JSON.stringify(row)).join("\n") + "\n");
     const native = provenCodexResume("fixture-thread", { startedAt: psLocalLstart("2026-10-20T05:00:01Z") });
@@ -84,6 +85,11 @@ describe("the live predecessor record", () => {
   it("retains the native-log join for a valid fresh Codex process", async () => {
     expect(await observeCodexRebuildPermissions(fixture({ argv: ["codex", "-p", "managed work"] })))
       .toMatchObject({ state: "observed", profile: "managed work" });
+  });
+  it("reports unverified when the latest record is after boot but before process start", async () => {
+    // 05:00:00.500Z is after the fixture boot at 05:00:00Z and before its 05:00:01Z process start.
+    expect(await observeCodexRebuildPermissions(fixture({ postBootPreLaunch: true })))
+      .toMatchObject({ state: "unverified" });
   });
   it.each([null, [], ["codex", "resume", "fixture-thread", "bad\0argument"], ["node", "resume", "fixture-thread"]])(
     "does not inspect native records for an opaque or malformed predecessor argv: %j", async argv => {
