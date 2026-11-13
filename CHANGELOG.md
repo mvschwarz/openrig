@@ -8,6 +8,149 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.7.14]
+
+OpenRig 0.7.14 is a patch for steadier circulation on a busy team. A burst of node
+reads now takes turns, so a health check, a queue read or a send waits for one
+step of it instead of the whole burst, and bounded queue listings over a long
+retained history use indexes instead of scanning it. An assistant connected to
+your team can reach a seat by the name its team shows, connected assistants
+appear in `rig ps` and the TUI, and a first team is fitted to the logins you
+have. There are fixes across delivery, seats and the TUI, many contributed by
+people using OpenRig. See Known limits for what this release doesn't fix.
+
+### Before you upgrade
+
+- **Stop the daemon, back up the database, install 0.7.14, then start the
+  daemon.** Your agents keep running through a daemon restart; don't use
+  `rig down`, which ends them.
+
+  ```sh
+  rig daemon stop
+  cp "$(rig config get db.path)" "$(rig config get db.path).before-0.7.14"
+  npm install -g @openrig/cli@0.7.14   # or your existing installation method
+  rig daemon start
+  ```
+
+- **The first start builds indexes before the daemon listens:** migrations 164
+  and 166. One measurement of 166 took 3.47 s on 28,976 rows, not a real
+  installation's size, so a large database can take longer. The write overhead,
+  and going back to 0.7.13 after these migrations, aren't established; keep the
+  backup. ([#3008](https://github.com/mvschwarz/openrig/pull/3008), [#3090](https://github.com/mvschwarz/openrig/pull/3090))
+- **If the start is reported pending:** the CLI waits 20 s for the daemon to be
+  ready, and a slow start can take longer. It then prints "Daemon startup is
+  pending after the readiness deadline", with the address and log to inspect,
+  and leaves the daemon starting. Don't run `rig daemon start` again: another
+  start is blocked while this one is pending. `rig daemon status` reads it as
+  starting and says to wait, then re-check.
+- **The `openrig` plugin carries the CLI's version, 0.7.14; openrig-core stays
+  0.1.29.**
+
+### Steadier under load
+
+- Node reads (`rig ps --nodes`, the TUI, several agents at once) take turns
+  through their three synchronous steps, so other reads and sends are no longer
+  held behind a whole burst. ([#3101](https://github.com/mvschwarz/openrig/pull/3101))
+- Bounded queue listings over retained history use indexes for their ordering
+  and for live and archived owner notifications. ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
+- One process listing serves every Codex seat a readiness poll re-checks. ([#3061](https://github.com/mvschwarz/openrig/pull/3061))
+- New tmux servers raise their open-file limit where they can, so a busy server
+  doesn't run out of descriptors as panes and viewers add up. ([#3070](https://github.com/mvschwarz/openrig/pull/3070))
+- A delegation parent gets one standing notice per child seat for unclaimed
+  rows, not one per row, and held work gets its notice back when its typing
+  hold clears. ([#3049](https://github.com/mvschwarz/openrig/pull/3049), [#3082](https://github.com/mvschwarz/openrig/pull/3082))
+
+### Your team and the people it works for
+
+- An assistant connected over MCP reaches a seat by its plain name, stored
+  under the seat's actual session; an unknown name, or one several seats match,
+  says so. ([#3088](https://github.com/mvschwarz/openrig/pull/3088))
+- Connected assistants appear, with their check-in, in `rig ps`, `rig_team` and
+  the TUI's tables, and their person sees plain tool titles. ([#3057](https://github.com/mvschwarz/openrig/pull/3057), [#3058](https://github.com/mvschwarz/openrig/pull/3058), [#3092](https://github.com/mvschwarz/openrig/pull/3092))
+- A first team fits your logins: you're told before launch when a seat needs a
+  sign-in you don't have, and you choose. ([#3077](https://github.com/mvschwarz/openrig/pull/3077))
+- The kernel operator offers to register you in its greeting when nobody is
+  registered, and registers you only on your yes. ([#3041](https://github.com/mvschwarz/openrig/pull/3041), [#3071](https://github.com/mvschwarz/openrig/pull/3071))
+- A team your agent hands work to knows how to ask you a question, and your
+  answer wakes it. A click on an ask with several questions records that
+  choice; the ask stays open until the last one. ([#3059](https://github.com/mvschwarz/openrig/pull/3059), [#3045](https://github.com/mvschwarz/openrig/pull/3045))
+- A pairing request's description of itself is quoted wherever it's shown. ([#3067](https://github.com/mvschwarz/openrig/pull/3067))
+- `rig queue list` takes exact `--tag`, `--mission` and `--slice` filters, and
+  several tags must all match. ([#3066](https://github.com/mvschwarz/openrig/pull/3066))
+- A skill-only edition of the `openrig` plugin, for Claude's plugin directory,
+  follows handed-on work and keeps its reply route. ([#3056](https://github.com/mvschwarz/openrig/pull/3056), [#3075](https://github.com/mvschwarz/openrig/pull/3075))
+
+### Fixes
+
+- An ordinary send no longer acts on an open Claude Code or Codex `/model`
+  picker. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
+- A restored Codex seat, or one brought back with `rig up --existing`, keeps
+  OpenRig's guidance out of the repository's tracked `AGENTS.md`. ([#3039](https://github.com/mvschwarz/openrig/pull/3039))
+- With `recovery.auto_drive_provider_prompts` on, Claude Code's gated-grants
+  trust check is never answered for you, and the plain trust prompt is answered
+  "Yes". ([#3073](https://github.com/mvschwarz/openrig/pull/3073))
+- Codex seats with linked `CODEX_HOME` folders or config files get hook trust
+  under the keys Codex reads. ([#3079](https://github.com/mvschwarz/openrig/pull/3079))
+- `rig terminal open --provider herdr` reuses a live Herdr workspace, and Rex
+  tiles show the seat's agent and its activity. ([#3068](https://github.com/mvschwarz/openrig/pull/3068), [#2992](https://github.com/mvschwarz/openrig/pull/2992))
+- `rig broadcast` prints a held recipient as retained, not sent. ([#3054](https://github.com/mvschwarz/openrig/pull/3054))
+- Account erasure also removes OpenRig's own wakes and notices for that
+  account's seats. ([#3089](https://github.com/mvschwarz/openrig/pull/3089))
+- A snapshot without sessions is reported as `invalid_snapshot_data` instead of
+  failing, and a retried no-launch import recovers the original rig by its
+  operation ID. ([#3069](https://github.com/mvschwarz/openrig/pull/3069), [#3042](https://github.com/mvschwarz/openrig/pull/3042))
+- A rebuilt seat's briefing names its newest three recaps and their folder. ([#3055](https://github.com/mvschwarz/openrig/pull/3055))
+- `rig compact --state` names the input check that stopped a managed
+  compaction, and the TUI's graph shows a seat the daemon reads as unknown as
+  unknown. ([#3053](https://github.com/mvschwarz/openrig/pull/3053), [#3046](https://github.com/mvschwarz/openrig/pull/3046))
+- Setting a context-pressure threshold explains when an environment override
+  inverts the pair, and `rig workflow validate` warns that harness pins aren't
+  checked against seats. ([#2567](https://github.com/mvschwarz/openrig/pull/2567), [#3102](https://github.com/mvschwarz/openrig/pull/3102))
+- The config browser's entries say each setting's type, choices, range, format
+  and write route. ([#3050](https://github.com/mvschwarz/openrig/pull/3050))
+
+### Experimental
+
+- `rig network` is experimental, unsupported and at your own risk. Its connector
+  isn't inert: the daemon starts it, sweeps leftover credential folders and
+  schedules local rounds even with no binding. ([#3007](https://github.com/mvschwarz/openrig/pull/3007), [#3084](https://github.com/mvschwarz/openrig/pull/3084))
+- A grant service can hold back only new work under its fair-use limit, and an
+  app can read what needs a person, and the answers to it, by link. ([#3048](https://github.com/mvschwarz/openrig/pull/3048), [#3008](https://github.com/mvschwarz/openrig/pull/3008))
+
+### Behaviour that changed
+
+- **Node reads:** a nodes response is no longer one snapshot across its steps,
+  and in a burst each nodes response comes later: about 43 ms against 21 ms
+  median in a 24-request burst. One very large rig is still one step. ([#3101](https://github.com/mvschwarz/openrig/pull/3101))
+- **An assistant naming a seat now hears three errors:** `destination_ambiguous`
+  (several seats match; the candidates are listed), `destination_not_found` (no
+  seat it can reach has that name) and `destination_unchecked` (the team
+  couldn't be read; try again). ([#3088](https://github.com/mvschwarz/openrig/pull/3088))
+
+### Known limits
+
+- **Queue listings:** the new indexes aren't a cure for every stall. Listings of
+  active work showed no gain, one case was slower, and writes weren't measured. ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
+- **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic OpenRig notice can still be left beside
+  a draft started during delivery. In the reproduced cases the person's draft
+  stayed intact and no Enter was sent, but OpenRig's text stayed in the input.
+- **The TUI's tables** can drop a connected assistant's check-in line when its
+  rig's seat inventory can't be read; `rig roster` still prints it. ([#3105](https://github.com/mvschwarz/openrig/pull/3105) isn't in this release)
+- **From 0.7.13:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.13)
+  still apply, except that the tracked `AGENTS.md` write ([#3039](https://github.com/mvschwarz/openrig/pull/3039)), the
+  operator-first registration offer ([#3041](https://github.com/mvschwarz/openrig/pull/3041), [#3071](https://github.com/mvschwarz/openrig/pull/3071)), model pickers ([#3083](https://github.com/mvschwarz/openrig/pull/3083)), a
+  first team's Codex sign-in ([#3077](https://github.com/mvschwarz/openrig/pull/3077)) and the unquoted pairing description ([#3067](https://github.com/mvschwarz/openrig/pull/3067)) are
+  fixed in this release. They weren't re-checked for this release unless named
+  here.
+
+### Credits
+
+Thanks to @Kayhusk, @billbenetti, @cavalcanticampos, @Aummadour, @Tankard,
+@w4rc0n and @Totopo27 for merged contributions. Thanks also for the reports
+behind these fixes: @Kayhusk ([#3035](https://github.com/mvschwarz/openrig/issues/3035) and [#3078](https://github.com/mvschwarz/openrig/issues/3078)), @Tankard ([#2583](https://github.com/mvschwarz/openrig/issues/2583)),
+@dajiaohuang ([#2529](https://github.com/mvschwarz/openrig/issues/2529)), @billbenetti ([#2728](https://github.com/mvschwarz/openrig/issues/2728)), @emilio-gagliardi ([#3087](https://github.com/mvschwarz/openrig/issues/3087)), @korallis
+([#161](https://github.com/mvschwarz/openrig/issues/161)) and @w4rc0n ([#3017](https://github.com/mvschwarz/openrig/issues/3017)).
+
 ## [0.7.13]
 
 OpenRig 0.7.13 is a patch for people running their own agent teams. When you answer a runner's permission request, you now get a
