@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import { ConfigStore, ENV_MAP, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
 import { initWorkspaceCommand } from "./config-init-workspace.js";
 
 function formatRow(key: string, value: unknown): string {
@@ -8,6 +8,40 @@ function formatRow(key: string, value: unknown): string {
 
 function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
   return store.resolveAllWithSource();
+}
+
+interface ContextPressureFallbackInfo {
+  effectiveValue: number;
+  explanation: string;
+}
+
+/**
+ * Returns fallback explanation and effective default value if setting/resetting a context-pressure
+ * key caused an inverted threshold pair to be rejected and fall back to 95/99 defaults in this shell.
+ * Returns null if no pair rejection occurred.
+ */
+function getContextPressureFallbackInfo(store: ConfigStore, key: string): ContextPressureFallbackInfo | null {
+  if (key !== "health.context_pressure.warning_percent" && key !== "health.context_pressure.critical_percent") {
+    return null;
+  }
+  const state = store.resolveContextPressurePolicyState();
+  if (!state.rejectedPair) {
+    return null;
+  }
+
+  const warnKey = "health.context_pressure.warning_percent" as const;
+  const critKey = "health.context_pressure.critical_percent" as const;
+  const envSources: string[] = [];
+  if (state.warning.source === "env") {
+    envSources.push(`${ENV_MAP[warnKey].primary}=${state.warning.value}`);
+  }
+  if (state.critical.source === "env") {
+    envSources.push(`${ENV_MAP[critKey].primary}=${state.critical.value}`);
+  }
+  const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
+  const explanation = `; inverted pair ${state.rejectedPair.warning}/${state.rejectedPair.critical}${envDetails} falls back to 95/99 defaults in this shell`;
+  const effectiveValue = key === warnKey ? 95 : 99;
+  return { effectiveValue, explanation };
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
@@ -76,7 +110,7 @@ Keys:
   health.context_pressure.*        context-pressure warning/critical percentages (defaults 95/99)
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
-  ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
+  ui.timezone            IANA timezone for the TUI's times, the Feed's included (default America/Los_Angeles; reopen TUI after changing)
   ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
   ui.terminal.max_live_terminals
@@ -220,11 +254,16 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.set(key, value);
         const resolved = store.resolveWithSource(key);
-        console.log(resolved.source === "env"
-          ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
-          : resolved.source === "default"
-            ? `${key} file override saved; effective value ${resolved.value} (source: default)`
-            : `${key} = ${resolved.value}`);
+        const fallbackInfo = getContextPressureFallbackInfo(store, key);
+        if (fallbackInfo) {
+          console.log(`${key} file override saved; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation})`);
+        } else {
+          console.log(resolved.source === "env"
+            ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
+            : resolved.source === "default"
+              ? `${key} file override saved; effective value ${resolved.value} (source: default)`
+              : `${key} = ${resolved.value}`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(resolved.source === "env"
@@ -246,9 +285,14 @@ Precedence: CLI flag > environment variable > config file > default`)
         store.reset(key);
         if (key) {
           const resolved = store.resolveWithSource(key);
-          console.log(resolved.source === "env"
-            ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
-            : `${key} reset to default (${resolved.value}).`);
+          const fallbackInfo = getContextPressureFallbackInfo(store, key);
+          if (fallbackInfo) {
+            console.log(`${key} file override cleared; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation}).`);
+          } else {
+            console.log(resolved.source === "env"
+              ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
+              : `${key} reset to default (${resolved.value}).`);
+          }
         } else {
           let envKeys: string[] = [];
           try {

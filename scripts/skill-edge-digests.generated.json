@@ -69,7 +69,7 @@
       "agent-operated-software/SKILL.md": "ec910bf5f631d7f20872786a565a0437a446fa2d5fd8b52b685979978243a6a8",
       "agent-operated-workflows/SKILL.md": "24e54cbfa979999f523516112670618b2926ae5d42c7aa0846c94db214857ea5",
       "applying-a-permission-policy/SKILL.md": "f7bba8d50b10fc8715f40a57bf82677ca9388c6718c8a162833d9c6daf2afdca",
-      "claude-compaction-restore/SKILL.md": "79a707974824e91d5888c7bc10b152989ff891491f1adecf3e93991e2af55f81",
+      "claude-compaction-restore/SKILL.md": "cd8369a62647ad389a9b0cc91c6f784a0d93e2d2b874bf9570d47c2134647d1c",
       "claude-compaction-restore/reference/SKILL-v1.md": "6af2a889c9c38227fb186897c6e29185f81b215822070b469a6ceeb47734e133",
       "claude-compaction-restore/scripts/precompact-hook.mjs": "712e97c8beb02eb6c2815884a960778a225d8f6238dfe04a9b0547c34eaa131d",
       "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "5584cff4ab36cd843e14c81bd201e4a2f8e498e995abacc4f81ec6c1fc556b10",

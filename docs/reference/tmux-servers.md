@@ -116,8 +116,8 @@ To move a team that runs on an older server:
    on it, yours included, has ended.
 3. Stop each rig deliberately with `rig down <rig>`. Its seats' sessions end, and a
    turn in progress stops. Queue rows, rigs and seats stay as they are. A session
-   OpenRig didn't start, such as a seat joined with `rig attach --self`, is left
-   running and `rig down` exits 2; stop it with the commands it prints, or it stays on
+   OpenRig didn't start, such as a seat joined with `rig attach --self` from a tmux
+   pane, is left running and `rig down` exits 2; stop it with the commands it prints, or it stays on
    the old server.
 4. Restart the daemon with `OPENRIG_TMUX_CONTROL=1` in its environment.
    `rig terminal status --json` should show `migrationPending: false`. If it's still
