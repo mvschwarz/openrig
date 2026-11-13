@@ -162,9 +162,12 @@ export class PassiveCeremonySource implements HealthObservationSource {
       for (const { segment, endedAt } of segments) {
         if (segment.length < p.thresholds.ceremonyTransitions) continue;
         const segmentFirst = segment[0]!;
-        const resumed = cuts.some((cut) => cut < segmentFirst.transitionId);
-        const episodeStartedAt = resumed ? segmentFirst.ts : first.ts;
-        const episodeKey = resumed ? `${lineageId}:${segmentFirst.transitionId}` : lineageId;
+        // A resumed episode is named by the first raw transition after its cut, not the first counted one,
+        // so a change to what counts never renames an open episode or orphans its diagnosis.
+        const cut = cuts.filter((c) => c < segmentFirst.transitionId).at(-1);
+        const opener = cut === undefined ? undefined : window.find((t) => t.transitionId > cut)!;
+        const episodeStartedAt = opener?.ts ?? first.ts;
+        const episodeKey = opener ? `${lineageId}:${opener.transitionId}` : lineageId;
         const measuredEnd = endedAt ?? now;
         const scopeKey = healthHash({ scope, workspace });
         if (!contexts.has(scopeKey)) contexts.set(scopeKey, scope.type === "mission" || scope.type === "slice"

@@ -463,3 +463,25 @@ it("#2762: a disposition recorded before the filter that cut at a daemon transit
   expect(closed.source.query.endedAt).toBe(receipt.finding.window.endedAt);
   expect(t.projection.get(first.id)?.status).toBe("cleared");
 });
+
+it("#2889 follow-up: a resumed episode keeps its id and diagnosis when its first transition after the cut stops counting", async () => {
+  const t = await setup(); const first = t.projection.list().records[0]!;
+  const id0 = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.dispose(id0, t.assessment("false-positive"));
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  const opener = insert.run("root", "2026-09-05T12:02:00.000Z", "pending", "builder@rig").lastInsertRowid as number;
+  for (let i = 1; i <= 20; i++) insert.run("root", `2026-09-05T12:02:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-05T12:02:30.000Z");
+  const resumed = t.projection.list().records.find((r) => r.id !== first.id)!;
+  expect(resumed).toBeDefined();
+  expect((await t.service.evaluate("system:health", true)).actions).toContainEqual(expect.objectContaining({ findingId: resumed.id, action: "create" }));
+  const diagnoses = t.service.list().length;
+  // A later change to what counts (here an upgrade that drops daemon@kernel) turns the episode's first transition
+  // after the cut into bookkeeping: the open episode and its diagnosis keep their identity.
+  t.db.prepare("UPDATE queue_transitions SET actor_session = ? WHERE transition_id = ?").run("daemon@kernel", opener);
+  t.time("2026-09-05T12:04:00.000Z");
+  expect(t.projection.list().records.filter((r) => r.id !== first.id).map((r) => r.id)).toEqual([resumed.id]);
+  const { actions } = await t.service.evaluate("system:health", true);
+  expect(actions.map((a) => a.action)).not.toContain("create");
+  expect(t.service.list()).toHaveLength(diagnoses);
+});
