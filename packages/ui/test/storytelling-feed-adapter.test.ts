@@ -90,6 +90,34 @@ describe("buildStorytellingFeedItems — production adapter", () => {
     expect(items).toHaveLength(3);
   });
 
+  it("routes closed and closed-<reason> non-delivery slices into ClosedCard rather than ShippedCard or IncidentCard", () => {
+    const items = buildStorytellingFeedItems(
+      [],
+      [
+        { name: "01-deferred", displayName: "Deferred slice", status: "closed" },
+        { name: "02-wontfix", status: "closed-wontfix" },
+      ],
+    );
+    expect(items).toEqual([
+      {
+        kind: "closed",
+        source: {
+          sliceId: "01-deferred",
+          title: "Deferred slice",
+          oneLiner: "Slice in closed state",
+        },
+      },
+      {
+        kind: "closed",
+        source: {
+          sliceId: "02-wontfix",
+          title: "02-wontfix",
+          oneLiner: "Slice in closed-wontfix state",
+        },
+      },
+    ]);
+  });
+
   it("routes blocked slices into IncidentCard with status=warning", () => {
     const items = buildStorytellingFeedItems([], [{ name: "x", status: "blocked" }]);
     expect(items[0]!.kind).toBe("incident");

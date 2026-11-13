@@ -286,3 +286,41 @@ describe("accepted proof on authored-complete missions (#2230)", () => {
       .toEqual({ state: "active", label: "proof ready", source: "derived" });
   });
 });
+
+describe("#2727 in-place non-delivery slice closures", () => {
+  it("keeps closed non-delivery slices out of done/shipped and out of current work", async () => {
+    const { sliceStatusTone } = await import("../src/components/project/ProjectMetaPrimitives.js");
+    const closedRow = projectSliceFromListEntry({
+      name: "02-deferred",
+      displayName: "Deferred Slice",
+      missionId: "m1",
+      railItem: null,
+      status: "closed",
+      rawStatus: "closed-deferred",
+      qitemCount: 0,
+      hasProofPacket: false,
+      lastActivityAt: RECENT,
+      readiness: { configured: true, state: "not-ready", revision: "unworked" },
+    });
+    expect(closedRow.status).toBe("closed");
+    expect(sliceStatusTone(closedRow.status)).toBe("neutral");
+    expect(sliceStatusTone("done")).toBe("success");
+
+    // Sole non-delivery closed slice never derives mission "shipped" or "active".
+    expect(reconcileMissionStatus(null, [closedRow], NOW, { state: "not-ready", revision: "empty" }))
+      .toEqual({ state: "idle", label: "idle", source: "derived" });
+
+    // Mixed delivered + deferred in-place slices on an unauthored mission do not auto-derive "shipped".
+    const deliveredRow = slice({ name: "01-done", status: "done", rawStatus: "done", lastActivityAt: STALE });
+    expect(reconcileMissionStatus(null, [deliveredRow, closedRow], NOW))
+      .toEqual({ state: "idle", label: "idle", source: "derived" });
+
+    // Mission with only unworked closed-deferred slice archives instead of staying current.
+    const partitioned = partitionProjectMissions(
+      [{ id: "m1", label: "m1", status: "idle", statusSource: "derived", slices: [closedRow] }],
+      NOW,
+    );
+    expect(partitioned.current).toEqual([]);
+    expect(partitioned.archive.map((m) => m.id)).toEqual(["m1"]);
+  });
+});

@@ -787,22 +787,38 @@ describe("MCP Server", () => {
   });
 
   it("the context reads return bounded summaries, cut long text and say so, and keep a route's hint as the message", async () => {
-    const slice = (name: string, missionId: string) => ({ name, missionId, displayName: name, status: "active", description: null, qitemCount: 2, lastActivityAt: null, slicePath: `/abs/${name}`, readiness: { big: true } });
+    const slice = (name: string, missionId: string, status = "active") => ({ name, missionId, displayName: name, status, description: null, qitemCount: 2, lastActivityAt: null, slicePath: `/abs/${name}`, readiness: { big: true } });
     const getFn = vi.fn(async (path: string) => {
       if (path === "/api/slices") return { status: 200, data: { slices: [slice("s1", "m1"), slice("s2", "m1"), slice("s3", "m2")], totalCount: 3 } };
       if (path === "/api/slices?filter=done") return { status: 503, data: { error: "slices_root_not_configured", hint: "Run rig config init-workspace" } };
+      if (path === "/api/slices?filter=closed") return { status: 200, data: { slices: [slice("s-closed", "m1", "closed")], totalCount: 1 } };
       if (path === "/api/missions/m1") return { status: 200, data: { missionId: "m1", missionPath: "/abs/m1", status: "active", readiness: { big: true }, slices: [slice("s1", "m1")] } };
       if (path.startsWith("/api/context-packs/library/by-ref")) return { status: 200, data: { relativePath: "world", name: "world", version: "1", purpose: "the world", sourcePath: "/abs", files: [{ path: "a.md", role: "atom", summary: null, estimatedTokens: 10, absolutePath: "/abs/a.md" }] } };
       if (path.startsWith("/api/context-packs/library/resolve-address")) return { status: 200, data: { address: "world/a.md", packRef: "world", filePath: "a.md", text: "x".repeat(50_000) } };
       return { status: 404, data: {} };
     });
     await setup({ get: getFn });
+    const rigSlicesTool = (await mcpClient.listTools()).tools.find((t) => t.name === "rig_slices");
+    expect((rigSlicesTool?.inputSchema.properties as Record<string, { enum?: string[] }> | undefined)?.filter?.enum).toEqual([
+      "all",
+      "active",
+      "done",
+      "closed",
+      "blocked",
+    ]);
     const call = async (name: string, args: Record<string, unknown>) => await mcpClient.callTool({ name, arguments: args });
 
     const slices = (await call("rig_slices", { missionId: "m1", limit: 1 })).structuredContent as { slices: Array<Record<string, unknown>>; totalCount: number; truncated: boolean };
     expect(slices).toMatchObject({ totalCount: 2, truncated: true });
     expect(slices.slices).toEqual([{ name: "s1", missionId: "m1", displayName: "s1", status: "active", description: null, qitemCount: 2, lastActivityAt: null }]);
     expect((await call("rig_slices", { filter: "done" })).structuredContent).toEqual({ ok: false, code: "slices_root_not_configured", message: "Run rig config init-workspace", status: 503 });
+    const closedSlices = await call("rig_slices", { filter: "closed" });
+    expect(closedSlices.isError).not.toBe(true);
+    expect(closedSlices.structuredContent).toEqual({
+      slices: [{ name: "s-closed", missionId: "m1", displayName: "s-closed", status: "closed", description: null, qitemCount: 2, lastActivityAt: null }],
+      totalCount: 1,
+      truncated: false,
+    });
 
     const mission = (await call("rig_mission", { missionId: "m1" })).structuredContent as Record<string, unknown>;
     expect(mission).toEqual({ missionId: "m1", status: "active", slices: [expect.objectContaining({ name: "s1" })] });

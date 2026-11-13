@@ -192,9 +192,21 @@ function parseStatusFromFrontmatter(raw: string | null): string | null {
   return null;
 }
 
+const NON_DELIVERY_CLOSURE_WORDS = new Set([
+  "wontfix",
+  "deferred",
+  "superseded",
+  "stale",
+  "closed-wontfix",
+  "closed-deferred",
+  "closed-superseded",
+  "closed-stale",
+]);
+
 function statusRequiresProof(status: string | null | undefined): boolean {
   if (!status) return false;
   const normalized = status.toLowerCase().trim();
+  if (NON_DELIVERY_CLOSURE_WORDS.has(normalized)) return false;
   return normalized.includes("done")
     || normalized.includes("ship")
     || normalized.includes("close")
