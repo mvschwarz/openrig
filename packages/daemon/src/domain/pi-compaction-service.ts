@@ -94,8 +94,9 @@ export class PiCompactionService {
 
     const attemptId = this.newAttemptId();
     const launchId = prior?.launchId ?? null;
+    const previous = this.requested.get(seat.sessionName) ?? this.savedRequest(seat.sessionName);
     // Record the pending attempt BEFORE awaiting the send: a second caller sees it
-    // in flight, and a refusal before any input clears it below.
+    // in flight, and a refusal before any input restores what was current before it.
     this.remember(seat, attemptId, launchId);
     // The guard re-checks node, session, occupant and pane at the write and at
     // Enter. This bound launch check runs at those same two moments, so a
@@ -124,7 +125,7 @@ export class PiCompactionService {
       if (tagged?.inputWritten === true || tagged?.inputAttempted === true) {
         return { triggered: true, attemptId, stage: "uncertain" };
       }
-      this.forget(seat.sessionName);
+      this.restore(seat.sessionName, previous);
       if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code, detail: error.message };
       return { triggered: false, reason: "send_failed", ...(tagged?.message ? { detail: tagged.message } : {}) };
     }
@@ -138,11 +139,11 @@ export class PiCompactionService {
       return { triggered: true, attemptId, stage: "uncertain", ...(detail ? { detail } : {}) };
     }
     if (result.outcome === "retained") {
-      this.forget(seat.sessionName);
+      this.restore(seat.sessionName, previous);
       return { triggered: false, reason: "held", detail: "The seat's delivery guard held the request; no compaction input was written." };
     }
     if (result.inputPhase === "not_reached" || result.sent === false) {
-      this.forget(seat.sessionName);
+      this.restore(seat.sessionName, previous);
       return { triggered: false, reason: result.reason ?? "send_failed", ...(result.error ? { detail: result.error } : {}) };
     }
     // No positive pre-input result: the write outcome is unknown, so the request
@@ -157,20 +158,53 @@ export class PiCompactionService {
    */
   getState(session: string, nodeId?: string): PiCompactionState {
     const sidecar = this.deps.readSidecar(session);
-    const saved = this.deps.requestStore?.get(session) ?? null;
-    const requested = this.requested.get(session) ?? (saved?.launchId === sidecar?.launchId ? saved : null);
+    const saved = this.savedRequest(session);
+    const requested = this.requested.get(session) ?? (saved && this.sameLaunch(saved.launchId, sidecar) ? saved : null);
     return this.attemptState(requested && (nodeId === undefined || requested.nodeId === nodeId) ? requested : null, sidecar);
   }
 
   private remember(seat: PiSeat, attemptId: string, launchId: string | null): void {
     const request = { nodeId: seat.nodeId, attemptId, launchId, submittedAt: new Date(this.now()).toISOString() };
-    this.deps.requestStore?.set(seat.sessionName, request);
     this.requested.set(seat.sessionName, request);
+    this.persist(seat.sessionName, request);
+  }
+
+  private savedRequest(session: string): RequestedAttempt | null {
+    try {
+      return this.deps.requestStore?.get(session) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private persist(session: string, request: RequestedAttempt): void {
+    try {
+      this.deps.requestStore?.set(session, request);
+    } catch {
+      return;
+    }
   }
 
   private forget(session: string): void {
-    this.deps.requestStore?.delete(session);
     this.requested.delete(session);
+    try {
+      this.deps.requestStore?.delete(session);
+    } catch {
+      return;
+    }
+  }
+
+  private restore(session: string, request: RequestedAttempt | null): void {
+    if (request === null) {
+      this.forget(session);
+      return;
+    }
+    this.requested.set(session, request);
+    this.persist(session, request);
+  }
+
+  private sameLaunch(launchId: string | null, sidecar: PiRunnerState | null): boolean {
+    return launchId == null || sidecar == null || sidecar.launchId === launchId;
   }
 
   private attemptState(requested: RequestedAttempt | null, sidecar: PiRunnerState | null): PiCompactionState {
@@ -188,7 +222,7 @@ export class PiCompactionService {
     if (!attemptId) return { status: "not_requested", attemptId: null, automatic };
     // Scoped to the launch that received the request: a record from another runner
     // launch never answers it, even if it somehow names the same attempt id.
-    const sameLaunch = requested?.launchId == null || sidecar == null || sidecar.launchId === requested.launchId;
+    const sameLaunch = this.sameLaunch(requested?.launchId ?? null, sidecar);
     const record = latestAttempt?.attemptId === attemptId ? latestAttempt
       : priorAttempt?.attemptId === attemptId ? priorAttempt : null;
     const scoped = sameLaunch ? record : null;

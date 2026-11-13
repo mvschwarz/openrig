@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PiCompactionService } from "../src/domain/pi-compaction-service.js";
+import { PiCompactionRequestStore } from "../src/domain/pi-compaction-request-store.js";
 import { DeliveryGuardError } from "../src/domain/seat-delivery-guard.js";
 import { TerminalPolicyRefusal, type TerminalActor } from "../src/domain/terminal-policy.js";
 import type { SendResult } from "../src/domain/session-transport.js";
@@ -14,6 +18,7 @@ function fixture(opts: {
   sidecar?: PiRunnerState | null;
   send?: (text: string, opts: SendOptsSeen) => Promise<SendEffect>;
   check?: (nodeId: string, action: "compaction", actor: TerminalActor) => void;
+  requestStore?: Pick<PiCompactionRequestStore, "get" | "set" | "delete">;
 } = {}) {
   let time = start;
   let state: PiRunnerState | null = opts.sidecar === undefined
@@ -34,13 +39,14 @@ function fixture(opts: {
         : { ok: true, sent: true, outcome: "rendered-unconfirmed" };
     },
     ...(opts.check ? { terminalPolicies: { check: opts.check } } : {}),
+    ...(opts.requestStore ? { requestStore: opts.requestStore } : {}),
     now: () => time,
     newAttemptId: () => `attempt-${++attempt}`,
   });
   const update = (patch: Partial<PiRunnerState> | null) => {
     state = patch === null ? null : { ready: true, launchId: "launch", updatedAt: new Date(time + 1).toISOString(), ...patch };
   };
-  return { service, sent, sentOpts, update, attemptId: () => `attempt-${attempt}`, beforeWrite: () => beforeWrite,
+  return { service, sent, sentOpts, update, state: () => state, attemptId: () => `attempt-${attempt}`, beforeWrite: () => beforeWrite,
     advance: () => { time += 1000; } };
 }
 
@@ -286,5 +292,62 @@ describe("PiCompactionService", () => {
     // No control was written: the transport refused before any input, with its own reason.
     expect(f.sentOpts.at(-1)).toMatchObject({ waitForIdleMs: 15_000, allowUnknownWhileIdle: true });
     expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "not_requested", attemptId: null });
+  });
+  it("keeps the earlier uncertain request when a retry is refused before input", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-compaction-refused-"));
+    try {
+      const store = new PiCompactionRequestStore(join(dir, "requests"));
+      let sends = 0;
+      const f = fixture({ requestStore: store, send: async () => {
+        sends += 1;
+        return sends === 3
+          ? { ok: true, sent: false, outcome: "retained", reason: "typing_guard_enabled" }
+          : { ok: true, sent: true, outcome: "rendered-unconfirmed" };
+      } });
+      // Given A completed.
+      await f.service.trigger(seat);
+      const endedAt = new Date(start).toISOString();
+      const completed = { attemptId: "attempt-1", reason: "manual", startedAt: endedAt, endedAt, result: { summary: "done" } };
+      f.update({ compaction: completed, requestedCompaction: completed });
+      expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "completed", attemptId: "attempt-1" });
+      // When B is written without Enter, so it stays uncertain.
+      await f.service.trigger(seat);
+      expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-2" });
+      // And the person retries with C, refused before any input.
+      expect(await f.service.trigger(seat)).toMatchObject({ triggered: false, reason: "held" });
+      // Then B is still the current request.
+      expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+        phase: "submitted_no_result", attemptId: "attempt-2" });
+      // And it survives a recreated store and service.
+      const restarted = new PiCompactionService({ readSidecar: f.state,
+        requestStore: new PiCompactionRequestStore(join(dir, "requests")),
+        send: async () => ({ ok: true, sent: true, outcome: "rendered-unconfirmed" }) });
+      expect(restarted.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+        phase: "submitted_no_result", attemptId: "attempt-2" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a saved request as uncertain when the status file is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-compaction-missing-status-"));
+    try {
+      const store = new PiCompactionRequestStore(join(dir, "requests"));
+      store.set(seat.sessionName, { nodeId: seat.nodeId, attemptId: "attempt-9", launchId: "launch",
+        submittedAt: new Date(start).toISOString() });
+      const service = new PiCompactionService({ readSidecar: () => null, requestStore: store,
+        send: async () => ({ ok: true, sent: true, outcome: "rendered-unconfirmed" }) });
+      expect(service.getState(seat.sessionName)).toMatchObject({ status: "uncertain",
+        phase: "submitted_no_result", attemptId: "attempt-9" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the in-memory request when the store cannot be read or written", async () => {
+    const denied = () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); };
+    const f = fixture({ requestStore: { get: denied, set: denied, delete: denied } });
+    expect(await f.service.trigger(seat)).toMatchObject({ triggered: true, attemptId: "attempt-1" });
+    expect(f.service.getState(seat.sessionName)).toMatchObject({ status: "uncertain", attemptId: "attempt-1" });
   });
 });
