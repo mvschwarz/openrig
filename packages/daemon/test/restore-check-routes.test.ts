@@ -264,6 +264,32 @@ profiles:
     }
   });
 
+  // The route keeps a snapshot whose occupants still match, and a seat added since with no session yet doesn't change that
+  // (one with a session moves the check to a current-state restore). From a snapshot with no recorded roster, restore
+  // restores the snapshot's own nodes and skips the later seat, so restore-check uses the same membership: the later
+  // seat's startup inputs don't block, and nothing says it's brought back. Its readiness keeps the existing red for a
+  // seat with no canonical session identity.
+  it.each([["saved", true], ["missing", false]] as const)("reads a seat added after a kept pre-roster snapshot as left, with its startup context %s", async (_label, saved) => {
+    const rig = rigRepo.createRig("pre-roster");
+    const node = rigRepo.addNode(rig.id, "seat", { runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "seat@pre-roster");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, { runtime: "terminal" });
+    const snapshot = seedCurrentSnapshot(rig.id);
+    const late = rigRepo.addNode(rig.id, "late", { runtime: "terminal" });
+    if (saved) insertStartupContextRow(db, late.id, { runtime: "terminal" });
+
+    const body = await (await app.request("/api/restore-check?rig=pre-roster&noQueue=true&noHooks=true")).json();
+
+    expect(body.checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions")).evidence).toContain(`Snapshot ${snapshot.id}`);
+    expect(body.checks.find((c: { check: string }) => c.check === "seat.late.readiness")).toMatchObject({ status: "red", evidence: "Missing canonical session identity" });
+    expect(body.checks.find((c: { check: string }) => c.check === "seat.late.startup-context")).toMatchObject(saved
+      ? { status: "green" }
+      : { status: "yellow", evidence: expect.stringContaining("Restore doesn't launch this seat (it isn't in the roster this restore uses") });
+    expect(body.checks.some((c: { evidence: string }) => c.evidence.includes("brings it back"))).toBe(false);
+  });
+
   it.each(["configured", "legacy"])("resolves the spec root and probes the SQLite queue store for %s shared-docs", async (layout) => {
     const home = path.join(openRigHome, "isolated-home");
     const sharedDocs = layout === "configured"

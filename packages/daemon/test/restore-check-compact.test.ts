@@ -30,12 +30,14 @@ function makeDeps(nodes: NodeInventoryEntry[]): RestoreCheckDeps {
     getNodeInventory: () => nodes,
     getStartupContext: () => ({ status: "missing" as const, evidence: "no context" }),
     hasSnapshot: () => true,
-    // Independent fixture for the newly shared snapshot pre-validation.
+    // Independent fixture for the newly shared snapshot pre-validation. Its nodes are the rig's seats, as a snapshot of
+    // the rig records them, so restore's membership includes every seat.
     getRestoreInputs: (rigId) => ({
       snapshot: { id: "snap-1", kind: "full", data: {
         rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
-        nodes: [], sessions: [], edges: [], checkpoints: {},
-      } },
+        nodes: nodes.flatMap((node) => node.nodeId ? [{ id: node.nodeId, logicalId: node.logicalId }] : []),
+        sessions: [], edges: [], checkpoints: {},
+      } } as never,
       servicesRecord: null,
     }),
     getLatestSnapshot: () => ({ id: "snap-1", kind: "full" }),

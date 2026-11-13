@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
+import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -489,8 +490,8 @@ export class RestoreCheckService {
         servicesRecord: input.servicesRecord,
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
       });
-      const rosterIds = input.snapshot.data.topologyRoster?.intendedNodeIds;
-      const roster = rosterIds ? new Set(rosterIds) : null;
+      // The membership restore itself uses: the snapshot's roster, or a pre-roster snapshot's own nodes.
+      const roster = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((entry) => entry.nodeId));
       // A seat's own startup blocker holds only a seat restore launches. For one restore leaves as it is, it's a caveat.
       const leftNodeIds = new Set(inventory.filter((node) => node.nodeId && this.restoreLeaves(node, roster)).map((node) => node.nodeId));
       const leftBlockers = validation.blockers.filter((blocker) => SEAT_STARTUP_BLOCKERS.has(blocker.code) && !!blocker.nodeId && leftNodeIds.has(blocker.nodeId));

@@ -93,7 +93,7 @@ function startupContextProbe(options?: {
 function mockDeps(overrides?: Partial<RestoreCheckDeps & {
   getStartupContext: (nodeId: string) => unknown;
 }>): RestoreCheckDeps {
-  return {
+  const deps: RestoreCheckDeps = {
     stateDir: "/custom-instance",
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
     getNodeInventory: () => [
@@ -109,12 +109,14 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
       } as NodeInventoryEntry,
     ],
     hasSnapshot: () => true,
-    // Independent fixture for the newly shared snapshot pre-validation.
+    // Independent fixture for the newly shared snapshot pre-validation. Its nodes are the rig's seats, as a snapshot of
+    // the rig records them, so restore's membership includes every seat the test's inventory has.
     getRestoreInputs: (rigId) => ({
       snapshot: { id: "snap-1", kind: "full", data: {
         rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
-        nodes: [], sessions: [], edges: [], checkpoints: {},
-      } },
+        nodes: deps.getNodeInventory(rigId).flatMap((node) => node.nodeId ? [{ id: node.nodeId, logicalId: node.logicalId }] : []),
+        sessions: [], edges: [], checkpoints: {},
+      } } as never,
       servicesRecord: null,
     }),
     getLatestSnapshot: () => null,
@@ -127,6 +129,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
     getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit"],
     ...overrides,
   };
+  return deps;
 }
 
 describe("RestoreCheckService", () => {
@@ -1191,6 +1194,33 @@ describe("RestoreCheckService", () => {
     })).check({ noQueue: true, noHooks: true }) as any;
     const startup = result.checks.find((entry: { check: string }) => entry.check.startsWith("seat.dev-impl@test-rig.startup"));
     expect(startup).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore doesn't launch this seat") });
+    expect(result.checks.filter((entry: { status: string }) => entry.status === "red")).toEqual([]);
+    expect(result.verdict).toBe("restorable_with_caveats");
+  });
+
+  // A snapshot from before rosters were recorded restores its own nodes, so restore skips a seat added since. restore-check
+  // reads that same membership: the later seat is left as it is, never brought back, and its startup inputs don't block.
+  it.each([
+    ["saved startup inputs", startupContextProbe(), "green"],
+    ["missing startup inputs", startupContextProbe({ status: "missing", evidence: "Persisted startup context missing" }), "yellow"],
+  ] as const)("a seat added after a pre-roster snapshot, with %s, reads left as it is", (_label, lateContext, startupStatus) => {
+    const late = claudeNode({ nodeId: "node-2", logicalId: "dev.late", canonicalSessionName: "dev-late@test-rig",
+      sessionStatus: "detached", startupStatus: "ready", tmuxAttachCommand: null, restorePolicy: "relaunch_fresh" });
+    const result = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode(), late],
+      getStartupContext: (nodeId: string) => nodeId === "node-2" ? lateContext : startupContextProbe(),
+      getRestoreInputs: (rigId: string) => ({
+        snapshot: { id: "snap-1", kind: "full", data: { rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+          nodes: [{ id: "node-1", logicalId: "dev.impl" }], sessions: [], edges: [], checkpoints: {} } },
+        servicesRecord: null,
+      }) as never,
+    })).check({ noQueue: true, noHooks: true }) as any;
+    const lateChecks = result.checks.filter((entry: { check: string }) => entry.check.startsWith("seat.dev-late@test-rig."));
+    expect(lateChecks.find((entry: { check: string }) => entry.check.endsWith(".readiness"))).toMatchObject({
+      status: "yellow", evidence: expect.stringContaining("Restore leaves this seat as it is: it isn't in the roster this restore uses"),
+    });
+    expect(lateChecks.find((entry: { check: string }) => entry.check.endsWith(".startup-context"))?.status).toBe(startupStatus);
+    expect(result.checks.some((entry: { evidence: string }) => entry.evidence.includes("brings it back"))).toBe(false);
     expect(result.checks.filter((entry: { status: string }) => entry.status === "red")).toEqual([]);
     expect(result.verdict).toBe("restorable_with_caveats");
   });
