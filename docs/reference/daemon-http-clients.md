@@ -268,3 +268,26 @@ With `needs-me.read` supported:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+
+
+## Per-rig delivery drain
+
+A maintenance owner can hold automatic queue wakes, watchdog delivery and stuck-sweep findings for one rig:
+
+- `GET /api/rigs/:rigId/delivery-drain` reads its current control and retained-notice counts.
+- `POST /api/rigs/:rigId/delivery-drain` begins a window, or renews the same window's review deadline:
+
+  ```json
+  {"drainId":"maintenance-window-1","owner":"maintainer@example","reviewAt":"2026-12-01T12:30:00Z"}
+  ```
+
+- `POST /api/rigs/:rigId/delivery-drain/end` with `{"drainId":"maintenance-window-1"}` explicitly ends that window.
+
+Status includes the owner, start, review deadline and drain ID, `retainedWorkCount`, and `nativeStartsDeferred: false`.
+The retained count is pending queue-wake intents plus due watchdog jobs, excluding maintenance review jobs; it is a count of notifications, not unique tasks. Work keeps its existing queue/outbox/job identities. Other rigs continue normally.
+
+A deadline prompts the recorded owner through the existing watchdog; it never ends a drain automatically. Its review job remains usable even if its owner's rig also has a delivery drain. Repeating BEGIN with the same ID and settings keeps the same window and job; renewal preserves the start. An active window is returned as status if a different ID is requested. A completed window's ID never starts it again.
+
+END changes only the named current window and schedules one existing recovery pass for its pending queue notices. Repeating END does not schedule another pass. A delayed END for an earlier window cannot end a later one. `releaseScheduled` reports scheduling, not successful delivery: notices still use current queue state, recipient checks and normal receipts. The END pass adds no retry of failed, uncertain, in-flight, delivered or manually retained input. Completed work reconciles normally; existing failed or uncertain outcomes keep their ordinary recovery and visibility.
+
+This is delivery-only maintenance. Direct sends, control/END requests and ordinary reads stay usable. Automatic native starts are **not deferred**, and input already in flight can finish. Coordinate native or daemon lifecycle work separately; this control does not promise all-activity quiet or graceful stop.
