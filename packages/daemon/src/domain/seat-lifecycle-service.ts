@@ -1915,7 +1915,11 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
-      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.` };
+      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.`,
+        // A recoverable seat (#3131) comes back in its saved conversation through the ordinary launch, leaving the rest of the rig alone.
+        ...(resolved.entry.lifecycleState === "recoverable"
+          ? { guidance: `The seat is recoverable from its saved conversation: rig launch ${shellQuote(seat.rigName)} ${shellQuote(seat.logicalId)} (add --plan to preview).` }
+          : {}) };
     }
     const binding = this.sessionRegistry.getBindingForNode(node.id);
     if (!binding?.tmuxSession || binding.tmuxSession !== session.session_name || !binding.tmuxPane) {
