@@ -43,6 +43,7 @@ describe("live seat runtime switch", () => {
   let queueRepo: QueueRepository;
   let panes: Map<string, string>;
   let sessionCreated: Map<string, string>;
+  let serverStart: number | null;
   let typed: Array<{ target: string; text: string }>;
   let swaps: Array<{ canonical: string; staged: string }>;
   let clock: number;
@@ -54,8 +55,9 @@ describe("live seat runtime switch", () => {
 
   const tmux = () => ({
     deliveryGuard: undefined,
-    listPanes: vi.fn(async (name: string) => panes.has(name) ? [{ id: panes.get(name)!, index: 0, cwd: "/project", width: 80, height: 24, active: true }] : []),
+    listPanes: vi.fn(async (name: string, _allWindows?: boolean) => panes.has(name) ? [{ id: panes.get(name)!, index: 0, cwd: "/project", width: 80, height: 24, active: true }] : []),
     listSessions: vi.fn(async () => [...panes.keys()].map((name) => ({ name, windows: 1, created: sessionCreated.get(name) ?? String(Date.parse("2026-10-24T01:00:00Z") / 1000), attached: false }))),
+    serverStartTime: vi.fn(async () => serverStart),
     listWindows: vi.fn(async (name: string) => panes.has(name) ? [{ id: "@1", index: 0, name: "main", panes: 1, active: true }] : []),
     probeSession: vi.fn(async (name: string) => ({ state: panes.has(name) ? "present" : "absent" })),
     capturePaneScreen: vi.fn(async () => "predecessor screen tail"),
@@ -123,6 +125,7 @@ describe("live seat runtime switch", () => {
     queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true, resolveOccupantGeneration: (name) => sessionRegistry.currentOccupantGenerationForSession(name) });
     panes = new Map([[SEAT, "%0"]]);
     sessionCreated = new Map();
+    serverStart = Date.parse("2026-10-24T01:00:00Z") / 1000;
     typed = [];
     swaps = [];
     clock = Date.parse("2026-10-24T02:00:00Z");
@@ -1052,11 +1055,56 @@ describe("live seat runtime switch", () => {
     it("#3103: a seat restored after a tmux server restart on the old successor's pane number isn't taken for the successor", async () => {
       record("preparing");
       panes.set(SEAT, "%5"); // the new server numbered panes from zero again
+      serverStart = Date.parse("2026-10-24T03:30:00Z") / 1000;
       sessionCreated.set(SEAT, String(Date.parse("2026-10-24T03:30:00Z") / 1000));
       clock = Date.parse("2026-10-24T04:00:00Z");
       expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(panes.get(SEAT)).toBe("%5");
+      expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
+    });
+
+    it("#3103: a successor that survives in a session newer than the switch, on the same tmux server, still holds the switch", async () => {
+      record("preparing");
+      panes.set(SEAT, "%5"); // the successor's pane, linked or moved into a session made after the switch
+      sessionCreated.set(SEAT, String(Date.parse("2026-10-24T03:30:00Z") / 1000));
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
+      expect(openSwitch()).toMatchObject({ phase: "preparing" });
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+    });
+
+    it("#3103: a successor in another window of the seat's session is seen, and an expired switch isn't settled", async () => {
+      record("preparing");
+      // tmux's list-panes on a session lists only its current window; -s lists every window.
+      fakeTmux.listPanes.mockImplementation(async (name: string, allWindows?: boolean) =>
+        name === SEAT ? (allWindows ? [{ id: "%9" }, { id: "%5" }] : [{ id: "%9" }]) as never : []);
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
+      expect(openSwitch()).toMatchObject({ phase: "preparing" });
+    });
+
+    it("#3103: with several panes at the seat and none the successor's, an expired switch settles with its occupant unknown", async () => {
+      record("preparing");
+      fakeTmux.listPanes.mockImplementation(async (name: string) => name === SEAT ? [{ id: "%9" }, { id: "%8" }] as never : []);
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      const result = await service().recover(nodeId);
+      expect(result).toMatchObject({ ok: true, outcome: expect.stringMatching(/the seat's current occupant is unknown \(it has several panes\); the staged claude-code successor was already gone/) });
+      expect(result).not.toMatchObject({ outcome: expect.stringMatching(/occupant holds the seat/) });
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+      expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
+    });
+
+    it("#3103: with no successor pane recorded and the seat's pane gone, an expired switch settles with no pane found", async () => {
+      record("preparing");
+      db.exec("UPDATE seat_runtime_switches SET successor_pane = NULL");
+      panes.delete(SEAT);
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      const result = await service().recover(nodeId);
+      expect(result).toMatchObject({ ok: true, outcome: expect.stringMatching(/no pane was found at the seat; the staged claude-code successor was already gone/) });
+      expect(panes.has(SEAT)).toBe(false);
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+      expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null });
       expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
     });
 
