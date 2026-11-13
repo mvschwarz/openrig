@@ -31,7 +31,7 @@ import {
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
-import { readSendOutcome } from "./connection-contract.js";
+import { readSendOutcome, type WrittenFact } from "./connection-contract.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -178,7 +178,7 @@ function enterWithheld(reason: string | undefined): boolean {
  *  write that may have landed is uncertain. Text that was written reads text only when a pre-Enter check refused the
  *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
  *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
-export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown" {
+export function writtenFact(result: SendResult): WrittenFact {
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
@@ -2745,7 +2745,7 @@ export class SessionTransport {
         pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
-        ...wireFingerprint(wire), outcome: readSendOutcome(result),
+        ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {

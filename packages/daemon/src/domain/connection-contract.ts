@@ -192,7 +192,7 @@ export function readWakeOutcome(recorded: string | null | undefined): WakeOutcom
 export type ConnectionRoute = "typed" | "codex-queue" | "hosted-trigger" | "gateway";
 
 /** What a connection says about one capability. `unavailable`: the connection has it, but it can't be used for this member
- *  now (a terminal seat with no live pane). `not-applicable`: it means nothing on this route (a dialog check on a webhook).
+ *  now (a terminal seat with no session recorded as current). `not-applicable`: it means nothing on this route (a dialog check on a webhook).
  *  A client reads an absent key as `unknown`, never as `not-supported`, idle or success. */
 export type Declared = "supported" | "not-supported" | "unavailable" | "not-applicable" | "unknown";
 
@@ -280,31 +280,45 @@ export interface MemberConnection {
   /** Why the route is null, or why a capability is unavailable. */
   reason?: string;
 }
+// A declaration says what a route can do, never that the member is ready now: `live` below is what OpenRig has recorded
+// as the seat's current session, not an observed pane or process.
 
 export function memberConnection(member: string, found: { kind: "person" } | { kind: "hosted" }
-  | { kind: "seat"; runtime: string | null; live: boolean } | { kind: "none"; reason: string }): MemberConnection {
+  | { kind: "seat"; runtime: string | null; /** A session recorded as current, not an observed pane. */ live: boolean }
+  | { kind: "none"; reason: string }): MemberConnection {
   if (found.kind === "person") return { member, route: "gateway", runtime: null, capabilities: declaredCapabilities("gateway", null) };
   if (found.kind === "hosted") return { member, route: "hosted-trigger", runtime: null, capabilities: declaredCapabilities("hosted-trigger", null) };
   if (found.kind === "none") return { member, route: null, runtime: null, capabilities: UNKNOWN_CAPABILITIES, reason: found.reason };
   const declared = declaredCapabilities("typed", found.runtime);
   if (found.live) return { member, route: "typed", runtime: found.runtime, capabilities: declared };
-  // A seat with no live pane keeps its declaration; what needs the pane can't be used until it runs again.
+  // A seat with no session recorded as current keeps its declaration; what needs its terminal can't be used until it has one.
   const live = (value: Declared): Declared => value === "supported" ? "unavailable" : value;
-  return { member, route: "typed", runtime: found.runtime, reason: "it has no live terminal now",
+  return { member, route: "typed", runtime: found.runtime, reason: "it has no session recorded as current",
     capabilities: { ...declared, observe: { dialog: live(declared.observe.dialog), turnStart: declared.observe.turnStart },
       control: { submit: live(declared.control.submit) } } };
 }
 
-/** What a typed send's own result says happened to it, in the shared words. Taken and submitted is `accepted` (with
- *  `renderVerified` when the screen showed it), held by a guard is `held`, refused before any input was written is
- *  `not-delivered`, and failed after input may have been written is `failed-effect-unknown`. Anything else is `unknown`.
- *  None of them means the member read the work. */
-export function readSendOutcome(result: { ok: boolean; outcome?: string; verified?: boolean; inputPhase?: string; sent?: boolean }):
+/** What a typed send's input reached, as the transport reads it from the send's result (`writtenFact`). */
+export type WrittenFact = "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
+
+/** What a typed send's own result says happened to it, in the shared words, read from what its input reached (`written`,
+ *  the transport's own reading) so the two can't disagree. Submitted is `accepted` (with `renderVerified` when the screen
+ *  showed it). Held by a guard is `held`. Text typed without Enter on a send that otherwise succeeded (a prompt answer
+ *  sent without one) is `unknown`: whether the prompt took it isn't known. Input that may have landed on a failed send is
+ *  `failed-effect-unknown`, and none written is `not-delivered`. Anything else is `unknown`. None of them means the
+ *  member read the work. */
+export function readSendOutcome(result: { ok: boolean; outcome?: string; verified?: boolean }, written: WrittenFact):
   ReportedFact<DeliveryFact> & { route: "typed"; renderVerified?: true } {
   const at = (fact: DeliveryFact, extra: { renderVerified?: true } = {}) => ({ fact, reporter: "openrig-observed" as const, route: "typed" as const, ...extra });
   if (result.outcome === "retained") return at("held");
-  if (result.ok) return result.outcome === "delivered" && result.verified === true ? at("accepted", { renderVerified: true }) : at("accepted");
-  if (result.inputPhase === "attempted" || result.inputPhase === "written") return at("failed-effect-unknown");
-  if (result.inputPhase === "not_reached" || result.sent === false) return at("not-delivered");
-  return at("unknown");
+  switch (written) {
+    case "submitted":
+    case "submit_only":
+      return result.outcome === "delivered" && result.verified === true ? at("accepted", { renderVerified: true }) : at("accepted");
+    case "text_only": return at(result.ok ? "unknown" : "failed-effect-unknown");
+    case "uncertain":
+    case "text_submit_unknown": return at("failed-effect-unknown");
+    case "none": return at("not-delivered");
+    default: return at("unknown");
+  }
 }

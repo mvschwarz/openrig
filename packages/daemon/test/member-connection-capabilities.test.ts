@@ -6,6 +6,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { resolveMemberConnection } from "../src/domain/member-connection.js";
+import type { LoadResult } from "../src/domain/gateway/human-registry.js";
 import { ROUTE_DECLARATIONS, declaredCapabilities, memberConnection, type ConnectionCapabilities } from "../src/domain/connection-contract.js";
 
 const dbs: Database.Database[] = [];
@@ -35,7 +36,7 @@ describe("declared capabilities", () => {
 
   it("a seat with no live terminal keeps its declaration, with what needs the terminal unavailable, never supported or idle", () => {
     const stopped = memberConnection("dev-impl@r", { kind: "seat", runtime: "codex", live: false });
-    expect(stopped).toMatchObject({ route: "typed", runtime: "codex", reason: "it has no live terminal now",
+    expect(stopped).toMatchObject({ route: "typed", runtime: "codex", reason: "it has no session recorded as current",
       capabilities: { control: { submit: "unavailable" }, observe: { dialog: "unavailable" }, nativeIdentity: { resume: "supported" } } });
     const nobody = memberConnection("ghost@r", { kind: "none", reason: "no one has it" });
     expect(nobody).toMatchObject({ route: null, reason: "no one has it" });
@@ -71,7 +72,7 @@ describe("GET /api/member-connection/capabilities", () => {
     expect((await t.get("?session=dev-impl@team")).body.member).toEqual({ member: "dev-impl@team", route: "typed", runtime: "claude-code",
       capabilities: declaredCapabilities("typed", "claude-code") });
     expect((await t.get("?session=dev-qa@team")).body.member).toMatchObject({ route: "typed", runtime: "codex",
-      capabilities: { control: { submit: "unavailable" } } });
+      capabilities: { control: { submit: "unavailable" } }, reason: "it has no session recorded as current" });
     expect((await t.get("?session=human@host")).body.member).toMatchObject({ route: "gateway" });
     const unknown = (await t.get("?session=nobody@nowhere")).body.member;
     expect(unknown).toMatchObject({ route: null, runtime: null, reason: expect.stringContaining("no seat, hosted member or registered person") });
@@ -79,18 +80,34 @@ describe("GET /api/member-connection/capabilities", () => {
   });
 });
 
-describe("resolveMemberConnection: the daemon's queue names people and hosted members", () => {
-  it("a registered person is reached through the gateway and a hosted member through its trigger, before any seat", () => {
+describe("resolveMemberConnection: a person is one the registry resolves, never an address's spelling", () => {
+  const ana = { entityId: "ana", class: "human" as const, displayName: "Ana", address: "ana@external", connectorBindings: [],
+    prefs: { deliveryClass: "A" as const } };
+  function resolver(registry: (() => LoadResult) | null) {
     const db = createFullTestDb();
     dbs.push(db);
-    const registry = { ok: true as const, entities: [{ entityId: "ana", class: "human" as const, displayName: "Ana", address: "ana@external",
-      connectorBindings: [], prefs: { deliveryClass: "A" as const } }] };
-    const queue = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry, isHostedMember: (address) => address === "assistant@team" });
-    expect(resolveMemberConnection(db, queue, "ana@external")).toMatchObject({ route: "gateway",
-      capabilities: { control: { submit: "not-applicable" } } });
-    expect(resolveMemberConnection(db, queue, "assistant@team")).toMatchObject({ route: "hosted-trigger",
+    const queue = registry === null ? undefined
+      : new QueueRepository(db, new EventBus(db), { loadHumanRegistry: registry, isHostedMember: (address) => address === "assistant@team" });
+    return (member: string) => resolveMemberConnection(db, queue, member);
+  }
+  const unknown = (reason: string) => expect.objectContaining({ route: null, reason: expect.stringContaining(reason) });
+
+  it("an @external address nobody registered is unknown, not a person; a registered one is reached through the gateway", () => {
+    const empty = resolver(() => ({ ok: true as const, entities: [] }));
+    expect(empty("not-registered@external")).toEqual(unknown("no seat, hosted member or registered person"));
+    const registered = resolver(() => ({ ok: true as const, entities: [ana] }));
+    expect(registered("ana@external")).toMatchObject({ route: "gateway", capabilities: { control: { submit: "not-applicable" } } });
+    expect(registered("bob@external")).toEqual(unknown("no seat, hosted member or registered person"));
+    expect(registered("assistant@team")).toMatchObject({ route: "hosted-trigger",
       capabilities: { observe: { dialog: "not-applicable" }, control: { submit: "not-applicable" } } });
-    // Without the queue (an older wiring), people and hosted members can't be told apart: unknown, never a guess.
-    expect(resolveMemberConnection(db, undefined, "assistant@team")).toMatchObject({ route: null });
+  });
+
+  it("with no registry to read, whether a person has the address is unknown; the reserved terminal person's seat is still one", () => {
+    const unreadable = resolver(() => ({ ok: false, error: "registry unreadable" }) as LoadResult);
+    expect(unreadable("ana@external")).toEqual(unknown("the person registry couldn't be read"));
+    const noQueue = resolver(null);
+    expect(noQueue("ana@external")).toEqual(unknown("the person registry couldn't be read"));
+    expect(noQueue("assistant@team")).toEqual(unknown("no seat, hosted member or registered person"));
+    expect(noQueue("human@host")).toMatchObject({ route: "gateway" });
   });
 });
