@@ -492,6 +492,15 @@ export class SessionRegistry {
     }
   }
 
+  /** Name existence is independent of best-effort tenure recording. */
+  carriesSessionName(sessionName: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      WHERE r.archived_at IS NULL AND (
+        EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?)
+        OR EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id AND (b.tmux_session = ? OR b.external_session_name = ?))
+      ) LIMIT 1`).get(sessionName, sessionName, sessionName);
+  }
+
   private rowToTenure(row: OccupantTenureRow): OccupantTenure {
     return {
       id: row.id,

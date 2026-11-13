@@ -659,7 +659,7 @@ describe("context-usage-threshold watchdog on a name two seat generations share"
     const engine = new WatchdogPolicyEngine({ jobsRepo: repo, historyLog: history, eventBus: new EventBus(db),
       deliver: async (request) => { deliveries.push(request); return { status: "ok" as const }; },
       resolveTargetGeneration: (s) => resolveGuardTarget(db, s)?.occupant ?? null,
-      targetNameCarried: (s) => sessions.currentOccupantGenerationForSession(s) !== null });
+      targetNameCarried: (s) => sessions.carriesSessionName(s) });
     const job = repo.register({ policy: "context-usage-threshold",
       specYaml: "policy: context-usage-threshold\ngenerated_by: continuity-policy-materializer\ncontinuity_mode: managed-compaction\n"
         + "target:\n  session: dev-impl@seat-rig\nmessage: Context threshold crossed.\n",
@@ -687,6 +687,25 @@ describe("context-usage-threshold watchdog on a name two seat generations share"
     expect(deliveries).toEqual([{ targetSession: "dev-impl@seat-rig", message: "Context threshold crossed." }]);
     expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ watchedFilePath: currentTranscript, watchedFileGeneration: "gen-current",
       lastFiredGeneration: "gen-current" });
+  });
+
+  it.each(["session", "tmux binding", "external binding"])("keeps a watch with missing tenure while a %s carries its name", async (carrier) => {
+    seat("rig-current", "node-current", "gen-current", join(tmp, "current.jsonl"));
+    db.prepare("DELETE FROM occupant_tenures WHERE node_id = 'node-current'").run();
+    if (carrier !== "session") {
+      new SessionRegistry(db).updateBinding("node-current", carrier === "tmux binding"
+        ? { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%1" }
+        : { attachmentType: "external_cli", externalSessionName: "dev-impl@seat-rig" });
+      db.prepare("DELETE FROM sessions WHERE node_id = 'node-current'").run();
+    }
+    const { repo, history, deliveries, engine, job } = watch();
+    expect(new SessionRegistry(db).currentOccupantGenerationForSession("dev-impl@seat-rig")).toBeNull();
+
+    const unresolved = await engine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(unresolved.outcome).toMatchObject({ action: "skip", reason: "occupant_generation_unresolved" });
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ state: "active", watchedFilePath: null });
+    expect(history.listForJob(job.jobId)[0]).toMatchObject({ outcome: "skipped", skipReason: "occupant_generation_unresolved" });
+    expect(deliveries).toEqual([]);
   });
 
   it("ends the watch of a seat that's gone: its rig removed, nothing carries the name", async () => {

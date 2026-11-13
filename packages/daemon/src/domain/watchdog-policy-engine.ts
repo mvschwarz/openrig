@@ -142,8 +142,8 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
-  /** Whether any node and occupant generation still carry this name. When resolveTargetGeneration is
-   *  unknown, a carried name is ambiguous (a context watch skips and measures again); one carried by
+  /** Whether an unarchived node still carries this name, even without a recorded tenure. When resolveTargetGeneration is
+   *  unknown, a carried name is unresolved (a context watch skips and measures again); one carried by
    *  nothing is a seat that's gone (the watch ends). Absent → gone, as before. */
   targetNameCarried?: (sessionName: string) => boolean;
   /**
