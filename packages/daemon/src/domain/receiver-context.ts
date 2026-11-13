@@ -12,7 +12,7 @@ export function terminalAnswerMeaning(unattributed: string): string {
  *  which reaches them where they answer. `asked` is null when no registered person resolves: removed since the ask, an
  *  unreadable registry, or an ask to the unattributed actor itself. What to do then is this one sentence. */
 export function askBackRoute(asked: string | null, unattributed: string, request: string): string {
-  const nowhere = `Don't write to ${unattributed}: nothing is delivered there.`;
+  const nowhere = `A row to ${unattributed} names no person: it notifies no one and only waits on Steering and in the Feed, so don't ask them back there.`;
   if (asked) {
     return `If their answer is unclear or conditional, ask them back with an ask to ${asked} that names ${request}: `
       + `rig queue create --destination ${asked} --summary "<your question>" --body-file <file>. It reaches them where they answer (the Feed, Steering, and Slack when it's connected). ${nowhere}`;

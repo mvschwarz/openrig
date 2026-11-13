@@ -2579,7 +2579,7 @@ export class QueueRepository {
   }
 
   /** The registered person an address names, so an ask back reaches them; null for anyone else, the unattributed
-   *  terminal actor included (it's a person address, but nothing is delivered there). */
+   *  terminal actor included (a person address, but a row there notifies no one and only waits on Steering and in the Feed). */
   reachablePerson(address: string | null | undefined): string | null {
     if (!address || address === UNATTRIBUTED_ACTOR) return null;
     const registry = this.loadHumanRegistryFn();
