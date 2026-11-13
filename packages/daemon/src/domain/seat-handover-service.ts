@@ -619,7 +619,9 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+        guidance: launch.code === "successor_preflight_failed"
+          ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
     }
 

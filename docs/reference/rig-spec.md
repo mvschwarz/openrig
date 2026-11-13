@@ -365,11 +365,17 @@ profile refuses launch. Compatible managed defaults and allowlists, harmless
 descriptions and provably narrower flat rules are accepted. Legacy sandbox
 settings are inert under the invocation's explicit permission-profile selection.
 Null fields are treated as absent, including unfamiliar optional fields.
+Managed `defaultPermissions` is a fallback, not a forced selection; the
+effective profile and managed allowlist determine whether the agent's choice holds.
 
 A timeout, reader failure, unfamiliar representation or unsupported managed
 requirement continues with the authored flags and reports `policy not verified:
 <reason>` in the launch observation and status. The policy is never dropped or
 swapped, and account/project settings are never edited to make the check pass.
+Absent selection or approval fields, unfamiliar profile formats and unclear
+overlap between native selectors and authored path rules are also unverified.
+Concrete refusals name the conflicting rule and offer a remedy; handover preserves
+that remedy while leaving the predecessor running.
 Without an explicit `CODEX_HOME`, OpenRig resolves the normal account home and
 pins it for both the read and launch; an unresolvable home is reported as
 unverified. A named `codex_config_profile` is retained but unverified because the

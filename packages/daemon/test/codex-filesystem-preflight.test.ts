@@ -57,7 +57,6 @@ describe("Codex seat filesystem configuration preflight", () => {
   it.each([
     ["wrong profile selection", { default_permissions: "other" }],
     ["wrong approval", { approval_policy: "on-request" }],
-    ["missing approval", { approval_policy: undefined }],
     ["missing profile map", { permissions: null }],
   ])("refuses %s", (_label, patch) => {
     const read = config();
@@ -78,7 +77,6 @@ describe("Codex seat filesystem configuration preflight", () => {
     { allowedApprovalPolicies: ["on-request"] },
     { allowedPermissionProfiles: { "other": true } },
     { allowedPermissionProfiles: { "openrig-seat": false } },
-    { defaultPermissions: "other" },
   ])("does not bypass managed policy %#", requirements => {
     expect(decide(config(), { requirements })).toMatchObject({ ok: false });
   });
@@ -108,12 +106,30 @@ describe("Codex seat filesystem verifier reader boundary", () => {
     expect(readCodexConfiguration).toHaveBeenLastCalledWith({ cwd: "/work", codexHome: "/account", launchPath: "/bin", args: [
       "-c", 'approval_policy="never"', "-c", 'default_permissions="openrig-seat"', "-c",
       'permissions={"openrig-seat"={filesystem={":minimal"="read","/work"="write","/work/hidden"="deny"},network={enabled=false}}}',
+      "-c", "features.plugins=false", "-c", "features.apps=false",
     ] });
   });
 
   it("returns an unavailable read as unverified", async () => {
     vi.mocked(readCodexConfiguration).mockResolvedValueOnce({ ok: false, reason: "native read timed out" });
     expect(await verifyCodexFilesystemPolicy({ permissions, cwd: "/work", codexHome: "/account" })).toMatchObject({ ok: true, verified: false });
+  });
+
+  it("names the filesystem rule, access on each side and a remedy without dumping configuration", () => {
+    const read = config();
+    read.config.permissions["openrig-seat"].filesystem["/work/hidden"] = "read";
+    Object.assign(read.config, { privateSetting: "do-not-print-this-value" });
+    expect(decide(read)).toMatchObject({ ok: false, error: expect.stringMatching(/\/work\/hidden.*agent.*deny.*(?:Codex|layer).*read/i) });
+    const decision = decide(read);
+    if (decision.ok) throw new Error("fixture must conflict");
+    expect(decision.error).toContain("\nFix:");
+    expect(decision.error).not.toContain("do-not-print-this-value");
+    read.config.default_permissions = "private-profile-selection";
+    const selection = decide(read);
+    if (selection.ok) throw new Error("fixture must conflict");
+    expect(selection.error).toContain("default_permissions");
+    expect(selection.error).toContain("\nFix:");
+    expect(selection.error).not.toContain("private-profile-selection");
   });
 
   it("returns a thrown reader failure without exposing arbitrary error contents", async () => {
@@ -139,7 +155,7 @@ describe("Codex seat filesystem verifier reader boundary", () => {
 });
 
 describe("compatible policies and inconclusive reads", () => {
-  it.each([":root", ":minimal", ":workspace_roots", ":project_roots", ":tmpdir", ":slash_tmp", "~/x"])(
+  it.each([":root", ":minimal"])(
     "refuses a known extra write grant at %s, including beside an unfamiliar representation", key => {
       const read = config();
       Object.assign(read.config.permissions["openrig-seat"].filesystem, { [key]: "write", future: { access: "future" } });
@@ -150,6 +166,58 @@ describe("compatible policies and inconclusive reads", () => {
     const read = config();
     Object.assign(read.config.permissions["openrig-seat"].filesystem, { ":root": "read" });
     expect(decide(read)).toMatchObject({ ok: false });
+  });
+
+  it.each([":workspace_roots", ":project_roots", ":tmpdir", ":slash_tmp", "~/x"])(
+    "leaves extra %s coverage unverified when an authored path may already cover it", key => {
+      const read = config();
+      Object.assign(read.config.permissions["openrig-seat"].filesystem, { [key]: "write" });
+      expect(decide(read)).toMatchObject({ ok: true, verified: false });
+    });
+
+  it("does not refuse a potentially redundant slash_tmp grant beside an authored /tmp grant", () => {
+    const own = { ...permissions, filesystem: { ":root": "read", "/tmp": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, ":slash_tmp": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+  });
+
+  it("still refuses a selector write when no authored rule could cover write access", () => {
+    const own = { ...permissions, filesystem: { ":root": "read" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, ":slash_tmp": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false });
+  });
+
+  it("does not invent a selector conflict by collapsing ambiguous coverage aliases", () => {
+    const own = { ...permissions, filesystem: { ":root": "read", ":project_roots": "write", ":workspace_roots": "deny" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, ":tmpdir": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+  });
+
+  it.each(["default_permissions", "approval_policy"])("reports absent or null %s without inventing a conflict", key => {
+    for (const value of [undefined, null]) {
+      const read = config();
+      Object.assign(read.config, { [key]: value });
+      expect(decide(read)).toMatchObject({ ok: true, verified: false });
+    }
+  });
+
+  it("reports a new profile representation without a filesystem field but keeps independent conflicts", () => {
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { futureFilesystem: { access: "new-format" }, network: { enabled: false } } });
+    expect(decide(read)).toMatchObject({ ok: true, verified: false });
+    read.config.permissions["openrig-seat"].network.enabled = true;
+    expect(decide(read)).toMatchObject({ ok: false });
+  });
+
+  it("accepts an allowed effective selection even when the managed fallback selects another profile", () => {
+    expect(decide(config(), { requirements: { defaultPermissions: "private-fallback-value",
+      allowedPermissionProfiles: { "openrig-seat": true } } })).toEqual({ ok: true, verified: true });
   });
 
   it("accepts a known selector grant already covered by an authored full-root grant", () => {
@@ -196,7 +264,7 @@ describe("compatible policies and inconclusive reads", () => {
     expect(decide(read, { requirements: { futureManagedPolicy: true } })).toMatchObject({ ok: false });
     expect(decide(config(), { requirements: { futureManagedPolicy: true, allowedApprovalPolicies: ["on-request"] } }))
       .toMatchObject({ ok: false });
-    expect(decideCodexFilesystemPolicy({ permissions, configRead: null, requirementsRead: { requirements: { defaultPermissions: "other" } } }))
+    expect(decideCodexFilesystemPolicy({ permissions, configRead: null, requirementsRead: { requirements: { allowedPermissionProfiles: { "openrig-seat": false } } } }))
       .toMatchObject({ ok: false });
   });
 

@@ -13,7 +13,7 @@ export type CodexFilesystemDecision =
   | { ok: true; verified: false; reason: string }
   | { ok: false; error: string };
 const verified = (): CodexFilesystemDecision => ({ ok: true, verified: true });
-const refuse = (error: string): CodexFilesystemDecision => ({ ok: false, error });
+const refuse = (error: string, remedy: string): CodexFilesystemDecision => ({ ok: false, error: `${error}\nFix: ${remedy}` });
 const unknown = (reason: string): CodexFilesystemDecision => ({ ok: true, verified: false, reason });
 export const codexPolicyWarning = (reason: string): string => `policy not verified: ${reason}`;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -38,10 +38,12 @@ const literalHomePath = (key: string) => key.startsWith("~/") && path.normalize(
 /** Compare only established flat coverage. Native expansion, inheritance and
  * unfamiliar syntax stay unknown; this is not a second sandbox implementation. */
 function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissions): CodexFilesystemDecision {
-  if (actual == null) return refuse("Codex did not return the selected filesystem mapping");
+  if (actual == null) return refuse("Rule permissions.openrig-seat.filesystem: the agent declares read/write/deny rules, but the effective Codex profile has no mapping.",
+    "Select a Codex profile that retains the agent's filesystem rules, or deliberately change the agent's codex_permissions.");
   if (!isRecord(actual)) return unknown("Codex selected filesystem mapping has an unfamiliar representation");
   const entries = present(actual);
-  if (!entries.length) return refuse("Codex selected filesystem mapping is empty");
+  if (!entries.length) return refuse("Rule permissions.openrig-seat.filesystem: the agent declares read/write/deny rules, but the effective Codex mapping is empty.",
+    "Restore the intended filesystem mapping in the effective Codex profile before launching.");
   const authored = Object.fromEntries(Object.entries(permissions.filesystem).map(([key, value]) => [canonicalKey(key), value]));
   const effective = Object.fromEntries(entries.map(([key, value]) => [canonicalKey(key), value]));
   const ambiguous = new Set<string>();
@@ -52,19 +54,24 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
       seen.add(key);
     }
   }
-  const at = (rules: Record<string, unknown>, key: string): CodexFilesystemAccess | undefined => {
+  const at = (rules: Record<string, unknown>, key: string, extraAccess?: CodexFilesystemAccess): CodexFilesystemAccess | undefined => {
     if (ambiguous.has(key)) return undefined;
     if (isAccess(rules[key])) return rules[key];
     const fullRoot = rules[":root"] ?? (literalAbsolute(path.sep) ? rules[path.sep] : undefined);
-    // These are known native grants, not unfamiliar syntax. A newly merged
-    // selector expands the authored policy unless an authored full-root grant
-    // already covers it. Minimal read does not authorize full-root read.
-    if (nativeSelectors.has(key)) return isAccess(fullRoot) ? fullRoot : "deny";
+    const rootAccess = isAccess(fullRoot) ? fullRoot : "deny";
+    // Native selectors/home paths can overlap authored literal paths or other
+    // selectors. Do not infer a widening where an existing grant may cover it;
+    // native expansion remains Codex's job, not another policy engine here.
+    const possibleCoverage = extraAccess !== undefined && accessRank[extraAccess] > accessRank[rootAccess]
+      && (ambiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
+        && isAccess(access) && accessRank[access] >= accessRank[extraAccess]));
+    if (nativeSelectors.has(key)) return key !== ":root" && possibleCoverage ? undefined : rootAccess;
     if (!literalAbsolute(key) && !literalHomePath(key)) return undefined;
     const ancestors = Object.keys(rules).filter(root => (literalAbsolute(root) || literalHomePath(root)) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
       .sort((a, b) => b.length - a.length);
     const root = ancestors[0];
     if (root) return isAccess(rules[root]) ? rules[root] : undefined;
+    if (literalHomePath(key) && possibleCoverage) return undefined;
     if (isAccess(fullRoot)) return fullRoot;
     if (literalHomePath(key)) return "deny";
     if (Object.keys(rules).some(rule => !literalAbsolute(rule) && rule !== ":minimal")) return undefined;
@@ -77,9 +84,11 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
   const unfamiliar = entries.some(([, value]) => !isAccess(value));
   for (const [key, value] of Object.entries(effective)) {
     if (!isAccess(value)) { checks.push(unknown("Codex returned an unfamiliar filesystem access value or nested mapping")); continue; }
-    const expected = at(authored, key);
+    const expected = at(authored, key, value);
     if (expected === undefined) { checks.push(unknown("Filesystem rule coverage could not be compared")); continue; }
-    if (accessRank[value] > accessRank[expected]) return refuse("Codex selected filesystem policy widens the seat's access");
+    if (accessRank[value] > accessRank[expected]) return refuse(
+      `Filesystem rule ${JSON.stringify(key)}: agent coverage is at most ${expected}; a lower Codex layer (account or trusted project) grants ${value}.`,
+      "Remove the conflicting lower-layer grant, or deliberately update the agent's codex_permissions to the intended access.");
     if (!(key in authored) && value === "read" && expected === "read" && !Object.keys(authored).some(root =>
       root === ":root" || (literalAbsolute(root) && literalAbsolute(key) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep)))) {
       checks.push(unknown("Native minimal read coverage could not be compared"));
@@ -88,7 +97,9 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
   for (const [key, access] of Object.entries(authored)) {
     if (key in effective) continue;
     const remaining = at(effective, key);
-    if (remaining !== undefined && accessRank[remaining] > accessRank[access] && !unfamiliar) return refuse("Codex selected filesystem policy omits a seat restriction");
+    if (remaining !== undefined && accessRank[remaining] > accessRank[access] && !unfamiliar) return refuse(
+      `Filesystem rule ${JSON.stringify(key)}: the agent requires ${access}; the effective Codex policy omits that restriction and grants ${remaining}.`,
+      "Restore the agent's restriction in the effective Codex profile, or deliberately change the agent's codex_permissions.");
     checks.push(unknown("An authored filesystem rule is absent from the effective mapping"));
   }
   return combine(...checks);
@@ -112,18 +123,22 @@ function compareRequirements(read: unknown, permissions: CodexFilesystemPermissi
   for (const [key, value] of present(read.requirements)) {
     if (UNRELATED_REQUIREMENTS.has(key)) continue;
     if (key === "defaultPermissions" && typeof value === "string") {
-      if (value !== CODEX_SEAT_PERMISSION_PROFILE) return refuse("Codex managed default selects a different permission profile");
+      // A fallback, not a forced choice. The effective selection and allowlists
+      // below establish whether Codex actually applied the agent's profile.
       continue;
     }
     if (key === "allowedApprovalPolicies" && Array.isArray(value) && value.every(policy => typeof policy === "string")) {
-      if (!value.includes(permissions.approval)) return refuse("Codex managed approval allowlist excludes the seat choice");
+      if (!value.includes(permissions.approval)) return refuse("Rule allowedApprovalPolicies: the managed allowlist excludes the agent's approval choice.",
+        "Ask the managed-policy owner to allow the intended approval, or select an allowed approval for the agent.");
       continue;
     }
     if (key === "allowedPermissionProfiles" && isRecord(value)) {
-      if (value[CODEX_SEAT_PERMISSION_PROFILE] === false) return refuse("Codex managed profile allowlist excludes the seat choice");
+      if (value[CODEX_SEAT_PERMISSION_PROFILE] === false) return refuse("Rule allowedPermissionProfiles: the managed allowlist explicitly excludes the agent's filesystem profile.",
+        "Ask the managed-policy owner to allow the agent's filesystem profile, or select an allowed policy for the agent.");
       const entries = present(value);
       if (entries.every(([, allowed]) => typeof allowed === "boolean")) {
-        if (value[CODEX_SEAT_PERMISSION_PROFILE] !== true) return refuse("Codex managed profile allowlist excludes the seat choice");
+        if (value[CODEX_SEAT_PERMISSION_PROFILE] !== true) return refuse("Rule allowedPermissionProfiles: the managed allowlist does not include the agent's filesystem profile.",
+          "Ask the managed-policy owner to allow the agent's filesystem profile, or select an allowed policy for the agent.");
         continue;
       }
     }
@@ -141,22 +156,29 @@ export function decideCodexFilesystemPolicy(request: {
   const checks = [compareRequirements(requirementsRead, permissions)];
   if (!isRecord(configRead) || !isRecord(configRead.config)) return combine(...checks, unknown("Codex config/read did not return a recognized effective configuration"));
   const config = configRead.config;
-  if (config.default_permissions != null && typeof config.default_permissions !== "string") checks.push(unknown("Codex permission selection has an unfamiliar representation"));
-  else if (config.default_permissions !== CODEX_SEAT_PERMISSION_PROFILE) return refuse("Codex did not select the seat filesystem permission profile");
-  if (config.approval_policy != null && typeof config.approval_policy !== "string") checks.push(unknown("Codex approval selection has an unfamiliar representation"));
-  else if (config.approval_policy !== permissions.approval) return refuse("Codex effective approval policy differs from the seat selection");
-  if (config.permissions == null) return refuse("Codex did not return the selected filesystem permission profile");
+  if (config.default_permissions == null || typeof config.default_permissions !== "string") checks.push(unknown("Codex permission selection is absent or has an unfamiliar representation"));
+  else if (config.default_permissions !== CODEX_SEAT_PERMISSION_PROFILE) return refuse("Rule default_permissions: the agent selects its filesystem profile; the effective Codex configuration selects a different profile.",
+    "Remove the conflicting account or trusted-project selection, or deliberately change the agent's codex_permissions.");
+  if (config.approval_policy == null || typeof config.approval_policy !== "string") checks.push(unknown("Codex approval selection is absent or has an unfamiliar representation"));
+  else if (config.approval_policy !== permissions.approval) return refuse("Rule approval_policy: the effective Codex configuration conflicts with the agent's approval choice.",
+    "Align the account, trusted-project or managed approval policy with the agent's intended approval choice.");
+  if (config.permissions == null) return refuse("Rule permissions.openrig-seat: the agent selects a filesystem profile, but the effective Codex configuration has no profile mapping.",
+    "Restore the selected profile in the effective Codex configuration before launching.");
   if (!isRecord(config.permissions)) return combine(...checks, unknown("Codex permission profiles have an unfamiliar representation"));
   const selected = config.permissions[CODEX_SEAT_PERMISSION_PROFILE];
-  if (selected == null) return refuse("Codex did not return the selected filesystem permission profile");
+  if (selected == null) return refuse("Rule permissions.openrig-seat: the agent selects a filesystem profile that is absent from the effective Codex configuration.",
+    "Restore the selected profile in the effective Codex configuration before launching.");
   if (!isRecord(selected)) return combine(...checks, unknown("Codex selected profile has an unfamiliar representation"));
-  if (!present(selected).length) return refuse("Codex selected permission profile is empty");
-  if (present(selected).some(([key]) => key !== "filesystem" && key !== "network" && key !== "description")) checks.push(unknown("Codex returned an unfamiliar selected profile option"));
-  checks.push(compareFilesystem(selected.filesystem, permissions));
+  if (!present(selected).length) return refuse("Rule permissions.openrig-seat: the agent selects filesystem read/write/deny rules, but the effective Codex profile is empty.",
+    "Restore the selected profile's intended filesystem rules before launching.");
+  const unfamiliarProfile = present(selected).some(([key]) => key !== "filesystem" && key !== "network" && key !== "description");
+  if (unfamiliarProfile) checks.push(unknown("Codex returned an unfamiliar selected profile option"));
+  if (!(unfamiliarProfile && selected.filesystem == null)) checks.push(compareFilesystem(selected.filesystem, permissions));
   const network = selected.network;
   if (!isRecord(network)) checks.push(unknown("Codex selected network policy could not be compared"));
   else {
-    if (network.enabled === true && !permissions.network_access) return refuse("Codex selected permission profile widens network access");
+    if (network.enabled === true && !permissions.network_access) return refuse("Rule network.enabled: the agent denies network access; the effective Codex profile allows it.",
+      "Remove the conflicting lower-layer network grant, or deliberately enable network_access in the agent's codex_permissions.");
     if (typeof network.enabled !== "boolean") checks.push(unknown("Codex selected network access is unfamiliar"));
     if (present(network).some(([key]) => key !== "enabled")) checks.push(unknown("Codex returned unfamiliar network options"));
   }
@@ -185,7 +207,8 @@ export async function verifyCodexFilesystemPolicy(request: {
   try {
     const read = await readCodexConfiguration({ cwd: request.cwd, codexHome, launchPath: request.launchPath,
       args: ["-c", `approval_policy=${JSON.stringify(request.permissions.approval)}`,
-        ...codexFilesystemOverrides(request.permissions).flatMap(value => ["-c", value])] });
+        ...codexFilesystemOverrides(request.permissions).flatMap(value => ["-c", value]),
+        "-c", "features.plugins=false", "-c", "features.apps=false"] });
     if (!read.ok) return unknown(read.reason);
     return decideCodexFilesystemPolicy({ permissions: request.permissions, configRead: read.configRead, requirementsRead: read.requirementsRead });
   } catch { return unknown("Native Codex configuration reader failed"); }

@@ -1288,13 +1288,15 @@ describe("SeatHandoverService", () => {
       const own = { approval: "never", filesystem: { ":minimal": "read", "/project": "write" } };
       db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
       const before = sessionRegistry.getBindingForNode(node.id);
-      const verifyFilesystemPolicy = vi.fn(async () => ({ ok: false as const, error: "native policy refuses successor" }));
+      const remedy = "Fix: Remove the conflicting lower-layer access before another handover.";
+      const verifyFilesystemPolicy = vi.fn(async () => ({ ok: false as const, error: `native policy refuses successor\n${remedy}` }));
       const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
         fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, listFiles: () => [] } });
       const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
         tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
       expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source, reason: "check successor policy" }))
-        .toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringContaining("native policy") });
+        .toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringContaining("native policy"),
+          guidance: expect.stringContaining(remedy) });
       expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ codexHome: "/seat-home", cwd: "/project" }));
       expect(signalPaneProcess).not.toHaveBeenCalled();
       expect(respawnPane).not.toHaveBeenCalled();
