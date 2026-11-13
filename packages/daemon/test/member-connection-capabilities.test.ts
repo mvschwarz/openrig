@@ -6,6 +6,8 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { resolveMemberConnection } from "../src/domain/member-connection.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import type { LoadResult } from "../src/domain/gateway/human-registry.js";
 import { ROUTE_DECLARATIONS, declaredCapabilities, memberConnection, type ConnectionCapabilities } from "../src/domain/connection-contract.js";
 
@@ -48,7 +50,9 @@ describe("GET /api/member-connection/capabilities", () => {
   function setup() {
     const db = createFullTestDb();
     dbs.push(db);
-    const app = createTestApp(db);
+    // The running daemon's queue, with nobody registered yet: a readable registry with no one in it.
+    const queueRepo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => ({ ok: false, error: "none", noHumans: true }) });
+    const app = createTestApp(db, { appDeps: { queueRepo } });
     const get = async (query = "") => {
       const res = await app.app.request(`/api/member-connection/capabilities${query}`);
       return { status: res.status, body: await res.json() as Record<string, any> };
@@ -86,6 +90,11 @@ describe("resolveMemberConnection: a person is one the registry resolves, never 
   function resolver(registry: (() => LoadResult) | null) {
     const db = createFullTestDb();
     dbs.push(db);
+    // A recorded seat whose name is also a person's canonical spelling, when `ana` is registered.
+    const rigRepo = new RigRepository(db), sessions = new SessionRegistry(db);
+    const seat = rigRepo.addNode(rigRepo.createRig("team").id, "ana", { runtime: "claude-code" });
+    sessions.updateStatus(sessions.registerSession(seat.id, "ana@team").id, "running");
+    sessions.updateBinding(seat.id, { tmuxSession: "ana@team", tmuxPane: "%1" });
     const queue = registry === null ? undefined
       : new QueueRepository(db, new EventBus(db), { loadHumanRegistry: registry, isHostedMember: (address) => address === "assistant@team" });
     return (member: string) => resolveMemberConnection(db, queue, member);
@@ -107,7 +116,21 @@ describe("resolveMemberConnection: a person is one the registry resolves, never 
     expect(unreadable("ana@external")).toEqual(unknown("the person registry couldn't be read"));
     const noQueue = resolver(null);
     expect(noQueue("ana@external")).toEqual(unknown("the person registry couldn't be read"));
-    expect(noQueue("assistant@team")).toEqual(unknown("no seat, hosted member or registered person"));
     expect(noQueue("human@host")).toMatchObject({ route: "gateway" });
+  });
+
+  it("with no registry to read, a canonical spelling a person could have is unknown, never the seat or hosted member with that name", () => {
+    for (const lookup of [resolver(() => ({ ok: false, error: "registry unreadable" }) as LoadResult), resolver(null)]) {
+      expect(lookup("ana@team")).toEqual(unknown("the person registry couldn't be read"));
+      expect(lookup("assistant@team")).toEqual(unknown("the person registry couldn't be read"));
+      expect(lookup("nobody@team")).toEqual(unknown("the person registry couldn't be read"));
+    }
+    // Readable, the same names resolve: a person first, as the queue does, then the hosted member and the seat.
+    const registered = resolver(() => ({ ok: true as const, entities: [ana] }));
+    expect(registered("ana@team")).toMatchObject({ route: "gateway" });
+    expect(registered("assistant@team")).toMatchObject({ route: "hosted-trigger" });
+    const nobodyRegistered = resolver(() => ({ ok: false, error: "none", noHumans: true }) as LoadResult);
+    expect(nobodyRegistered("ana@team")).toMatchObject({ route: "typed", runtime: "claude-code" });
+    expect(nobodyRegistered("ana@external")).toEqual(unknown("no seat, hosted member or registered person"));
   });
 });

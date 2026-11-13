@@ -212,14 +212,16 @@ every capability as unknown and keep using what works today.
 
 `?session=<address>` adds `member`: `{ member, route, runtime, capabilities, reason? }` for the member that address
 names: a person the human registry resolves (or the terminal person's own `human@host`), a hosted member, or a seat. An
-address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. An address none
-of them has, or a person's address when the registry can't be read, comes back with `route: null`, every capability
-`unknown`, and the reason.
+address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. A person is
+resolved first, so when the registry can't be read, any address it could resolve to a person (`<id>@external`, or any
+`member@rig`, since a person's id can be spelled that way) comes back unknown, even if a seat or hosted member has that name. That
+answer, and an address none of them has, comes back with `route: null`, every capability `unknown`, and the reason.
 
 Each typed send also records what happened to it, in the daemon's `transport.delivery_evidence` event, as
 `outcome: { fact, reporter, route }`. `fact` is `accepted` (typed and submitted, with `renderVerified: true` when
-the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown` (a prompt answer typed without
-Enter is `unknown`: whether the prompt took it isn't known); `reporter` says who established it.
+the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`. A prompt answer typed without Enter on a send that
+succeeded is `unknown`: whether the prompt took it isn't known; if the send failed after typing, it's
+`failed-effect-unknown`. `reporter` says who established it.
 None of them means the member read the work: picking it up is a claim on the row.
 
 ## Route details
