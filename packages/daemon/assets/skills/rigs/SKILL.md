@@ -189,6 +189,8 @@ person needs in their project or home folder and name that path.
   - **Your return address:** if this session joined the team (above), it's the `OPENRIG_SESSION_NAME` that
     `rig attach` printed. Otherwise agree one with the person on the kernel's rig, such as `claude-app@kernel` or
     `codex-app@kernel`. It's an address the queue takes tasks for; nothing is launched for it and no file is written.
+    To tell the team what it's for, the person can add it to a roster as a hosted member
+    (`docs/reference/hosted-members.md` in the OpenRig package).
     Put it in front of every `rig queue` command: `OPENRIG_SESSION_NAME=<address> rig queue ...` (add
     `OPENRIG_HOME=<home>` when OpenRig doesn't use the default home). A `--source` name only labels the one task it's
     on: claiming and answering the team's questions need the address in `OPENRIG_SESSION_NAME`.
@@ -218,11 +220,13 @@ person needs in their project or home folder and name that path.
     operator that names your task's ID, not as keys typed into its pane.
   - **Delivery isn't the task's state.** A task's state says where the work is: pending (created and readable, not
     yet claimed), claimed or in progress (an agent took it), handed off (follow the next item) or done (read its
-    resolution). Whether its agent was woken is a separate fact, the wake outcome `--verify` reports: `verified`,
-    `delivered-ack-pending` or `claimed` (woken or picked up); `retained` (the seat's typing guard held the wake, and
-    the task is still there to read); `failed` (the wake didn't land, and the task is still owed: wake it with
-    `rig send <canonicalSessionName> "task <id> is yours"`); `indeterminate` or `still-pending` (unknown, neither
-    failed nor delivered: check before you wake it again). A pending task with no wake isn't lost or done.
+    resolution). Whether its agent was woken is a separate fact, the wake outcome `--verify` reports: `verified` (it
+    rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
+    proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
+    isn't retried automatically: wake it once the seat's input is free with
+    `rig send <canonicalSessionName> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
+    owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
+    before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: check your address when the person asks or comes back.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
