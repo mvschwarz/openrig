@@ -93,7 +93,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   active work showed no gain, one case was slower, and writes weren't measured.
   ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic notice can still be left beside a
-  draft started during delivery.
+  draft started during delivery. In an isolated test with a scripted terminal,
+  characters typed while OpenRig ran its last checks before Enter were also
+  submitted with the notice; that hasn't been tested with a real client or model.
 - **The TUI's tables** can drop a connected assistant's check-in line when its
   rig's seat inventory can't be read; `rig roster` still prints it.
 - **Repository guidance on restore:** rigs without pods, old or unknown Codex

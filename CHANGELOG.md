@@ -154,8 +154,12 @@ release doesn't fix.
 - **Queue listings:** the new indexes aren't a cure for every stall. Listings of
   active work showed no gain, one case was slower, and writes weren't measured. ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic OpenRig notice can still be left beside
-  a draft started during delivery. In the reproduced cases the person's draft
+  a draft started during delivery. In the reproduced paste-window cases the person's draft
   stayed intact and no Enter was sent, but OpenRig's text stayed in the input.
+  Those cases don't cover a later window: in an isolated test with a scripted
+  terminal, characters typed while OpenRig ran its last checks before Enter were
+  submitted together with the notice, and the send reported success. The same
+  test reproduces it on 0.7.13. It hasn't been tested with a real client or model.
 - **The TUI's tables** can drop a connected assistant's check-in line when its
   rig's seat inventory can't be read; `rig roster` still prints it. ([#3105](https://github.com/mvschwarz/openrig/pull/3105) isn't in this release)
 - **Repository guidance on restore:** rigs without pods, old or unknown Codex
