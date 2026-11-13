@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { selectRigProject, rigFromSession, ProjectReadError } from "@openrig/daemon/project-catalog";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -255,6 +256,10 @@ export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
   configPath?: string;
+  /** An absolute slice is an explicit target, so it keeps the previous workspace resolution. */
+  targetPath?: string;
+  /** Mission creation may create a new missions tree within an existing project. */
+  allowMissingProjectMissions?: boolean;
   /**
    * Fail instead of falling back to the configured root when an explicit
    * override (`--workspace` or OPENRIG_WORK_ROOT) names no missions tree.
@@ -291,8 +296,49 @@ export function resolveMissionsRoot(opts: {
       });
     }
   }
+  if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+    const rig = rigFromSession(process.env.OPENRIG_SESSION_NAME);
+    if (rig) {
+      try {
+        const config = new ConfigStore(opts.configPath);
+        const selected = selectRigProject(String(config.get("workspace.catalog_path")), rig);
+        if (selected) {
+          const manifestPath = path.join(selected.root, "project.yaml");
+          if (fs.existsSync(manifestPath)) {
+            let manifest: unknown;
+            try { manifest = YAML.parse(fs.readFileSync(manifestPath, "utf8")); }
+            catch (error) {
+              throw new ScopeCliError({ fact: `Cannot read ${manifestPath}: ${(error as Error).message}`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            }
+            const fields = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest as Record<string, any> : null;
+            if (!fields) throw new ScopeCliError({ fact: `${manifestPath} must be a YAML object.`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            const declared = fields.id ?? fields.metadata?.id;
+            if (declared && declared !== selected.id) throw new ScopeCliError({ fact: `Catalog project '${selected.id}' conflicts with project identity '${declared}'.`, consequence: "No project was selected.", action: "Correct the project identity or select a workspace explicitly." });
+          }
+          const warnings: string[] = [];
+          const root = readProjectMissionsRoot(selected.root, warnings);
+          for (const warning of warnings) console.error(`warning: ${warning}`);
+          if (!root || (fs.existsSync(root) ? !fs.statSync(root).isDirectory() : !opts.allowMissingProjectMissions)) throw new ScopeCliError({
+            fact: `Project '${selected.id}' selected by rig '${rig}' has no readable missions root.`,
+            consequence: "The command did not use the shared workspace.",
+            action: "Create its missions tree or select a workspace explicitly.",
+          });
+          console.error(`Project ${selected.id}: ${selected.root} (selected by rig ${rig})`);
+          return root;
+        }
+      } catch (error) {
+        if (!(error instanceof ProjectReadError)) throw error;
+        throw new ScopeCliError({ fact: error.message, consequence: "No project was selected.", action: "Correct the catalog or select a workspace explicitly." });
+      }
+    }
+  }
   const configured = configuredMissionsRoot(opts.configPath);
-  if (configured) return configured;
+  if (configured) {
+    if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+      console.error(`Project unbound: ${configured} (configured missions root)`);
+    }
+    return configured;
+  }
   throw new ScopeCliError({
     fact: `Configured workspace.slices_root is not a readable directory: ${(new ConfigStore(opts.configPath).get("workspace.slices_root") as string) || "(unset)"}.`,
     consequence: "No mission tree to operate on.",
