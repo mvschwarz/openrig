@@ -25,7 +25,8 @@ export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
  *       "on"?: "user" | "tool_result" | "any", // what the request's last turn must be (default "user")
  *       "when"?: "<regex source>",            // matched against that turn's text; absent matches any
  *       "times"?: <n>,                        // how many requests this rule answers; absent is unlimited
- *       "gate"?: "<name>",                    // hold the answer until the case releases this gate
+ *       "gate"?: "<name>",                    // hold the answer until the case releases this gate; {{marker}}
+ *                                             //   in the name becomes the turn's first marker, a gate per turn
  *       "delayMs"?: <n>,                      // wait before the first byte
  *       // then exactly one action:
  *       "say"?: "<text>",                     // a streamed text reply; {{marker}} is the turn's first marker
@@ -227,7 +228,7 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     const marker = turn.text.match(loaded.marker)?.[0] ?? null;
     log({ ...entry, body, request: protocol.describe?.(body) ?? null, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
       action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });
-    if (picked.rule.gate) await waitGate(picked.rule.gate);
+    if (picked.rule.gate) await waitGate(picked.rule.gate.replaceAll("{{marker}}", marker ?? ""));
     if (picked.rule.delayMs) await sleep(picked.rule.delayMs);
     if (picked.rule.error) {
       res.writeHead(picked.rule.error.status, { "content-type": "application/json", ...(picked.rule.error.headers ?? {}) })

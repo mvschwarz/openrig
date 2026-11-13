@@ -322,6 +322,21 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect(events((await pending).text).at(-1)!.event).toBe("response.completed");
   });
 
+  it("names a gate after the turn's marker, so releasing one turn leaves another held", async () => {
+    const standIn = await start("messages", { script: { rules: [{ gate: "{{marker}}", say: "late" }] } });
+    const done: string[] = [];
+    const first = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-a1")).then((r) => { done.push("a1"); return r; });
+    const second = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-b2")).then((r) => { done.push("b2"); return r; });
+    await new Promise((r) => setTimeout(r, 150));
+    standIn.release("DLV-D18-busy-a1");
+    await first;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(done).toEqual(["a1"]);
+    standIn.release("DLV-D18-busy-b2");
+    await second;
+    expect(done).toEqual(["a1", "b2"]);
+  });
+
   it("uses a rule only as many times as it says, then falls through", async () => {
     const standIn = await start("messages", { script: { rules: [{ say: "first", times: 1 }, { say: "after" }] } });
     const text = async () => events((await post(`${standIn.url}/v1/messages`, userTurn("DLV-x"))).text)

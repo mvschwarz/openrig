@@ -189,6 +189,14 @@ export function caseContext(cell, { caseId, kind, version }) {
       verdict.info("watchdog reminder registered", { jobId, intervalSeconds });
       return jobId;
     },
+    /** The job and its recent evaluations (`recentHistory`): what each occurrence did, with its delivery status, code
+     *  and reason. Null when it can't be read. */
+    async watchdogStatus(jobId) {
+      const out = await cell.rig(["watchdog", "status", jobId, "--json"], { allowFail: true });
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** Let the stand-in answer turns held on `gate`. */
+    releaseGate(gate) { cell.record({ step: "release-gate", caseId, gate }); cell.standIn.release(gate); },
     async stopWatchdog(jobId) { await cell.rig(["watchdog", "stop", jobId, "--json"], { allowFail: true }); },
 
     async setGuard(mode) {
@@ -199,7 +207,9 @@ export function caseContext(cell, { caseId, kind, version }) {
     /** Release one held message's quota; it delivers nothing. The route requires a sender, so the suite names itself. */
     async retireHeld(outboxId) {
       const out = await cell.rig(["seat", "retire-held-message", cell.session, outboxId, "--reason", `delivery suite ${caseId}`, "--json"], { allowFail: true, as: "delivery-suite@dlv" });
-      return { exit: out.exit, stdout: out.stdout.trim().slice(0, 600) };
+      let state = null;
+      try { state = JSON.parse(out.stdout)?.entry?.deliveryState ?? null; } catch { state = null; }
+      return { exit: out.exit, state, stdout: out.stdout.trim().slice(0, 600) };
     },
     async setDraftDelivery(value) {
       await cell.rig(["config", "set", "transport.draft_delivery", value]);
