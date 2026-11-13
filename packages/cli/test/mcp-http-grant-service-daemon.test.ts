@@ -156,14 +156,14 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const args = { qitemId: "qitem-first-task", body: "Create a useful file and return it" };
     const first = await ask("rig_queue_create", args);
     expect(first.isError).toBe(false);
-    expect(repo.getById(args.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a", body: args.body });
+    expect(repo.getById(args.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "lead@team-a", body: args.body });
     const retry = await ask("rig_queue_create", args);
     expect(retry.isError).toBe(false);
     expect(retry.structured.qitemId).toBe(args.qitemId);
     expect(rows()).toBe(1);
     const revision = await ask("rig_queue_create", { body: "Improve the file", revises: args.qitemId });
     expect(revision.isError).toBe(false);
-    expect(repo.getById(revision.structured.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a",
+    expect(repo.getById(revision.structured.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "lead@team-a",
       chainOfRecord: [args.qitemId], body: `Revision of ${args.qitemId}.\n\nImprove the file` });
     // A supplied destination still takes the original route, even with a different configured receiver.
     expect((await ask("rig_queue_create", { destination: "other@team-a", body: "Explicit task" })).isError).toBe(false);
@@ -185,7 +185,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(tools.find((tool) => tool.name === "rig_queue_create")?.inputSchema.required).not.toContain("destination");
     const result = await client.callTool({ name: "rig_queue_create", arguments: { qitemId: "qitem-modern-first", body: "Create the file" } });
     expect(result.isError).not.toBe(true);
-    expect(repo.getById("qitem-modern-first")).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a" });
+    expect(repo.getById("qitem-modern-first")).toMatchObject({ sourceSession: CALLER, destinationSession: "lead@team-a" });
   });
 
   it("does not infer a receiver from grant metadata, caller identity or an empty queue", async () => {
@@ -219,14 +219,127 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const ask = await connect(url);
     const sent = await ask("rig_queue_create", { qitemId: "qitem-bare-name", destination: "pod-lead", body: "Do this directly" });
     expect(sent.isError).toBe(false);
-    expect(repo.getById("qitem-bare-name")).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a" });
-    // A name that is no seat there, or the caller's own, writes nothing.
-    for (const name of ["my-lead", "cus-vvmaexample01-caller", ""]) {
-      expect((await ask("rig_queue_create", { destination: name, body: "Nobody" })).structured.code).toBe("out_of_scope");
+    expect(repo.getById("qitem-bare-name")).toMatchObject({ sourceSession: CALLER, destinationSession: "lead@team-a" });
+    // A name that is no seat there says so; the caller's own seat stays a scope refusal. Neither writes anything.
+    for (const name of ["my-lead", ""]) {
+      expect((await ask("rig_queue_create", { destination: name, body: "Nobody" })).structured.code).toBe("destination_not_found");
     }
+    expect((await ask("rig_queue_create", { destination: "cus-vvmaexample01-caller", body: "Myself" })).structured.code).toBe("out_of_scope");
     expect(rows()).toBe(1);
     const described = (await ask.catalog()).tools.find((tool) => tool.name === "rig_queue_create")?.inputSchema.properties?.destination as { description?: string };
     expect(described.description).toContain("name alone");
+  });
+
+  describe("a name alone reaches the seat's actual session", () => {
+    /** A seat whose session is its own name, as a self-attached seat's is, rather than its pod-member form. */
+    function namedSeat(rigName: string, member: string, session: string) {
+      const rig = setup.rigRepo.listRigs?.().find((r: { name: string }) => r.name === rigName) ?? setup.rigRepo.createRig(rigName);
+      const node = setup.rigRepo.addNode(rig.id, `pod.${member}`, { role: "worker" });
+      setup.sessionRegistry.registerSession(node.id, session);
+    }
+
+    it("finds a seat by its session's own name, that name's slug, or its pod-member form, and stores its actual session", async () => {
+      namedSeat("team-a", "caller-7f3a", "Workshop.Caller@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      for (const [name, qitemId] of [["Workshop.Caller", "qitem-own-name"], ["workshop-caller", "qitem-slug"], ["pod-caller-7f3a", "qitem-pod-member"]]) {
+        const sent = await ask("rig_queue_create", { qitemId, destination: name, body: `Reach me as ${name}` });
+        expect(sent.isError).toBe(false);
+        expect(repo.getById(qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "Workshop.Caller@team-a" });
+      }
+      expect(rows()).toBe(3);
+    });
+
+    it("names the candidates when a name matches no seat exactly and two by slug, and writes nothing", async () => {
+      namedSeat("team-a", "reviewer", "reviewer@team-a");
+      namedSeat("team-a", "reviewer-two", "Reviewer@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      const refused = await ask("rig_queue_create", { destination: "REVIEWER", body: "Which one?" });
+      expect(refused.structured).toMatchObject({ code: "destination_ambiguous" });
+      expect([...refused.structured.candidates].sort()).toEqual(["Reviewer@team-a", "reviewer@team-a"]);
+      expect(rows()).toBe(0);
+    });
+
+    it("says no such seat, naming rig_team when the grant offers it, apart from a scope refusal and an unreadable team", async () => {
+      namedSeat("team-a", "lead", "lead@team-a");
+      answer = () => [200, active({ objects: { queue: ["create", "show", "list"], team: ["list"] } })];
+      const { url } = await listen();
+      const ask = await connect(url);
+      const missing = await ask("rig_queue_create", { destination: "led", body: "Typo" });
+      expect(missing.structured).toMatchObject({ code: "destination_not_found" });
+      expect(missing.text).toContain("No seat here is named 'led'");
+      expect(missing.text).toContain("rig_team lists the seats you can reach");
+      broken = (req) => req.method === "GET" && /\/api\/rigs\/[^/]+\/nodes$/.test(new URL(req.url).pathname)
+        ? new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "Content-Type": "application/json" } }) : undefined;
+      expect((await ask("rig_queue_create", { destination: "lead", body: "Unread" })).structured).toMatchObject({ code: "destination_unchecked" });
+      broken = undefined;
+      expect(rows()).toBe(0);
+      expect((await ask("rig_queue_create", { destination: "lead", body: "Reached" })).isError).toBe(false);
+      expect(rows()).toBe(1);
+    });
+
+    it("an exact name wins over another seat's slug twin, as a name alone and as the configured receiver", async () => {
+      namedSeat("team-a", "lead", "pod-lead@team-a");
+      namedSeat("team-a", "other", "Pod.Lead@team-a");
+      const { url } = await listen(undefined, "pod-lead@team-a");
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-exact-name", destination: "pod-lead", body: "Exact" })).isError).toBe(false);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-exact-receiver", body: "Receiver" })).isError).toBe(false);
+      for (const qitemId of ["qitem-exact-name", "qitem-exact-receiver"]) expect(repo.getById(qitemId)).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    });
+
+    it("a pod-member name that reached one seat still does beside a self-attached slug twin", async () => {
+      namedSeat("team-a", "lead", "lead@team-a");
+      namedSeat("team-a", "twin", "Pod_Lead@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-pod-member-kept", destination: "pod-lead", body: "As before" })).isError).toBe(false);
+      expect(repo.getById("qitem-pod-member-kept")).toMatchObject({ destinationSession: "lead@team-a" });
+    });
+
+    it("without team/list, another caller's name answers the same whether or not its seat exists, before the team is read", async () => {
+      let nodeReads = 0;
+      broken = (req) => { if (/\/api\/rigs\/[^/]+\/nodes$/.test(new URL(req.url).pathname)) nodeReads++; return undefined; };
+      const { url } = await listen();
+      const ask = await connect(url);
+      const answers = async () => Promise.all(["cus-other-connection", "Cus_Other_Connection"].map(async (destination) =>
+        (await ask("rig_queue_create", { destination, body: "Hidden?" })).structured));
+      const absent = await answers();
+      namedSeat("team-a", "other-connection", "cus-other-connection@team-a");
+      const present = await answers();
+      expect(present).toEqual(absent);
+      // As written it's out of scope, without a read; a slug of it reads as no seat at all.
+      expect(absent.map((answer) => answer.code)).toEqual(["out_of_scope", "destination_not_found"]);
+      expect(nodeReads).toBe(2);
+      expect(rows()).toBe(0);
+    });
+
+    it("a seat the grant can't address never shadows one it can, by name alone", async () => {
+      namedSeat("team-a", "visible", "Pod_Hidden@team-a");
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-slug-alone", destination: "pod-hidden", body: "Slug" })).isError).toBe(false);
+      // Another caller's seat whose pod-member form is the name exactly: hidden without team/list, so it doesn't count.
+      namedSeat("team-a", "hidden", "cus-other-connection@team-a");
+      expect((await ask("rig_queue_create", { qitemId: "qitem-slug-beside-hidden", destination: "pod-hidden", body: "Slug" })).isError).toBe(false);
+      for (const qitemId of ["qitem-slug-alone", "qitem-slug-beside-hidden"]) expect(repo.getById(qitemId)).toMatchObject({ destinationSession: "Pod_Hidden@team-a" });
+    });
+
+    it("a configured receiver that names only a hidden seat is unavailable, as when it names none, and never names that seat", async () => {
+      const { url } = await listen(undefined, "pod-hidden@team-a");
+      const ask = await connect(url);
+      const none = await ask("rig_queue_create", { body: "Receiver?" });
+      namedSeat("team-a", "hidden", "cus-other-connection@team-a");
+      const hidden = await ask("rig_queue_create", { body: "Receiver?" });
+      expect(hidden.structured).toEqual(none.structured);
+      expect(hidden.structured.code).toBe("task_destination_unavailable");
+      expect(JSON.stringify(hidden)).not.toContain("cus-other-connection");
+      expect(rows()).toBe(0);
+      namedSeat("team-a", "visible", "Pod_Hidden@team-a");
+      expect((await ask("rig_queue_create", { qitemId: "qitem-receiver-beside-hidden", body: "Receiver" })).isError).toBe(false);
+      expect(repo.getById("qitem-receiver-beside-hidden")).toMatchObject({ destinationSession: "Pod_Hidden@team-a" });
+    });
   });
 
   it("with several rigs, a name alone reaches only the configured receiver of that name; a refusal says to omit destination, without naming it", async () => {
@@ -236,7 +349,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const { url } = await listen(undefined, "pod-lead@team-a");
     const ask = await connect(url);
     expect((await ask("rig_queue_create", { qitemId: "qitem-bare-receiver", destination: "pod-lead", body: "Do this directly" })).isError).toBe(false);
-    expect(repo.getById("qitem-bare-receiver")).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    expect(repo.getById("qitem-bare-receiver")).toMatchObject({ destinationSession: "lead@team-a" });
     for (const destination of ["pod-other", "my-lead", "pod-lead@team-c"]) {
       const refused = await ask("rig_queue_create", { destination, body: "Ambiguous or unknown" });
       expect(refused.structured).toMatchObject({ code: "out_of_scope", message: expect.stringContaining("Omit destination to reach the team's configured receiver.") });
@@ -251,9 +364,9 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const { url } = await listen(undefined, "pod-lead@team-b");
     const ask = await connect(url);
     expect((await ask("rig_queue_create", { qitemId: "qitem-own-lead", destination: "pod-lead", body: "Do this directly" })).isError).toBe(false);
-    expect(repo.getById("qitem-own-lead")).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    expect(repo.getById("qitem-own-lead")).toMatchObject({ destinationSession: "lead@team-a" });
     const refused = await ask("rig_queue_create", { destination: "my-lead", body: "Nobody" });
-    expect(refused.structured.code).toBe("out_of_scope");
+    expect(refused.structured.code).toBe("destination_not_found");
     expect(refused.structured.message).not.toContain("Omit destination");
     expect(rows()).toBe(1);
   });

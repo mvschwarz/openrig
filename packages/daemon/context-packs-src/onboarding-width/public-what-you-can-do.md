@@ -1278,7 +1278,8 @@ reaching them is ordinary work rather than an escalation.
 - **The `relay` gateway connector** carries a registered person's questions, updates and notices to a
   bridge process you run, over loopback HTTP, and takes their replies back with the sender resolved
   against their bindings. It's off until a person has a relay binding (`rig gateway human add <id> …
-  --binding "relay:<connectorRef>:file:<absolute env file>:primary"`), and the bridge, with its reach to
+  --binding "relay:<connectorRef>:file:<absolute env file>:primary:handle=<alias>"`). The handle is how
+  their replies are matched to them: a binding without one is outbound-only. The bridge, with its reach to
   any messaging platform, is yours (`docs/reference/gateway-relay.md`).
 - **`rig gateway channel add <id> --display-name <name> --binding
   slack:<connectorRef>:<secretsRef>:<channelId>`** — a Slack shared channel as one participant,
@@ -1597,8 +1598,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
   without that storage), so don't copy them by hand; read the `plugin_skill_*` warnings if one
   is missing. TDD is no longer a default skill.
 - **`on_restore: follow_source`** on a spec's `resources.skills[]` entry refreshes that skill from its source when
-  a Claude or Codex seat is restored, keeping its conversation; `keep_saved`, the default, keeps the saved copy, but a
-  skill whose source changed after `rig down` comes back missing, named in the restore's warnings.
+  a Claude or Codex seat is restored, keeping its conversation, while the seat's copy is still what OpenRig wrote: an
+  edited, unrecorded or linked copy is kept and named, and a source that can't be read leaves the saved copy.
+  `keep_saved`, the default, keeps the saved copy, but a missing file comes back only from a source that still has the
+  bytes OpenRig wrote: a file whose source changed after `rig down` stays missing, named in the restore's warnings,
+  even when the rest of the skill (its `SKILL.md`, say) is unchanged.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.

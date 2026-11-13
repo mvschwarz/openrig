@@ -814,9 +814,9 @@ export interface NodeInventoryEntry {
   /** Effective mode; inherited non-default sockets also have server arguments. */
   tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;
-  /** Present when the resume command couldn't include something the seat chose (its saved Codex permission choice
-   *  couldn't be read): the command still shows, and this says what it lacks. */
-  resumeCommandNote?: string;
+  /** Codex: label explaining whether the displayed resume flags match the seat's recorded current-generation launch,
+   *  differ from it, or come from current settings because no launch record applies; null otherwise. */
+  resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
   // Extended fields

@@ -1,6 +1,6 @@
 // The Codex resume command OpenRig shows a person for a seat (`rig ps --nodes` resumeCommand and the node detail's
 // recovery guidance) carries the seat's own saved permission choice, as its managed resume does. A choice that can't be
-// read still shows the command, with a note that it doesn't include it.
+// read shows no command: the label and guidance carry the same refusal the managed launch gives, with its repair step.
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import { observeCodexSandbox, type AppliedLaunchObservation } from "../src/domai
 import { getNodeDetail, getNodeInventory } from "../src/domain/node-inventory.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { CodexMemberPermissions } from "../src/domain/codex-member-permissions.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 // No real Codex, shell or tmux runs here.
@@ -26,8 +27,9 @@ const workspace: CodexMemberPermissions = { sandbox: "workspace-write", approval
 const WORKSPACE_ARGS = " -s workspace-write -a on-request -c 'sandbox_workspace_write.writable_roots=[\"/data\"]'"
   + " -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false'"
   + " -c 'sandbox_workspace_write.exclude_slash_tmp=false'";
-const NOT_INCLUDED = "This seat's saved Codex permission choice couldn't be read, so the resume command doesn't include it and "
-  + "carries the default posture instead. Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>.";
+// The operational flag a managed Codex launch adds, which the shown command carries too.
+const UPDATE_OFF = " '-c' 'check_for_update_on_startup=false'";
+const CURRENT = "flags from current settings";
 
 describe("the Codex resume command a person is shown carries the seat's own permission choice", () => {
   let db: Database.Database;
@@ -59,11 +61,10 @@ describe("the Codex resume command a person is shown carries the seat's own perm
     it("a workspace-write choice replaces the default posture, in the command and the guidance", () => {
       choose(JSON.stringify(workspace));
       const { entry, guidance } = shown();
-      expect(entry.resumeCommand).toBe(`codex${WORKSPACE_ARGS} resume 'sess-456'`);
-      expect(entry).not.toHaveProperty("resumeCommandNote");
-      expect(guidance.commands).toEqual([`codex${WORKSPACE_ARGS} resume 'sess-456'`, "cd /workspace/app"]);
-      expect(guidance.summary).toBe("Try native Codex resume first; it carries this seat's own permission choice, as its managed launch does.");
-      expect(guidance.notes).not.toContain(NOT_INCLUDED);
+      expect(entry.resumeCommand).toBe(`codex${WORKSPACE_ARGS}${UPDATE_OFF} resume 'sess-456'`);
+      expect(entry.resumeCommandLabel).toBe(CURRENT);
+      expect(guidance.commands).toEqual([`codex${WORKSPACE_ARGS}${UPDATE_OFF} resume 'sess-456'`, "cd /workspace/app"]);
+      expect(guidance.summary).toBe(`Try native Codex resume first (codex${WORKSPACE_ARGS}${UPDATE_OFF} resume 'sess-456').`);
     });
 
     it("a read-only choice keeps the seat's profile and a recorded --no-daemon", () => {
@@ -71,7 +72,10 @@ describe("the Codex resume command a person is shown carries the seat's own perm
       db.prepare("UPDATE nodes SET codex_config_profile = ? WHERE id = ?").run("team", "node-codex");
       const generation = registry.currentOccupantTenure("node-codex")!.generationUuid;
       new AppliedLaunchObservationStore(db).recordGeneration(generation, { ...observeCodexSandbox("-s workspace-write"), daemonOptOut: true } as AppliedLaunchObservation);
-      expect(shown().entry.resumeCommand).toBe("codex --no-daemon -p 'team' -s read-only -a never resume 'sess-456'");
+      expect(shown().entry).toMatchObject({
+        resumeCommand: `codex --no-daemon -p 'team' -s read-only -a never${UPDATE_OFF} resume 'sess-456'`,
+        resumeCommandLabel: "launched with -s workspace-write (approval unrecorded); a resume now uses -s read-only -a never",
+      });
     });
 
     it("prints the same permission arguments the seat's managed resume sends", async () => {
@@ -89,23 +93,23 @@ describe("the Codex resume command a person is shown carries the seat's own perm
       expect(result.ok).toBe(true);
       const managed = (sendText.mock.calls as unknown[][]).map((call) => String(call[1])).find((text) => text.includes(" resume "))!;
       expect(managed).toContain(`codex${WORKSPACE_ARGS}`);
-      expect(shown().entry.resumeCommand).toBe(`codex${WORKSPACE_ARGS} resume 'sess-456'`);
+      expect(shown().entry.resumeCommand).toBe(`codex${WORKSPACE_ARGS}${UPDATE_OFF} resume 'sess-456'`);
     });
 
-    it("a choice that can't be read still shows the command, with a note that it doesn't include it", () => {
+    it("a choice that can't be read shows no command, and says why with the managed launch's own refusal", () => {
       choose(JSON.stringify({ sandbox: "danger-full-access", approval: "never" }));
+      let refusal = "";
+      try { new NativePermissionStore(db).launchOverride("node-codex", "codex"); } catch (err) { refusal = `Permission selection: ${(err as Error).message}`; }
+      expect(refusal).not.toBe("");
       const { entry, guidance } = shown();
-      expect(entry.resumeCommand).toBe("codex -s workspace-write resume 'sess-456'");
-      expect(entry.resumeCommandNote).toBe(NOT_INCLUDED);
-      expect(guidance.commands).toEqual(["codex -s workspace-write resume 'sess-456'", "cd /workspace/app"]);
-      expect(guidance.notes).toContain(NOT_INCLUDED);
+      expect(entry).toMatchObject({ resumeCommand: null, resumeCommandLabel: refusal });
+      expect(guidance).toMatchObject({ summary: `Cannot derive Codex resume command — ${refusal}`, commands: [], notes: [refusal] });
     });
 
     it("a seat with no choice shows the command as before, with no note", () => {
       const { entry, guidance } = shown();
-      expect(entry.resumeCommand).toBe("codex -s workspace-write resume 'sess-456'");
-      expect(entry).not.toHaveProperty("resumeCommandNote");
-      expect(guidance.notes).not.toContain(NOT_INCLUDED);
+      expect(entry).toMatchObject({ resumeCommand: `codex -s workspace-write${UPDATE_OFF} resume 'sess-456'`, resumeCommandLabel: CURRENT });
+      expect(guidance.notes).toContain(CURRENT);
     });
   });
 
@@ -113,8 +117,7 @@ describe("the Codex resume command a person is shown carries the seat's own perm
     choose(JSON.stringify(workspace));
     const { entry, guidance } = shown();
     expect(entry.resumeCommand).toBeNull();
-    expect(entry).not.toHaveProperty("resumeCommandNote");
-    expect(guidance.commands).toEqual(["cd /workspace/app", `codex${WORKSPACE_ARGS} resume --last`]);
-    expect(guidance.summary).toBe(`No stored Codex resume token. Try codex${WORKSPACE_ARGS} resume --last; it carries this seat's own permission choice, as its managed launch does.`);
+    expect(guidance.commands).toEqual(["cd /workspace/app", `codex${WORKSPACE_ARGS}${UPDATE_OFF} resume --last`]);
+    expect(guidance.summary).toBe(`No stored Codex resume token. Try codex${WORKSPACE_ARGS}${UPDATE_OFF} resume --last from the seat workspace.`);
   });
 });

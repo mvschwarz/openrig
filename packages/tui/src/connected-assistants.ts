@@ -10,7 +10,7 @@ export function toConnectedAssistants(body: unknown): ConnectedAssistant[] | nul
   if (!Array.isArray(members)) return null;
   return members.flatMap((member: Record<string, unknown>) => {
     if (typeof member?.seat !== "string" || !member.seat) return [];
-    const known = typeof member.status === "string" && member.status in CHECK_IN_DISPLAY;
+    const known = typeof member.status === "string" && Object.hasOwn(CHECK_IN_DISPLAY, member.status);
     return [{ seat: member.seat, checkIn: {
       status: known ? member.status as CheckInStatus : "unknown",
       lastCheckInAt: typeof member.lastCheckInAt === "string" ? member.lastCheckInAt : null,

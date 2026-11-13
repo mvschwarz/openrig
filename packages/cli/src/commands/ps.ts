@@ -72,8 +72,7 @@ export interface NodeEntry {
   lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
-  /** What the resume command couldn't include, when something the seat chose couldn't be read. */
-  resumeCommandNote?: string;
+  resumeCommandLabel?: string | null;
   latestError: string | null;
   /** Slice 15 — `terminal-active` primitive. true=producing output,
    *  false=silent past threshold, null=no signal. NEVER derived from
@@ -233,7 +232,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "lifecycleState",
   "tmuxAttachCommand",
   "resumeCommand",
-  "resumeCommandNote",
+  "resumeCommandLabel",
   "latestError",
   "terminalActive",
   "hasAssignedWork",
@@ -960,7 +959,7 @@ latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
-resumeCommand, latestError, terminalActive, hasAssignedWork,
+resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
 contextUsage, heldReason, startedWithoutRequired, storedSessionStatus, identityVerdict.

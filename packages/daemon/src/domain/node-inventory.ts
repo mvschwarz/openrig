@@ -24,9 +24,19 @@ import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAl
 import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
-import { buildNativeResumeCommand, buildCodexResumeCore, codexSeatPostureArg } from "./native-resume-probe.js";
-import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
-import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import {
+  buildCodexResumeDisplay,
+  buildNativeResumeCommand,
+  buildNativeResumeDisplay,
+  type CodexResumeDisplayInput,
+} from "./native-resume-probe.js";
+import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
+import { resolveLaunchOverrideFromFacts, type LaunchOverrideSelectionFact } from "./native-permission-store.js";
+import {
+  readRegularCustomPolicyFile,
+  resolveDisplayedRestorePosture,
+  resolvePersistedRestorePosture,
+} from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
@@ -51,6 +61,18 @@ interface InventoryRow {
   effort: string | null;
   effort_choice: string | null;
   codex_config_profile: string | null;
+  codex_permissions_json: string | null;
+  node_permission_policy: string | null;
+  node_policy_origin: string | null;
+  node_policy_resolved_target: string | null;
+  node_policy_declaring_dir: string | null;
+  node_policy_launch_posture: string | null;
+  rig_permission_policy: string | null;
+  rig_policy_origin: string | null;
+  rig_policy_resolved_target: string | null;
+  rig_policy_declaring_dir: string | null;
+  rig_policy_launch_posture: string | null;
+  rig_non_interruptive: number | null;
   claude_mcp: ClaudeMcp | null;
   launch_wrapper: string | null;
   agent_ref: string | null;
@@ -115,37 +137,148 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null, codexChoice?: CodexSeatChoice): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp,
-    codexChoice && "permissions" in codexChoice ? codexChoice.permissions : undefined);
+function readCustomPolicyCached(
+  target: string,
+  cache: Map<string, string | null>,
+): string {
+  if (cache.has(target)) {
+    const cached = cache.get(target)!;
+    if (cached === null) throw new Error(`Cached unreadable custom policy target: ${target}`);
+    return cached;
+  }
+  try {
+    const content = readRegularCustomPolicyFile(target);
+    cache.set(target, content);
+    return content;
+  } catch (error) {
+    cache.set(target, null);
+    throw error;
+  }
+}
+
+function resolveBasePolicyPosture(
+  row: InventoryRow,
+  customPolicyCache: Map<string, string | null>,
+): { posture: "floor" | "full_bypass" | "auto"; emptySavedPosture: boolean } {
+  const snapshot = {
+    nodeOrigin: row.node_policy_origin,
+    nodeLaunchPosture: row.node_policy_launch_posture,
+    nodeResolvedTarget: row.node_policy_resolved_target,
+    nodeDeclaringDir: row.node_policy_declaring_dir,
+    nodeRef: row.node_permission_policy,
+    rigOrigin: row.rig_policy_origin,
+    rigLaunchPosture: row.rig_policy_launch_posture,
+    rigResolvedTarget: row.rig_policy_resolved_target,
+    rigDeclaringDir: row.rig_policy_declaring_dir,
+    rigRef: row.rig_permission_policy,
+  };
+  const readFile = (target: string) => readCustomPolicyCached(target, customPolicyCache);
+  const posture = resolveDisplayedRestorePosture(snapshot, { readFile });
+  const raw = row.node_policy_launch_posture === "" || row.rig_policy_launch_posture === ""
+    ? resolvePersistedRestorePosture({
+        getNodeProvenance: () =>
+          snapshot.nodeOrigin != null && snapshot.nodeLaunchPosture != null
+            ? {
+                origin: snapshot.nodeOrigin,
+                launchPosture: snapshot.nodeLaunchPosture,
+                resolvedTarget: snapshot.nodeResolvedTarget,
+                declaringDir: snapshot.nodeDeclaringDir,
+                nodeRef: snapshot.nodeRef,
+              }
+            : null,
+        getFallbackRigRef: () => snapshot.rigRef,
+        getRigProvenance: () =>
+          snapshot.rigOrigin != null && snapshot.rigLaunchPosture != null
+            ? {
+                origin: snapshot.rigOrigin,
+                launchPosture: snapshot.rigLaunchPosture,
+                resolvedTarget: snapshot.rigResolvedTarget,
+                declaringDir: snapshot.rigDeclaringDir,
+                rigRef: snapshot.rigRef,
+              }
+            : null,
+        readFile,
+      })
+    : posture;
+  return { posture, emptySavedPosture: raw === "" };
+}
+
+type PermissionSelectionsLookup =
+  | { state: "available"; byNodeId: Map<string, { runtime: string; mode: string }> }
+  | { state: "unavailable"; error: unknown };
+
+type CodexResumeResolution =
+  | { ok: true; input: CodexResumeDisplayInput }
+  | { ok: false; diagnostic: string };
+
+function resolveCodexResumeResolution(
+  row: InventoryRow,
+  recordedLaunch: StoredAppliedLaunchObservation | undefined,
+  permissionSelections: PermissionSelectionsLookup,
+  customPolicyCache: Map<string, string | null>,
+  launchWrapper?: readonly string[] | null,
+): CodexResumeResolution {
+  const selection: LaunchOverrideSelectionFact = permissionSelections.state === "unavailable"
+    ? permissionSelections
+    : { state: "available", value: permissionSelections.byNodeId.get(row.node_id) ?? null };
+  let override: ReturnType<typeof resolveLaunchOverrideFromFacts>;
+  try {
+    override = resolveLaunchOverrideFromFacts({
+      nodeId: row.node_id,
+      logicalId: row.logical_id,
+      runtime: "codex",
+      selection,
+      codexPermissionsJson: row.codex_permissions_json,
+      launchDefaultMetadata: {
+        rigName: row.rig_name,
+        memberPolicy: row.node_permission_policy,
+        rigPolicy: row.rig_permission_policy,
+        codexProfile: row.codex_config_profile,
+      },
+    });
+  } catch (error) {
+    return { ok: false, diagnostic: `Permission selection: ${(error as Error).message}` };
+  }
+  const basePosture = override.codexPermissions || override.launchPosture
+    ? undefined
+    : resolveBasePolicyPosture(row, customPolicyCache);
+  return {
+    ok: true,
+    input: {
+      codexConfigProfile: row.codex_config_profile,
+      codexDaemonOptOut: recordedLaunch?.daemonOptOut,
+      codexPermissions: override.codexPermissions,
+      resolvedPosture: override.codexPermissions
+        ? "floor"
+        : (override.launchPosture ?? basePosture!.posture),
+      ...(basePosture?.emptySavedPosture ? { emptySavedPosture: true } : {}),
+      nonInterruptive: row.rig_non_interruptive === 1,
+      kernelAuthority: override.kernelAuthority === true,
+      teamPermissionDefault: override.teamPermissionDefault === true,
+      recordedLaunch: recordedLaunch ?? null,
+      ...(launchWrapper && launchWrapper.length > 0 ? { launchWrapper } : {}),
+    },
+  };
+}
+
+function readPermissionSelectionsMap(db: Database.Database): PermissionSelectionsLookup {
+  try {
+    const rows = db.prepare("SELECT node_id, runtime, mode FROM node_permission_selections").all() as Array<{
+      node_id: string;
+      runtime: string;
+      mode: string;
+    }>;
+    return {
+      state: "available",
+      byNodeId: new Map(rows.map((row) => [row.node_id, { runtime: row.runtime, mode: row.mode }])),
+    };
+  } catch (error) {
+    return { state: "unavailable", error };
+  }
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
-
-/** Shown beside a Codex resume command when the seat's saved permission choice couldn't be read: the command still shows. */
-const CODEX_PERMISSIONS_NOT_INCLUDED = "This seat's saved Codex permission choice couldn't be read, so the resume command doesn't include it and "
-  + "carries the default posture instead. Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>.";
-
-/** A Codex seat's saved permission choice: the choice, or unreadable. A seat with none has no entry. */
-type CodexSeatChoice = { permissions: CodexMemberPermissions } | { unreadable: true };
-
-/** Every seat's saved Codex permission choice, in one read. A schema without the column (a minimal fixture) has none. */
-function readCodexSeatChoices(db: Database.Database): Map<string, CodexSeatChoice> {
-  const choices = new Map<string, CodexSeatChoice>();
-  let rows: Array<{ id: string; codex_permissions_json: string }>;
-  try {
-    rows = db.prepare("SELECT id, codex_permissions_json FROM nodes WHERE codex_permissions_json IS NOT NULL").all() as typeof rows;
-  } catch (error) {
-    if ((error as { code?: string }).code === "SQLITE_ERROR" && /no such column: codex_permissions_json\b/.test((error as Error).message)) return choices;
-    throw error;
-  }
-  for (const row of rows) {
-    try { choices.set(row.id, { permissions: validateCodexMemberPermissions(JSON.parse(row.codex_permissions_json)) }); }
-    catch { choices.set(row.id, { unreadable: true }); }
-  }
-  return choices;
-}
 
 function computeRecoveryGuidance(input: {
   runtime: string | null;
@@ -155,11 +288,10 @@ function computeRecoveryGuidance(input: {
   codexConfigProfile?: string | null;
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
+  codexResolution?: CodexResumeResolution;
   claudeMcp?: ClaudeMcp;
-  /** Codex: the seat's saved permission choice; undefined when it has none. */
-  codexChoice?: CodexSeatChoice;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp, codexChoice } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, codexResolution, claudeMcp } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -189,44 +321,54 @@ function computeRecoveryGuidance(input: {
   }
 
   if (runtime === "codex") {
+    if (codexResolution && !codexResolution.ok) {
+      return {
+        summary: `Cannot derive Codex resume command — ${codexResolution.diagnostic}`,
+        commands: [],
+        notes: [codexResolution.diagnostic],
+      };
+    }
     const commands: string[] = [];
     const notes: string[] = [];
+    const codexDisplay = codexResolution?.input;
+    const displayInput: CodexResumeDisplayInput = {
+      ...codexDisplay,
+      codexConfigProfile: codexDisplay?.codexConfigProfile !== undefined ? codexDisplay.codexConfigProfile : codexConfigProfile,
+      codexDaemonOptOut: codexDisplay?.codexDaemonOptOut !== undefined ? codexDisplay.codexDaemonOptOut : codexDaemonOptOut,
+    };
+    const effectiveDaemonChoice = displayInput.codexDaemonOptOut ?? displayInput.recordedLaunch?.daemonOptOut;
+    const primaryDisplay = resumeToken
+      ? buildCodexResumeDisplay(resumeToken, displayInput)
+      : buildCodexResumeDisplay("", displayInput, { useLast: true });
 
-    const daemonOptOut = codexDaemonOptOut === true;
-    // The seat's own permission choice replaces the posture decision, as on its managed resume.
-    const seatPosture = codexSeatPostureArg(codexConfigProfile, codexChoice && "permissions" in codexChoice ? codexChoice.permissions : undefined);
-    const lastCommand = buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, seatPosture, daemonOptOut);
     if (resumeToken) {
-      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, seatPosture, daemonOptOut));
+      commands.push(primaryDisplay.command);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      commands.push(lastCommand);
-    }
-    if (codexChoice && "unreadable" in codexChoice) {
-      notes.push(CODEX_PERMISSIONS_NOT_INCLUDED);
+      commands.push(primaryDisplay.command);
     }
 
+    if (primaryDisplay.label) {
+      notes.push(primaryDisplay.label);
+    }
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
-    if (codexConfigProfile) {
-      notes.push(`Preserve Codex config profile: ${codexConfigProfile}`);
+    if (displayInput.codexConfigProfile) {
+      notes.push(`Preserve Codex config profile: ${displayInput.codexConfigProfile}`);
     }
     if (sessionName) {
       notes.push(`If the identity anchor was captured, the picker may include: ${sessionName}`);
     }
-    if (codexDaemonOptOut === undefined) {
+    if (effectiveDaemonChoice === undefined) {
       notes.push(CODEX_DAEMON_CHOICE_NOT_RECORDED);
     }
 
-    const ownChoice = "it carries this seat's own permission choice, as its managed launch does.";
     return {
-      summary: seatPosture
-        ? (resumeToken ? `Try native Codex resume first; ${ownChoice}` : `No stored Codex resume token. Try ${lastCommand}; ${ownChoice}`)
-        : resumeToken
-        ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
-        : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
+      summary: resumeToken
+        ? `Try native Codex resume first (${primaryDisplay.command}).`
+        : `No stored Codex resume token. Try ${primaryDisplay.command} from the seat workspace.`,
       commands,
       notes,
     };
@@ -628,11 +770,7 @@ export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: stri
 
 // -- Public API --
 
-/**
- * Get the canonical node inventory for a rig.
- * Single source of truth consumed by CLI, UI, and MCP.
- */
-export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
+function projectRigInventoryItems(db: Database.Database, rigId: string): ProjectedNodeInventoryItem[] {
   // Resolve the rig's latest usable snapshot once for the whole projection so per-node
   // recoverability checks share the same source of truth without N extra queries.
   const usableSnapshot = findLatestUsableSnapshot(db, rigId);
@@ -648,14 +786,32 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // map = the prior WHERE rig_id=? filter; oriented history follows the rig's nodes.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
   const orienteds = buildOrientedMap(db, rigId);
-  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
-  const codexSeatChoices = readCodexSeatChoices(db);
+  const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations();
+  const permissionSelections = readPermissionSelectionsMap(db);
+  const customPolicyCache = new Map<string, string | null>();
 
   const rows = queryInventoryRows(db, rigId);
 
   return rows.map((row) =>
-    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts, codexSeatChoices }),
+    buildInventoryItem(db, row, {
+      usableSnapshot,
+      workspaceSpec,
+      identityVerdicts,
+      restoreOutcomes,
+      orienteds,
+      currentLaunchObservations,
+      permissionSelections,
+      customPolicyCache,
+    }),
   );
+}
+
+/**
+ * Get the canonical node inventory for a rig.
+ * Single source of truth consumed by CLI, UI, and MCP.
+ */
+export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
+  return projectRigInventoryItems(db, rigId).map((item) => item.entry);
 }
 
 /**
@@ -678,6 +834,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
   const nodeColumns = new Set(db.prepare("PRAGMA table_info(nodes)").all()
     .map((row) => (row as { name?: string }).name));
   const nodeColumnOrNull = (name: string) => nodeColumns.has(name) ? `n.${name}` : "NULL";
+  const rigColumns = new Set(db.prepare("PRAGMA table_info(rigs)").all()
+    .map((row) => (row as { name?: string }).name));
+  const rigColumnOrNull = (name: string) => rigColumns.has(name) ? `r.${name}` : "NULL";
   const codexConfigProfileSelect = nodeColumnOrNull("codex_config_profile");
   const stmt = db.prepare(`
     SELECT
@@ -693,6 +852,18 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
+      ${nodeColumnOrNull("codex_permissions_json")} as codex_permissions_json,
+      ${nodeColumnOrNull("permission_policy")} as node_permission_policy,
+      ${nodeColumnOrNull("policy_origin")} as node_policy_origin,
+      ${nodeColumnOrNull("policy_resolved_target")} as node_policy_resolved_target,
+      ${nodeColumnOrNull("policy_declaring_dir")} as node_policy_declaring_dir,
+      ${nodeColumnOrNull("policy_launch_posture")} as node_policy_launch_posture,
+      ${rigColumnOrNull("permission_policy")} as rig_permission_policy,
+      ${rigColumnOrNull("rig_policy_origin")} as rig_policy_origin,
+      ${rigColumnOrNull("rig_policy_resolved_target")} as rig_policy_resolved_target,
+      ${rigColumnOrNull("rig_policy_declaring_dir")} as rig_policy_declaring_dir,
+      ${rigColumnOrNull("rig_policy_launch_posture")} as rig_policy_launch_posture,
+      ${rigColumnOrNull("non_interruptive")} as rig_non_interruptive,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
       n.agent_ref,
@@ -767,10 +938,18 @@ interface InventoryBuildContext {
   // batched path) and looked up O(1) here instead of a query per node.
   restoreOutcomes: Map<string, RestoreProjection>;
   orienteds: Map<string, NodeOriented>;
-  /** Each node's current recorded Codex daemon choice (one read per projection); absent = not recorded. */
-  codexDaemonOptOuts: Map<string, boolean>;
-  /** Each seat's saved Codex permission choice (one read per projection); absent = none. */
-  codexSeatChoices: Map<string, CodexSeatChoice>;
+  /** Each node's current recorded launch observation (one read per projection); absent = not recorded. */
+  currentLaunchObservations: Map<string, StoredAppliedLaunchObservation>;
+  /** Explicit per-seat native permission selections (one read per projection), or table-unavailable state. */
+  permissionSelections: PermissionSelectionsLookup;
+  /** Per-inventory-build custom-policy target cache so shared targets are probed/read at most once per build. */
+  customPolicyCache: Map<string, string | null>;
+}
+
+interface ProjectedNodeInventoryItem {
+  entry: NodeInventoryEntry;
+  codexResolution?: CodexResumeResolution;
+  codexDaemonOptOut?: boolean;
 }
 
 /**
@@ -778,18 +957,48 @@ interface InventoryBuildContext {
  * Apply only current-occupant identity evidence and retain stored status alongside
  * effective status so readers can distinguish absence from registration history.
  */
-function buildInventoryEntry(
+function buildInventoryItem(
   db: Database.Database,
   row: InventoryRow,
   ctx: InventoryBuildContext,
-): NodeInventoryEntry {
-  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts, codexSeatChoices } = ctx;
-  const codexChoice = row.runtime === "codex" ? codexSeatChoices.get(row.node_id) : undefined;
+): ProjectedNodeInventoryItem {
+  const {
+    usableSnapshot,
+    workspaceSpec,
+    identityVerdicts,
+    restoreOutcomes,
+    orienteds,
+    currentLaunchObservations,
+    permissionSelections,
+    customPolicyCache,
+  } = ctx;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
     throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
   }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
+  const recordedLaunch = currentLaunchObservations.get(row.node_id);
+  const codexResolution = row.runtime === "codex"
+    ? resolveCodexResumeResolution(
+      row,
+      recordedLaunch,
+      permissionSelections,
+      customPolicyCache,
+      launchWrapper,
+    )
+    : undefined;
+  const resumeDisplay = codexResolution && !codexResolution.ok
+    ? { command: null, label: row.resume_token ? codexResolution.diagnostic : null }
+    : buildNativeResumeDisplay(
+      row.runtime,
+      row.resume_token,
+      null,
+      row.codex_config_profile,
+      codexResolution?.input.codexDaemonOptOut,
+      row.claude_mcp,
+      codexResolution?.input,
+      launchWrapper,
+    );
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
@@ -822,7 +1031,7 @@ function buildInventoryEntry(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
-  return {
+  const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
     rigName: row.rig_name,
@@ -864,8 +1073,8 @@ function buildInventoryEntry(
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()
       ? { tmuxServerMode: daemonTmuxServerInfo()!.mode } : {}),
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp, codexChoice),
-    ...(row.resume_token && codexChoice && "unreadable" in codexChoice ? { resumeCommandNote: CODEX_PERMISSIONS_NOT_INCLUDED } : {}),
+    resumeCommand: resumeDisplay?.command ?? null,
+    resumeCommandLabel: resumeDisplay?.label ?? null,
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -900,6 +1109,19 @@ function buildInventoryEntry(
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
+  return {
+    entry,
+    codexResolution,
+    codexDaemonOptOut: recordedLaunch?.daemonOptOut,
+  };
+}
+
+function buildInventoryEntry(
+  db: Database.Database,
+  row: InventoryRow,
+  ctx: InventoryBuildContext,
+): NodeInventoryEntry {
+  return buildInventoryItem(db, row, ctx).entry;
 }
 
 /** #2456: the required startup files the seat's current occupant started without, as its handover recorded them. Only
@@ -962,8 +1184,9 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
   // events, so each node's value equals the single-rig path.
   const restoreOutcomes = buildRestoreOutcomeMap(db); // one fleet restore-outcome scan
   const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
-  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts(); // one launch-fact read
-  const codexSeatChoices = readCodexSeatChoices(db); // one permission-choice read
+  const currentLaunchObservations = new AppliedLaunchObservationStore(db).readCurrentObservations(); // one launch-fact read
+  const permissionSelections = readPermissionSelectionsMap(db);
+  const customPolicyCache = new Map<string, string | null>();
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -972,8 +1195,9 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
       identityVerdicts: verdictsByRig.get(row.rig_id) ?? new Map(),
       restoreOutcomes,
       orienteds,
-      codexDaemonOptOuts,
-      codexSeatChoices,
+      currentLaunchObservations,
+      permissionSelections,
+      customPolicyCache,
     });
     let list = out.get(row.rig_id);
     if (!list) { list = []; out.set(row.rig_id, list); }
@@ -1027,10 +1251,12 @@ export function getNodeDetail(
     installedResourcesOverride?: Array<{ id: string; category: string; targetPath: string }>;
   },
 ): NodeDetailEntry | null {
-  // Get the inventory entry first
-  const allEntries = getNodeInventory(db, rigId);
-  const entry = allEntries.find((e) => e.logicalId === logicalId);
-  if (!entry) return null;
+  // Project the rig's inventory once and reuse the target seat's resolved Codex inputs for recoveryGuidance.
+  const allItems = projectRigInventoryItems(db, rigId);
+  const allEntries = allItems.map((item) => item.entry);
+  const targetItem = allItems.find((item) => item.entry.logicalId === logicalId);
+  if (!targetItem) return null;
+  const entry = targetItem.entry;
 
   // Find the node ID
   const nodeRow = db.prepare(
@@ -1179,9 +1405,9 @@ export function getNodeDetail(
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
-      codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
+      codexDaemonOptOut: targetItem.codexDaemonOptOut,
+      codexResolution: targetItem.codexResolution,
       claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
-      codexChoice: entry.runtime === "codex" ? readCodexSeatChoices(db).get(nodeId) : undefined,
     }),
     binding,
     startupFiles,

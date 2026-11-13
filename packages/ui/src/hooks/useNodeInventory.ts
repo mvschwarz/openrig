@@ -57,6 +57,7 @@ export interface NodeInventoryEntry {
   restoreOutcome: string;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
+  resumeCommandLabel?: string | null;
   latestError: string | null;
   contextUsage?: {
     usedPercentage: number | null;
