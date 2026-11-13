@@ -1098,6 +1098,19 @@ describe("live seat runtime switch", () => {
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
     });
 
+    it("#3103: with several current-window panes, one the successor's, and the all-windows read failing, an expired switch isn't settled", async () => {
+      record("preparing");
+      fakeTmux.listPanes.mockImplementation(async (name: string, allWindows?: boolean) => {
+        if (name !== SEAT) return [];
+        if (allWindows) throw new Error("tmux: server busy");
+        return [{ id: "%9" }, { id: "%5" }] as never;
+      });
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
+      expect(openSwitch()).toMatchObject({ phase: "preparing" });
+      expect(fakeTmux.killSession).not.toHaveBeenCalled();
+    });
+
     it("#3103: with the original pane current and the successor in another window, an expired switch isn't settled", async () => {
       record("preparing");
       fakeTmux.listPanes.mockImplementation(async (name: string, allWindows?: boolean) =>

@@ -734,8 +734,10 @@ export class SeatRuntimeSwitchService {
       return { ok: false as const, code: "runtime_switch_pending", message, switchId: row.id };
     };
     let canonicalPane: string | null = null;
+    let currentPanes: string[] | null = null;
     try {
       const panes = await tmux.listPanes(row.canonical_session);
+      currentPanes = panes.map((pane) => pane.id);
       canonicalPane = panes.length === 1 ? panes[0]!.id : null;
     } catch { /* absent or unreadable: decided below */ }
     const staging = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
@@ -752,14 +754,14 @@ export class SeatRuntimeSwitchService {
       // Before commit: the predecessor holds the seat.
       const exchanged = canonicalPane !== null && canonicalPane === row.successor_pane && stagingPane === row.predecessor_pane;
       // Past its deadline with no staging session, the staged successor is gone unless a pane in any of the seat's
-      // windows is it. If every window can't be read, the current window's pane still counts.
+      // windows is it. If every window can't be read, each of the current window's panes still counts.
       const pastDeadline = staging.state === "absent" && this.now().getTime() >= Date.parse(row.deadline_at);
       let seatPanes: string[] | null = null;
       if (pastDeadline) {
         try { seatPanes = (await tmux.listPanes(row.canonical_session, true)).map((pane) => pane.id); }
         catch { /* unreadable: no evidence of the successor */ }
       }
-      const successorPresent = pastDeadline && await this.successorAtSeat(row, seatPanes ?? (canonicalPane ? [canonicalPane] : null));
+      const successorPresent = pastDeadline && await this.successorAtSeat(row, seatPanes ?? currentPanes);
       const successorGone = pastDeadline && !successorPresent;
       if (exchanged) {
         const back = await tmux.swapRuntimeSwitchPanes({ nodeId, stagingSession: row.staging_session, canonicalSession: row.canonical_session,
