@@ -13,6 +13,7 @@ import { EraseRefusal, eraseQueue } from "../src/domain/queue-erasure.js";
 import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { recordReaderAction } from "../src/domain/stream-reader-actions.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -551,6 +552,68 @@ describe("account deletion of a rig that never had a member", () => {
     await expect(erase(false)).rejects.toMatchObject({ code });
     await expect(erase()).rejects.toMatchObject({ code });
     expect(everything()).toBe(before);
+  });
+
+  // A seat with no session row still leaves its work under its address: a grant-service caller acting as its grant's
+  // seat, or a hosted member. That address at the rig, plain or host-qualified, refuses [], and naming the seat works.
+  it("refuses [] when queue work names a seat at the rig, and accepts that seat named", async () => {
+    const GRANT = "helper@n-empty";
+    await row("g-grant", GRANT, OUT, [{ state: "done", daysAgo: 2 }]);
+    await row("g-lookalike", "y@n-empty-other", "z@n_empty", [{ state: "done", daysAgo: 2 }]);
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining(GRANT) });
+    db.prepare("UPDATE queue_items SET source_session = ? WHERE qitem_id = 'g-grant'").run(`${GRANT}@hub-host`);
+    db.prepare("UPDATE queue_transitions SET actor_session = ? WHERE qitem_id = 'g-grant'").run(`${GRANT}@hub-host`);
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining(`${GRANT}@hub-host`) });
+    // Named, the seat is accepted (it has no session, so the both-ways check holds); its row with OUT is mixed and kept.
+    const named = await eraseQueue(db, { scope: { kind: "members", members: [`${GRANT}@hub-host`], rig: RIG }, apply: true, nowIso: NOW });
+    expect(named).toMatchObject({ complete: true, mixed: [{ qitemId: "g-grant" }], rig: { found: true, verified: true } });
+    expect(exists("g-lookalike")).toBe(true);
+  });
+
+  // A [] receipt is taken while the rig exists. A member who comes later and the rig's removal must not let the rerun
+  // erase the later evidence and report clean: the rerun is refused, dry run and apply.
+  it.each([
+    ["a launch", () => new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-late", logicalId: "late.one", sessionName: "late@n-empty" } as never)],
+    ["a claim", () => new EventBus(db).emit({ type: "node.claimed", rigId: RIG, nodeId: "node-late", logicalId: "late.one" } as never)],
+    ["a grant seat's work", () => row("g-late", "late@n-empty", OUT, [{ state: "done", daysAgo: 0 }])],
+  ] as const)("refuses the rerun after removal when %s came after the [] receipt", async (_label, later) => {
+    expect(await erase()).toMatchObject({ clean: true, rig: { found: true, verified: true } });
+    await later();
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "rig.deleted", rigId: RIG } as never);
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    expect(everything()).toBe(before);
+  });
+
+  // The proof is rechecked in each transaction that deletes or records. A seat registered while the run yields stops it
+  // before anything goes; one whose event lands between two delete chunks stops it there. Neither run writes a receipt.
+  // A launch writes its session row and its event in separate statements, so the run can see either one alone.
+  it.each([["with its launch event", true], ["by its session row alone", false]] as const)("stops when a seat registers during the run (%s), before erasing anything, and writes no receipt", async (_label, launched) => {
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-new', ?, 'new.one')").run(RIG);
+    const run = erase();
+    new SessionRegistry(db).registerSession("node-new", "new-one@n-empty");
+    if (launched) new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-new", logicalId: "new.one", sessionName: "new-one@n-empty" } as never);
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("changed during the run") } });
+    expect(everything()).toContain("secret-empty-snapshot");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = 'node-new'").get()).toEqual({ n: 1 });
+  });
+
+  it("stops between delete chunks when a seat's event lands, and writes no receipt", async () => {
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const first = (db.prepare("SELECT MIN(seq) AS seq FROM events WHERE rig_id = ?").get(RIG) as { seq: number }).seq;
+    db.exec(`CREATE TEMP TRIGGER late_claim AFTER DELETE ON events WHEN old.seq = ${first}
+      BEGIN INSERT INTO events (rig_id, type, payload) VALUES ('${RIG}', 'node.claimed', '{}'); END;`);
+    const report = await erase();
+    expect(report).toMatchObject({ complete: false, error: { stage: "rig", message: expect.stringContaining("event node.claimed") } });
+    expect(report.rig!.erased.events).toBe(1000);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ? AND type = 'node.claimed'").get(RIG)).toEqual({ n: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
   });
 
   it("refuses a removed rig no earlier run recorded with no members, and members [] without a rig", async () => {

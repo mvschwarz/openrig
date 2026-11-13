@@ -358,6 +358,94 @@ function refuseUnlessNeverHadSession(db: Database.Database, rigId: string, rigNa
   }
 }
 
+/** Where queue work keeps a session address. A seat that worked at a rig shows here even with no session row: a
+ *  grant-service caller acting as its grant's seat, or a hosted member. */
+const ADDRESS_COLUMNS: ReadonlyArray<{ table: string; columns: string[] }> = [
+  { table: "queue_items", columns: ["source_session", "destination_session"] },
+  { table: "queue_transitions", columns: ["actor_session"] },
+  { table: "queue_transitions_archive", columns: ["actor_session"] },
+  { table: "inbox_entries", columns: ["sender_session", "destination_session"] },
+  { table: "outbox_entries", columns: ["sender_session", "destination_session"] },
+  { table: "stream_items", columns: ["source_session"] },
+];
+const ADDRESS_WINDOW = 5_000;
+/** A session address at the rig, `<name>@<rig>` or host-qualified `<name>@<rig>@<host>`: matched exactly on the part after
+ *  the first `@` (LIKE would read `_` in a rig name as a wildcard). */
+const AT_RIG = (column: string) => `(instr(${column}, '@') > 0 AND (substr(${column}, instr(${column}, '@') + 1) = @rigName
+    OR substr(${column}, instr(${column}, '@') + 1, length(@rigName) + 1) = @rigName || '@'))`;
+const atRig = (address: unknown, rigName: string): address is string => {
+  if (typeof address !== "string" || !address.includes("@")) return false;
+  const rest = address.slice(address.indexOf("@") + 1);
+  return rest === rigName || rest.startsWith(`${rigName}@`);
+};
+
+/** How far each table reached when a never-member proof was taken; whatever lands past it came during the run. */
+type Watermark = { seq: number; rowids: Record<string, number> };
+function watermark(db: Database.Database, tables: Set<string>): Watermark {
+  const rowids: Record<string, number> = {};
+  for (const { table } of ADDRESS_COLUMNS) {
+    if (tables.has(table)) rowids[table] = (db.prepare(`SELECT MAX(rowid) AS n FROM ${table}`).get() as { n: number | null }).n ?? 0;
+  }
+  return { seq: (db.prepare("SELECT MAX(seq) AS n FROM events").get() as { n: number | null }).n ?? 0, rowids };
+}
+
+/** Addresses at the rig in queue work, read in rowid windows with a yield between them (from a watermark: only rows past
+ *  it). At most `limit` are listed. */
+async function addressesAtRig(db: Database.Database, tables: Set<string>, rigName: string, limit = 20): Promise<string[]> {
+  const found = new Set<string>();
+  for (const { table, columns } of ADDRESS_COLUMNS) {
+    if (!tables.has(table)) continue;
+    const top = (db.prepare(`SELECT MAX(rowid) AS n FROM ${table}`).get() as { n: number | null }).n ?? 0;
+    const read = db.prepare(`SELECT ${columns.join(", ")} FROM ${table}
+        WHERE rowid > @lo AND rowid <= @hi AND (${columns.map(AT_RIG).join(" OR ")})`);
+    for (let lo = 0; lo < top && found.size < limit; lo += ADDRESS_WINDOW) {
+      for (const row of read.all({ lo, hi: Math.min(lo + ADDRESS_WINDOW, top), rigName }) as Array<Record<string, unknown>>) {
+        for (const column of columns) if (atRig(row[column], rigName)) found.add(row[column] as string);
+      }
+      await yieldToLoop();
+    }
+  }
+  return [...found].sort().slice(0, limit);
+}
+
+/** A never-member erase rechecks its proof inside each transaction that deletes or records: nothing new for the rig past
+ *  the watermark (an event of the rig or its nodes, a session on its nodes, queue work at its address). A seat that
+ *  arrives while the run yields stops it before its records go, and no receipt is written. */
+function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id: string; name: string | null; found: boolean },
+  mark: Watermark): () => void {
+  const params = { rig: rig.id, rigName: rig.name ?? "", seq: mark.seq };
+  const stop = (what: string) => {
+    throw new Error(`rig ${rig.name ?? rig.id} changed during the run (${what}), so nothing more was erased and no receipt was written; rerun to check it again`);
+  };
+  return () => {
+    const event = (db.prepare("SELECT type FROM events WHERE rig_id = @rig AND seq > @seq LIMIT 1").get(params)
+      ?? db.prepare("SELECT type FROM events WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = @rig) AND seq > @seq LIMIT 1").get(params)) as
+      { type: string } | undefined;
+    if (event !== undefined) stop(`event ${event.type}`);
+    if (db.prepare("SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = @rig LIMIT 1").get(params) !== undefined) stop("a session");
+    if (rig.name === null) return;
+    for (const { table, columns } of ADDRESS_COLUMNS) {
+      if (!tables.has(table)) continue;
+      const row = db.prepare(`SELECT 1 FROM ${table} WHERE rowid > @after AND (${columns.map(AT_RIG).join(" OR ")}) LIMIT 1`)
+        .get({ ...params, after: mark.rowids[table] ?? 0 });
+      if (row !== undefined) stop(`queue work at the rig in ${table}`);
+    }
+  };
+}
+
+/** After a never-member erase recorded its receipt and the rig was removed: anything of the rig since then that only a
+ *  member leaves (a node or seat event, a session event, one naming a session) means a member came later, so the
+ *  receipt no longer holds. */
+function refuseIfMemberSinceReceipt(db: Database.Database, rigId: string): void {
+  const event = db.prepare(`SELECT type FROM events WHERE rig_id = ?
+      AND (substr(type, 1, 5) IN ('node.', 'seat.') OR substr(type, 1, 8) IN ('session.', 'binding.') OR type = 'rig.expanded'
+        OR instr(payload, '"sessionName"') > 0 OR instr(payload, '"sessionId"') > 0) LIMIT 1`).get(rigId) as { type: string } | undefined;
+  if (event !== undefined) {
+    throw new EraseRefusal("erase_rig_had_sessions",
+      `Rig ${rigId} had a member after its erasure was recorded with none (event ${event.type}). Name its members.`);
+  }
+}
+
 type BatchPlan = {
   rows: Candidate[];
   absent: string[];
@@ -418,6 +506,9 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   // members included), and every session of it is a member. A rig already removed is verified only by the record an
   // earlier run kept with this membership.
   let rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null } | null = null;
+  // A never-member erase (no members, with its rig): the tables read, and where they stood when its proof was taken.
+  let tables: Set<string> | undefined;
+  let proofMark: Watermark | undefined;
   if (scope.kind === "members" && scope.members.length === 0 && scope.rig === undefined) {
     throw new EraseRefusal("erase_members_invalid", "An empty members list names an account rig that never had a member: give its rig.");
   }
@@ -434,7 +525,15 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           unlisted.length > 0 ? `Rig ${name} has sessions the members don't list: ${unlisted.join(", ")}.` : "",
         ].filter(Boolean).join(" "));
       }
-      if (scope.members.length === 0) refuseUnlessNeverHadSession(db, scope.rig, name);
+      if (scope.members.length === 0) {
+        tables ??= tableNames(db);
+        proofMark = watermark(db, tables);
+        refuseUnlessNeverHadSession(db, scope.rig, name);
+        const addresses = await addressesAtRig(db, tables, name);
+        if (addresses.length > 0) {
+          throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${name}: ${addresses.join(", ")}. Name them.`);
+        }
+      }
       rig = { id: scope.rig, name, found: true, verified: true, completedAt: null };
     } else {
       const kept = db.prepare(`SELECT rig_name AS name, members_digest AS digest, completed_at AS completedAt
@@ -444,6 +543,17 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       if (scope.members.length === 0 && !verified) {
         throw new EraseRefusal("erase_rig_history_unknown",
           `Rig ${scope.rig} isn't on this daemon, and no earlier erasure recorded it with no members, so it can't be shown that it never had a session.`);
+      }
+      if (scope.members.length === 0) {
+        tables ??= tableNames(db);
+        proofMark = watermark(db, tables);
+        refuseIfMemberSinceReceipt(db, scope.rig);
+        if (kept!.name !== "") {
+          const addresses = await addressesAtRig(db, tables, kept!.name);
+          if (addresses.length > 0) {
+            throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${kept!.name}: ${addresses.join(", ")}. Name them.`);
+          }
+        }
       }
       rig = { id: scope.rig, name: verified && kept.name !== "" ? kept.name : null, found: false, verified,
         completedAt: verified ? kept.completedAt : null };
@@ -811,7 +921,8 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       if (rig !== null) {
         stage = "rig";
         report.rig = { id: rig.id, found: rig.found, verified: rig.verified, erased: {}, left: {}, unknown: [] };
-        await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig);
+        const guard = proofMark !== undefined && tables !== undefined ? neverMemberGuard(db, tables, rig, proofMark) : undefined;
+        await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig, guard);
       }
     }
   } catch (err) {
@@ -925,9 +1036,8 @@ const RIG_RECORDS_CHUNK = 1_000;
  *  what it erased. */
 async function eraseRigRecords(db: Database.Database, st: Statements,
   rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null; members: string; digest: string },
-  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>): Promise<void> {
-  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
-    .map((row) => row.name));
+  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>, guard?: () => void): Promise<void> {
+  const tables = tableNames(db);
   const params = { rig: rig.id, rigName: rig.name ?? "", members: rig.members };
   const add = (into: Record<string, number>, table: string, n: number) => {
     into[table] = (into[table] ?? 0) + n;
@@ -945,9 +1055,13 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
     }
     add(out.erased, table, 0);
     // In chunks by rowid (every one of these tables has one; a declared key can be NULL), so a large table (events)
-    // never holds the daemon in one statement.
+    // never holds the daemon in one statement. A guard rechecks its proof in each chunk's own transaction.
     const chunk = st.get(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} LIMIT ${RIG_RECORDS_CHUNK})`);
-    for (let changes = chunk.run(params).changes; changes > 0; changes = chunk.run(params).changes) {
+    const run = db.transaction(() => {
+      guard?.();
+      return chunk.run(params).changes;
+    });
+    for (let changes = run(); changes > 0; changes = run()) {
       add(out.erased, table, changes);
       await yieldToLoop();
     }
@@ -965,7 +1079,8 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
   out.unknown = [...unknown];
   const leftTotal = Object.values(out.left).reduce((sum, n) => sum + n, 0);
   if (rig.completedAt !== null) out.completedAt = rig.completedAt;
-  if (apply && rig.verified) {
+  if (apply && rig.verified) db.transaction(() => {
+    guard?.();
     if (rig.found) {
       // While the rig exists, its id and name are kept with this membership, so the run after its removal is verified.
       db.prepare(`INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at, completed_at) VALUES (?, ?, ?, ?, NULL)
@@ -978,5 +1093,9 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
       db.prepare("UPDATE queue_erased_rigs SET rig_name = '', completed_at = ? WHERE rig_id = ?").run(nowIso, rig.id);
       out.completedAt = nowIso;
     }
-  }
+  })();
+}
+
+function tableNames(db: Database.Database): Set<string> {
+  return new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 }
