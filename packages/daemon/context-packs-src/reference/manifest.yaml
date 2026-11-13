@@ -14,6 +14,9 @@ files:
   - path: instance-layout.md
     role: reference
     summary: "Where an OpenRig instance keeps its files and configuration."
+  - path: product-journey-sdlc.md
+    role: reference
+    summary: "Product-journey SDLC components, and how to resolve a mission's selected path (linked from role guidance)."
   - path: rig-spec.md
     role: reference
     summary: "The rig specification format."

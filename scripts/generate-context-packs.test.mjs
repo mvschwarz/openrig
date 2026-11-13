@@ -613,8 +613,8 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
     runProduction(out);
     const helpSource = readFileSync(join(REPO, "docs/reference/help.md"), "utf8");
     const refDir = join(out, "reference");
-    assert.deepEqual(readdirSync(refDir).sort(), ["acp-agents.md", "getting-started.md", "instance-layout.md", "manifest.yaml", "rig-spec.md", "tmux-servers.md", "whats-new.md"]);
-    for (const f of ["acp-agents.md", "getting-started.md", "instance-layout.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]) {
+    assert.deepEqual(readdirSync(refDir).sort(), ["acp-agents.md", "getting-started.md", "instance-layout.md", "manifest.yaml", "product-journey-sdlc.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]);
+    for (const f of ["acp-agents.md", "getting-started.md", "instance-layout.md", "product-journey-sdlc.md", "rig-spec.md", "tmux-servers.md", "whats-new.md"]) {
       assert.ok(!lstatSync(join(refDir, f)).isSymbolicLink(), `${f} ships as a real file`);
       assert.equal(readFileSync(join(refDir, f), "utf8"), readFileSync(join(REPO, "docs/reference", f), "utf8"));
     }
@@ -640,6 +640,11 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
     const tmuxGuide = "reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode";
     assert.deepEqual(tmuxAddresses, [tmuxGuide, tmuxGuide]);
     assert.deepEqual(await unresolvedAddresses(app, tmuxAddresses), []);
+    // Role guidance names the product-journey path lookup by its installed reference path.
+    const roleGuidance = readFileSync(join(REPO, "packages/daemon/specs/agents/orchestration/orchestrator/guidance/role.md"), "utf8");
+    const journeyAddresses = [...roleGuidance.matchAll(/\$OPENRIG_HOME\/(reference\/[\w.#/-]+)/g)].map((m) => m[1]);
+    assert.deepEqual(journeyAddresses, ["reference/product-journey-sdlc.md#resolve-the-selected-path"]);
+    assert.deepEqual(await unresolvedAddresses(app, journeyAddresses), []);
     const section = await (await app.request(
       `/api/context-packs/library/resolve-address?address=${encodeURIComponent("reference/getting-started.md#incomplete-setup-and-restart")}`,
     )).json();
