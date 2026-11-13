@@ -264,6 +264,7 @@ export interface WorkflowInstance {
    * site. null = unbound = pre-FAC-1 behavior byte-identical.
    */
   boundRig: string | null;
+  boundPod?: string | null;
   lifecycleOperationKey: string | null;
   compiledInputDigest: string | null;
   lifecycleBinding: Record<string, unknown> | null;

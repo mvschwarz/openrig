@@ -104,6 +104,7 @@ all database migrations:
 | [`040`](../../../packages/daemon/src/db/migrations/040_workflow_specs_diagnostic.ts), [`050`](../../../packages/daemon/src/db/migrations/050_workflow_spec_json.ts) | Cache diagnostics and complete parsed spec JSON. |
 | [`049`](../../../packages/daemon/src/db/migrations/049_workflow_instance_version.ts), [`051`](../../../packages/daemon/src/db/migrations/051_workflow_resume.ts), [`052`](../../../packages/daemon/src/db/migrations/052_workflow_instance_bound_rig.ts) | Optimistic version guard, resume/hop baseline, and bound rig. |
 | [`079`](../../../packages/daemon/src/db/migrations/079_workflow_lifecycle_parallel.ts) | Lifecycle operation key/digest/binding, packet-to-step frontier bindings, and failure occurrences. |
+| [`158`](../../../packages/daemon/src/db/migrations/158_workflow_bound_pod.ts) | Optional workflow pod binding. |
 
 Current instance states include `active`, `waiting`, `completed`, `failed`,
 and `aborted`. A multi-packet frontier needs packet-to-step bindings; a
@@ -137,6 +138,14 @@ parked `blocked_on` that human seat in the same transaction (summary and
 `evidence_ref` required), and the instance waits until the park is resolved;
 for a declared role, an ordinary packet goes to that handler role's seat
 (`workflow-projector.ts:1659`–`1778`).
+
+`rig workflow instantiate` and `rig workflow run` accept `--pod <namespace>`
+when the instance is bound to a registered rig. The pod must exist on that rig.
+The instance stores the selection, and role-only resolution considers seats in
+that pod on later projections and resumes. A preferred target can use the
+quoted YAML form `"{pod}-builder@{rig}"`; the instance expands it from its
+stored bindings. Literal preferred targets and explicit owner overrides retain
+their existing precedence and may name other seats.
 
 A `preferred_targets` entry may end in `@{rig}`, for example `watcher@{rig}`.
 When the instance is bound to a rig (`--rig`, or the spec's `target.rig`
