@@ -82,6 +82,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     project: null,
     scopesMission: null,
     scopesSelected: null,
+    fleetSelected: null,
     scopesCollapseReqs: false,
     scopesNarrative: false,
     executionOpen: null,
@@ -93,7 +94,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
 
   function dispatch(action: Action): ViewState {
     const previous = state;
-    if (["attention-category", "attention-open", "attention-view", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null, specLaunch: null, ...(state.pendingDrill ? { pendingDrill: null } : {}) };
+    if (["attention-category", "attention-open", "attention-view", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "fleet-slice-open", "fleet-close", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null, specLaunch: null, ...(state.pendingDrill ? { pendingDrill: null } : {}) };
     state = reduce(state, action, getSnapshot());
     // A pending address belongs to the Topology landing it opened; leaving it cancels the address.
     if (state.pendingDrill && (state.section !== "topology" || state.drill.length > 0)) state = { ...state, pendingDrill: null };
@@ -231,6 +232,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     }
     case "scopes-open":
       return syncSelection(resetContent({ ...next, section: "scopes", drill: [], runningOf: null, viewTab: "table", filter: "", scopesMission: action.mission, scopesSelected: { mission: action.mission, slice: action.slice }, scopesNarrative: false, executionOpen: null, healthOpen: null }), snap);
+    case "fleet-slice-open":
+      // Composite identity (origin host + native mission/slice) — the selection
+      // itself keeps the row distinct from an identically-named row elsewhere.
+      return syncSelection(resetContent({ ...next, section: "fleet", drill: [], runningOf: null, viewTab: "table", filter: "", fleetSelected: { hostId: action.hostId, mission: action.mission, slice: action.slice }, healthOpen: null }), snap);
+    case "fleet-close":
+      return resetContent({ ...next, fleetSelected: null });
     case "scopes-reqs":
       return { ...next, scopesCollapseReqs: !next.scopesCollapseReqs };
     case "scopes-narrative":
@@ -368,8 +375,8 @@ function location(s: ViewState): string {
 }
 
 function navigationFrame(s: ViewState): NavigationFrame {
-  const { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus } = s;
-  return { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus };
+  const { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, fleetSelected, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus } = s;
+  return { attentionCategory, attentionOpen, project, terminalView, terminalPage, file, externalUrl, section, drill, filter, selection, runningOf, viewTab, contentOffset, contentMaxOffset, contentTargetCount, contentSelection, focusedPane, scopesMission, scopesSelected, scopesCollapseReqs, scopesNarrative, fleetSelected, executionOpen, expanded, recentOpen, timeZoneHelp, configCategory, configKey, configFocus };
 }
 
 function applyDrill(state: ViewState, next: ViewState, action: Extract<Action, { type: "drill" }>, snap: FleetSnapshot): ViewState {
@@ -636,7 +643,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           ? "SPECS"
           : section.name === "needs"
             ? "FEED"
-            : section.name === "scopes" ? "PROJECTS" : section.name.toUpperCase();
+            : section.name === "scopes" ? "PROJECTS" : section.name === "fleet" ? "FLEET · PROJECTS" : section.name.toUpperCase();
     // A section changes view but has no independent collapse state. Do not draw
     // a disclosure glyph that cannot be toggled.
     rows.push({ label, action: { type: "jump", section: section.name }, key: `section:${section.name}` });

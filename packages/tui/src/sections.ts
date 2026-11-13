@@ -17,6 +17,11 @@ export const SECTION_REGISTRY: readonly SectionDef[] = [
     sourceRead: "GET /api/scopes/projects + project-scoped scopes, execution and slice projections",
     drillShape: "project>mission>execution-row>slice/source",
   },
+  {
+    name: "fleet",
+    sourceRead: "GET /api/fleet/scopes (existing scopes counts read per host) + /api/scopes/slice via the read-through for a fleet slice's detail",
+    drillShape: "host>mission>slice",
+  },
   { name: "terminals", sourceRead: "GET /api/terminal/views?detail=1 + /api/terminal/preview (passive)", drillShape: "saved/derived>view>page" },
   {
     name: "needs",
