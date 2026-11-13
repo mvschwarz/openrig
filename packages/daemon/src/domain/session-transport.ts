@@ -31,6 +31,7 @@ import {
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
+import { readSendOutcome } from "./connection-contract.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -2744,7 +2745,7 @@ export class SessionTransport {
         pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
-        ...wireFingerprint(wire),
+        ...wireFingerprint(wire), outcome: readSendOutcome(result),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {

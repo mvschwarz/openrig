@@ -1110,10 +1110,11 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db.prepare("UPDATE queue_items SET destination_session = 'human-x@external' WHERE qitem_id = ?").run(own);
     await repo.createHumanAnswer({ sourceSession: "human-x@external", destinationSession: CALLER, body: "The person's private reasoning",
       inboundReplyTo: own, nudge: false } as never);
-    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ answers: [{ by: "human-x@external" }] });
+    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ answers: [{ by: "human-x@external" }], answersFrom: "this-daemon" });
     const shown = await asExternal("rig_queue_show", { qitemId: own });
     expect(shown.isError).toBe(false);
     expect(shown.structured.item).not.toHaveProperty("answers");
+    expect(shown.structured.item).not.toHaveProperty("answersFrom");
     expect(shown.text).not.toContain("private reasoning");
   });
 

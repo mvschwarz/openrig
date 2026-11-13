@@ -21,6 +21,7 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, readDraftDeliverySetting, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, writtenFact, type TransportReadinessChecker } from "../src/domain/session-transport.js";
+import { readSendOutcome } from "../src/domain/connection-contract.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -2785,6 +2786,32 @@ describe("SessionTransport", () => {
       expect(withEvidence.outcome).toBeUndefined();
       expect(fact).toMatchObject({ written: "submitted", terminalObserved: { outcome: null, verified: null } });
       expect(fact.messageId).toBe(fact.attemptId);
+      // In the shared words: the typed route took it, as OpenRig saw. Never that the member read it.
+      expect(fact.outcome).toEqual({ fact: "accepted", reporter: "openrig-observed", route: "typed" });
+    });
+
+    it("records a typed wake to a Codex seat with its own labelled outcome, on the typed route", async () => {
+      seedCanonicalRig("codex");
+      await createTransport(typing(), { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
+      expect(evidence()).toEqual([expect.objectContaining({ sessionName: "dev-impl@my-rig",
+        outcome: { fact: "accepted", reporter: "openrig-observed", route: "typed" } })]);
+    });
+
+    it("reads each result shape's outcome in the shared words: unknown when the result doesn't establish one", () => {
+      const s = "dev-impl@my-rig";
+      expect([
+        { ok: true, sessionName: s },
+        { ok: true, sessionName: s, verified: true, outcome: "delivered" },
+        { ok: true, sessionName: s, verified: false, outcome: "rendered-unconfirmed" },
+        { ok: true, sessionName: s, outcome: "retained", sent: false, verified: false },
+        { ok: false, sessionName: s, outcome: "failed", inputPhase: "attempted" },
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "submit_refused" },
+        { ok: false, sessionName: s, sent: false, inputPhase: "not_reached" },
+        { ok: false, sessionName: s, reason: "transport_unavailable" },
+      ].map((result) => readSendOutcome(result).fact === "accepted" && readSendOutcome(result).renderVerified
+        ? "accepted, render verified" : readSendOutcome(result).fact))
+        .toEqual(["accepted", "accepted, render verified", "accepted", "held", "failed-effect-unknown", "failed-effect-unknown",
+          "not-delivered", "unknown"]);
     });
 
     it("uses the caller's delivery id as the message, and gives each attempt its own id", async () => {
