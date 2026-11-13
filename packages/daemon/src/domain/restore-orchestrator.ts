@@ -1683,6 +1683,13 @@ export class RestoreOrchestrator {
     return true;
   }
 
+  /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
+   *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. */
+  private markHarnessNotStarted(rigId: string, nodeId: string, sessionId: string, error: string): void {
+    this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
+    this.eventBus.emit({ type: "node.startup_failed", rigId, nodeId, error, sessionId, stage: "harness_not_started" });
+  }
+
   /** Retire only the provisional session created by this restore attempt. The prior
    * binding must stay cleared while a replacement launch is handed off. */
   private async retireProvisionalSession(nodeId: string, sessionName: string, launchedSessionId: string | undefined): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -2112,6 +2119,7 @@ export class RestoreOrchestrator {
         if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, node.id)) {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
+          this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
@@ -2144,6 +2152,7 @@ export class RestoreOrchestrator {
       const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
+      this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
     }
 
