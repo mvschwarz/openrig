@@ -983,18 +983,22 @@ export class WorkflowProjector {
       });
     };
     let createdException;
-    try {
-      createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
-    } catch (error) {
-      if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
-      // Only an unavailable agent rig invokes human selection. Other
-      // admission/storage failures propagate unchanged and roll back the
-      // close, retaining the failure+attention-item atomic contract.
-      createdException = createExceptionItem(
-        workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
-        "human-gate",
-        true,
-      );
+    if (!route.humanRouted && !this.queueRepo.acceptsDestination(route.destinationSession)) {
+      createdException = createExceptionItem(workflowHumanDestination(this.exceptionDial?.humanFallbackSeat), "human-gate", true);
+    } else {
+      try {
+        createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
+      } catch (error) {
+        if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
+        // Only an unavailable agent rig invokes human selection. Other
+        // admission/storage failures propagate unchanged and roll back the
+        // close, retaining the failure+attention-item atomic contract.
+        createdException = createExceptionItem(
+          workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
+          "human-gate",
+          true,
+        );
+      }
     }
     registerEvent(createdException.persistedEvent);
     this.queueRepo.stageHandoffWake(createdException.qitemId, input.actorSession,
