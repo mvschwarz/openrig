@@ -115,6 +115,11 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   Existing managed blocks may still refresh, and the seat-skills line still
   belongs to the file writer; check `git status`. A block whose source can't be
   read is reported missing.
+- **Linked Codex config files:** when a Codex seat's `config.toml` or
+  `hooks.json` is a symbolic link, OpenRig records its hook trust under the
+  link's target, as in 0.7.13. A change to key it by the file's own name isn't
+  in this release, and such a seat may be asked to review hooks again.
+  ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **From 0.7.13:** its limits below still apply, except where this release
   fixes them. The runtime fixes cover adding missing guidance on the eligible
   Codex resumes described above and the unquoted pairing description. The fix
