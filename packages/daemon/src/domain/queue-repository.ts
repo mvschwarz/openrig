@@ -105,6 +105,7 @@ import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, r
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
 import { askBackRoute, RUNNER_CLOSE_WAITS, terminalAnswerMeaning } from "./receiver-context.js";
+import { runSyncSite, runSyncSiteWhenSlow } from "./sync-site-wrap.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
 function humanAnswerId(askId: string, episodeKey?: string): string {
@@ -821,14 +822,14 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
     const startedAt = performance.now();
     const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
     const ids = JSON.stringify([...sources]);
-    const rows = db.prepare(
+    const rows = runSyncSite("queue.linked_successors.build", () => db.prepare(
       `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
         WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
        UNION
        SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
         WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
           AND j.value IN (SELECT value FROM json_each(?))`,
-    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+    ).all(ids, ids)) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
     for (const r of rows) {
       const list = map.get(r.source);
       const entry = { qitemId: r.qitem_id, destination: r.destination_session };
@@ -2634,8 +2635,13 @@ export class QueueRepository {
   }
 
   /** {@link handoff}'s whole act, synchronously: its transaction commits before this returns, and the wake is delivered
-   *  after commit without being awaited, so a synchronous caller (an answer's close path) can hand a row on. */
+   *  after commit without being awaited, so a synchronous caller (an answer's close path) can hand a row on. Named in
+   *  the slow-operation log, so a stall during a handoff is attributed to it. */
   private handoffNow(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
+    return runSyncSite("queue.handoff", () => this.handoffWithin(input));
+  }
+
+  private handoffWithin(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -4563,8 +4569,9 @@ export class QueueRepository {
       typeof opts?.excludeOperationReply === "string" && opts.excludeOperationReply.length > 0
         ? mcOperationTag(opts.excludeOperationReply)
         : null;
+    // Named only when slow: it runs on every row read and on each row of the attention read.
     const replies = this.hasReplyToColumn
-      ? (excludeOp
+      ? runSyncSiteWhenSlow("queue.decision_revision.replies", () => excludeOp
           ? (this.db
               .prepare(
                 "SELECT qitem_id FROM queue_items WHERE reply_to = ? AND NOT (tags IS NOT NULL AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) ORDER BY ts_created, rowid",

@@ -371,6 +371,82 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect(() => loadScript({ rules: [{ say: "a", on: "assistant" }] })).toThrow(/on must be/);
   });
 
+  it("finds the turn before a trailing system message, as Claude Code 2.1.322 sends its environment", () => {
+    // The shape recorded from a real Claude Code 2.1.322 seat on the stand-in: the turn, then a system message.
+    const body = { model: "m", stream: true, messages: [
+      { role: "user", content: [{ type: "text", text: "<system-reminder>context</system-reminder>" }, { type: "text", text: "start DLV-start-1" }] },
+      { role: "system", content: [{ type: "text", text: "# Environment\nPrimary working directory: /w" }] },
+    ] };
+    expect(messagesTurnOf(body)).toMatchObject({ kind: "user", parts: [{ source: "text" }, { text: "start DLV-start-1", source: "text" }] });
+    expect(messagesTurnOf({ messages: [{ role: "system", content: "only" }] })).toMatchObject({ kind: "other", parts: [] });
+  });
+
+  it("logs which conversation each request belongs to, so a side request quoting a delivery isn't counted as one", async () => {
+    // Shapes recorded from real seats on the stand-ins: Codex 0.167.2's turn and its task-title side request, and
+    // Claude Code 2.1.322's session in metadata.user_id.
+    const codex = await start("responses", { script: { rules: [] } });
+    const turn = { ...codexTurn("please DLV-T1"), tools: [{ type: "function", name: "exec" }], client_metadata: { thread_id: "thread-1", session_id: "thread-1" } };
+    const title = { ...codexTurn("Generate a concise title for: please DLV-T1"), tools: [], client_metadata: { "x-codex-window-id": "w:0" },
+      text: { format: { type: "json_schema", strict: true, name: "title", schema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } } } };
+    await post(`${codex.url}/v1/responses`, turn, { "x-stainless-retry-count": "0", "thread-id": "thread-1" });
+    const titled = events((await post(`${codex.url}/v1/responses`, title)).text);
+    expect(JSON.parse(titled.filter((e) => e.event === "response.output_text.delta").map((e) => e.data.delta).join(""))).toEqual({ title: "stand-in" });
+    expect(codex.requests().map((r) => [r.marker, r.request])).toEqual([
+      ["DLV-T1", { thread: "thread-1", tools: 1, structuredOutput: false }],
+      ["DLV-T1", { thread: null, tools: 0, structuredOutput: true }],
+    ]);
+    expect(codex.requests()[0].headers).toMatchObject({ "x-stainless-retry-count": "0", "thread-id": "thread-1" });
+
+    const claude = await start("messages", { script: { rules: [] } });
+    await post(`${claude.url}/v1/messages`, { ...userTurn("DLV-T2"), tools: [{ name: "Bash" }],
+      metadata: { user_id: JSON.stringify({ device_id: "d", account_uuid: "", session_id: "sess-1" }) } }, { "x-stainless-retry-count": "1" });
+    expect(claude.requests()[0]).toMatchObject({ request: { thread: "sess-1", tools: 1, structuredOutput: false }, headers: { "x-stainless-retry-count": "1" } });
+  });
+
+  it("refuses a script whose rules aren't a list, or whose patterns don't compile, at load", () => {
+    expect(() => loadScript({ rules: { say: "a" } })).toThrow(/rules must be a list/);
+    expect(() => loadScript({ rules: "say a" })).toThrow(/rules must be a list/);
+    expect(() => loadScript({ rules: [null] })).toThrow(/must be an object/);
+    expect(() => loadScript({ rules: [{ say: "a", when: "DLV-(" }] })).toThrow(/rule 0: when isn't a valid pattern/);
+    expect(() => loadScript({ marker: "[", rules: [] })).toThrow(/marker isn't a valid pattern/);
+    // No rules at all is the fallback script, not a mistake.
+    expect(loadScript({}).rules).toEqual([]);
+  });
+
+  it.each(["messages", "responses"] as const)("answers a request body that isn't JSON with an error, not a scripted reply (%s)", async (kind) => {
+    const standIn = await start(kind, { script: { rules: [{ say: "never {{marker}}" }] } });
+    const path = kind === "messages" ? "/v1/messages" : "/v1/responses";
+    for (const raw of ['{"model": "x", "stream": tru', ""]) {
+      const res = await fetch(`${standIn.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toContain("never");
+    }
+    expect(standIn.requests().map((r) => [r.served, r.rule])).toEqual([["malformed", undefined], ["malformed", undefined]]);
+    expect(standIn.requests()[0]).toMatchObject({ body: '{"model": "x", "stream": tru', rawBytes: 28 });
+  });
+
+  it("answers 500 and records the failure when it can't write its log, rather than serving a turn it didn't keep", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stand-in-logfail-"));
+    try {
+      // A directory where the log file should be: every append fails.
+      const standIn = await start("responses", { script: { rules: [] }, logPath: dir });
+      const res = await post(`${standIn.url}/v1/responses`, codexTurn("DLV-logfail"));
+      expect(res.status).toBe(500);
+      expect(JSON.parse(res.text)).toMatchObject({ error: { type: "stand_in_error" } });
+      expect(standIn.errors()).toEqual([expect.objectContaining({ method: "POST", path: "/v1/responses", message: expect.stringMatching(/EISDIR/) })]);
+      // A credential in the failing request's query stays out of the error record too.
+      const sentinel = "sk-SENTINEL-error-path-0123456789";
+      await post(`${standIn.url}/v1/responses?api-key=${sentinel}`, codexTurn("DLV-logfail-2"));
+      expect(JSON.stringify(standIn.errors())).not.toContain(sentinel);
+      expect(standIn.errors()[1]).toMatchObject({ path: "/v1/responses", query: { "api-key": "(present)" } });
+      const served = await (await fetch(`${standIn.url}/_stand-in/errors`)).json();
+      expect(served).toHaveLength(2);
+      expect(JSON.stringify(served)).not.toContain(sentinel);
+      // The server is still up for the next request.
+      expect((await fetch(`${standIn.url}/_stand-in/requests`)).status).toBe(200);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("runs from the command line and says where it listens", async () => {
     const dir = mkdtempSync(join(tmpdir(), "stand-in-cli-"));
     const scriptPath = join(dir, "script.json");

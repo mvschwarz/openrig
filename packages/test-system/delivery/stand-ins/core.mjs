@@ -39,13 +39,21 @@ export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
  */
 export function loadScript(source) {
   const script = typeof source === "string" ? JSON.parse(readFileSync(source, "utf8")) : (source ?? {});
-  const rules = Array.isArray(script.rules) ? script.rules : [];
-  rules.forEach((rule, index) => {
+  // A script with no rules answers everything with the fallback; one whose rules aren't a list is a mistake, not that.
+  if (script.rules !== undefined && !Array.isArray(script.rules)) throw new Error("stand-in script: rules must be a list");
+  const rules = script.rules ?? [];
+  // Every pattern is compiled here, so a bad one fails the script at load rather than a request mid-case.
+  const when = rules.map((rule, index) => {
+    if (!rule || typeof rule !== "object") throw new Error(`stand-in script rule ${index}: must be an object`);
     const actions = ["say", "tool", "error", "failInStream"].filter((key) => rule[key] !== undefined);
     if (actions.length !== 1) throw new Error(`stand-in script rule ${index}: needs exactly one of say, tool, error, failInStream (has ${actions.join(", ") || "none"})`);
     if (rule.on !== undefined && !["user", "tool_result", "any"].includes(rule.on)) throw new Error(`stand-in script rule ${index}: on must be user, tool_result or any`);
+    if (rule.when === undefined) return null;
+    try { return new RegExp(rule.when); } catch (error) { throw new Error(`stand-in script rule ${index}: when isn't a valid pattern (${error.message})`); }
   });
-  return { marker: new RegExp(script.marker ?? DEFAULT_MARKER), rules };
+  let marker;
+  try { marker = new RegExp(script.marker ?? DEFAULT_MARKER); } catch (error) { throw new Error(`stand-in script: marker isn't a valid pattern (${error.message})`); }
+  return { marker, rules, when };
 }
 
 /** The rule that answers a turn, consuming one of its `times`; null when none fits. */
@@ -53,7 +61,7 @@ export function selectRule(script, used, turn) {
   for (const [index, rule] of script.rules.entries()) {
     const on = rule.on ?? "user";
     if (on !== "any" && on !== turn.kind) continue;
-    if (rule.when !== undefined && !new RegExp(rule.when).test(turn.text)) continue;
+    if (script.when[index] && !script.when[index].test(turn.text)) continue;
     if (rule.times !== undefined && (used.get(index) ?? 0) >= rule.times) continue;
     used.set(index, (used.get(index) ?? 0) + 1);
     return { index, rule };
@@ -81,7 +89,10 @@ export function splitChunks(text, n = 1) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Header and query values the log may keep. Every other value, which may be a credential a provider is configured to
 // send under any name (Codex's http_headers, env_http_headers, query_params), is logged as "(present)".
-const SAFE_HEADER_VALUES = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta"]);
+// Ids and a retry count are kept too: they tell a case which conversation a request belongs to and whether it's a retry,
+// and none of them is a credential.
+const SAFE_HEADER_VALUES = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta",
+  "x-stainless-retry-count", "x-claude-code-session-id", "session-id", "thread-id"]);
 const SAFE_QUERY_VALUES = new Set(["beta"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -102,14 +113,22 @@ function loggedQuery(params) {
  *   userTurns(body) -> number   how many user turns the request's history holds, tool results aside
  *   answer(ctx) -> Promise<void>   writes the response for the chosen rule
  *   other(req, res, body) -> boolean   serves a path the protocol knows besides its main one (count_tokens, a probe)
+ *   describe(body) -> { thread, tools, structuredOutput }   which conversation the request belongs to (null when it
+ *     names none), how many tools it offers, and whether it asks for a JSON-schema answer. A program's side requests
+ *     (Codex's task title, for one) quote the delivered text too, so a case counts a delivery only in the seat's thread.
+ *   fallback(turn, body) -> rule | null   the protocol's own answer when no rule fits, before the generic one
  *   path: the main POST path, e.g. "/v1/messages"
- * Control routes for the harness, under /_stand-in/: GET requests (the log so far), POST release/<gate>.
+ * Control routes for the harness, under /_stand-in/: GET requests (the log so far), GET errors (what failed inside the
+ * stand-in, such as a log write), POST release/<gate>.
  */
 export async function startStandIn(protocol, { script, logPath, port = 0, host = "127.0.0.1" } = {}) {
   if (!LOOPBACK_HOSTS.has(host)) throw new Error(`stand-in listens on loopback only (127.0.0.1, ::1 or localhost), not ${host}`);
   const loaded = loadScript(script);
   const used = new Map();
   const requests = [];
+  // What went wrong inside the stand-in itself, such as a log it couldn't write. A case reads these: a request missing
+  // from the log is then the stand-in's failure, not the program's.
+  const errors = [];
   const gates = new Map();
   let seq = 0;
 
@@ -129,7 +148,19 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     gates.set(name, gate);
   };
 
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => {
+    handle(req, res).catch((error) => {
+      // The path and the query's names only, as the request log keeps them: a query value can be a credential.
+      const url = new URL(req.url ?? "/", "http://stand-in");
+      const where = { path: url.pathname, query: loggedQuery(url.searchParams) };
+      errors.push({ at: new Date().toISOString(), method: req.method, ...where, message: String(error?.message ?? error) });
+      process.stderr.write(`stand-in: ${req.method} ${where.path}: ${error?.message ?? error}\n`);
+      if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "stand_in_error", message: String(error?.message ?? error) } }));
+      else res.end();
+    });
+  });
+
+  async function handle(req, res) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString("utf8");
@@ -143,6 +174,10 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(requests));
       return;
     }
+    if (url.pathname === "/_stand-in/errors" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(errors));
+      return;
+    }
     if (url.pathname.startsWith("/_stand-in/release/") && req.method === "POST") {
       release(decodeURIComponent(url.pathname.slice("/_stand-in/release/".length)));
       res.writeHead(204).end();
@@ -150,7 +185,8 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     }
 
     let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
+    let malformed = false;
+    try { body = raw ? JSON.parse(raw) : null; } catch { malformed = true; }
     if (req.method !== "POST" || url.pathname !== protocol.path) {
       const served = protocol.other?.(req, res, body, url) ?? false;
       log({ ...entry, body: body ?? (raw || null), served: served ? "other" : "not-found" });
@@ -158,10 +194,18 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
       return;
     }
 
+    // A request the program sent that isn't JSON gets an error, never a scripted reply a case could mistake for a turn.
+    if (malformed || body === null) {
+      log({ ...entry, body: raw || null, served: "malformed" });
+      res.writeHead(400, { "content-type": "application/json" })
+        .end(JSON.stringify({ error: { type: "invalid_request_error", message: "stand-in: the request body isn't JSON" } }));
+      return;
+    }
+
     const turn = protocol.turnOf(body);
-    const picked = selectRule(loaded, used, turn) ?? fallbackRule(turn);
+    const picked = selectRule(loaded, used, turn) ?? protocol.fallback?.(turn, body) ?? fallbackRule(turn);
     const marker = turn.text.match(loaded.marker)?.[0] ?? null;
-    log({ ...entry, body, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
+    log({ ...entry, body, request: protocol.describe?.(body) ?? null, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
       action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });
     if (picked.rule.gate) await waitGate(picked.rule.gate);
     if (picked.rule.delayMs) await sleep(picked.rule.delayMs);
@@ -176,7 +220,7 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
       if (!res.headersSent) res.writeHead(500).end(String(error));
       else res.end();
     }
-  });
+  }
 
   await new Promise((resolve) => server.listen(port, host, resolve));
   const address = server.address();
@@ -186,6 +230,7 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     url,
     port: address.port,
     requests: () => [...requests],
+    errors: () => [...errors],
     release,
     close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }),
   };
