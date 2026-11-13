@@ -362,12 +362,16 @@ function looksLikeClaudeBypassConsentPrompt(paneContent: string): boolean {
 }
 
 // Claude Code's "gated grants" backstop (2.1.319+, #2820 item 2). Its marks, which the plain workspace trust prompt
-// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, and the option that
-// declines them. Its default choice declines them ("No, continue without these permissions") or exits ("No, exit").
-// The marks are read on the whitespace-joined screen too, so a row that a narrow pane wraps still counts.
-const CLAUDE_GATED_GRANTS_MARK = /This folder pre-approves \d+ tool permissions?\b|No, continue without these permissions/;
+// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, the note under the list
+// ("These will apply without asking"), and the option that declines them. Its default choice declines them ("No,
+// continue without these permissions") or exits ("No, exit"); in the "No, exit" variant only the warning and the note
+// mark it, and a long permission list can scroll the warning out. The marks are read on the whitespace-joined screen
+// too, so a row that a narrow pane wraps still counts.
+const CLAUDE_GATED_GRANTS_MARK =
+  /This folder pre-approves \d+ tool permissions?\b|These will apply without asking\b|No, continue without these permissions/;
 // One row of the backstop's marks, or of a part of one that a narrow pane wrapped.
-const CLAUDE_GATED_GRANTS_MARK_ROW = /This folder pre-approves\b|No, continue without\b|without these permissions\b/;
+const CLAUDE_GATED_GRANTS_MARK_ROW =
+  /This folder pre-approves\b|These will apply without\b|apply without asking\b|No, continue without\b|without these permissions\b/;
 const CLAUDE_TRUST_FOOTER = "Enter to confirm · Esc to cancel";
 const CLAUDE_TRUST_YES = "Yes, I trust this folder";
 const CLAUDE_TRUST_EXIT = "No, exit";
@@ -544,8 +548,18 @@ function claudeSearchBoxEnd(rows: string[], top: number): number {
  *  doesn't count: it can sit under a live chooser, and a missed chooser reads resumed. Hint rows and blank rows under the
  *  options belong to the chooser. */
 function claudeDrawnAfter(rows: string[]): boolean {
-  return hasClaudeInputFrame(rows) || rows.some((line) => line.includes("Claude Code v") || /^[●⏺]/.test(line));
+  return hasClaudeInputFrame(rows) || rows.some((line) => CLAUDE_VERSION_HEADER.test(line) || /^[●⏺]/.test(line));
 }
+
+// Claude's version header row: "Claude Code v<x.y.z>" at column 0, or after Claude's logo or a box border (with any
+// blanks around them), and a blank, a border or the row's end after it ("Claude Code v2.1.303",
+// " ▐▛███▜▌   Claude Code v2.1.322", "╭─── Claude Code v2.0.14 ───╮"). The same words inside a dialog are not the
+// header: a pre-approved grant ("Bash(echo Claude Code v*)"), the workspace path ("/tmp/Claude Code v2/lab") or a
+// path or a title that a narrow pane wraps onto an indented row (" Claude Code v2.1.322 lab") would cut the screen
+// inside a live prompt.
+const CLAUDE_HEADER_GLYPHS = "▐▛▜▌▙▟▀▄█▝▘▗▖╭╮─│✻";
+const CLAUDE_VERSION_HEADER = new RegExp(
+  `^(?:[\\s${CLAUDE_HEADER_GLYPHS}]*[${CLAUDE_HEADER_GLYPHS}][\\s${CLAUDE_HEADER_GLYPHS}]*)?Claude Code v\\d+\\.\\d+\\.\\d+(?=$|[\\s─╮╯│])`, "u");
 
 // On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
 const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;

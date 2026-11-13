@@ -1446,6 +1446,24 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(probe(screen.replace("❯ No, continue without these permissions", "❯ No, exit"))).toMatchObject(gate);
   });
 
+  // "Claude Code v" inside the dialog is not Claude's version header: the screen is not cut there.
+  it.each([
+    ["'No, exit'", "❯ No, exit"],
+    ["'No, continue without these permissions'", "❯ No, continue without these permissions"],
+  ])("is the same gate, focus on %s, with a pre-approved grant that reads 'Claude Code v'", (_focus, option) => {
+    const grant = screen.replace("❯ No, continue without these permissions", option)
+      .replace("Bash(git status:*)", "Bash(echo Claude Code v*)");
+    expect(grant).toContain("Bash(echo Claude Code v*)");
+    expect(probe(grant)).toMatchObject(gate);
+  });
+
+  it("is the same gate in the 'No, exit' variant with the warning scrolled out, by its 'These will apply without asking' block", () => {
+    const rows = screen.replace("❯ No, continue without these permissions", "❯ No, exit").split("\n");
+    const scrolled = rows.filter(row => !row.includes("This folder pre-approves")).join("\n");
+    expect(scrolled).not.toMatch(/pre-approves|No, continue without/);
+    expect(probe(scrolled)).toMatchObject(gate);
+  });
+
   it("is the same gate when the git root is the home folder (the case item 1 deliberately does not seed)", () => {
     expect(probe(screen.replace("<lab>/repo/cadeiras/rig/seat", "/home/agent"))).toMatchObject(gate);
   });
@@ -1570,6 +1588,39 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     const plain = ["Accessing workspace:", "/some/workspace", "", "Quick safety check: Is this a project you created or one you trust?",
       "❯ 1. Yes, I trust this folder", "  2. No, exit"].join("\n");
     expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("the real plain prompt in a workspace whose path reads 'Claude Code v' is still trust_gate, never resumed", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const path = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    expect(path).toContain("/tmp/Claude Code v2/lab");
+    expect(probe(path)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["wrapped at a space", [" /home/agent/testes de", " Claude Code v2.1.322"]],
+    ["wrapped mid-word", [" /home/agent/labs/versoes-do-cli-claude/", " Claude Code v2.1.322 lab/seat"]],
+    ["after a dash", [" /home/agent/labs/old", " -Claude Code v2.1.322"]],
+  ])("a workspace path with 'Claude Code v<x.y.z>' %s by a 40-column pane is still trust_gate", (_case, path) => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("<lab>/backstop/rep"));
+    const warning = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const note = rows.findIndex(row => row.includes("configuration."));
+    const plain = [...rows.slice(0, from), ...path, ...rows.slice(from + 2, warning), ...rows.slice(note + 1)].join("\n")
+      .replace(" ❯ No, continue without these", " ❯ No, exit");
+    expect(plain).not.toMatch(/pre-approves|without asking|No, continue/);
+    expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("Claude's version header drawn after the prompt still makes it history", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n").replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    for (const header of [" ▐▛███▜▌   Claude Code v2.1.322", "Claude Code v2.1.322"]) {
+      const later = [plain, "", header, "", "────────────────", "❯ ", "────────────────"].join("\n");
+      expect(probe(later).code).not.toBe("trust_gate");
+    }
   });
 });
 
