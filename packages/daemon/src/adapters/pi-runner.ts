@@ -472,10 +472,17 @@ export class RunnerCore {
   /** Whether the last activity posted is that attention. Later activity in
    *  the same turn (a tool call after a denied approval) replaces it. */
   private attentionIsLatest = false;
-  /** The attention this run's assistant error raised, if any. A harness that
-   *  types `willRetry` at agent_end releases exactly this attention, never a
-   *  refused input's or a get_state attention that happens to be held. */
-  private assistantErrorAttention: "runtime_error" | "transient_turn_error" | null = null;
+  /** WHICH SOURCE raised the current attention — an assistant failure, a
+   *  refused input, or a get_state finding — because the subtype alone can't
+   *  tell them apart (a refused steer and an untyped provider error both ask
+   *  for runtime_error). A `willRetry` release or a retry-start clear may
+   *  release only assistant-owned attention; input- and state-owned attention
+   *  outrank it and pin the owner when raises are deduplicated. */
+  private attentionOwner: "assistant" | "input" | "state" | null = null;
+  /** True between this run's agent_end and the next agent_start/turn_start:
+   *  Pi 0.87.1 emits the exhausted-retry summary AFTER agent_end, so the
+   *  correlation must survive the run boundary on forks. */
+  private runEnded = false;
   // Native OMP retry summaries have no message/status. Correlate only within
   // the announced attempt, using the latest typed assistant failure's exact
   // diagnostic as an identity check, never as a transient-error classifier.
@@ -681,7 +688,7 @@ export class RunnerCore {
       // prompt/steer/follow_up is the seat being unable to work at all —
       // e.g. a missing or invalid credential.
       if (this.runtime !== "pi" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
-        this.raiseAttention("runtime_error");
+        this.raiseAttention("runtime_error", "input");
       }
       return;
     }
@@ -702,7 +709,7 @@ export class RunnerCore {
         // For custom protocol: pi-rpc community harnesses, reporting no session file
         // reads as needing attention rather than stopping the child process.
         this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
-        this.raiseAttention("runtime_error");
+        this.raiseAttention("runtime_error", "state");
         return;
       }
       this.writeSidecar({});
@@ -710,7 +717,7 @@ export class RunnerCore {
         // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
         // seat asks for attention rather than beating idle on a session nothing records.
         this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
-        this.raiseAttention("runtime_error");
+        this.raiseAttention("runtime_error", "state");
         return;
       }
       if (!wasReady) {
@@ -812,13 +819,23 @@ export class RunnerCore {
     }, () => { /* best-effort: resent on the next refresh */ });
   }
 
-  private raiseAttention(subtype: "runtime_error" | "permission_prompt" | "transient_turn_error"): void {
+  private raiseAttention(subtype: "runtime_error" | "permission_prompt" | "transient_turn_error", owner: "assistant" | "input" | "state"): void {
     // Persistent failures and denied approvals outrank transient failures.
     // Only emit when attention changes or intervening activity replaced it.
     const next = this.attention === "runtime_error" ? this.attention
       : this.attention === "permission_prompt" && subtype === "transient_turn_error" ? this.attention : subtype;
-    if (this.attention === next && this.attentionIsLatest) return;
+    // The owner records the source even when the post is deduplicated: an
+    // input or state raise PINS the owner (a later assistant error of the
+    // same subtype must not make it releasable), and an assistant raise
+    // updates the owner only when an assistant failure is what is held.
+    const ownerNext = this.attentionOwner !== null && this.attentionOwner !== "assistant" && owner === "assistant"
+      ? this.attentionOwner : owner;
+    if (this.attention === next && this.attentionIsLatest) {
+      this.attentionOwner = ownerNext;
+      return;
+    }
     this.attention = next;
+    this.attentionOwner = ownerNext;
     this.attentionIsLatest = true;
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
   }
@@ -861,6 +878,7 @@ export class RunnerCore {
 
   private clearAttention(): void {
     this.attention = null;
+    this.attentionOwner = null;
     this.attentionIsLatest = false;
   }
 
@@ -883,14 +901,13 @@ export class RunnerCore {
         this.io.mirrorLine(this.runtime !== "omp"
           ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
-        this.raiseAttention("permission_prompt");
+        this.raiseAttention("permission_prompt", "input");
       }
       return;
     }
     const message = event.message as Record<string, unknown> | undefined;
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
-      this.assistantErrorAttention = null;
     }
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
@@ -903,7 +920,7 @@ export class RunnerCore {
 
     if (event.type === "agent_start") {
       this.clearAttention();
-      this.assistantErrorAttention = null;
+      this.runEnded = false;
     }
     if (this.runtime !== "pi") {
       if (event.type === "agent_start" || event.type === "turn_start"
@@ -915,9 +932,13 @@ export class RunnerCore {
         this.retryFailure = null;
       }
       // A successful automatic retry supersedes the failed attempt.
-      if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")) this.clearAttention();
+      // OMP keeps its existing clear. A fork's retry start releases only what
+      // this run's assistant failure raised — a refused input's or a get_state
+      // attention stays held through the backoff.
+      if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")
+        && (this.runtime === "omp" || this.attentionOwner === "assistant")) this.clearAttention();
       // Some paths omit agent_start; turn_start still opens a new turn.
-      if (event.type === "turn_start") { this.assistantErrorShown = false; this.assistantErrorAttention = null; }
+      if (event.type === "turn_start") { this.assistantErrorShown = false; this.runEnded = false; }
     }
     const mapped = mapPiEvent(event, this.runtime);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
@@ -943,12 +964,12 @@ export class RunnerCore {
       // `willRetry` at agent_end) must not hold the seat through the backoff.
       // Release only the attention this run's assistant error raised; a
       // refused input or get_state attention is not this run's to clear.
+      this.runEnded = true;
       if ((event as { willRetry?: unknown }).willRetry === true
-        && this.assistantErrorAttention !== null
-        && this.attention === this.assistantErrorAttention && this.attentionIsLatest) {
+        && this.attention !== null
+        && this.attentionOwner === "assistant" && this.attentionIsLatest) {
         this.clearAttention();
       }
-      this.assistantErrorAttention = null;
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -961,9 +982,11 @@ export class RunnerCore {
         this.io.mirrorLine(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
-      // Only typed, explicitly transient HTTP failures may release the send
-      // guard at agent_end. Unknown/auth/configuration failures stay attention;
-      // diagnostic prose is never used to decide whether a retry is safe.
+      // A typed transient HTTP status releases at agent_end where the harness
+      // types one (OMP does); a fork's untyped provider failure releases through
+      // `willRetry` at agent_end and the harness's own retry summary instead.
+      // Unknown/auth/configuration failures stay attention; prose never decides
+      // whether a retry is safe — only the harness's own retry signals do.
       const status = message?.errorStatus;
       const transient = (event.type === "message_end" || event.type === "turn_end")
         && message?.role === "assistant" && message.stopReason === "error"
@@ -995,14 +1018,29 @@ export class RunnerCore {
         const assistantFailure = (event.type === "message_end" || event.type === "turn_end")
           && message?.role === "assistant" && message.stopReason === "error";
         const forkRetried = this.runtime !== "omp" && this.retryAttempt !== null;
-        this.assistantErrorAttention = transient || retrySummary || (assistantFailure && forkRetried)
+        const kind = transient || retrySummary || (assistantFailure && forkRetried)
           ? "transient_turn_error" : "runtime_error";
-        this.raiseAttention(this.assistantErrorAttention);
-        this.raiseAttention(this.assistantErrorAttention);
+        // Pi 0.87.1 emits the terminal summary AFTER agent_end (willRetry:
+        // false). By then the failure was already released at agent_end as
+        // transient, and the correlation survives the run boundary on forks —
+        // so a MATCHED summary after the run ended settles instead of raising
+        // a fresh persistent error. A genuine unmatched failure still raises.
+        if (retrySummary && this.runEnded && this.runtime !== "omp" && this.runtime !== "pi") {
+          this.retryAttempt = null;
+          this.retryFailure = null;
+          return;
+        }
+        this.raiseAttention(kind, "assistant");
       }
     }
-    if (this.runtime !== "pi" && (event.type === "auto_retry_end" && event.success === true
+    if (this.runtime === "omp" && (event.type === "auto_retry_end" && event.success === true
       || event.type === "agent_end" && event.isTerminal !== false)) {
+      this.retryAttempt = null;
+      this.retryFailure = null;
+    }
+    // A fork's retry correlation survives agent_end (the summary follows it);
+    // agent_settled and a new run are where it genuinely ends.
+    if (this.runtime !== "pi" && this.runtime !== "omp" && event.type === "agent_settled") {
       this.retryAttempt = null;
       this.retryFailure = null;
     }
@@ -1011,7 +1049,7 @@ export class RunnerCore {
     if (mapped.activity.hookEvent === "Stop" && this.attention) {
       // The turn ended, but the operator still has to act. Drop the Stop; if
       // later activity replaced the attention, restore it as the final state.
-      if (!this.attentionIsLatest) this.raiseAttention(this.attention);
+      if (!this.attentionIsLatest) this.raiseAttention(this.attention, this.attentionOwner ?? "assistant");
     } else {
       this.attentionIsLatest = false;
       this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype));

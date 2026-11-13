@@ -310,7 +310,7 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     expect(f.latest()?.state).not.toBe("needs_input");
   });
 
-  it("a fork's exhausted automatic retry clears attention the omp way", async () => {
+  it("a fork's exhausted automatic retry settles in Pi's emit order (agent_end, then the summary, then agent_settled)", async () => {
     const f = forkFixture({ runtime: "omo", agentRunner: 2 });
     const core = f.runner();
     const err = "429 overloaded";
@@ -318,12 +318,73 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
     core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
     core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    // Pi 0.87.1's order: agent_end (willRetry: false) BEFORE the summary.
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: false }));
+    await f.settle();
+    // The terminal summary arrives after the run ended: the correlation
+    // survives the boundary, so a MATCHED summary settles instead of raising
+    // a fresh persistent error.
     core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 2, finalError: err }));
     await f.settle();
-    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_settled" }));
     await f.settle();
     expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
     expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a genuine unmatched failure after the run still raises needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: false }));
+    // No retry correlation exists: this summary is not ours to settle.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 7, finalError: "something else" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+  });
+
+  it("a refused steer after an assistant error keeps needing input through a willRetry release", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429" } }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    // The assistant failure will be retried, but the refused steer still needs
+    // the person: the release is owner-scoped, not subtype-scoped.
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("a refused steer before an assistant error keeps needing input through a willRetry release", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429" } }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("an auto_retry_start on a fork does not release a refused input's attention", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "p-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    await f.settle();
+    // The retry's working beat may be the latest activity, but the refused
+    // input's attention is still HELD: at the run's end the Stop is dropped
+    // and the attention restored, proving the retry-start did not clear it.
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
   });
 
   it("a fork's final unretried provider error stays needs_input", async () => {
