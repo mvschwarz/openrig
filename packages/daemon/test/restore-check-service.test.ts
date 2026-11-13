@@ -1137,7 +1137,7 @@ describe("RestoreCheckService", () => {
   it.each([
     ["kept attached as an external CLI", { attachmentType: "external_cli" }, null, "Restore leaves this seat as it is: it's attached as an external CLI"],
     ["outside the roster restore uses", {}, [], "Restore leaves this seat as it is: it isn't in the roster this restore uses"],
-    ["brought back from its saved startup context", {}, null, "restore brings it back from its saved startup context"],
+    ["brought back from its saved startup context", { restorePolicy: "relaunch_fresh" }, null, "restore brings it back from its saved startup context"],
   ] as const)("a detached seat %s reads yellow, named, and doesn't block the rig", (_label, seat, rosterIds, said) => {
     const result = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ sessionStatus: "detached", startupStatus: "ready", tmuxAttachCommand: null, ...seat })],
@@ -1153,6 +1153,59 @@ describe("RestoreCheckService", () => {
     expect(result.verdict).not.toBe("not_restorable");
   });
 
+  const emptyRosterInputs = (rigId: string) => ({
+    snapshot: { id: "snap-1", kind: "full", data: { rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+      nodes: [], sessions: [], edges: [], checkpoints: {}, topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [] } } },
+    servicesRecord: null,
+  }) as never;
+
+  // A running, ready seat keeps its true readiness, and restore-check names what restore would do with it beside that, in
+  // compact output too.
+  it.each([
+    ["kept attached as an external CLI", { attachmentType: "external_cli" }, false, "it's attached as an external CLI"],
+    ["outside the roster restore uses", {}, true, "it isn't in the roster this restore uses"],
+  ] as const)("a running, ready seat %s is named with what restore does", (_label, seat, emptyRoster, said) => {
+    const result = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode(seat)],
+      ...(emptyRoster ? { getRestoreInputs: emptyRosterInputs } : {}),
+    })).check({ compact: true, noQueue: true, noHooks: true }) as any;
+    const readiness = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+    expect(readiness).toMatchObject({ status: "yellow", evidence: expect.stringContaining(`Seat running and ready: dev-impl@test-rig. Restore leaves this seat as it is: ${said}`) });
+    expect(result.rigs[0]).toMatchObject({ runningReadyNodes: 1 });
+    expect(result.verdict).toBe("restorable_with_caveats");
+  });
+
+  // Restore doesn't launch a seat it leaves as it is, so that seat's missing startup context or startup file doesn't block
+  // the rig; it's still named.
+  it.each([
+    ["external CLI", "no saved startup context", { attachmentType: "external_cli" }, false, startupContextProbe({ status: "missing", evidence: "Persisted startup context missing" })],
+    ["roster-excluded", "no saved startup context", {}, true, startupContextProbe({ status: "missing", evidence: "Persisted startup context missing" })],
+    ["external CLI", "a missing required startup file", { attachmentType: "external_cli" }, false, startupContextProbe({ resolvedStartupFiles: [{ absolutePath: "/gone/notes.md", required: true }] })],
+    ["roster-excluded", "a missing required startup file", {}, true, startupContextProbe({ resolvedStartupFiles: [{ absolutePath: "/gone/notes.md", required: true }] })],
+  ] as const)("a detached %s seat with %s and no resume token doesn't block the rig", (_kind, _missing, seat, emptyRoster, context) => {
+    const result = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ sessionStatus: "detached", startupStatus: "ready", tmuxAttachCommand: null, ...seat })],
+      getStartupContext: () => context,
+      exists: (target: string) => target !== "/gone/notes.md",
+      ...(emptyRoster ? { getRestoreInputs: emptyRosterInputs } : {}),
+    })).check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((entry: { check: string }) => entry.check.startsWith("seat.dev-impl@test-rig.startup"));
+    expect(startup).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore doesn't launch this seat") });
+    expect(result.checks.filter((entry: { status: string }) => entry.status === "red")).toEqual([]);
+    expect(result.verdict).toBe("restorable_with_caveats");
+  });
+
+  // Restore stops a resume-policy seat that had a session but has no resume token before it starts anything, so a saved
+  // startup context doesn't bring it back: it stays red.
+  it("a detached resume seat with no resume token stays red, though its startup context is saved", () => {
+    const result = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ sessionStatus: "detached", startupStatus: "ready", tmuxAttachCommand: null })],
+    })).check({ noQueue: true, noHooks: true }) as any;
+    const readiness = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+    expect(readiness).toMatchObject({ status: "red", evidence: expect.not.stringContaining("brings it back") });
+    expect(result.verdict).toBe("not_restorable");
+  });
+
   it("preserves independent red and unknown causes alongside a stale selection", () => {
     const overrides = { getDesiredClaudeActivityHooks: () => ({ status: "known" as const, selected: true }) };
     // A stopped seat restore can't bring back (no saved startup context, no resume token) stays red.
@@ -1160,9 +1213,10 @@ describe("RestoreCheckService", () => {
       getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
       getStartupContext: () => startupContextProbe({ status: "missing", evidence: "Persisted startup context missing" }),
     })).check({}).verdict).toBe("not_restorable");
-    // One restore brings back is named yellow instead, and doesn't block the rig on its own.
+    // One restore brings back (a fresh-start seat with its saved startup context) is named yellow instead, and doesn't
+    // block the rig on its own.
     expect(new RestoreCheckService(mockDeps({ ...overrides, probeQueueStore: () => ({ available: false, evidence: "broken" }),
-      getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
+      getNodeInventory: () => [claudeNode({ sessionStatus: "exited", restorePolicy: "relaunch_fresh" })],
     })).check({}).verdict).toBe("restorable_with_caveats");
     expect(new RestoreCheckService(mockDeps({ ...overrides, getRestoreInputs: () => { throw new Error("unreadable snapshot"); },
     })).check({}).verdict).toBe("unknown");
@@ -1377,8 +1431,7 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    // The stopped seat restore brings back from its saved startup context is a caveat, not a blocker.
-    expect(result.readiness.status).toBe("ready_with_caveats");
+    expect(result.readiness.status).toBe("not_ready");
     expect(result.recovery).toEqual({
       status: "actionable",
       summary: expect.stringContaining("1 rig can be recovered"),
@@ -1696,7 +1749,8 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    // The stopped seat restore brings back is a caveat, so the unknown restore input decides the aggregate, and stays named.
+    // With restore's inputs unreadable, what restore does with the stopped seat is unknown (a caveat), so the unknown
+    // restore input decides the aggregate, and stays named.
     expect(result.readiness.status).toBe("unknown");
     expect(result.rigs[0].status).toBe("unknown");
     expect(result.recovery).toEqual({

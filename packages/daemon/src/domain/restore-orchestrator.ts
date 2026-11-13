@@ -58,7 +58,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { validatePreRestore } from "./restore-preconditions.js";
+import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
@@ -119,8 +119,6 @@ export interface SelectedRestoreHistory {
   beforeNative: (resultSessionId?: string, bindingId?: string) => boolean;
 }
 
-/** Pre-restore blockers that concern one seat's own startup content; see restore(). */
-const SEAT_STARTUP_BLOCKERS = new Set(["required_startup_file_missing", "startup_owner_root_missing"]);
 
 export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
   if (nodes.length === 0) return "failed";
@@ -446,14 +444,22 @@ export class RestoreOrchestrator {
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
-      // A seat that is still a node of this rig but isn't in the snapshot's intended roster (one claimed with rig bind or
-      // rig attach after the rig's topology was recorded) isn't started by this restore. It's named as skipped rather than
-      // filed as historical, and the rig isn't fully restored. A roster the operator narrowed on purpose keeps the rest out
-      // without reading as a skip.
-      const liveNodeIds = new Set((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => current.id));
+      // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
+      // one claimed with rig bind or rig attach after the rig's topology was recorded, or one added or claimed after this
+      // snapshot was taken, so it isn't in the snapshot at all. It's named as skipped rather than filed as historical or left
+      // out, and the rig isn't fully restored. A roster the operator narrowed on purpose keeps the rest out without reading
+      // as a skip.
+      const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
+      const liveNodeIds = new Set(liveNodes.map((current) => current.id));
+      const snapshotNodeIds = new Set(snapshot.data.nodes.map((node) => node.id));
       const narrowedRoster = snapshot.data.topologyRoster?.source === "operator_explicit";
-      const excludedNodes: RestoreExcludedNode[] = topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
-        ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded);
+      const excludedNodes: RestoreExcludedNode[] = [
+        ...topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
+          ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded),
+        ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id)).map((current) => ({
+          nodeId: current.id, logicalId: current.logicalId, reason: "current_seat_not_in_intended_roster" as const,
+        }))),
+      ];
       const skippedSeats = excludedNodes.filter((excluded) => excluded.reason === "current_seat_not_in_intended_roster");
       // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
       // without its startup content; it's reported failed with the reason, and the rest of the rig restores. Any other
@@ -568,7 +574,7 @@ export class RestoreOrchestrator {
       }
 
       for (const skipped of skippedSeats) {
-        restoreWarnings.push(`Restore: ${skipped.logicalId} was skipped: it's a seat of this rig but not in this snapshot's intended roster (a seat claimed after the rig's topology was recorded), so restore didn't start it.`);
+        restoreWarnings.push(`Restore: ${skipped.logicalId} was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.`);
       }
       const rolledUp = rollupRestoreRigResult(nodeResults);
       const restoreResult: RestoreResult = {

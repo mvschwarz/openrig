@@ -431,7 +431,7 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing"]);
     });
-    expect(logs).toContain("  work.claimed: skipped — not in this restore's roster (a seat claimed after the rig's topology was recorded)");
+    expect(logs).toContain("  work.claimed: skipped — not in this restore's roster (added or claimed after that roster was recorded)");
     expect(logs.join("\n")).not.toContain("old.gone");
     expect(logs).toContain("The one seat is running; work.claimed was skipped. The restore isn't whole, so rig up exits 1.");
     expect(exitCode).toBe(1);

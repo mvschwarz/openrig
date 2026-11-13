@@ -580,9 +580,32 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
     expect(result.result.excludedNodes).toEqual([expect.objectContaining({ logicalId: "claimed", reason })]);
-    const skippedWarning = "Restore: claimed was skipped: it's a seat of this rig but not in this snapshot's intended roster (a seat claimed after the rig's topology was recorded), so restore didn't start it.";
+    const skippedWarning = "Restore: claimed was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
     expect(result.result.warnings.includes(skippedWarning)).toBe(reason === "current_seat_not_in_intended_roster");
     expect(result.result.rigResult).toBe(rigResult);
+  });
+
+  // A seat added or claimed after the selected snapshot was taken isn't in it at all. Restore doesn't start it either, so
+  // it's named as skipped the same way; a roster the operator narrowed on purpose still keeps it out without a skip.
+  it.each([
+    ["a recorded", "materialized_topology", true],
+    ["an operator-narrowed", "operator_explicit", false],
+  ] as const)("a seat added after the snapshot, restored from %s roster", async (_label, source, named) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "shell", role: "worker", runtime: "terminal" }], edges: [] });
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source, intendedNodeIds: data.nodes.map((node) => node.id) };
+    });
+    const late = rigRepo.addNode(snap.rigId, "late", { role: "worker", runtime: "claude-code" });
+
+    const result = await createOrchestrator().restore(fixed.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
+    expect(result.result.excludedNodes).toEqual(named ? [{ nodeId: late.id, logicalId: "late", reason: "current_seat_not_in_intended_roster" }] : []);
+    const skippedWarning = "Restore: late was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
+    expect(result.result.warnings.includes(skippedWarning)).toBe(named);
+    expect(result.result.rigResult).toBe(named ? "partially_restored" : "fully_restored");
   });
 
   it("rejects an explicitly selected unusable snapshot before mutation", async () => {

@@ -6,7 +6,7 @@ import { existsSync, accessSync, constants } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { validatePreRestore } from "./restore-preconditions.js";
+import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -206,6 +206,13 @@ function seatResumes(node: NodeInventoryEntry): boolean {
     && (node.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
 }
 
+/** Restore's pre-launch stop: a resume-policy seat that had a session but has no resume token stops for a decision before
+ *  anything starts, whatever its saved startup context. A terminal seat starts fresh instead. */
+function restoreStopsWithoutResumeToken(node: NodeInventoryEntry): boolean {
+  return !!node.sessionStatus && !node.resumeToken && node.runtime !== "terminal"
+    && (node.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
+}
+
 export interface RestoreCheckDeps {
   /** Get all rigs as summaries */
   listRigs: () => Array<{ rigId: string; name: string; hasServices?: boolean }>;
@@ -218,7 +225,8 @@ export interface RestoreCheckDeps {
   /** Get the newest snapshot for exact restore planning when available */
   getLatestSnapshot?: (rigId: string) => { id: string; kind: string } | null;
   /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
-  /** The latest recorded topology roster (node ids), which a current-state restore uses; null when none is recorded. */
+  /** The latest recorded topology roster (node ids), which a current-state restore uses; null when none is recorded. It
+   *  throws when the recorded roster is malformed, and the rig's restore inputs read as unknown. */
   getMaterializedRoster?: (rigId: string) => string[] | null;
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
@@ -367,7 +375,7 @@ export class RestoreCheckService {
       }
 
       for (const node of nodes) {
-        const readinessCheck = this.checkSeatReadiness(node, rig.name, restoreRoster);
+        const readinessCheck = this.checkSeatReadiness(node, rig.name, restoreRoster, preconditionError !== undefined);
         checks.push(readinessCheck);
         rigChecks.push(readinessCheck);
 
@@ -388,13 +396,18 @@ export class RestoreCheckService {
             ...startupContextCheck.unknownChecks,
           ]);
         }
-        rigChecks.push(startupContextCheck.check);
+        // Restore doesn't launch a seat it leaves as it is, so that seat's missing startup inputs are a caveat, not a blocker.
+        const leaves = this.restoreLeaves(node, restoreRoster);
+        const contextCheck: CheckEntry = leaves && startupContextCheck.check.status === "red"
+          ? { ...startupContextCheck.check, status: "yellow", evidence: `${startupContextCheck.check.evidence}. Restore doesn't launch this seat (${leaves}), so this doesn't block a restore.` }
+          : startupContextCheck.check;
+        rigChecks.push(contextCheck);
         if (omitReadyDetail) {
           // Not emitted (AC-4 token-safe), but counts toward the top-level
           // verdict/readiness/counts (rev1-r2 no-false-ready).
-          deferredAssessmentChecks.push(startupContextCheck.check);
+          deferredAssessmentChecks.push(contextCheck);
         } else {
-          checks.push(startupContextCheck.check);
+          checks.push(contextCheck);
         }
 
         // AC-4 / FR-3: default compact does NOT assemble the rest of the
@@ -476,11 +489,19 @@ export class RestoreCheckService {
         servicesRecord: input.servicesRecord,
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
       });
-      const { blockers, warnings } = validation;
       const rosterIds = input.snapshot.data.topologyRoster?.intendedNodeIds;
+      const roster = rosterIds ? new Set(rosterIds) : null;
+      // A seat's own startup blocker holds only a seat restore launches. For one restore leaves as it is, it's a caveat.
+      const leftNodeIds = new Set(inventory.filter((node) => node.nodeId && this.restoreLeaves(node, roster)).map((node) => node.nodeId));
+      const leftBlockers = validation.blockers.filter((blocker) => SEAT_STARTUP_BLOCKERS.has(blocker.code) && !!blocker.nodeId && leftNodeIds.has(blocker.nodeId));
+      const blockers = validation.blockers.filter((blocker) => !leftBlockers.includes(blocker));
+      const warnings = [
+        ...validation.warnings,
+        ...leftBlockers.map((blocker) => `${blocker.code}: ${blocker.message} (restore doesn't launch this seat, so this doesn't block a restore)`),
+      ];
       return {
         snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
-        roster: rosterIds ? new Set(rosterIds) : null,
+        roster,
         check: {
           check,
           status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
@@ -854,19 +875,31 @@ export class RestoreCheckService {
     };
   }
 
-  /** What restore does with a seat that isn't running and ready: leaves it as it is (an external CLI attachment it keeps,
-   *  or a seat outside the roster it restores), brings it back (saved startup context, or a resume), or neither (null). */
-  private restoreFate(node: NodeInventoryEntry, roster: Set<string> | null | undefined): { leaves: string } | { brings: string } | null {
-    if (node.attachmentType === "external_cli") return { leaves: "it's attached as an external CLI, and restore keeps that attachment" };
+  /** Why restore leaves a seat as it is, if it does: an external CLI attachment it keeps, or a seat outside the roster it
+   *  restores. Restore doesn't launch such a seat. */
+  private restoreLeaves(node: NodeInventoryEntry, roster: Set<string> | null | undefined): string | null {
+    if (node.attachmentType === "external_cli") return "it's attached as an external CLI, and restore keeps that attachment";
     if (roster && node.nodeId && !roster.has(node.nodeId)) {
-      return { leaves: "it isn't in the roster this restore uses (a seat claimed after the rig's topology was recorded)" };
+      return "it isn't in the roster this restore uses (it was added or claimed after that roster was recorded)";
     }
+    return null;
+  }
+
+  /** What restore does with a seat that isn't running and ready: leaves it as it is, brings it back (saved startup context,
+   *  or a resume), can't be told because restore's inputs couldn't be read, or none of these (null). */
+  private restoreFate(node: NodeInventoryEntry, roster: Set<string> | null | undefined, inputsUnknown: boolean):
+    { leaves: string } | { brings: string } | { unknown: string } | null {
+    if (node.attachmentType === "external_cli") return { leaves: this.restoreLeaves(node, roster)! };
+    if (inputsUnknown) return { unknown: "restore's inputs couldn't be read, so what restore does with this seat is unknown" };
+    const leaves = this.restoreLeaves(node, roster);
+    if (leaves) return { leaves };
+    if (restoreStopsWithoutResumeToken(node)) return null;
     if (node.nodeId && this.deps.getStartupContext(node.nodeId).status === "ok") return { brings: "restore brings it back from its saved startup context" };
     if (seatResumes(node)) return { brings: "restore tries its saved conversation" };
     return null;
   }
 
-  private checkSeatReadiness(node: NodeInventoryEntry, rigName: string, roster?: Set<string> | null): CheckEntry {
+  private checkSeatReadiness(node: NodeInventoryEntry, rigName: string, roster?: Set<string> | null, inputsUnknown = false): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.readiness`;
 
@@ -899,7 +932,7 @@ export class RestoreCheckService {
       // A seat restore leaves or brings back is named here, not a blocker for the whole rig; only a seat restore itself
       // can't bring back stays red.
       // A running seat that isn't ready (a failed start, attention, an identity question) isn't restore's to restart.
-      const fate = node.sessionStatus === "running" ? null : this.restoreFate(node, roster);
+      const fate = node.sessionStatus === "running" ? null : this.restoreFate(node, roster, inputsUnknown);
       if (fate && "leaves" in fate) {
         return {
           check,
@@ -907,6 +940,15 @@ export class RestoreCheckService {
           evidence: `Seat not running/ready: sessionStatus=${node.sessionStatus ?? "unknown"} startupStatus=${node.startupStatus ?? "unknown"}${latestError}. Restore leaves this seat as it is: ${fate.leaves}.`,
           remediation: "Restore won't start this seat; start or reattach it yourself if you need it running",
           remediationSafe: false,
+        };
+      }
+      if (fate && "unknown" in fate) {
+        return {
+          check,
+          status: "yellow",
+          evidence: `Seat not running/ready: sessionStatus=${node.sessionStatus ?? "unknown"} startupStatus=${node.startupStatus ?? "unknown"}${latestError}; ${fate.unknown}.`,
+          remediation: "Inspect the rig's restore snapshot and persisted inputs, then rerun rig restore-check",
+          remediationSafe: true,
         };
       }
       if (fate && "brings" in fate) {
@@ -927,6 +969,17 @@ export class RestoreCheckService {
       };
     }
 
+    // Running and ready now; name what restore would do when it leaves this seat as it is.
+    const leaves = this.restoreLeaves(node, roster);
+    if (leaves) {
+      return {
+        check,
+        status: "yellow",
+        evidence: `Seat running and ready: ${node.canonicalSessionName}. Restore leaves this seat as it is: ${leaves}.`,
+        remediation: "Nothing to fix now. Restore won't start or restart this seat.",
+        remediationSafe: true,
+      };
+    }
     return {
       check,
       status: "green",
