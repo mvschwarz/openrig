@@ -11,7 +11,15 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(out).toContain('↩ Reply: rig send driver-3@my-rig "..."');
   });
 
-  it.each(["human@kernel", "human@host", "human-alice@kernel", "human-alice@host"])(
+  // An answer typed at this machine is recorded as human@host, which names nobody: nothing is delivered there, so its
+  // reply hint says so and points to the person's own address.
+  it.each(["human@host", "human@host@host-origin"])("never points %s's reply at the unattributed address", (sender) => {
+    const last = wrapSendBody(sender, "driver@rig", "Answered.").split("\n").at(-1);
+    expect(last).toBe(`↩ Don't write to ${sender}: nothing is delivered there. To ask the person back, use their own address (rig gateway human list shows it).`);
+    expect(last).not.toContain("rig queue create");
+  });
+
+  it.each(["human@kernel", "human-alice@kernel", "human-alice@host"])(
     "gives %s a queue update reply with the existing human-route fields",
     (sender) => {
       const body = "Please check this.\nKeep the actor unchanged.";
