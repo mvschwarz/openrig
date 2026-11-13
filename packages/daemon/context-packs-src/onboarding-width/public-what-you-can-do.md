@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-three top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.14`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.15`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -352,7 +352,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   never posted. By default, an emoji reaction on a message posted for an ask reaches the asking seat
   as a task tagged `human-reaction`: a signal to interpret, not an answer, and the ask stays open.
   `rig slack setup --reactions off` disables that routing; the default is `route`, and regenerating
-  the app manifest preserves the setting.
+  the app manifest preserves the setting. Since 0.7.15 link and media previews on posts to a person
+  are off by default: `rig slack setup --unfurl on` turns them back on from the connector's next
+  rewire, and `rig slack status` shows the mode. An answer to a reply that arrived in an older
+  thread posts back into that thread.
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
@@ -641,7 +644,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   result. VS Code, Copilot CLI and Cursor load it with no seat: give the app its own
   `rig mcp serve --front-door` server with `OPENRIG_SESSION_NAME` set and turn the plugin's off.
   A skill-only edition for Claude's plugin directory, in `plugins/claude-directory/`, follows
-  handed-on work and keeps its reply route.
+  handed-on work and keeps its reply route. The plugin needs Claude Code 2.1.119 or later: on
+  earlier versions, with its OpenRig seat setting blank, the agent has no OpenRig tools.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -725,6 +729,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   (or, when it names none, the only one Codex has logged since it started); OpenRig can't tell
   which conversation Codex is on now. If the conversation was changed inside the running Codex,
   the restart may refuse or resume the earlier one, so look at the pane (`rig capture <seat>`) first.
+  Since 0.7.15, when it refuses a recoverable seat whose tmux session is gone (`session_not_live`),
+  it names the way back: `rig launch '<rig>' '<node>'` (add `--plan` to preview).
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add`, `rig grow` and `rig remove` take the rig's name or ID; a name two active rigs share is refused
   with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
@@ -792,6 +798,12 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  Since 0.7.15 start waits up to 180 s for the child it started, with a progress line about every
+  20 s: let it finish rather than starting again. The longer wait isn't a cure for a slow start.
+  When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
+  slow synchronous steps by site, since 0.7.15 including three more queue reads and each slow step
+  of a nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
+  `nodes.inventory.terminal_work`).
   On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
   own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
   as before, with one log line giving the reason.
@@ -858,6 +870,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   Use `rig launch ... --snapshot-id <id>` when selection must be exact, and `rig restore status
   <attempt> --rig <rig>` for the derived intended-set receipt after an asynchronous restore.
   restore-check's per-seat `seat.<s>.queue-file` check is now `seat.<s>.queue-store`.
+  Since 0.7.15 restore resumes a seat in a rig with pods that has a resume token but no saved
+  startup context, names the missing context in its restore gaps and reads `partially_restored`;
+  restore-check reads that seat yellow. Both warn when a snapshot's named Codex profile was cleared
+  from the current seat. A rig can still read `fully_restored` past a seat restore didn't start or
+  one left attached, and a seat left as a bare shell still counts as running in `rig ps`.
 - **`rig restore-packet write` / `read` / `validate`** — a seat is about to die or must move
   runtimes; capture what it knows into a portable artifact instead of losing it with the process.
 - **Upgrading is agent-led** — load the shipped `openrig-upgrade` skill for the bounded inspect,
@@ -956,6 +973,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   re-nudges). `--enabled true|false` remains compatible: true selects hold, false selects off.
   Known limit: in `draft-aware`, a multi-line message to a Claude seat can stay unsubmitted when the
   paste changes Claude's footer hint, and later sends wait behind it; check the seat's composer.
+  Since 0.7.15 `draft-aware` re-checks right before an automatic paste and holds after recent
+  client activity or when tmux can't be read; typing after that last check still isn't seen. With
+  Claude Code's full-width auto-update-failure footer on screen, an empty `draft-aware` seat can
+  hold an ordinary send; `rig seat held-messages` shows it.
   `rig seat status` shows the requested/effective mode; wait for pending activation to finish.
   **`rig seat held-messages`** lists what was retained and **`rig seat retire-held-message`**
   retires one; changing mode does not replay old held messages. A seat that starts, or a successor
@@ -1029,6 +1050,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   cached hook keeps that trust, as with any hook trusted in Codex; the trust covers that
   `CODEX_HOME`, so your own Codex sessions there load the plugin too, and its hooks do nothing
   outside an OpenRig seat; adding your own Codex hook can trigger a re-review of one OpenRig hook.
+  Since 0.7.15, when a new openrig-core changes one of those six hook declarations, the boot or
+  launch that installs it renews OpenRig's approvals from its own record, in the daemon's Codex
+  home at boot and in a seat's own Codex home at its launch, instead of stopping at Codex's review.
+  A person's own choice in any layer OpenRig reads keeps the review. A linked `config.toml` or
+  `hooks.json` still has its trust recorded under the link's target.
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
   enough context left to believe it knows everything and not enough to actually know anything — and
   **the compacted agent is the only one who knows it happened**, while every other seat keeps
@@ -1109,7 +1135,8 @@ scheme, and nothing downstream can see it.
   System World, topology, and Project World plan. Add `--runtime` to see the composed managed skill
   loadout, `--apply-skills` to reconcile its owned harness projection, or `--deliver` to emit the
   exact extant files in order while marking absent pieces visibly. Without the flags it remains
-  plan-only. Without `--project` it picks the project itself, in order: the only project, the
+  plan-only. Since 0.7.15 a `--mission` that doesn't exist adds a warning and reads
+  `missionRoot` null, instead of quietly serving the project's context. Without `--project` it picks the project itself, in order: the only project, the
   project whose `rigs:` lists the seat's rig, the deepest project root containing the working
   folder, then the only unclaimed project. It reports `position.selectedBy`. If a step is
   ambiguous (two projects list the rig, or two roots tie), it stops there and asks for
@@ -1621,7 +1648,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   A hosted member's roster entry shows whether it's checking in: its expected cadence and its last
   check-in, read as checking in, overdue, not yet checked in or checking in on request, and unknown
   when that can't be read. It's a status, never a gate on delivery. Since 0.7.14 `rig ps`,
-  `rig_team` and the TUI's tables list connected assistants with that check-in line.
+  `rig_team` and the TUI's tables list connected assistants with that check-in line; since 0.7.15
+  the TUI keeps it when a rig's inventory can't be read. An assistant that passes its team's
+  display name as `rig_team`'s `rigId` is told to leave `rigId` out to see its own team.
   **Internet-facing hosted members are experimental, unsupported, off by default and at your
   own risk.** Local assistants can connect locally. Internet access needs your own TLS tunnel or
   proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
