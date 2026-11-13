@@ -654,19 +654,21 @@ const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 /** For a connection that relays a person's request to another assistant (an external caller, or the front door): which one
  *  they mean is theirs to say when more than one fits, never inferred from the agent's own history. The listing steps need
  *  rig_team, so a connection without it is told only to ask. Pickup is said only where it's true: another connected
- *  assistant waits for its person, and the front door's team seats are woken. A member, which works items, isn't given it. */
-function askWhichAssistant(canList: boolean, pickup: "connected-assistant" | "woken" | null): string {
-  const picked = pickup === "connected-assistant"
-    ? "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up."
-    : pickup === "woken" ? "When you send, tell your person <name> will pick it up on its own." : "";
-  const sentences = canList
-    ? ["Before sending a request to another assistant, list the team's members.",
-      "If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory.",
-      "If the list says the chosen one isn't connected, say so before sending and ask whether to send it anyway.",
-      picked, "If your person names one clearly, or says to send it anyway, go ahead."]
-    : ["If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory.",
-      picked, "If your person names one clearly, go ahead."];
-  return sentences.filter(Boolean).join(" ");
+ *  assistant waits for its person; on the front door, a running team seat is woken, and one sent to anyway waits until it's
+ *  back. A member, which works items, isn't given it. */
+function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
+  if (!canList) {
+    return "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+  }
+  return [
+    "Before sending a request to another assistant, list the team's members.",
+    "If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory.",
+    "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
+    ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
+    "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
+    ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
+    "If your person names one clearly, or says to send it anyway, go ahead.",
+  ].join(" ");
 }
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
@@ -674,7 +676,7 @@ function askWhichAssistant(canList: boolean, pickup: "connected-assistant" | "wo
 export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
-  askWhichAssistant(true, "woken"),
+  askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
@@ -716,7 +718,7 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
   // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
   const instructions = tools.has("rig_queue_create")
-    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), tools.has("rig_team") ? "connected-assistant" : null)}` : workflow;
+    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), false)}` : workflow;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 

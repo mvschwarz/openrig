@@ -21,9 +21,10 @@ function mockClient(overrides?: {
 
 // What a connection that relays a person's request is told when more than one assistant could be the one they mean. With
 // rig_team it lists the team first; pickup is said only where it's true for the path.
-const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory. If the list says the chosen one isn't connected, say so before sending and ask whether to send it anyway.";
+const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, naming them as the list does; don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.";
+const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your person that seat will pick it up on its own.";
 const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.";
-const ASK_WOKEN_PICKUP = "When you send, tell your person <name> will pick it up on its own.";
+const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
 const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
 const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway, go ahead.";
 
@@ -403,10 +404,10 @@ describe("MCP Server", () => {
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
-      // It hands the team the person's work, so which assistant they mean is theirs to say when several fit; its team's
-      // seats are woken, so it promises no wait for a person.
-      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_WOKEN_PICKUP} ${ASK_GO_AHEAD}`);
-      expect(FRONT_DOOR_WORKFLOW).not.toContain(ASK_CONNECTED_PICKUP);
+      // It hands the team the person's work, so which assistant they mean is theirs to say when several fit. Its list shows
+      // team seats and connected assistants: only a running team seat picks a request up on its own.
+      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD}`);
+      expect(FRONT_DOOR_WORKFLOW).not.toContain("<name>");
       // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
       expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
       const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
@@ -908,7 +909,8 @@ describe("MCP Server", () => {
     await external.connect(clientTransport);
     const instructions = external.getInstructions() ?? "";
     expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD}`);
-    expect(instructions).not.toContain(ASK_WOKEN_PICKUP);
+    expect(instructions).not.toContain(ASK_RUNNING_PICKUP);
+    expect(instructions).not.toContain(ASK_SENT_ANYWAY);
     await external.close();
     await server.close();
   });
