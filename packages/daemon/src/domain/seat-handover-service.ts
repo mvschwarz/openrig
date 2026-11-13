@@ -896,7 +896,7 @@ export class SeatHandoverService {
     if (!proof.ok) {
       return { ok: false, code: "successor_identity_unproven", message: proof.message,
         guidance: "unprovable" in proof && proof.unprovable
-          ? `Nothing was changed. The successor runs in the pane (rig capture ${quotedSeat}), but --recover can't prove it, and running it again will not change that; the seat stays bound to its previous occupant, which the failed handover already ended. Another handover, or rig seat launch ${quotedSeat} --fresh --stop --reason "<why>", ends the running successor.`
+          ? `Nothing was changed. The successor runs in the pane (rig capture ${quotedSeat}), but --recover can't prove it: two samples a few seconds apart found the same foreground with no Claude it recognizes. If the pane shows Claude has not started yet (a wrapper still waiting), run --recover again once it has; if Claude already runs there, running it again will not change that: the seat stays bound to its previous occupant, which the failed handover already ended. Another handover, or rig seat launch ${quotedSeat} --fresh --stop --reason "<why>", ends the running successor.`
           : `Nothing was changed. Look at the pane: rig capture ${quotedSeat}. If the successor is still starting, run the recovery again in a moment; another handover ends whatever runs there.` };
     }
 

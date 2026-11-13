@@ -648,6 +648,39 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation, kind: "handover" });
   });
 
+  // CodeRabbit on #3044: a classic #! wrapper still waiting (here a `sleep`) when --recover runs, after the handover's
+  // readiness window, shows the same foreground in both samples. The refusal keeps "can't prove it", but its guidance
+  // says to run --recover again once the pane shows Claude has started, and that retry proves the successor.
+  it("a classic wrapper still waiting across both samples is refused with a retry once Claude starts, which then proves it", async () => {
+    const launched = `--session-id ${successorToken} --name ${SEAT}`;
+    let from = Number.POSITIVE_INFINITY;
+    const fg = () => elapsed - from >= 6_000 ? [
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/opt/claude/bin/claude ${launched}`, executableName: "claude", startedAt },
+    ] as NativeProcessRow[] : [
+      ...WRAPPER_ONLY(launched),
+      { pid: 103, ppid: 101, pgid: 101, tpgid: 101, command: "sleep 600", executableName: "sleep", startedAt },
+    ] as NativeProcessRow[];
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? fg() : []),
+    ];
+    const generation = await failedHandover();
+    from = elapsed;
+    const before = state();
+    const first = await service().recover({ seatRef: SEAT, reason: "adopt the waiting wrapper's successor" });
+    expect(first).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (first.ok) throw new Error("expected a refusal");
+    expect(first.guidance).toContain("--recover can't prove it");
+    expect(first.guidance).toContain("run --recover again once it has");
+    expect(first.guidance).not.toMatch(/can't prove it, and running it again will not change that/);
+    expect(state()).toEqual(before);
+    elapsed += 4_000; // the wrapper ends its wait and execs Claude
+    vi.setSystemTime(startedAtMs + elapsed);
+    const second = await service().recover({ seatRef: SEAT, reason: "adopt the waiting wrapper's successor" });
+    expect(second).toMatchObject({ ok: true });
+    expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation, kind: "handover" });
+  });
+
   // A foreground that changed between the two samples and still holds no Claude the proof knows (the wrapper started a
   // node child) is a launch still starting: the refusal says to run the recovery again, not "can't prove it".
   it("a classic launch whose foreground changes between the two samples says to run the recovery again", async () => {

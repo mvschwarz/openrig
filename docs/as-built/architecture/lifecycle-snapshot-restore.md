@@ -328,7 +328,8 @@ cited here by number with the code that carries them):
   or a renamed binary it is not, and when the foreground runs the launch's
   conversation with no such Claude (nor a native one whose executable path
   this sample could not read), the refusal says `--recover` can't prove it
-  instead of asking to run it again, but only when a second sample,
+  (to run it again only once the pane shows a waiting wrapper has started
+  Claude), but only when a second sample,
   `UNPROVABLE_CONFIRM_MS` (3 s) later, finds the same foreground: a `#!`
   wrapper in its start window has not yet exec'd or started its Claude.
   The result and
