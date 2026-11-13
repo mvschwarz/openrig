@@ -24,7 +24,8 @@ import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAl
 import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
-import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import { buildNativeResumeCommand, buildCodexResumeCore, codexSeatPostureArg } from "./native-resume-probe.js";
+import { validateCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
@@ -114,12 +115,37 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null, codexChoice?: CodexSeatChoice): string | null {
+  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp,
+    codexChoice && "permissions" in codexChoice ? codexChoice.permissions : undefined);
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
+
+/** Shown beside a Codex resume command when the seat's saved permission choice couldn't be read: the command still shows. */
+const CODEX_PERMISSIONS_NOT_INCLUDED = "This seat's saved Codex permission choice couldn't be read, so the resume command doesn't include it and "
+  + "carries the default posture instead. Repair it with rig seat set-permissions <seat> --codex-permissions <file> --reason <reason>.";
+
+/** A Codex seat's saved permission choice: the choice, or unreadable. A seat with none has no entry. */
+type CodexSeatChoice = { permissions: CodexMemberPermissions } | { unreadable: true };
+
+/** Every seat's saved Codex permission choice, in one read. A schema without the column (a minimal fixture) has none. */
+function readCodexSeatChoices(db: Database.Database): Map<string, CodexSeatChoice> {
+  const choices = new Map<string, CodexSeatChoice>();
+  let rows: Array<{ id: string; codex_permissions_json: string }>;
+  try {
+    rows = db.prepare("SELECT id, codex_permissions_json FROM nodes WHERE codex_permissions_json IS NOT NULL").all() as typeof rows;
+  } catch (error) {
+    if ((error as { code?: string }).code === "SQLITE_ERROR" && /no such column: codex_permissions_json\b/.test((error as Error).message)) return choices;
+    throw error;
+  }
+  for (const row of rows) {
+    try { choices.set(row.id, { permissions: validateCodexMemberPermissions(JSON.parse(row.codex_permissions_json)) }); }
+    catch { choices.set(row.id, { unreadable: true }); }
+  }
+  return choices;
+}
 
 function computeRecoveryGuidance(input: {
   runtime: string | null;
@@ -130,8 +156,10 @@ function computeRecoveryGuidance(input: {
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
   claudeMcp?: ClaudeMcp;
+  /** Codex: the seat's saved permission choice; undefined when it has none. */
+  codexChoice?: CodexSeatChoice;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp, codexChoice } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -165,14 +193,20 @@ function computeRecoveryGuidance(input: {
     const notes: string[] = [];
 
     const daemonOptOut = codexDaemonOptOut === true;
+    // The seat's own permission choice replaces the posture decision, as on its managed resume.
+    const seatPosture = codexSeatPostureArg(codexConfigProfile, codexChoice && "permissions" in codexChoice ? codexChoice.permissions : undefined);
+    const lastCommand = buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, seatPosture, daemonOptOut);
     if (resumeToken) {
-      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, seatPosture, daemonOptOut));
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(lastCommand);
+    }
+    if (codexChoice && "unreadable" in codexChoice) {
+      notes.push(CODEX_PERMISSIONS_NOT_INCLUDED);
     }
 
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
@@ -186,8 +220,11 @@ function computeRecoveryGuidance(input: {
       notes.push(CODEX_DAEMON_CHOICE_NOT_RECORDED);
     }
 
+    const ownChoice = "it carries this seat's own permission choice, as its managed launch does.";
     return {
-      summary: resumeToken
+      summary: seatPosture
+        ? (resumeToken ? `Try native Codex resume first; ${ownChoice}` : `No stored Codex resume token. Try ${lastCommand}; ${ownChoice}`)
+        : resumeToken
         ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
         : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
       commands,
@@ -612,11 +649,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
   const orienteds = buildOrientedMap(db, rigId);
   const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
+  const codexSeatChoices = readCodexSeatChoices(db);
 
   const rows = queryInventoryRows(db, rigId);
 
   return rows.map((row) =>
-    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts }),
+    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts, codexSeatChoices }),
   );
 }
 
@@ -731,6 +769,8 @@ interface InventoryBuildContext {
   orienteds: Map<string, NodeOriented>;
   /** Each node's current recorded Codex daemon choice (one read per projection); absent = not recorded. */
   codexDaemonOptOuts: Map<string, boolean>;
+  /** Each seat's saved Codex permission choice (one read per projection); absent = none. */
+  codexSeatChoices: Map<string, CodexSeatChoice>;
 }
 
 /**
@@ -743,7 +783,8 @@ function buildInventoryEntry(
   row: InventoryRow,
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
-  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
+  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts, codexSeatChoices } = ctx;
+  const codexChoice = row.runtime === "codex" ? codexSeatChoices.get(row.node_id) : undefined;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
     throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
@@ -823,7 +864,8 @@ function buildInventoryEntry(
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()
       ? { tmuxServerMode: daemonTmuxServerInfo()!.mode } : {}),
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp),
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp, codexChoice),
+    ...(row.resume_token && codexChoice && "unreadable" in codexChoice ? { resumeCommandNote: CODEX_PERMISSIONS_NOT_INCLUDED } : {}),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -921,6 +963,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
   const restoreOutcomes = buildRestoreOutcomeMap(db); // one fleet restore-outcome scan
   const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
   const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts(); // one launch-fact read
+  const codexSeatChoices = readCodexSeatChoices(db); // one permission-choice read
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -930,6 +973,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
       restoreOutcomes,
       orienteds,
       codexDaemonOptOuts,
+      codexSeatChoices,
     });
     let list = out.get(row.rig_id);
     if (!list) { list = []; out.set(row.rig_id, list); }
@@ -1137,6 +1181,7 @@ export function getNodeDetail(
       codexConfigProfile: entry.codexConfigProfile,
       codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
       claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
+      codexChoice: entry.runtime === "codex" ? readCodexSeatChoices(db).get(nodeId) : undefined,
     }),
     binding,
     startupFiles,

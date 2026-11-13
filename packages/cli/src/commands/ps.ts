@@ -72,6 +72,8 @@ export interface NodeEntry {
   lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
+  /** What the resume command couldn't include, when something the seat chose couldn't be read. */
+  resumeCommandNote?: string;
   latestError: string | null;
   /** Slice 15 — `terminal-active` primitive. true=producing output,
    *  false=silent past threshold, null=no signal. NEVER derived from
@@ -231,6 +233,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "lifecycleState",
   "tmuxAttachCommand",
   "resumeCommand",
+  "resumeCommandNote",
   "latestError",
   "terminalActive",
   "hasAssignedWork",

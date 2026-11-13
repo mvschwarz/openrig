@@ -2,6 +2,8 @@ import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
 import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
+import { codexMemberEnvelope, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -52,6 +54,8 @@ export function buildNativeResumeCommand(
   /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
   codexDaemonOptOut?: boolean,
   claudeMcp?: ClaudeMcp | null,
+  /** Codex: the seat's own saved permission choice; it replaces the posture decision, as on the seat's managed resume. */
+  codexPermissions?: CodexMemberPermissions,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -60,9 +64,17 @@ export function buildNativeResumeCommand(
     return `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`;
   }
   if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
+    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined,
+      codexSeatPostureArg(codexConfigProfile, codexPermissions), codexDaemonOptOut === true);
   }
   return null;
+}
+
+/** A Codex seat's own permission choice as the managed resume emits it: the profile, then the choice's flags, in place
+ *  of the posture decision. Undefined without a choice, so the posture decision stands. */
+export function codexSeatPostureArg(codexConfigProfile: string | null | undefined, permissions: CodexMemberPermissions | undefined): string | undefined {
+  if (!permissions) return undefined;
+  return `${codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : ""}${codexEnvelopeArgs(codexMemberEnvelope(permissions))}`;
 }
 
 /** Managed Codex seats run tool commands in a non-login shell, so they keep the seat's own environment, including the
