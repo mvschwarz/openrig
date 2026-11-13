@@ -32,6 +32,24 @@ function rootOf(c: Parameters<typeof selectedProject>[0]): { root: string } | { 
   return { root: indexer.slicesRoot };
 }
 
+/** One counts row per slice directory — the cheap Projects-list projection.
+ *  Shared by the local list route (`?counts=1`) and the fleet view's local leg,
+ *  so both serve the same row for the same slice. */
+function countsRow(sliceName: string, sliceDir: string, selected: ReturnType<typeof selectedProject>): Record<string, unknown> | null {
+  let sourcePath: string | undefined;
+  try {
+    if (selected) sourcePath = workSource(selected.root, sliceDir, false);
+    if (selected) workSource(selected.root, sliceDir);
+    const header = projectSliceHeader(realFs, sliceDir);
+    if (!header) return null;
+    const { content: _content, fm: _fm, ...row } = header;
+    return { ...row, ...(sourcePath ? { sourcePath } : {}) };
+  } catch (err) {
+    return { dirName: sliceName, id: null, displayName: sliceName, error: (err as Error).message, ...(sourcePath ? { sourcePath } : {}),
+      status: null, stage: null, locks: { spec: null, delivery: null } };
+  }
+}
+
 export function scopesRoutes(): Hono {
   const app = new Hono();
   app.get("/projects", c => { try { return c.json(listProjects(c)); } catch (err) { return projectReadResponse(err); } });
@@ -66,21 +84,7 @@ export function scopesRoutes(): Hono {
           intent: "", miniRequirements: [], proofContract: [], progressPath: null, specShaShort: null, prdExists: false, narrative: null };
       }
     };
-    const countsFor = (missionName: string, dirName: string) => {
-      const sliceDir = path.join(r.root, missionName, "slices", dirName);
-      let sourcePath: string | undefined;
-      try {
-        if (selected) sourcePath = workSource(selected.root, sliceDir, false);
-        if (selected) workSource(selected.root, sliceDir);
-        const header = projectSliceHeader(realFs, sliceDir);
-        if (!header) return null;
-        const { content: _content, fm: _fm, ...row } = header;
-        return { ...row, ...(sourcePath ? { sourcePath } : {}) };
-      } catch (err) {
-        return { dirName, id: null, displayName: dirName, error: (err as Error).message, ...(sourcePath ? { sourcePath } : {}),
-          status: null, stage: null, locks: { spec: null, delivery: null } };
-      }
-    };
+    const countsFor = (missionName: string, dirName: string) => countsRow(dirName, path.join(r.root, missionName, "slices", dirName), selected);
     const missionFor = (name: string) => {
       if (selected) projectMission(selected, name);
       const dir = path.join(r.root, name);
@@ -152,18 +156,9 @@ export function scopesRoutes(): Hono {
           if (selected) projectMission(selected, name);
           const dir = path.join(r.root, name);
           const rows: Record<string, unknown>[] = [];
-          for (const s of realFs.listDir(path.join(dir, "slices")).filter((s) => realFs.isDirectory(path.join(dir, "slices", s)))) {
-            let sourcePath: string | undefined;
-            try {
-              if (selected) sourcePath = workSource(selected.root, path.join(dir, "slices", s), false);
-              const header = projectSliceHeader(realFs, path.join(dir, "slices", s));
-              if (header) {
-                const { content: _content, fm: _fm, ...row } = header;
-                rows.push({ ...row, ...(sourcePath ? { sourcePath } : {}) });
-              }
-            } catch (err) {
-              rows.push({ dirName: s, id: null, displayName: s, error: (err as Error).message, status: null, stage: null, locks: { spec: null, delivery: null }, ...(sourcePath ? { sourcePath } : {}) });
-            }
+          for (const s of realFs.listDir(path.join(dir, "slices")).filter((e) => realFs.isDirectory(path.join(dir, "slices", e)))) {
+            const row = countsRow(s, path.join(dir, "slices", s), selected);
+            if (row) rows.push(row);
           }
           return { mission: name, slices: rows };
         } catch (err) { return { mission: name, slices: [], error: (err as Error).message }; }

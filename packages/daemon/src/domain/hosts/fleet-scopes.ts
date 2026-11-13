@@ -158,6 +158,13 @@ function remoteCounts(payload: unknown): { ok: true; missions: LocalScopesCounts
     const row = m as Record<string, unknown>;
     if (typeof row["mission"] !== "string") return { ok: false, reason: "a mission row carries no mission name" };
     if (row["slices"] !== undefined && !Array.isArray(row["slices"])) return { ok: false, reason: `mission ${row["mission"]} carries a non-array slices list` };
+    for (const s of (row["slices"] as unknown[] | undefined) ?? []) {
+      if (s === null || typeof s !== "object" || Array.isArray(s)) return { ok: false, reason: `mission ${row["mission"]} carries a slice row that is not an object` };
+      const slice = s as Record<string, unknown>;
+      if (typeof slice["dirName"] !== "string") return { ok: false, reason: `mission ${row["mission"]} carries a slice row with no dirName` };
+      if (typeof slice["displayName"] !== "string") return { ok: false, reason: `slice ${slice["dirName"]} carries no displayName` };
+      if (!slice["locks"] || typeof slice["locks"] !== "object" || Array.isArray(slice["locks"])) return { ok: false, reason: `slice ${slice["dirName"]} carries no locks object` };
+    }
   }
   return { ok: true, missions: missions as LocalScopesCounts["missions"] };
 }
@@ -194,12 +201,12 @@ async function readHostScopes(
   if (res.ok) {
     const counts = remoteCounts(res.payload);
     if (!counts.ok) return fromCache("unreachable", `remote scopes read answered HTTP ${res.status} but ${counts.reason}`);
-    const project =
-      (res.payload as Record<string, unknown>)["project"] !== null &&
-      typeof (res.payload as Record<string, unknown>)["project"] === "object" &&
-      (res.payload as Record<string, unknown>)["project"] !== undefined
-        ? ((res.payload as Record<string, { id?: unknown }>)["project"]!["id"] as string | undefined) ?? null
-        : null;
+    // The counts read carries the selected project (null when the host serves its
+    // default workspace); the row's project context is that id, never invented.
+    const rawProject = (res.payload as Record<string, unknown>)["project"];
+    const project = rawProject && typeof rawProject === "object" && typeof (rawProject as Record<string, unknown>)["id"] === "string"
+      ? ((rawProject as Record<string, unknown>)["id"] as string)
+      : null;
     const missions = counts.missions.map((m) => stampRows(hostId, label, project, m));
     cache.set(hostId, { at: observedAt, missions, project });
     return { status: { hostId, status: "ok", observedAt, lastSuccessAt: observedAt }, missions };

@@ -30,10 +30,12 @@ function scaffold(): string {
   return root;
 }
 
-function appWith(root: string): Hono {
+function appWith(root: string, opts: { registry?: unknown; fetchImpl?: typeof fetch } = {}): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: root } as never);
+    if (opts.registry) c.set("hostRegistryLoader" as never, () => opts.registry);
+    if (opts.fetchImpl) c.set("remoteFetchImpl" as never, opts.fetchImpl);
     await next();
   });
   app.route("/api/scopes", scopesRoutes());
@@ -81,5 +83,59 @@ describe("/api/scopes reads only what the view returns", () => {
       missions: Array<{ mission: string; slices: Array<{ dirName: string; narrative: string | null; intent: string }> }>;
     };
     expect(byName(byName(body.missions, "mission", "release-x").slices, "dirName", "01-thing")).toMatchObject({ narrative: "narrative only", intent: "Do it." });
+  });
+});
+
+// #3093 — the fleet Projects view's route: the LOCAL leg is the same counts projection the
+// local list serves (one source of truth), and registry failures are stated, never hidden.
+describe("GET /api/scopes/fleet — local leg + registry honesty", () => {
+  let root: string;
+  beforeEach(() => { root = scaffold(); reads.length = 0; });
+
+  it("serves the local counts rows stamped with the local host, alongside every host's status", async () => {
+    const body = await (await appWith(root, { registry: { ok: true, registry: { hosts: [] } } }).request("/api/scopes/fleet")).json() as {
+      missions: Array<{ hostId: string; mission: string; slices: Array<Record<string, unknown>> }>;
+      hosts: Array<{ hostId: string; status: string; observedAt: string; lastSuccessAt: string | null }>;
+      registry: { state: string };
+    };
+    expect(body.registry).toEqual({ state: "read" });
+    // The local row set is exactly what ?counts=1 serves: identity + status from the node file.
+    const releaseX = byName(body.missions, "mission", "release-x");
+    expect(byName(releaseX.slices, "dirName", "01-thing")).toMatchObject({ id: "OPR.01-thing", status: "spec", stage: "building" });
+    expect(body.missions.map((m) => [m.mission, m.slices.length]).sort()).toEqual([["release-x", 2], ["release-y", 1]]);
+    expect(new Set(body.missions.map((m) => m.hostId)).size).toBe(1);
+    expect(body.hosts).toHaveLength(1);
+    expect(body.hosts[0]).toMatchObject({ hostId: body.missions[0]!.hostId, status: "ok" });
+    expect(body.hosts[0]!.lastSuccessAt).toBe(body.hosts[0]!.observedAt);
+  });
+
+  it("an unreadable registry keeps the local rows and says why no remote rows are shown", async () => {
+    const body = await (await appWith(root, { registry: { ok: false, error: "hosts.yaml unreadable" } }).request("/api/scopes/fleet")).json() as {
+      missions: unknown[]; registry: { state: string; error?: string };
+    };
+    expect(body.registry).toEqual({ state: "unreadable", error: "hosts.yaml unreadable" });
+    expect(body.missions.length).toBe(2); // release-x, release-y — local rows intact
+  });
+
+  it("COLLIDING native ids from a remote host stay distinct rows, host-attributed", async () => {
+    const remote = {
+      ok: true,
+      registry: { hosts: [{ id: "host-b", transport: "http" as const, url: "http://host-b:7433" }] },
+    };
+    // The remote serves the SAME mission/slice names as the local root.
+    const fetchImpl = (async () => Response.json({
+      missions: [{ mission: "release-x", slices: [{ dirName: "01-thing", id: "OPR.01-thing", displayName: "01-thing", status: "spec", stage: "building", locks: { spec: null, delivery: null } }] }],
+      project: null,
+    })) as typeof fetch;
+    const body = await (await appWith(root, { registry: remote, fetchImpl }).request("/api/scopes/fleet")).json() as {
+      missions: Array<{ hostId: string; mission: string; slices: Array<{ dirName: string; hostId: string }> }>;
+      hosts: Array<{ hostId: string; status: string }>;
+    };
+    const releaseX = body.missions.filter((m) => m.mission === "release-x");
+    expect(releaseX).toHaveLength(2); // local host + host-b, never merged
+    expect(new Set(releaseX.map((m) => m.hostId)).size).toBe(2);
+    expect(releaseX.map((m) => m.hostId)).toContain("host-b");
+    expect(byName(releaseX, "hostId", "host-b").slices[0]).toMatchObject({ dirName: "01-thing", hostId: "host-b" });
+    expect(body.hosts.find((h) => h.hostId === "host-b")?.status).toBe("ok");
   });
 });
