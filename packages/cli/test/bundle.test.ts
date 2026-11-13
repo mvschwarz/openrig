@@ -8,6 +8,7 @@ import { bundleCommand } from "../src/commands/bundle.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
@@ -56,7 +57,7 @@ function runningDeps(port: number): StatusDeps {
       }),
       fetch: vi.fn(async () => ({ ok: true })),
     }),
-    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+    clientFactory: () => new DaemonClient(`http://127.0.0.1:${port}`),
   };
 }
 
@@ -170,8 +171,9 @@ describe("Bundle CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => { server.close(); });
