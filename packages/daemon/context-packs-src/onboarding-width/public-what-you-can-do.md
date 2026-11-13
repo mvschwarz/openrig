@@ -981,7 +981,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   Since 0.7.15 `draft-aware` re-checks right before an automatic paste and holds after recent
   client activity or when tmux can't be read; typing after that last check still isn't seen. With
   Claude Code's full-width auto-update-failure footer on screen, an empty `draft-aware` seat can
-  hold an ordinary send; `rig seat held-messages` shows it.
+  hold an ordinary send; `rig seat held-messages` shows it. On Codex (seen with 0.167.1 and
+  0.167.2), a send to a busy `draft-aware` seat can be pasted without Enter, neither delivered
+  nor held; its text stays in the input, and there's no fix for it in this release.
   `rig seat status` shows the requested/effective mode; wait for pending activation to finish.
   **`rig seat held-messages`** lists what was retained and **`rig seat retire-held-message`**
   retires one; changing mode does not replay old held messages. A seat that starts, or a successor
