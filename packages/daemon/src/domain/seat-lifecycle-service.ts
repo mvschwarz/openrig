@@ -55,6 +55,8 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { recordedProcessStillRunning } from "./reconciler.js";
+import { readProcessTable, type ProcessTableRow } from "./process-table.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -73,7 +75,8 @@ const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 /**
  * The supported route for a session registered as adopted (origin=claimed): `rig unclaim` releases
- * it and leaves its process running, so ending that process in its own terminal ends only this seat.
+ * it and leaves its process running, so ending that process and its tmux session ends only this seat. Closing only
+ * a viewing window detaches from the tmux session and leaves it running.
  * `rig down` stops only a session carrying the seat's OpenRig marker, which OpenRig sets on the sessions
  * it starts and an adopted, bound or self-attached session lacks, so it isn't a route here and the
  * guidance says why. Only the guidance names the route; the refusal stands. A seat handed over before
@@ -85,8 +88,12 @@ export function claimedSessionRoutes(rigName: string, sessionName: string, exter
   const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
   if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
   return `To end this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
-    + `then end that process in its own terminal. ${rigDownLeavesIt(rigName)}`;
+    + `then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name. `
+    + `${VIEWER_LEAVES_IT} ${rigDownLeavesIt(rigName)}`;
 }
+
+/** Closing a viewer detaches; the tmux session, its shell and the seat's name stay. */
+const VIEWER_LEAVES_IT = "Closing only its viewing window leaves the tmux session running.";
 
 /** Why `rig down <rig>` isn't the route for an adopted session. */
 function rigDownLeavesIt(rigName: string): string {
@@ -105,6 +112,8 @@ export interface SeatLifecycleDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: NativeProcessLister;
+  /** The OS process table, read before reopening a released seat's tmux server; injectable for tests. */
+  readProcesses?: () => Promise<ProcessTableRow[]>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
@@ -333,6 +342,7 @@ export class SeatLifecycleService {
   private readonly eventBus: EventBus;
   private readonly tmuxAdapter: TmuxAdapter;
   private readonly listProcesses?: NativeProcessLister;
+  private readonly readProcesses: () => Promise<ProcessTableRow[]>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
@@ -355,6 +365,7 @@ export class SeatLifecycleService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses;
+    this.readProcesses = deps.readProcesses ?? readProcessTable;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
@@ -940,7 +951,7 @@ export class SeatLifecycleService {
       let persisted: PersistedEvent | null = null;
       const result = this.db.transaction(() => {
         // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
-        const row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null } | undefined;
+        const row = this.db.prepare("SELECT codex_permissions_json, codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null; codex_config_profile: string | null } | undefined;
         if (!row) throw new Error("Seat runtime changed; the envelope was not changed.");
         let from: unknown = null;
         try { from = readCodexMemberPermissions(this.db, seat.nodeId) ?? null; }
@@ -957,7 +968,7 @@ export class SeatLifecycleService {
             nodeId: seat.nodeId, from, to, ...(replaced ? { replaced } : {}), actor, reason, effect: "future_launches_only" });
         }
         return { ok: true as const, seat, from, to, changed, ...(replaced ? { replaced } : {}),
-          effect: `The envelope applies at the next separately authorized managed launch or resume, as explicit sandbox and approval flags that a profile or policy posture doesn't override.${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
+          effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, with native configuration conflicts refused and inconclusive checks reported as policy not verified." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       return result;
@@ -1381,6 +1392,8 @@ export class SeatLifecycleService {
         ok: false,
         code: "unmanaged_session_collision",
         message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
+        guidance: "If you released this session with rig unclaim, end that underlying tmux session, including any remaining shell, "
+          + "then launch again. Closing only its viewing window doesn't end the session.",
       };
     }
     if (!stop) {
@@ -1424,8 +1437,10 @@ export class SeatLifecycleService {
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process yourself, then launch fresh.`
-          + (externalCli ? "" : ` ${rigDownLeavesIt(seat.rigName)}`),
+        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), `
+          + (externalCli
+            ? "end that process and close its terminal, then launch fresh."
+            : `end that process and the underlying tmux session, including any remaining shell, then launch fresh. ${VIEWER_LEAVES_IT} ${rigDownLeavesIt(seat.rigName)}`),
       };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);
@@ -1566,17 +1581,34 @@ export class SeatLifecycleService {
     // probe sees unavailable transport instead of positive absence. Reopen an
     // empty server only when the persisted state proves this seat's managed
     // occupant was deliberately stopped and no other managed row remains live.
+    // `rig unclaim` is as deliberate for an adopted session: it marks the row
+    // detached and clears the binding, and the person ends the process and its
+    // tmux session, which can be the server's last session too.
     // The probe below still decides absence; a recreated session or failed
     // transport remains a refusal.
     if ("code" in canonicalProbe) {
       const latest = this.latestSession(node.id);
       const hasCurrentBinding = this.sessionRegistry.getBindingForNode(node.id) !== null;
+      const released = latest?.status === "detached" && latest.origin === "claimed";
       const stoppedManagedOccupant = latest !== null
         && latest.session_name === canonicalSessionName
-        && latest.status === "exited"
-        && latest.origin !== "claimed"
+        && ((latest.status === "exited" && latest.origin !== "claimed") || released)
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
+      // Unclaim doesn't end the process. While the released session's recorded process still runs, its server may
+      // only have lost its socket: a server started there would read the session absent and launch a second occupant
+      // beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
+      const stillRuns = stoppedManagedOccupant && released
+        ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
+          () => this.readProcesses().catch(() => null))
+        : null;
+      if (stillRuns) {
+        return {
+          ...canonicalProbe,
+          guidance: `This seat's released session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+            + "on a tmux server this daemon can't reach. End that process, then launch again.",
+        };
+      }
       if (stoppedManagedOccupant) {
         try {
           const restored = await this.tmuxAdapter.startServer();
@@ -1908,7 +1940,11 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
-      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.` };
+      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.`,
+        // A recoverable seat (#3131) comes back in its saved conversation through the ordinary launch, leaving the rest of the rig alone.
+        ...(resolved.entry.lifecycleState === "recoverable"
+          ? { guidance: `The seat is recoverable from its saved conversation: rig launch ${shellQuote(seat.rigName)} ${shellQuote(seat.logicalId)} (add --plan to preview).` }
+          : {}) };
     }
     const binding = this.sessionRegistry.getBindingForNode(node.id);
     if (!binding?.tmuxSession || binding.tmuxSession !== session.session_name || !binding.tmuxPane) {

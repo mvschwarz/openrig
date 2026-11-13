@@ -32,7 +32,7 @@ function signal() {
   return { ready: new Promise<void>(resolve => { release = resolve; }), release: () => release() };
 }
 
-function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } = {}) {
+function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; appendPaste?: boolean } = {}) {
   const db = new Database(saved ?? ":memory:");
   if (!saved) {
     migrate(db, ALL_MIGRATIONS);
@@ -42,23 +42,27 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
       INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running'),('sb','b','sibling@test','running');
       INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh'),('gb','b',1,'g2','fresh');`);
   }
-  const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+  const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void>;
+    settle?: (ms: number) => void | Promise<void>; clients?: () => string } = {};
+  // The guard's own waits (its re-reads) go to `settle`, kept apart from the transport's `sleep`; none is real time.
+  const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name), async ms => { await hooks.settle?.(ms); });
   guard.recoverActivation();
   const bodies: Record<string, string | null> = { a: "", b: "" };
   const history: Record<string, string> = { a: "", b: "" };
   const writes: string[] = [], submissions: string[] = [];
   const observations: unknown[] = [];
-  const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void> } = {};
   let staged = "";
   // A terminal pane shows a submitted line as typed; an agent pane echoes a sent message under its prompt, as Claude does.
   const echo = (node: string, body: string) => (db.prepare("SELECT runtime FROM nodes WHERE id=?").get(node) as { runtime: string }).runtime === "terminal"
     ? `${body}\n` : `${body.split("\n").map((row, i) => (i ? "  " : "❯ ") + row).join("\n")}\n`;
   const tmux = new TmuxAdapter(async command => {
+    if (command.includes("list-clients")) return hooks.clients?.() ?? "";
     if (command.includes("load-buffer")) await hooks.load?.();
     const node = command.includes("%2") ? "b" : "a";
     if (command.includes("paste-buffer")) {
       await hooks.paste?.();
-      writes.push(`paste:${node}:${staged}`); bodies[node] = staged;
+      // appendPaste: a paste lands after whatever the input already holds, as in a real composer (#3076 tests).
+      writes.push(`paste:${node}:${staged}`); bodies[node] = opts.appendPaste ? (bodies[node] ?? "") + staged : staged;
     }
     if (command.includes("send-keys")) {
       writes.push(`keys:${node}:${command}`);
@@ -1154,5 +1158,187 @@ describe("draft-aware at a full held quota (#2430)", () => {
     expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
     expect(f.outbox.coalescedInto(held.outboxIds![0]!)).toEqual(["older"]);
     expect(f.outbox.retentionUsage("a").count).toBe(100);
+  });
+});
+
+
+describe("#3076: a draft typed between the guard's read and the paste", () => {
+  const draft = "Please send it to the team. Also";
+  const notice = "[OpenRig watchdog scheduler · policy: periodic-reminder · job: j]\nWake timer fired.";
+  const pasted = (f: ReturnType<typeof fixture>) => f.writes.filter(w => w.startsWith("paste:"));
+  const setActivity = (f: ReturnType<typeof fixture>, at: () => number | null) => {
+    vi.spyOn(f.tmux, "lastClientActivity").mockImplementation(async () => at());
+  };
+
+  it("is seen by the re-read after the settle wait: the notice is held and nothing is pasted into the person's input", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const waits: number[] = [];
+    // The person starts typing during the guard's wait right before the paste (the first read saw an empty input).
+    f.hooks.settle = ms => { waits.push(ms); if (!pasted(f).length) f.bodies.a = draft; };
+    const result = await f.send("watchdog-wake", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(waits[0]).toBe(300);
+    expect(pasted(f)).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+  });
+
+  it("holds on recent writable-client activity, also activity during the wait, and a later attempt delivers once quiet", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let last: number | null = Date.now() - 1000;
+    setActivity(f, () => last);
+    const busy = await f.send("wake-1", "Wake timer fired.", { openrigNotice: true, verify: false });
+    expect(busy).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+
+    last = Date.now() - 60_000;
+    f.hooks.settle = () => { last = Date.now(); };   // activity during the settle wait, nothing drawn yet
+    f.advance();
+    const during = await f.send("wake-2", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(during).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+
+    last = Date.now() - 60_000;
+    f.hooks.settle = undefined;
+    f.advance();
+    const sent = await f.send("wake-3", "Wake timer fired a third time.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+    expect(f.submissions).toHaveLength(1);
+  });
+
+  it("counts the quiet window from the end of the whole second tmux reports: 3.5 s ago still holds, 4.5 s ago delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let last = Date.now() - 3500;   // activity at N.999 s reads as N: it may have been 2.5 s ago
+    setActivity(f, () => last);
+    const held = await f.send("whole-second", "Wake timer fired.", { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    last = Date.now() - 4500;
+    f.advance();
+    const sent = await f.send("whole-second-later", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("holds as unreadable when tmux can't report recent writable-client activity; with no writable client it delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
+    const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    expect(pasted(f)).toEqual([]);
+    setActivity(f, () => null);
+    f.advance();
+    const sent = await f.send("no-client", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("holds as unreadable when the input can't be read after the wait", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = null; };
+    const result = await f.send("unreadable", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    expect(pasted(f)).toEqual([]);
+  });
+
+  it("runs the send's own waiting checks before the guard's last read, so a draft typed while they wait is seen", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    // A conditional send's checks await (a conversation lookup); the person types meanwhile. The adapter returns the
+    // guard's refusal as its result.
+    const result = await f.guard.operation("worker@test", () =>
+      f.tmux.sendText("worker@test", notice, undefined, { beforePaste: async () => { f.bodies.a = draft; } }));
+    expect(result).toMatchObject({ ok: false, code: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+  });
+
+  it("applies to every automatic input under draft-aware, a deliberate send included, as the empty check already did", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    f.hooks.settle = () => { if (!pasted(f).length) f.bodies.a = draft; };
+    const result = await f.send("deliberate", "a message from another seat", { verify: false });
+    expect(result).toMatchObject({ sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+  });
+
+  it("the remaining gap: typing after the final check and before the paste leaves the notice beside the draft, never submitted or deleted", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let typed = false;
+    // The person types between the guard's last check and tmux's paste: the paste lands after their text.
+    f.hooks.paste = () => { if (!typed) { typed = true; f.bodies.a = draft; } };
+    const result = await f.send("final-boundary", notice, { openrigNotice: true, verify: false });
+    // Contamination: exactly one paste, and the input is the person's text followed by it, nothing removed.
+    expect(pasted(f)).toHaveLength(1);
+    const staged = pasted(f)[0]!.slice("paste:a:".length);
+    expect(f.bodies.a).toBe(draft + staged);
+    // Submission: none. No key at all reached the pane (no Enter, C-m or C-u), and the guard says why.
+    expect(f.writes.filter(w => w.startsWith("keys:a"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(result).toMatchObject({ ok: false });
+    expect(JSON.stringify(result)).toContain("draft_input_changed");
+  });
+
+  it("checks the activity again after the final read: activity that appears at that read holds the paste", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    let last: number | null = Date.now() - 60_000;
+    setActivity(f, () => last);
+    const real = f.tmux.captureComposerSnapshot.getMockImplementation()!;
+    let armed = false;
+    f.hooks.settle = () => { armed = true; };
+    // The composer still reads empty at the final read, but a writable client has activity right then.
+    vi.spyOn(f.tmux, "captureComposerSnapshot").mockImplementation(async (name: string) => {
+      const shot = await real(name);
+      if (armed) { armed = false; last = Date.now(); }
+      return shot;
+    });
+    const result = await f.send("activity-at-final-read", notice, { openrigNotice: true, verify: false });
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+  });
+
+  it("reads tmux's real list-clients output end to end: an attach in this second holds, a quiet client delivers", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const now = () => Math.floor(Date.now() / 1000);
+    f.hooks.clients = () => `1|${now()}\n0|${now()}\n`;   // a viewer tile and a writable client attached this second
+    const held = await f.send("attach-now", notice, { openrigNotice: true, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(pasted(f)).toEqual([]);
+    f.hooks.clients = () => `1|${now()}\n0|${now() - 10}\n`;   // only the read-only tile is active
+    f.advance();
+    const sent = await f.send("attach-quiet", "Wake timer fired again.", { openrigNotice: true, verify: false });
+    expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("re-reads the input after the Enter's own waiting checks, so a draft typed while they wait is not submitted with the notice", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const typed = " PERSONDRAFT-k7";
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      // A conditional Enter awaits its own checks (a conversation lookup); the person types after the pasted notice.
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => { f.bodies.a += typed; } });
+    });
+    expect(result).toMatchObject({ ok: false, code: "draft_input_changed" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(w => w.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(notice + typed);
+  });
+
+  it("still presses the Enter when the input stays as pasted while the Enter's checks wait", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => {} });
+    });
+    expect(result).toEqual({ ok: true });
+    expect(f.submissions).toEqual([notice]);
+    expect(f.bodies.a).toBe("");
   });
 });

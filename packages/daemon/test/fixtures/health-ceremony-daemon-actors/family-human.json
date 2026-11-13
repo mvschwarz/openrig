@@ -1,0 +1,103 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family human). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "human",
+  "lineageId": "qitem-20261105005757-49f81eb717880063",
+  "now": "2026-11-05T09:22:15.811Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "handedOffFrom": null,
+      "sourceSession": "human@kernel",
+      "destinationSession": "plataforma-supervisor@comando",
+      "tags": [
+        "decision",
+        "task-ref",
+        "mission:family-human"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 38763,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:46:44.412Z",
+      "state": "pending",
+      "actorSession": "human@kernel",
+      "transitionNote": "created",
+      "identityProvenance": "claimed:v1"
+    },
+    {
+      "transitionId": 38775,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:47:52.064Z",
+      "state": "in-progress",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "claimed",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 38776,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:47:52.560Z",
+      "state": "blocked",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 38841,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:56:16.367Z",
+      "state": "pending",
+      "actorSession": "plataforma-clerigo@comando",
+      "transitionNote": "auto-unparked: blocker qitem-20261105024741-41cb92793e4d553b reached terminal state 'handed-off'",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 38842,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:56:19.952Z",
+      "state": "pending",
+      "actorSession": "queue@system",
+      "transitionNote": "blocker qitem-20261105024741-41cb92793e4d553b wake attempted; delivery=delivered-ack-pending",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 38858,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T02:57:49.810Z",
+      "state": "blocked",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 41866,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T09:20:37.536Z",
+      "state": "pending",
+      "actorSession": "plataforma-clerigo@comando",
+      "transitionNote": "auto-unparked: blocker qitem-20261105025745-bdfbc9982c8272b5 reached terminal state 'handed-off'",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 41869,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T09:20:46.792Z",
+      "state": "pending",
+      "actorSession": "queue@system",
+      "transitionNote": "blocker qitem-20261105025745-bdfbc9982c8272b5 wake attempted; delivery=delivered-ack-pending",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 41895,
+      "qitemId": "qitem-20261105005757-49f81eb717880063",
+      "ts": "2026-11-05T09:22:15.811Z",
+      "state": "done",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

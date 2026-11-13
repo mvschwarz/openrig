@@ -22,6 +22,8 @@ export interface InboundRoute {
   tags: string[];
   /** Exact human-gate qitem this thread was opened for. Absent on unmapped traffic. */
   correlationQitemId?: string;
+  /** The thread a reply arrived in when its superseded root no longer correlates to the gate. */
+  arrivalThread?: { threadTs: string; channel: string };
   /** The routing class that fired — receipts per class ride the row tags + logs. */
   routeClass: "existing-thread" | "closed-thread" | "unmapped-thread" | "human-initiated";
 }
@@ -77,7 +79,7 @@ export function makeThreadRouteResolver(opts: {
         return {
           destination: mapping.seat,
           tags: [...BASE_TAGS, "thread", `reply-to:${mapping.conversationId}`],
-          ...(current ? { correlationQitemId: mapping.conversationId } : {}),
+          ...(current ? { correlationQitemId: mapping.conversationId } : { arrivalThread: { threadTs, channel: mapping.channel } }),
           routeClass,
         };
       }

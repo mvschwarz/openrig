@@ -12,6 +12,8 @@ import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
+import { readWakeOutcome } from "./connection-contract.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
 // silently park: today one failed nudge is recorded and nothing follows (the measured
 // dominant 0.5.3 failure class — a perfect surviving packet, a recipient never woken).
@@ -383,28 +385,44 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
 type WakeMode = "failed" | "unconfirmed" | "held";
 
 function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
-  if (!lastNudgeResult) return null;
-  if (lastNudgeResult.startsWith("failed:")) return "failed";
-  // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
-  // unclaimed baton keeps a retry path instead of stranding behind a terminal
-  // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
-  // claimed parked-owner arm's retry readback still selects `failed:%` only, so
-  // admitting retained there would make recovery OWN a row that nothing retries.
-  // Retry behaviour, as it actually runs: the first retry re-probes the guard and
-  // records a fresh attempt; later retries reuse the same delivery id, whose
-  // retained readback returns `retained` again even after the guard has cleared —
-  // so the row re-probes once and then escalates rather than looping probes.
-  // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
-  // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
-  if (lastNudgeResult === "retained:typing_guard") return "held";
-  if (lastNudgeResult.startsWith("retained:")) return "failed";
-  if (
-    lastNudgeResult === "delivered-ack-pending" ||
-    lastNudgeResult.startsWith("indeterminate:") ||
-    lastNudgeResult.startsWith("gateway-owned:")
-  )
-    return "unconfirmed";
-  return null; // verified (or unknown vocabulary) — never enters the ladder
+  // A claimed row's unconfirmed result is presented as `claimed` (presentedNudgeResult): the claim is pickup, which
+  // outranks any wake outcome.
+  if (lastNudgeResult === "claimed") return null;
+  const outcome = readWakeOutcome(lastNudgeResult);
+  if (!outcome) return null;
+  switch (outcome.fact) {
+    // Nothing reached the seat, so a retry can't double-deliver. An address no route can carry (`none`) has nothing
+    // to retry; its own notice covers it.
+    case "not-delivered":
+      return outcome.route === "none" ? null : "failed";
+    // A webhook failure after the POST: its effect is unknown, but it keeps the failed path and retry policy it has
+    // always had.
+    case "failed-effect-unknown":
+      return "failed";
+    // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
+    // unclaimed baton keeps a retry path instead of stranding behind a terminal
+    // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
+    // claimed parked-owner arm's retry readback still selects `failed:%` only, so
+    // admitting retained there would make recovery OWN a row that nothing retries.
+    // Retry behaviour, as it actually runs: the first retry re-probes the guard and
+    // records a fresh attempt; later retries reuse the same delivery id, whose
+    // retained readback returns `retained` again even after the guard has cleared —
+    // so the row re-probes once and then escalates rather than looping probes.
+    // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
+    // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
+    case "held":
+      return outcome.heldBy === "typing-guard" ? "held" : "failed";
+    // A rendered terminal wake, or a hosted trigger that took the ring (the stuck sweep owns a hosted member's
+    // unclaimed work), never enters. An unverified terminal send rides the confirmation path.
+    case "accepted":
+      return outcome.renderVerified || outcome.route === "hosted-trigger" ? null : "unconfirmed";
+    // Unknown, including a recorded result no reader recognises: it never retries (input may have arrived), and it
+    // escalates past the window when nothing picked the work up, instead of reading as delivered.
+    case "queued-not-started":
+    case "turn-started":
+    case "unknown":
+      return "unconfirmed";
+  }
 }
 
 /** A retained (typing-guard) result is retryable ONLY for an unclaimed baton. The
@@ -416,7 +434,7 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
 function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "lastNudgeResult">): WakeMode | null {
   const mode = classifyWakeResult(row.lastNudgeResult);
   if (mode === null) return null;
-  const retained = row.lastNudgeResult?.startsWith("retained:") ?? false;
+  const retained = readWakeOutcome(row.lastNudgeResult)?.fact === "held";
   if (retained && !(row.state === "pending" && !row.claimedAt && row.handedOffFrom)) return null;
   return mode;
 }
@@ -863,7 +881,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
           : mode === "held"
             ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried`
-            : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
+            : readWakeOutcome(row.lastNudgeResult)?.route === null
+              ? `wake outcome unknown (unrecognised result "${row.lastNudgeResult!.slice(0, 80)}") with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`
+              : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
       if (hasConsumedEscalationHop(deps.db, row.qitemId)) {
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
@@ -1043,6 +1063,33 @@ const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
 const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
 
+/** The rows a prompt refusal can still concern: open rows, and the rows an open prompt alert recovers (its exact
+ * `recovery-for:<id>` tags), each kept when one of its own transitions carries a refusal note. Read from the open rows
+ * (the state index) and then each candidate's own transitions (the qitem index), not by matching the note across the
+ * whole transition log, which only grows. Ordered by each row's first refusal: the order the whole-log read returned
+ * under its observed plan (it had no ORDER BY), now explicit. A recovered id is cut after the 13-byte ASCII prefix as
+ * bytes, because text substr stops at a NUL, which a caller-supplied id can hold; the join then compares it exactly. */
+export const PROMPT_REFUSAL_CANDIDATES_SQL = `WITH scored AS MATERIALIZED (
+    SELECT q.qitem_id, q.destination_session,
+      (SELECT min(t.transition_id) FROM queue_transitions t
+        WHERE t.qitem_id = q.qitem_id AND t.transition_note LIKE @refused) AS first_refusal
+    FROM (
+      SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+      UNION
+      SELECT CAST(substr(CAST(j.value AS BLOB), 14) AS TEXT) FROM queue_items a,
+        json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) j
+      WHERE a.state IN ('pending','in-progress','blocked') AND json_valid(a.tags)
+        AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) WHERE value = @alertTag)
+        AND j.type = 'text' AND substr(j.value, 1, 13) = 'recovery-for:'
+    ) c JOIN queue_items q ON q.qitem_id = c.qitem_id)
+  SELECT qitem_id, destination_session FROM scored WHERE first_refusal IS NOT NULL ORDER BY first_refusal`;
+
+/** Named in the slow-operation log, so a stall during it is attributed to this read: one begin and one end record per tick. */
+export function readPromptRefusalCandidates(db: Database.Database): Array<{ qitem_id: string; destination_session: string }> {
+  return runSyncSite("queue.wake_ladder.prompt_candidates", () => db.prepare(PROMPT_REFUSAL_CANDIDATES_SQL)
+    .all({ refused: `${REFUSED_PREFIX}%`, alertTag: PROMPT_ALERT_TAG }) as Array<{ qitem_id: string; destination_session: string }>);
+}
+
 /** Active watchdog jobs whose latest attempt was refused at a target's prompt. A run of refusals starts
  * after the job's latest other entry at that target (looked up past the 50-entry read when the read is all refusals) or
  * after this seat's latest prompt-cleared alert retirement, whichever is later; the key names that boundary, so it stays
@@ -1173,13 +1220,7 @@ async function advancePromptRefusals(
       return null;
     }
   };
-  const candidates = deps.db.prepare(`SELECT DISTINCT q.qitem_id, q.destination_session FROM queue_items q
-    JOIN queue_transitions t ON t.qitem_id = q.qitem_id
-    WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
-      SELECT 1 FROM queue_items a WHERE a.state IN ('pending','in-progress','blocked')
-      AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
-      AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
-    .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
+  const candidates = readPromptRefusalCandidates(deps.db);
   // Every tag value of every final prompt disposition, read once per tick when the first episode needs it,
   // rather than one scan of all terminal rows per open episode. The row predicates are the per-episode lookup's;
   // membership is the same exact json_each value equality; and nothing below writes before the last episode is

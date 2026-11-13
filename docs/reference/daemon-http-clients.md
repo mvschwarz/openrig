@@ -20,7 +20,8 @@ The CLI itself finds the daemon in these orders:
   `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
   `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
 - **Status** (`rig status`, `rig daemon status`): `OPENRIG_URL` (or `RIGGED_URL`) first, probed directly; else
-  the state file below.
+  the state file below. If no state is read, probe the configured `daemon.host` and `daemon.port` instead (defaulting
+  to `127.0.0.1:7433`).
 - **Start and stop** (`rig daemon start`, `stop`): the state file, `$OPENRIG_HOME/daemon.json`, then the legacy
   `~/.rigged/daemon.json`.
 
@@ -82,6 +83,13 @@ All of them are server-sent events (`text/event-stream`):
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
   Live events that arrive during the replay follow it, without duplicates.
+  When a person clicks an answer on an ask with questions (in Steering, the Feed, Slack or an MCP client), the stream
+  carries `queue.answer_recorded`: `{ qitemId, actorSession, questionId, answered, questions, complete, summary }`.
+  `complete: false` means the set is still partial: the ask stays open, and its answers haven't gone back yet. The
+  event carries ids and counts, not the choice; read the ask for its `humanAnswers`. A click that changes nothing (the
+  same option again) has no event, and neither does a typed reply, which settles the ask through its own
+  `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
+  client that re-reads the ask after a gap still sees it.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
@@ -151,6 +159,41 @@ An outbox entry's `deliveryState` reports the send attempt; only `delivered` con
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
 
+### What needs a person, and how their answers link back (`team-operations.v1`)
+
+`GET /api/team-operations/capabilities` says which team-operations jobs this daemon supports, separately from its
+build:
+
+```json
+{ "contract": "team-operations.v1",
+  "capabilities": { "needs-me.read": "supported", "needs-me.answer": "not-supported", "needs-me.follow": "not-supported" },
+  "build": { "semver": "…", "commit": "…" } }
+```
+
+A capability reads `supported`, `not-supported` or `unknown`, and a missing key means `unknown`. A daemon without the
+route (HTTP 404) predates the contract: keep reading what it already returns. In a source run, `build` is
+`{ semver: null, commit: null }`.
+
+With `needs-me.read` supported:
+
+- **What needs the person:** `GET /api/attention?view=<person-id>` (the same read as the Feed). Each queue item adds
+  `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
+  `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
+  read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
+  about the open rows blocked on it (at most 100; empty when none are recorded).
+- **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
+  `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
+  already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
+  is partial. An identical repeated choice, or a later click after a pending ask's answer set is complete, records
+  nothing new and emits none. Events are best effort; re-read the snapshot or row after a stream gap.
+- **The answers returned to a request:** `GET /api/queue/<qitemId>` adds `answers`, oldest first, each
+  `{ qitemId, by, at, text, episode, recordedIdentity }`. They are found by the answer row's link to the request, not
+  by its text, so don't parse the `In reply to:` line in an answer's body. `text` is the person's answer without that
+  footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
+  recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
+  set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
+  or a host pairing request is answered in place, with no answer row.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
@@ -189,6 +232,7 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the

@@ -9,13 +9,13 @@ import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import { ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
-import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
+import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
@@ -35,7 +35,7 @@ import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-re
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { absentGuidanceBlocks, applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
 import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -51,6 +51,7 @@ import type {
   Session,
   Checkpoint,
   RestoreSnapshotSelection,
+  NodeStartupSnapshot,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -269,6 +270,9 @@ export interface RestoreOrchestratorDeps {
 export class RestoreOrchestrator {
   readonly db: Database.Database;
   private activeRestores = new Set<string>();
+  /** #3039: per node, the guidance blocks its resumed launch carried, which the check after the launch doesn't look for in
+   *  the repository file. */
+  private launchGuidanceBlocks = new Map<string, Set<string>>();
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
@@ -437,6 +441,9 @@ export class RestoreOrchestrator {
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
+        currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
+          .filter((current) => current.codexConfigProfile !== undefined)
+          .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
@@ -1548,6 +1555,17 @@ export class RestoreOrchestrator {
     try { this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(file, nodeId); } catch { /* no column */ }
   }
 
+  /** #3039: whether this resume's launch carries the seat's guidance, by the adapter's own fresh-launch rule (a Codex
+   *  conversation resume). Anything unanswered or unreadable keeps the repository path. */
+  private async resumeLaunchCarriesGuidance(adapter: import("./runtime-adapter.js").RuntimeAdapter | undefined,
+    binding: import("./runtime-adapter.js").NodeBinding): Promise<boolean> {
+    if (!adapter?.guidanceFileFor) return false;
+    try {
+      const answer = adapter.guidanceFileFor(binding, { resuming: true, resumingConversation: true });
+      return (answer instanceof Promise ? await answer : answer).launchInstructions === true;
+    } catch { return false; }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1555,6 +1573,8 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     warnings?: string[],
   ): RestoreNodeResult {
+    const launchCarried = this.launchGuidanceBlocks.get(node.id);
+    this.launchGuidanceBlocks.delete(node.id);
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
@@ -1581,7 +1601,9 @@ export class RestoreOrchestrator {
     const noted = notes.length > 0 ? { ...result, guidanceNotes: notes } : result;
     let missing: string[];
     try {
-      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
+      // #3039: a block the resumed launch carried isn't looked for in the repository file; one it couldn't carry still is.
+      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })
+        .filter((id) => !launchCarried?.has(id));
     } catch (err) {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
@@ -1804,7 +1826,8 @@ export class RestoreOrchestrator {
     // runtime and write Claude hooks into another agent's working folder
     // (with a saved context, the compatibility gate already stops that
     // mismatch), and a pod-aware agent must get no write from this recovery
-    // at all — it still ends at the "Harness not started" gate, unchanged.
+    // at all. With no saved context and a resume token, restore tries its resume
+    // on an empty plan (replayCtx below), still without this recovery.
     const activityAdapter = opts?.adapters?.["claude-code"];
     const recoveryRuntime = startupCtx?.runtime
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
@@ -1828,6 +1851,18 @@ export class RestoreOrchestrator {
         await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps, launchCwd);
       }
     }
+
+    // #3039: a pod-aware resume whose saved choice is the repository file asks the adapter, as startup does, whether its
+    // launch carries the guidance (a Codex conversation resume, the fresh launch's rule). Then the saved guidance goes with
+    // the resume as developer instructions (the containment below lets only it through), and the repository AGENTS.md
+    // gets only #2456's refresh of blocks already there. A legacy resume starts its harness before startNode, so it can't.
+    let launchCarriesGuidance = false;
+    this.launchGuidanceBlocks.delete(node.id);
+    if (resumeRequested && resumeToken && launchResult && isPodAware && startupCtx && !startupCtx.guidanceFile) {
+      launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, session?.communityHarness),
+        { ...launchResult.binding, guidanceFile: null, cwd: launchCwd, codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined });
+    }
+    let launchGuidance: import("./runtime-adapter.js").ResolvedStartupFile[] | null = null;
 
     // A narrow exception to the replay containment below: before either native resume path
     // starts the harness, put back only the MISSING managed guidance blocks from the saved
@@ -1862,6 +1897,23 @@ export class RestoreOrchestrator {
       if (linked && guidance) {
         warnings?.push(`Restore guidance: ${node.logicalId}: ${linked} is now a link, so nothing was put back in ${guidance.targetPath}, which other sessions could read.`);
         guidance = null;
+      }
+      if (guidance && guidance.items.length > 0 && launchCarriesGuidance && startupCtx) {
+        // #3039: a block the file doesn't hold at all goes with the launch instead of being put back, when its source reads
+        // now (the writer's own read). Everything else stays with the writer below, as before: a block already there
+        // (refreshed or kept and named), a partial one, a source that's gone or can't be read (gaps), and the seat-skills
+        // line (the person's yes was for that file). So the launch's own placement writes nothing here: each block it gets is
+        // absent from the file. Each goes as an optional startup file, so a read that fails at the launch skips it rather
+        // than stopping the resume, and the check after the launch looks only past the blocks the launch reports it sent.
+        let absent = new Set<string>();
+        try { absent = new Set(absentGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") })); }
+        catch { /* unreadable: the writer below reports it */ }
+        const reads = (path: string): boolean => { try { readFileSync(path, "utf-8"); return true; } catch { return false; } };
+        const carried = guidance.items.filter((item) => absent.has(item.blockId) && !item.unresolved
+          && item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && reads(item.sourcePath));
+        launchGuidance = carried.map((item) => ({ path: item.blockId, absolutePath: item.sourcePath, ownerRoot: dirname(item.sourcePath),
+          deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
+        guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
@@ -1992,10 +2044,25 @@ export class RestoreOrchestrator {
     // launches are new histories and keep their replay.
     // One narrow exception: MISSING managed guidance blocks are put back before the harness
     // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
-    // nothing else is replayed.
+    // nothing else is replayed. #3039: when the resumed launch carries the guidance instead, only that
+    // saved guidance passes, as optional startup files (launchGuidance): no action, skill or other resource.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
+    // A seat that only ever resumed or was attached (attach, adopt, reconcile-session, a set resume token) has a resume
+    // token but no saved startup context. A resume replays none anyway (replayContained), so restore tries the resume
+    // with an empty plan and names the gap, rather than stopping on data the resume doesn't use. Guidance, activity hooks
+    // and the guidance record read the saved context only, so no guidance is put back and no startup context is written
+    // for this seat; the adapter's ordinary bootstrap and the seat's existing skill restoration still run, as on any resume.
+    const resumeWithoutContext = isPodAware && !startupCtx && replayContained && startupRuntime !== null && startupRuntime !== "terminal";
+    // A fresh seat launch reads the saved startup context and refuses without one, so a rollback names none for this seat.
+    const noContextFresh = "This seat has no saved startup context, and no command records one for it yet, so no fresh start is offered here.";
+    const replayCtx: NodeStartupSnapshot | null = startupCtx
+      ?? (resumeWithoutContext ? { runtime: startupRuntime!, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } : null);
+    if (resumeWithoutContext && startupAdapter && launchResult) {
+      warnings?.push(`Restore: ${node.logicalId}: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.`);
+      activityHookGaps?.push("startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan.");
+    }
     // New compute has no retained context filesystem. Restore the saved file selection, never conversation actions.
     const restoreEnvironmentContext = replayContained && !!startupAdapter?.environment && !!data.environmentBindingsByNode?.[node.id];
 
@@ -2008,13 +2075,14 @@ export class RestoreOrchestrator {
       && baseStatus !== "resumed"
       && startupRuntime !== null
       && startupRuntime !== "terminal"
-      && (!startupCtx || !startupAdapter)
+      && (!replayCtx || !startupAdapter)
     ) {
       // A deliberate fresh launch with no captured startup context is the
       // never-occupied-seat case from #49. The restore launcher has already
       // created a shell, so remove that provisional session before handing the
-      // seat to the normal recipe-backed launch path. Resume requests stay on
-      // the fail-closed path below: no durable context means no safe resume.
+      // seat to the normal recipe-backed launch path. A resume with a token
+      // goes on with an empty plan (replayCtx above); a resume without one stays
+      // on the fail-closed path below: no durable context means no safe resume.
       if (!startupCtx && !resumeRequested && this.freshLaunch) {
         // Keep the usable provisional shell when the callback exists but its
         // recipe/member inputs are unavailable. A callback being present alone
@@ -2051,23 +2119,23 @@ export class RestoreOrchestrator {
           };
         }
       }
-      const cause = startupCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
+      const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
     }
 
     // Attempt restore-safe startup replay if context available
-    if (data.nodeStartupContext && opts?.adapters && launchResult) {
-      if (startupCtx) {
-        const adapter = seatAdapter(opts.adapters, startupCtx.runtime, session?.communityHarness);
+    if ((data.nodeStartupContext || replayCtx) && opts?.adapters && launchResult) {
+      if (replayCtx) {
+        const adapter = seatAdapter(opts.adapters, replayCtx.runtime, session?.communityHarness);
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
+          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : replayCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : withContextEntryFloor(startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
-          const sourceActions = replayContained ? [] : startupCtx.startupActions;
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? launchGuidance ?? [] : withContextEntryFloor(replayCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn)));
+          const sourceActions = replayContained ? [] : replayCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
               warnings?.push(`Restore: missing projection entry ${e.absolutePath} (skipped)`);
@@ -2105,7 +2173,7 @@ export class RestoreOrchestrator {
           // it is, an edited one is named, and a missing one whose recorded source is gone or has changed is not put back
           // with today's bytes. Only the rest is projected or installed. Nothing is re-resolved from today's spec. Native
           // resume replays nothing (sourceEntries is empty). The whole selection stays in the saved startup context.
-          const seatSkills = (startupCtx.runtime === "claude-code" || startupCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
+          const seatSkills = (replayCtx.runtime === "claude-code" || replayCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
           let replaySkip: { entryIds: Set<string>; files: Set<string> } | undefined;
           if (seatSkills) {
             const replay = seatSkillReplay({ entries: filteredEntries, files: filteredFiles, paths: seatSkills,
@@ -2116,7 +2184,7 @@ export class RestoreOrchestrator {
 
           // Build fresh projection plan (all safe_projection; replaySkip says which seat skills are left alone)
           const plan: import("./projection-planner.js").ProjectionPlan = {
-            runtime: startupCtx.runtime,
+            runtime: replayCtx.runtime,
             cwd: launchCwd,
             entries: filteredEntries.map((e) => ({
               ...e,
@@ -2133,7 +2201,9 @@ export class RestoreOrchestrator {
           const binding = {
             ...launchResult.binding,
             // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
-            guidanceFile: startupCtx.guidanceFile ?? null,
+            guidanceFile: replayCtx.guidanceFile ?? null,
+            // #3039: the resumed launch carries the guidance chosen above, so startup doesn't ask again and the adapter queues it.
+            ...(launchGuidance ? { guidanceLaunchInstructions: true as const } : {}),
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             ...(opts?.claudeLaunch ? { claudeLaunch: opts.claudeLaunch } : {}),
@@ -2179,6 +2249,11 @@ export class RestoreOrchestrator {
               ...(selected ? { beforeNativeLaunch: () => selected.beforeNative(launchResult.session.id, launchResult.binding.id) } : {}),
             });
             warnings?.push(...(startupResult.warnings ?? []));
+            // #3039: the blocks the resumed launch actually sent, by the adapter's own record, are the ones the check after the
+            // launch doesn't look for in the repository file.
+            const carriedIds = new Set((launchGuidance ?? []).map((f) => f.path));
+            const sentGuidance = carriedIds.size > 0 && launchResult.binding.tmuxSession ? adapter.launchGuidanceSent?.(launchResult.binding.tmuxSession) : undefined;
+            if (sentGuidance?.length) this.launchGuidanceBlocks.set(node.id, new Set(sentGuidance.filter((id) => carriedIds.has(id))));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested
@@ -2196,7 +2271,9 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
-                  error: `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. If that degradation is acceptable, start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+                  error: resumeWithoutContext
+                    ? `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. ${noContextFresh}`
+                    : `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. If that degradation is acceptable, start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
                 };
               }
               const finalStatus = (isPodAware && resumeRequested)
@@ -2242,7 +2319,9 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
-                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
+                  error: resumeWithoutContext
+                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. ${noContextFresh} Restore the original session manually.`
+                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
                 };
               }
               return {
@@ -2408,57 +2487,13 @@ export class RestoreOrchestrator {
    *   3. Nothing attached (or a resolution error) → EXPLICIT "floor" — the locked
    *      minimum-floor absence contract; never undefined/env-delegation for managed seats.
    */
-  /** Pure, read-only policy resolution shared with selected startup review. */
+  /** Pure, read-only policy resolution shared with selected startup review and node-inventory display. */
   resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | "auto" {
-    try {
-      const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
-      if (prov) {
-        // Guard-F3: the resolver swallows read errors internally (advisory floor), so the
-        // fallback must be decided BEFORE re-resolution: probe readability of the persisted
-        // resolvedTarget first — readable → REOPEN + re-derive (the ruling); unreadable /
-        // invalid → the PERSISTED posture carries (restart-stable), never a silent floor.
-        if (prov.origin === "custom" && prov.declaringDir && prov.resolvedTarget) {
-          const ref = prov.nodeRef ?? this.rigRepo.getRigPermissionPolicy(rigId);
-          if (ref) {
-            let content: string | null = null;
-            try { content = readFileSync(prov.resolvedTarget, "utf-8"); } catch { content = null; }
-            if (content !== null) {
-              const body = content;
-              const rederived = resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
-                readFile: () => body,
-              });
-              // Guard round-2: trust the re-derivation ONLY when content resolution
-              // genuinely succeeded with usable semantics (parse OK + valid flag
-              // contract) — readable-but-malformed/unusable carries the PERSISTED
-              // posture, exactly like unreadable. Advisory only; no enforcement.
-              if (rederived.contentResolved) return rederived.launchPosture;
-            }
-          }
-        }
-        return prov.launchPosture;
-      }
-      // Guard-F1: no node provenance (organic claim/self-attach seats) → the PERSISTED
-      // rig-level attachment is authoritative — same readable-probe discipline; NEVER
-      // resolve the raw relative rig ref against this process's cwd.
-      const rigProv = this.rigRepo.getRigPolicyProvenance(rigId);
-      if (rigProv) {
-        if (rigProv.origin === "custom" && rigProv.declaringDir && rigProv.resolvedTarget && rigProv.rigRef) {
-          let content: string | null = null;
-          try { content = readFileSync(rigProv.resolvedTarget, "utf-8"); } catch { content = null; }
-          if (content !== null) {
-            const body = content;
-            const rederived = resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
-              readFile: () => body,
-            });
-            if (rederived.contentResolved) return rederived.launchPosture; // same rule as node-level
-          }
-        }
-        return rigProv.launchPosture;
-      }
-    } catch { /* posture resolution must never block a restore */ }
-    // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked
-    // minimum floor, explicitly — never undefined (which would delegate to ambient YOLO).
-    return "floor";
+    return resolvePersistedRestorePosture({
+      getNodeProvenance: () => this.rigRepo.getNodePolicyProvenance(nodeId),
+      getFallbackRigRef: () => this.rigRepo.getRigPermissionPolicy(rigId),
+      getRigProvenance: () => this.rigRepo.getRigPolicyProvenance(rigId),
+    }) as "floor" | "full_bypass" | "auto";
   }
 
   /** The live seat's current model: `rig seat set-model` saves it on the live node after the snapshot, and every
@@ -2627,6 +2662,7 @@ export class RestoreOrchestrator {
         ...(launchWrapper?.length ? ([launchWrapper] as const) : []),
       );
       if (result.ok) {
+        for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }

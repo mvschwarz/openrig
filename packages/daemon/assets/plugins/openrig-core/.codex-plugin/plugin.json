@@ -1,13 +1,13 @@
 {
   "name": "openrig-core",
-  "version": "0.1.27",
+  "version": "0.1.29",
   "description": "OpenRig canonical skills and hooks for cross-runtime agent topology coordination, continuity, and operating discipline.",
   "author": {
     "name": "Mike Schwarz",
     "url": "https://github.com/mvschwarz"
   },
   "homepage": "https://github.com/mvschwarz/openrig-plugins",
-  "repository": "github:mvschwarz/openrig-plugins",
+  "repository": "https://github.com/mvschwarz/openrig-plugins",
   "license": "Apache-2.0",
   "keywords": ["openrig", "agent", "topology", "rig", "continuity", "coordination", "compaction", "handoff"],
   "skills": "./skills",
@@ -19,6 +19,8 @@
     "developerName": "Mike Schwarz",
     "category": "Productivity",
     "capabilities": ["Read"],
-    "websiteURL": "https://github.com/mvschwarz/openrig-plugins"
+    "websiteURL": "https://github.com/mvschwarz/openrig-plugins",
+    "privacyPolicyURL": "https://openrig.dev/privacy",
+    "termsOfServiceURL": "https://openrig.dev/terms"
   }
 }

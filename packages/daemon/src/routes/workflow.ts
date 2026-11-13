@@ -321,10 +321,20 @@ export function workflowRoutes(): Hono {
   // runtime.continue()'s enriched instance.
   app.get("/list", (c) => {
     const status = c.req.query("status");
-    if (status === "active" || status === "waiting" || status === "completed" || status === "failed" || status === "aborted") {
-      return c.json(getRuntime(c).listInstancesWithDeadline(status));
+    const parsedStatus = status === "active" || status === "waiting" || status === "completed" || status === "failed" || status === "aborted" ? status : undefined;
+    const rawLimit = c.req.query("limit");
+    if (rawLimit !== undefined && (!/^[1-9]\d*$/.test(rawLimit) || Number(rawLimit) > 10000)) return c.json({ error: "limit_invalid", message: "limit must be an integer from 1 to 10000" }, 400);
+    const fields = ["project", "mission", "slice", "rig", "name"] as const;
+    const filters: { project?: string; mission?: string; slice?: string; rig?: string; name?: string; tags?: string[]; limit?: number } = {};
+    for (const field of fields) {
+      const value = c.req.query(field);
+      if (value !== undefined) { if (!value.trim()) return c.json({ error: "filter_invalid", message: `${field} must not be empty` }, 400); filters[field] = value; }
     }
-    return c.json(getRuntime(c).listInstancesWithDeadline());
+    const tags = c.req.queries("tag");
+    if (tags?.some((tag) => !tag.trim())) return c.json({ error: "filter_invalid", message: "tag must not be empty" }, 400);
+    if (tags?.length) filters.tags = tags;
+    if (rawLimit !== undefined) filters.limit = Number(rawLimit);
+    return c.json(getRuntime(c).listInstancesWithDeadline(parsedStatus, Object.keys(filters).length ? filters : undefined));
   });
 
   // Lists every cached workflow_spec with an `isBuiltIn` flag computed

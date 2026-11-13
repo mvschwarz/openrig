@@ -29,6 +29,69 @@ function mockExec(responses: Record<string, { stdout?: string; error?: Error }>)
   };
 }
 
+describe("TmuxAdapter.listSessionClientTerminals", () => {
+  it("lists each attached client's terminal and its reported type", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { stdout: "/dev/ttys011|rex 0.0.1793890641-gaf0c20\n/dev/ttys012|\n" } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toEqual([
+      { tty: "/dev/ttys011", termtype: "rex 0.0.1793890641-gaf0c20" },
+      { tty: "/dev/ttys012", termtype: "" },
+    ]);
+  });
+
+  it("is empty when the session or the server is gone, so the caller can stop looking", async () => {
+    for (const error of [new Error("can't find session: op@kernel"), NO_SERVER_ERROR,
+      new Error("error connecting to /private/tmp/tmux-501/x (No such file or directory)")]) {
+      expect(await adapterFor(mockExec({ "list-clients": { error } })).listSessionClientTerminals("op@kernel")).toEqual([]);
+    }
+  });
+
+  it("is null when tmux fails for another reason", async () => {
+    const adapter = adapterFor(mockExec({ "list-clients": { error: new Error("command timed out") } }));
+    expect(await adapter.listSessionClientTerminals("op@kernel")).toBeNull();
+  });
+});
+
+describe("TmuxAdapter.lastClientActivity (#3076)", () => {
+  const activity = (stdout: string) => adapterFor(mockExec({ "list-clients": { stdout } })).lastClientActivity("op@kernel");
+
+  it("is the latest activity of a writable client, in milliseconds", async () => {
+    expect(await activity("0|1790000100\n0|1790000105\n")).toBe(1790000105000);
+  });
+
+  it("does not count a read-only client (a viewer tile)", async () => {
+    expect(await activity("1|1790000200\n0|1790000100\n")).toBe(1790000100000);
+    expect(await activity("1|1790000200\n")).toBeNull();
+  });
+
+  it("counts an attach as recent activity: a key in the same second as the attach can't be told apart from it", async () => {
+    // tmux would report client_created == client_activity for both an attach alone and an attach plus a key that second.
+    expect(await activity("0|1790000300\n")).toBe(1790000300000);
+  });
+
+  it("is null with no client", async () => {
+    expect(await activity("")).toBeNull();
+    expect(await activity("\n")).toBeNull();
+  });
+
+  it("throws on a row it can't read, alone or next to a readable one, so the guard holds", async () => {
+    for (const stdout of ["0|abc\n", "0|0\n", "0\n", "2|1790000100\n", "0|1790000000|1790000100\n", "0|1790000100\n0|abc\n"]) {
+      await expect(activity(stdout)).rejects.toThrow();
+    }
+  });
+
+  it("throws when tmux can't say", async () => {
+    for (const error of [new Error("can't find session: op@kernel"), NO_SERVER_ERROR, new Error("command timed out")]) {
+      await expect(adapterFor(mockExec({ "list-clients": { error } })).lastClientActivity("op@kernel")).rejects.toThrow();
+    }
+  });
+
+  it("asks tmux for the read-only flag and the activity of each client of the session", async () => {
+    const commands: string[] = [];
+    await adapterFor(async command => { commands.push(command); return ""; }).lastClientActivity("op@kernel");
+    expect(commands.some(c => c.includes("list-clients") && c.includes("#{client_readonly}|#{client_activity}"))).toBe(true);
+  });
+});
+
 describe("TmuxAdapter", () => {
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;
@@ -630,6 +693,47 @@ describe("TmuxAdapter", () => {
       expect(checks).toBe(2);
       expect(tmux.cmds().some(cmd => cmd.startsWith("tmux paste-buffer"))).toBe(false);
       expect(tmux.cmds()).toContain("tmux delete-buffer -b 'cr'");
+      expect(seat.noteSubmitted).not.toHaveBeenCalled();
+    });
+
+    it("input typed while the carriage return's re-check awaits the caller's checks stops it (#3076)", async () => {
+      const tmux = readOnlyTmux();
+      const adapter = new TmuxAdapter(tmux.exec, tmux.files);
+      let composer = "notice";
+      const seat = guard(async () => {
+        if (composer !== "notice") throw new DeliveryGuardError("draft_input_changed", "The input changed; Enter was not sent.");
+      });
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      let calls = 0;
+      const beforeKeys = vi.fn(async () => { calls += 1; if (calls === 2) composer = "notice PERSONDRAFT-k7"; });
+      expect(await adapter.sendKeys("dev@rig", ["Enter"], undefined, { beforeKeys }))
+        .toEqual({ ok: false, code: "draft_input_changed", message: "The input changed; Enter was not sent." });
+      expect(tmux.cmds().some(cmd => cmd.startsWith("tmux paste-buffer"))).toBe(false);
+      expect(tmux.cmds()).toContain("tmux delete-buffer -b 'cr'");
+      expect(seat.noteSubmitted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("sendKeys reads the input after the caller's waiting checks (#3076)", () => {
+    const TARGET = { nodeId: "n1", session: "dev@rig", occupant: "o1", pane: "%1" };
+
+    it("a draft typed while beforeKeys awaits stops the Enter, and nothing reaches the pane", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => cmd.startsWith("tmux list-panes") ? "%1|0|/w|80|24|1\n" : "");
+      const adapter = new TmuxAdapter(exec);
+      let composer = "notice";
+      const seat = {
+        maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false,
+        checkInput: vi.fn(), noteSubmitted: vi.fn(), notePasted: async () => {}, attachInputInspection: () => {},
+        input: (_name: string, fn: () => Promise<unknown>) => fn(), humanInput: (_name: string, fn: () => Promise<unknown>) => fn(),
+        needsInputCheck: () => true,
+        beforeInput: vi.fn(async () => {
+          if (composer !== "notice") throw new DeliveryGuardError("draft_input_changed", "The input changed; Enter was not sent.");
+        }),
+      };
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      const result = await adapter.sendKeys("dev@rig", ["Enter"], undefined, { beforeKeys: async () => { composer = "notice PERSONDRAFT-k7"; } });
+      expect(result).toEqual({ ok: false, code: "draft_input_changed", message: "The input changed; Enter was not sent." });
+      expect(exec.mock.calls.map(([cmd]) => cmd).some(cmd => cmd.startsWith("tmux send-keys"))).toBe(false);
       expect(seat.noteSubmitted).not.toHaveBeenCalled();
     });
   });

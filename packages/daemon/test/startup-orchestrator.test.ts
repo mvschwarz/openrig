@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -159,6 +160,40 @@ describe("StartupOrchestrator", () => {
       ...overrides,
     };
   }
+
+  it.each([false, true])("revokes its exact run grant on later readiness failure, replacement=%s", async replace => {
+    const seed = seedSession();
+    db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(seed.nodeId);
+    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('bound',?,'r01-impl','%1')").run(seed.nodeId);
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: seed.nodeId, generation: sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid,
+      issuedBy: "launch", run: { runId, sessionId: seed.sessionId, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    const first = issue("first"); grants.activate(first.grantId);
+    let replacement: ReturnType<typeof issue> | undefined;
+    const adapter = mockAdapter({ runtime: "pi", launchHarness: vi.fn(async () => ({ ok: true, activityGrantId: first.grantId })),
+      checkReady: vi.fn(async () => { if (replace) { replacement = issue("replacement"); grants.activate(replacement.grantId); } throw new Error("readiness unavailable"); }) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter,
+      binding: { ...makeBinding(), nodeId: seed.nodeId, tmuxPane: "%1" } }));
+    expect(result.startupStatus).toBe("failed");
+    expect(grants.get(first.grantId)?.revokedAt).not.toBeNull();
+    if (replacement) expect(grants.standing(replacement.grantId)).toBe("current");
+  });
+
+  it("revokes its run when context delivery reveals a definitive readiness gate", async () => {
+    const seed = seedSession();
+    db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(seed.nodeId);
+    db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('bound',?,'r01-impl','%1')").run(seed.nodeId);
+    const grants = new ActivityGrantStore(db);
+    const grant = grants.issue({ nodeId: seed.nodeId, generation: sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid,
+      issuedBy: "launch", run: { runId: "first", sessionId: seed.sessionId, binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+    grants.activate(grant.grantId);
+    const adapter = mockAdapter({ runtime: "pi", launchHarness: vi.fn(async () => ({ ok: true, activityGrantId: grant.grantId })),
+      checkReady: vi.fn().mockResolvedValueOnce({ ready: true }).mockResolvedValue({ ready: false, code: "login_required", reason: "login needed" }) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter, startupActions: [makeAction({ type: "send_text", value: "startup text" })],
+      binding: { ...makeBinding(), nodeId: seed.nodeId, tmuxPane: "%1" } }));
+    expect(result.startupStatus).toBe("attention_required");
+    expect(grants.get(grant.grantId)?.revokedAt).not.toBeNull();
+  });
 
   it("community contract: launch surfaces undelivered startup files without placing or pasting them", async () => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-startup-files-"));
@@ -1063,7 +1098,7 @@ describe("StartupOrchestrator", () => {
       opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
     const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
     expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false, resumingConversation: false });
     const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
     expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
@@ -1071,8 +1106,29 @@ describe("StartupOrchestrator", () => {
     expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
     vi.mocked(adapter.project).mockClear();
     expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
-    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
     expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
+  });
+
+  // A restore or `rig up --existing` resumes the seat's own conversation: with a saved repository choice it learns only
+  // whether its launch carries the guidance, so a supported Codex keeps it out of the tracked AGENTS.md. The saved file
+  // never changes, and a fork or a continuation isn't asked.
+  it("a resume with a saved repository choice asks only whether its launch carries the guidance, and keeps the saved file", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean; resumingConversation?: boolean }) =>
+      opts?.resuming && !opts.resumingConversation ? { file: null } : { file: "/elsewhere/AGENTS.md", launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    const saved = { ...makeBinding(), guidanceFile: null } as NodeBinding;
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true, resumingConversation: true });
+    for (const call of [vi.mocked(adapter.project).mock.calls[0]?.[1], vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1], vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]]) {
+      expect(call).toMatchObject({ guidanceFile: null, guidanceLaunchInstructions: true });
+    }
+    // A fork, or a seat whose saved choice is its own file, isn't asked.
+    guidanceFileFor.mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "native-original", binding: { ...saved, guidanceFile: "/state/agent/AGENTS.md" } as NodeBinding }))).ok).toBe(true);
+    expect((await orch.startNode(makeInput(seed, { adapter, isRestore: true, forkSource: { kind: "native_id", value: "parent-1" }, binding: saved }))).ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {

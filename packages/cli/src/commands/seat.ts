@@ -1022,8 +1022,8 @@ Example:
       }
       if (opts.json) return;
       const state = res.data.state;
-      console.log(state === "answered" ? `Decided: ${res.data.optionId}. The runner gives it to its agent at its next read.`
-        : state === "refused" ? "Decided: refused. The runner gives its agent the refusal at its next read."
+      console.log(state === "answered" ? `Decided: ${res.data.optionId}. A runner waiting on the request gets it now; one that isn't gets it at its next read.`
+        : state === "refused" ? "Decided: refused. A runner waiting on the request gets the refusal now; one that isn't gets it at its next read."
         : `Nothing was decided: the request is ${state}.`);
     });
 
@@ -1493,9 +1493,10 @@ Examples:
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
-session and leaves its process running), then end that process in its own
-terminal. rig down <rig> ends every seat in its rig, so it is the route only
-for a one-seat rig.
+session and leaves its process running), then end that process and the
+underlying tmux session, including any remaining shell. Closing only its
+viewing window leaves the tmux session running. rig down <rig> leaves a
+session OpenRig didn't start running.
 A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
 adopted and is refused too, until its next launched handover or managed launch;
 the refusal says so. Stopping ends that agent's session and any work in progress:

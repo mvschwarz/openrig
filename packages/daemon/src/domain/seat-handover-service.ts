@@ -19,6 +19,7 @@ import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILI
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, sep } from "node:path";
 import { keptGuidanceSeatLine, lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot, seatStartupTextFiles, type SeatStartupTextFile } from "./restore-guidance.js";
 import { managedBlockRecords } from "./managed-block-records.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -517,7 +518,9 @@ export class SeatHandoverService {
       if (permissionOverride.codexPermissions) {
         // Saved envelopes retain ordinary launch additions; only an observed predecessor
         // policy uses the exact carry path. Describe policy, not an observed native delta.
-        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+        const directoryPolicy = "filesystem" in permissionOverride.codexPermissions
+          ? "with its explicit filesystem policy and no additional writable directory grants"
+          : permissionOverride.codexPermissions.sandbox === "workspace-write"
           ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
           : "without additional writable directory grants, as on a read-only fresh launch";
         permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
@@ -616,7 +619,9 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+        guidance: launch.code === "successor_preflight_failed"
+          ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
     }
 
@@ -656,7 +661,7 @@ export class SeatHandoverService {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
         // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
         // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -741,7 +746,7 @@ export class SeatHandoverService {
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
         // binding unchanged, seat re-wakeable — never a false complete.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -778,8 +783,8 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       startedWithoutRequired,
-      launchWarnings: coreCopyNotes,
-      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
     });
   }
 
@@ -854,12 +859,12 @@ export class SeatHandoverService {
     }
     // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
     // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
-    // this seat's own, so commit re-claims it. A row claimed by any other node, or a discovered-source
-    // successor, still needs an active, unclaimed record.
+    // this seat's own, so commit re-claims it. #2861: a deleted owner or a terminal owner in an archived
+    // earlier rig can also leave that pane claimed. Other owners and discovered-source successors still refuse.
     const ownPaneClaim = input.reportedSource.mode !== "discovered"
       && discovered.status === "claimed"
-      && discovered.claimedNodeId === input.node.id
-      && discovered.tmuxSession === input.latestSession.session_name;
+      && discovered.tmuxSession === input.latestSession.session_name
+      && (discovered.claimedNodeId === input.node.id || this.isStalePaneClaimOwner(discovered.claimedNodeId));
     if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
@@ -1075,9 +1080,24 @@ export class SeatHandoverService {
       lines.push("", "Priming artifacts (read each, in order):");
       for (const artifact of required) lines.push(`- ${artifact.address} — ${artifact.label}`);
     }
-    if (history.length > 0) {
+    const newest = history[0];
+    if (newest) {
       lines.push("", "Older recaps, newest first (read these only if you need the seat's history):");
-      for (const artifact of history) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      const settings = new SettingsStore();
+      let limit: number;
+      try {
+        limit = Number(settings.resolveOne("output.rebuild_recaps").value);
+      } catch {
+        // Optional presentation settings must not interrupt successor delivery.
+        limit = 3;
+      }
+      const folder = dirname(newest.address);
+      // A folder pointer replaces paths only when it covers EVERY optional artifact.
+      // Custom resolvers with other layouts retain their complete explicit list.
+      const bounded = limit > 0 && history.length > limit && basename(folder) === "recap-superseded"
+        && history.every((artifact) => isAbsolute(artifact.address) && dirname(artifact.address) === folder);
+      for (const artifact of bounded ? history.slice(0, limit) : history) lines.push(`- ${artifact.address} — ${artifact.label}`);
+      if (bounded) lines.push(`All ${history.length} older recaps: ${folder}${sep} (optional history; list this folder for the rest).`);
     }
     if (info.gaps.length > 0) {
       lines.push("", "Declared but MISSING on disk (known gaps, named so nothing is silently dropped):");
@@ -1277,6 +1297,15 @@ export class SeatHandoverService {
     return findOtherSessionOwner(this.db, tmuxSession, targetNodeId, { ignoreArchived });
   }
 
+  private isStalePaneClaimOwner(nodeId: string | null): boolean {
+    if (nodeId === null) return true; // ON DELETE SET NULL retains the claim after its owner is removed.
+    return this.db.prepare(`
+      SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      WHERE n.id = ? AND r.archived_at IS NOT NULL
+        AND (SELECT status FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) IN ('superseded', 'detached', 'exited')
+    `).pluck().get(nodeId) === 1;
+  }
+
   private commit(input: {
     seatRef: string;
     status: SeatStatus;
@@ -1298,6 +1327,15 @@ export class SeatHandoverService {
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
+      // The presence probe awaited after validation. Reclaim only the same still-stale foreign claim,
+      // inside the transaction that assigns it, so a resumed owner or a new claimant cannot be overwritten.
+      if (input.discovered.status === "claimed" && input.discovered.claimedNodeId !== input.node.id) {
+        const current = this.discoveryRepo.getDiscoveredSession(input.discovered.id);
+        if (current?.status !== "claimed" || current.claimedNodeId !== input.discovered.claimedNodeId
+          || !this.isStalePaneClaimOwner(current.claimedNodeId)) {
+          return null;
+        }
+      }
       const rows = this.db.prepare(
         "SELECT id FROM sessions WHERE node_id = ? AND status NOT IN ('superseded', 'detached', 'exited') ORDER BY id"
       ).all(input.node.id) as Array<{ id: string }>;
@@ -1317,10 +1355,11 @@ export class SeatHandoverService {
       });
       // (e/Class-B): capture the RETIRING occupant's generation BEFORE registerClaimedSession mints the
       // successor's tenure below — after that mint the node's "current" generation IS the successor's
-      // (the name is reused), so this is the only point the retiree's generation is resolvable.
-      const retiringGeneration =
-        this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
+      // (the name is reused), so this is the only point the retiree's generation is resolvable. It is read by
+      // this node, not by its session name: an earlier generation of the seat (an archived rig of the same
+      // name) can hold a newer session row under that name.
       const tenureBefore = this.readOccupantTenure(input.node.id);
+      const retiringGeneration = tenureBefore?.generationUuid ?? undefined;
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
       const newSession = this.sessionRegistry.registerClaimedSession(
         input.node.id,
@@ -1413,11 +1452,16 @@ export class SeatHandoverService {
 
     let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent; provenanceRecordWritten: boolean };
     try {
-      committed = tx();
-      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
-      // oracle sees the swap as its own event, keyed by the durable node id, identified
-      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
-      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+      const outcome = tx();
+      if (outcome === null) {
+        return {
+          ok: false,
+          code: "discovered_not_active",
+          message: `Discovery record "${input.discovered.id}" no longer has a stale owner claim.`,
+          guidance: "Inspect the current discovery owner and successor state before retrying.",
+        };
+      }
+      committed = outcome;
     } catch (err) {
       return {
         ok: false,
@@ -1425,6 +1469,16 @@ export class SeatHandoverService {
         message: `Seat handover commit failed: ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Inspect daemon logs and retry after the seat state is consistent.",
       };
+    }
+
+    // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+    // oracle sees the swap as its own event, keyed by the durable node id, identified
+    // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+    try {
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+    } catch (err) {
+      // A notification failure cannot roll back the committed binding or abandon its grant.
+      console.warn(`Seat activity swap notification failed: ${err instanceof Error ? err.name : typeof err}`);
     }
 
     this.eventBus.notifySubscribers(committed.event);

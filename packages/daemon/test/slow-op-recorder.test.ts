@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Worker } from "node:worker_threads";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { createDaemon } from "../src/startup.js";
 import { createSlowOpRequestMiddleware } from "../src/domain/slow-op-recorder.js";
@@ -21,6 +21,7 @@ const expectedSites = new Map<string, string[]>([
   ["domain/codex-thread-id.ts", ["codex_thread_id.resolve_home"]],
   ["domain/review/gather.ts", ["review.gather.git"]],
   ["domain/tmux-option-defaults.ts", ["tmux_options.command_v"]],
+  ["domain/queue-repository.ts", ["queue.decision_revision.replies", "queue.linked_successors.build", "queue.handoff"]],
 ]);
 
 const pluginVendorUrl = "https://github.com/mvschwarz/openrig-plugins/releases/latest/download/openrig-core.tar.gz";
@@ -67,12 +68,37 @@ afterEach(() => {
 });
 
 describe("SlowOpRecorder locked instrumentation contract", () => {
+  it("returns promptly while begin acknowledgements are delayed", async () => {
+    const mod = await loadRecorderModule();
+    if (!mod) throw new Error("recorder module missing");
+    const logPath = path.join(tempDir(), "pending.jsonl");
+    const recorder = new mod.SlowOpRecorder({ logPath });
+    const worker: Worker = (recorder as any).worker;
+    const post = worker.postMessage;
+    const held: unknown[] = [];
+    worker.postMessage = message => {
+      if (message?.record?.phase === "begin") held.push(message);
+      else post.call(worker, message);
+    };
+    try {
+      const start = performance.now();
+      const values = [1, 2, 3].map(value => recorder.runSync("test.delayed.begin", () => value));
+      const elapsedMs = performance.now() - start;
+      expect(values).toEqual([1, 2, 3]);
+      expect(held).toHaveLength(3);
+      expect(elapsedMs).toBeLessThan(100);
+    } finally {
+      worker.postMessage = post;
+      for (const message of held) post.call(worker, message);
+      await recorder.close();
+    }
+  });
+
   it("pins the absolute boundary, rotation, filename, and secret-safe record contract", async () => {
     const mod = await loadRecorderModule();
     expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
     if (!mod) return;
 
-    expect(mod.SLOW_OPERATION_BARRIER_TIMEOUT_MS).toBe(250);
     expect(mod.SLOW_OPERATION_THRESHOLD_MS).toBe(250);
     expect(mod.SLOW_OPERATION_ROTATION_BYTES).toBe(1024 * 1024);
     expect(mod.SLOW_OPERATION_ROTATION_COUNT).toBe(3);
@@ -85,9 +111,6 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     process.env.OPENRIG_TEST_SECRET = secret;
     try {
       const value = recorder.runSync("test.sync.boundary", () => {
-        const records = fs.readFileSync(logPath, "utf8");
-        expect(records).toContain('"phase":"begin"');
-        expect(records).toContain('"site":"test.sync.boundary"');
         return 41;
       });
       expect(value).toBe(41);
@@ -107,88 +130,34 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     }
   });
 
-  it("leaves a durable open span after the begin barrier and exposes fail-visible degradation", async () => {
+  it("flushes a queued open span and exposes acknowledged write failure in health", async () => {
     const mod = await loadRecorderModule();
-    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
-    if (!mod) return;
-
+    if (!mod) throw new Error("recorder module missing");
     const dir = tempDir();
-    const logPath = path.join(dir, "slow-operations.jsonl");
+    const logPath = path.join(dir, "open.jsonl");
     const recorder = new mod.SlowOpRecorder({ logPath });
-    const span = recorder.beginSyncSpan("test.sync.wedge");
-    expect(span).toBeTruthy();
-    const records = await readRecords(logPath);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ phase: "begin", site: "test.sync.wedge" });
-    expect(recorder.snapshot()).toMatchObject({ healthy: true });
+    recorder.beginSyncSpan("test.sync.wedge");
+    await recorder.flush();
+    expect(await readRecords(logPath)).toMatchObject([{ phase: "begin", site: "test.sync.wedge" }]);
     await recorder.close();
 
-    const degraded = new mod.SlowOpRecorder({
-      logPath: path.join(dir, "degraded.jsonl"),
-      barrierTimeoutMs: 0,
-    });
+    const degraded = new mod.SlowOpRecorder({ logPath: dir });
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createTestDaemon({
-      dbPath: ":memory:",
-      tmuxExec: async () => "",
-      cmuxExec: async () => "",
-      slowOpRecorder: degraded,
-    } as never);
+    const daemon = await createTestDaemon({ dbPath: ":memory:", tmuxExec: async () => "", cmuxExec: async () => "", slowOpRecorder: degraded } as never);
     try {
-      const worker: Worker = (degraded as any).worker;
-      const postMessage = worker.postMessage;
-      let intercepted = 0;
-      let withheldSignal: SharedArrayBuffer | undefined;
-      try {
-        worker.postMessage = (message, transferList) => {
-          if (message?.type === "append"
-            && message.record?.phase === "begin"
-            && message.record?.site === "test.sync.degraded"
-            && message.signal instanceof SharedArrayBuffer) {
-            intercepted++;
-            const { signal, ...withoutSignal } = message;
-            withheldSignal = signal;
-            // Append through the real worker, but withhold this acknowledgement.
-            return postMessage.call(worker, withoutSignal, transferList);
-          }
-          return postMessage.call(worker, message, transferList);
-        };
-        expect(degraded.runSync("test.sync.degraded", () => "continued")).toBe("continued");
-      } finally {
-        worker.postMessage = postMessage;
-      }
-      expect(intercepted).toBe(1);
-      expect(worker.postMessage).toBe(postMessage);
-      expect(withheldSignal).toBeInstanceOf(SharedArrayBuffer);
-      expect(new Int32Array(withheldSignal!)[0]).toBe(0);
-      expect(degraded.snapshot()).toMatchObject({
-        healthy: false,
-        reason: "begin_barrier_timeout",
-        site: "test.sync.degraded",
-      });
-
-      const healthResponse = await daemon.app.request("/healthz");
-      expect(await healthResponse.json()).toMatchObject({
-        status: "ok",
-        slowOperations: {
-          healthy: false,
-          reason: "begin_barrier_timeout",
-          site: "test.sync.degraded",
-        },
-      });
+      expect(degraded.runSync("test.sync.degraded", () => "continued")).toBe("continued");
+      await expect(degraded.flush()).rejects.toBeInstanceOf(mod.SlowOpRecorderWriteError);
+      expect(degraded.snapshot()).toMatchObject({ healthy: false, reason: "recorder_write_failed", site: "recorder.worker" });
+      const response = await daemon.app.request("/healthz");
+      expect(await response.json()).toMatchObject({ status: "ok", slowOperations: { healthy: false, reason: "recorder_write_failed" } });
       const observations = daemon.deps.streamStore!.list();
       expect(observations).toHaveLength(1);
-      expect(observations[0]!.body).toContain("begin_barrier_timeout");
-      expect(observations[0]!.body).toContain("test.sync.degraded");
-      await degraded.flush();
-      const degradedRecords = await readRecords(path.join(dir, "degraded.jsonl"));
-      expect(degradedRecords.filter((record) => record.phase === "begin"
-        && record.site === "test.sync.degraded")).toHaveLength(1);
+      expect(observations[0]!.body).toContain("recorder_write_failed");
     } finally {
       daemon.eventLoopMonitor.stop();
       daemon.db.close();
-      await degraded.close();
+      await degraded.close().catch(() => {});
       if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
       else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
     }
@@ -211,20 +180,17 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       });
       expect(value).toBe("continued");
       expect(ran).toBe(true);
-      expect(recorder.snapshot()).toEqual({
-        healthy: false,
-        reason: "begin_barrier_failed",
-        site: "test.sync.observer_failure",
-      });
+      await expect(recorder.flush()).rejects.toBeInstanceOf(mod.SlowOpRecorderWriteError);
+      expect(recorder.snapshot()).toEqual({ healthy: false, reason: "recorder_write_failed", site: "recorder.worker" });
     } finally {
       // This recorder's log path is intentionally unwritable (to force the
-      // begin-barrier failure above), so close() now correctly rejects on the
+      // asynchronously acknowledged write failure above), so close() now correctly rejects on the
       // latched lost-write durability — tolerate it in teardown.
       await recorder.close().catch(() => {});
     }
   });
 
-  it("durably records an open span before a main-thread sync wedge is killed", async () => {
+  it("writes a queued begin while the main thread is wedged, before a later kill", async () => {
     const dir = tempDir();
     const logPath = path.join(dir, "crash.jsonl");
     fs.writeFileSync(logPath, "", { mode: 0o600 });
@@ -278,6 +244,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
         });
       });
       expect(callbackEvidence).toEqual({ isMainThread: true, threadId: 0 });
+      await vi.waitFor(async () => expect(await readRecords(logPath)).toMatchObject([{ phase: "begin", site: "test.sync.crash" }]));
       child.kill("SIGKILL");
       await once(child, "exit");
 
@@ -324,6 +291,23 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     await recorder.close();
   });
 
+  it("records a slow synchronous site only at or above the slow threshold, with its outcome", async () => {
+    const mod = await loadRecorderModule();
+    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
+    if (!mod) return;
+
+    const dir = tempDir();
+    const logPath = path.join(dir, "slow-operations.jsonl");
+    const recorder = new mod.SlowOpRecorder({ logPath, slowThresholdMs: 250 });
+    recorder.recordSlowSync("queue.decision_revision.replies", 249, "ok");
+    recorder.recordSlowSync("queue.decision_revision.replies", 250, "ok");
+    recorder.recordSlowSync("queue.decision_revision.replies", 400, "failed");
+    await recorder.flush();
+    const records = (await readRecords(logPath)).filter((record) => record.site === "queue.decision_revision.replies");
+    expect(records.map((record) => [record.phase, record.durationMs, record.outcome])).toEqual([["end", 250, "ok"], ["end", 400, "failed"]]);
+    await recorder.close();
+  });
+
   // The request-timing MIDDLEWARE CONTRACT, hermetic + deterministic. The prior "real server" form
   // ran the full daemon (event-loop monitor + a globalThis.fetch monkey-patch), which is structurally
   // ambient-fragile under the concurrent-workspace gate: it intermittently returned 200 for an unmatched
@@ -351,7 +335,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     expect(JSON.stringify(requests)).not.toContain("must-not-appear");
   });
 
-  it("wraps all nine accepted sync calls without moving them off the main thread", () => {
+  it("keeps the accepted slow-operation site labels", () => {
     const srcRoot = path.resolve(import.meta.dirname, "../src");
     for (const [relativePath, sites] of expectedSites) {
       const source = fs.readFileSync(path.join(srcRoot, relativePath), "utf8");
@@ -496,7 +480,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     expect((await app.request("/definitely-missing")).status).toBe(404);
   });
 
-  it("drives the real tmux command-v spawnSync site through a hermetic daemon", async () => {
+  it("drives the asynchronous tmux command-v site through a hermetic daemon", async () => {
     const mod = await loadRecorderModule();
     expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
     if (!mod) return;

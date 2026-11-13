@@ -109,8 +109,43 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 - **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
   - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
     `<OPENRIG_HOME>/mcp-http-presence.json`, beside the token file;
-  - `lastWake`: its latest ring and the result, among its 50 most recent rows.
+  - `lastWake`: its latest ring and the result, among its 50 most recent rows;
+  - `checkIn`: its check-in status, last check-in and stated cadence, as described in [Check-in status](#check-in-status)
+    (unknown, with the reason, when the daemon gives none).
 - `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
+
+### Check-in status
+
+A connected assistant (a roster member marked `hosted: true`) checks in each time it reads its own pending inbox (through the queue list, as the MCP list tool does
+when it lists the member's own work). Other calls it makes don't count yet. Its status compares its last check-in with
+what its roster entry states: a cadence (`check_in_minutes`), or that it checks in when a person asks it
+(`check_in_on_request: true`):
+
+| Status | Meaning |
+|---|---|
+| `checking-in` | its last check-in is no older than twice its stated cadence |
+| `check-in-overdue` | its last check-in is older than that: its schedule may be off or waiting for an approval |
+| `no-check-in-yet` | no check-in recorded for it on this daemon, whatever its entry states |
+| `on-request` | its entry says it checks in when a person asks it |
+| `disconnected` | reserved for a recorded revocation or removal of its connection. Nothing records one yet, so a revoked assistant reads overdue (or unknown, with no cadence) |
+| `unknown` | its entry states neither, its statement can't be used, or its check-ins couldn't be read; the reason says which, and its last check-in is shown. OpenRig assumes no cadence, so this never reads idle or overdue |
+
+Each place it's shown gives the evidence with it, for example `overdue: last check-in 2026-11-12T13:05:00Z, expected
+every 60 min; its schedule may be off or waiting for an approval`.
+
+A stated cadence is its person's statement: neither reading proves the assistant's own schedule ran, or that it picked
+anything up. It's a status only. Work addressed to a member that isn't checking in still queues and is rung as before, a check-in
+isn't pickup (pickup is its claim), and no check-in doesn't mean it's idle, failed or safe. `GET /api/queue/hosted-members`
+gives this daemon's host id and each member on this host with its status, last check-in and stated cadence (with the
+reason when it's unknown); `rig roster show` and `find` show it as `Check-in:`, for a team with or without terminal seats, and `rig ps` (with or
+without `--nodes`, and when it has no rigs or nodes to show) lists every connected assistant after its table, one line
+each. That's on this host, and in the node view of an HTTP host; an SSH host's `rig ps` prints its own. An HTTP host's
+rig view and the multi-host fan-out leave the section out. When the list can't be read, for example from an older
+daemon, it says check-in is unavailable instead. Its `--json` output is unchanged. The TUI's
+instance and rig tables list them the same way after their seats, with times in the viewer's zone; when the list can't be read,
+they say check-in is unavailable, as `rig ps` does.
+When the member has unclaimed work, the standing notice described above states the same status in its `check-ins:`
+line; when that notice is filed doesn't change.
 
 ## Revoke
 
@@ -142,10 +177,28 @@ and nothing else is offered:
   `rig_queue_create` that leaves out `destination` goes to that receiver. The operator sets it; a caller can't. It must be
   exactly one existing local node within that request's grant, or nothing is written. An explicit `destination` works as
   before.
+- **A seat by its name:** a `destination` with no `@` names a seat as its team shows it: its session's own name, then its
+  pod-member form, then that name's slug, in the connection's one rig or the configured receiver's. Only seats the grant
+  can address count, and the first of these that any of them matches decides, so another seat's slug never makes an exact
+  name ambiguous and a seat the grant can't address never shadows one it can. The item is stored under that
+  seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
+  seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
+  or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
-- **Messages are items:** a message is an item the receiver reads and closes, and a reply is an item back to its sender.
+- **Messages are items:** a message is an item the receiver reads and closes, with any reply in its `resolution`. The
+  sender reads that reply on the same item. Nothing wakes the sender or posts a new item for it. A separate new message is
+  new work.
+- **A fair-use limit on new work:** the service can add `throttle: { new_work: true, retry_after_seconds: <n> }` to an
+  active answer.
+  - While it does, a `rig_queue_create` that would open a new item writes nothing. It returns `fair_use_retry_later` with
+    `retryAfterSeconds` (1 to 600) and the `qitemId` to retry with.
+  - A retry of a create that already landed is answered from the stored item, as before.
+  - Everything else is served: reading, claiming and closing existing items (a reply in `resolution` included), and
+    answering the team's questions. A separate new message or revision waits like any other new item.
+  - It's never a credential refusal, and a `throttle` that can't be read is ignored.
+  - The service is asked once per HTTP request (initialize and tool listing included), not once per tool call.
 - **What the sender can tell, from the item it reads:**
   - **Queued:** the item exists and is `pending` with no claim.
   - **Picked up:** the receiver's claim (`in-progress`).

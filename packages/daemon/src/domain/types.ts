@@ -330,6 +330,10 @@ export type RigEvent =
   // consumers on /api/views/:name/sse when ANY queue state mutation
   // changes a view result-set, not just create/handoff/claim/unclaim.
   | { type: "queue.updated"; qitemId: string; fromState: string; toState: string; closureReason: string | null; closureTarget: string | null; actorSession: string; summary: string | null }
+  // A person's clicked answer recorded on an ask with questions: `answered` of `questions` now have an answer, and
+  // `complete` says whether that's all of them. A partial set is a change to the ask, not its answer: the ask stays open
+  // until the set is complete and returned.
+  | { type: "queue.answer_recorded"; qitemId: string; actorSession: string; questionId: string; answered: number; questions: number; complete: boolean; summary: string | null }
   // Coordination primitive (PL-004 Phase B) — project (classifier) / view.
   // project.classified: emitted when a stream item is successfully projected.
   // classifier.lease_*: lifecycle of the daemon-enforced single-writer lease.
@@ -651,6 +655,9 @@ export interface AgentActivity {
   sourceSequence?: number | null;
   /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
   livenessSeconds?: number | null;
+  /** #99: when a Claude usage limit (StopFailure/rate_limit) says it resets, read by the relay from Claude's own
+   *  message. Only the instant is kept, never the message. */
+  resetsAt?: string | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
@@ -807,6 +814,9 @@ export interface NodeInventoryEntry {
   /** Effective mode; inherited non-default sockets also have server arguments. */
   tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;
+  /** Codex: label explaining whether the displayed resume flags match the seat's recorded current-generation launch,
+   *  differ from it, or come from current settings because no launch record applies; null otherwise. */
+  resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
   // Extended fields

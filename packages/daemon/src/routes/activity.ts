@@ -116,6 +116,16 @@ export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
 const hookEvidenceSeq = new Map<string, number>();
 // What each seat's runner has said about its turns, for deciding whether a working beat counts (the runner contract §4).
 const workingLiveness = new WorkingLivenessGate();
+/** #99: the reset instant the relay read from a Claude usage limit, as a canonical ISO timestamp, or null. The store
+ *  keeps it only on the typed StopFailure/rate_limit row; the provider lane decides whether it is still ahead. */
+function limitResetsAt(body: Record<string, unknown>): string | null {
+  if (typeof body.resetsAt !== "string" || body.resetsAt.length > 40) return null;
+  const ms = Date.parse(body.resetsAt);
+  // The relay's eight-day horizon, enforced at ingress too: no sender can park a pool for longer than the relay could.
+  return Number.isFinite(ms) && ms <= Date.now() + LIMIT_RESET_MAX_MS ? new Date(ms).toISOString() : null;
+}
+const LIMIT_RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+
 function sourceSequence(body: Record<string, unknown>): number | null {
   return typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null;
 }
@@ -148,6 +158,14 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (revoked && !permissionRoute) {
     return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
   }
+  if (grant.runId && body.runId !== undefined && body.runId !== grant.runId) {
+    return refuse(409, "activity_grant_stale", "This post names another run; nothing was recorded.");
+  }
+  const claimedRuntime = stringOrNull(body.runtime);
+  if (grant.binding && ((claimedRuntime && claimedRuntime !== grant.binding.runtime)
+    || (body.eventFamily === "session_identity" && !claimedRuntime))) {
+    return refuse(403, "activity_grant_runtime_mismatch", "This runner grant speaks only for its bound runtime; nothing was recorded.");
+  }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
   if ((claimedNode && claimedNode !== grant.nodeId)
@@ -168,6 +186,15 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
  *  hasn't registered yet (pending). A `revoked` grant whose occupant wasn't replaced reads revoked: it was reissued for
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
+  if (grant.runId) {
+    const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
+    if (standing === "current") return null;
+    if (standing === "unverified") {
+      return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
+        error: `This runner grant couldn't be verified now; retry verification; ${outcome}` }, 409);
+    }
+    return c.json({ ok: false, code: `activity_grant_${standing}`, error: `This runner grant is ${standing}; ${outcome}` }, standing === "revoked" ? 401 : 409);
+  }
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -201,7 +228,10 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
-  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  const grantStore = new ActivityGrantStore(sessionRegistry.db);
+  const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
+  if (bearerToken !== expectedToken && headerToken !== expectedToken && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -212,6 +242,12 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  if (grant?.runId) {
+    const bound = bindToGrant(c, store, grant, body);
+    if ("refused" in bound) return { error: bound.refused };
+    if (grant.binding?.runtime !== "pi") return { error: c.json({ ok: false, code: "activity_grant_wrong_seat", error: "Pi usage requires a Pi run." }, 403) };
+    body = bound.body;
   }
   const sessionName = stringOrNull(body.sessionName);
   const piSessionId = stringOrNull(body.piSessionId);
@@ -316,6 +352,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
   }
 
+  if (Object.hasOwn(body, "runId") && !grant?.runId) {
+    return c.json({ ok: false, code: "run_grant_required", error: "Actual-run reports require their run-bound credential." }, 403);
+  }
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
   if (grant) {
     const bound = bindToGrant(c, store, grant, body);
@@ -456,7 +495,7 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (current.generationUuid !== generation && !(grant?.runId && grant.generation === generation)) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -727,6 +766,8 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     livenessSeconds: beat ? workingLivenessSeconds(body.livenessSeconds)
       : typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
         && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
+    resetsAt: limitResetsAt(body),
+    sessionId: stringOrNull(body.sessionId),
   });
 
   if (!result.ok) {

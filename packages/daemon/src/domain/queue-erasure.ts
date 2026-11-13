@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
+import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
 
 /**
  * Queue erasure: the maintained way to remove queue content, for closed-work retention and account deletion on a
@@ -13,11 +14,13 @@ import type Database from "better-sqlite3";
  * The row's own copies follow it: its transitions, live and archived; events whose payload names it; its
  * mission-control audit rows. Copies another party holds (outbox and inbox entries, stream reader actions and
  * dispositions) go only when they're the owner's: both endpoints the account's (members scope) or the row's own
- * (other scopes). Others are kept and reported.
+ * (other scopes). Others are kept and reported. OpenRig's own sessions (`daemon@kernel`, `system:*`), which send its
+ * wakes and notices, are no one's: a row, copy or entry is judged by its other sessions, and needs one of them.
  *
- * Scope is exact. Account deletion takes the account's recorded membership (exact session names): a row whose two
- * endpoints are both members is deleted, whatever its state; a row with one member endpoint is reported as mixed and
- * left untouched. Named with the account's rig, it also removes the rig's own records that outlive the rig. Routine
+ * Scope is exact. Account deletion takes the account's recorded membership (exact session names): a row between two
+ * members, or between a member and OpenRig, is deleted, whatever its state; a row with one member endpoint and the
+ * other outside the account is reported as mixed and left untouched. Named with the account's rig, it also removes
+ * the rig's own records that outlive the rig. Routine
  * retention touches only closed rows (done, canceled, denied, handed-off; never failed or open work), aged from the
  * start of their final closed state. A row a workflow still references is reported, never erased.
  *
@@ -95,7 +98,8 @@ export interface EraseReport {
   error?: { stage: Stage; message: string };
   /** rows erased (applied, committed) or that would be (dry run) */
   qitems: Array<{ qitemId: string; action: EraseAction; state: string }>;
-  /** members scope: rows with exactly one member endpoint, left untouched */
+  /** members scope: rows with one member endpoint and the other outside the account (OpenRig's own isn't), left
+   *  untouched */
   mixed: Array<{ qitemId: string; memberEndpoint: "source" | "destination" }>;
   /** rows not erased, and why: a workflow references them; (ids scope) no such row to scrub; the row changed after
    *  selection so it no longer qualifies (reopened, rerouted out of the account, written to out of its window, or an
@@ -116,7 +120,8 @@ export interface EraseReport {
   unreadableEvents: Array<{ seq: number; qitemIds: string[] }>;
   /** copies erased with the rows, or that would be */
   linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
-  /** members scope: entries between members that no queue row owns; mixed ones are counted and left */
+  /** members scope: entries no queue row owns between members, or a member and OpenRig; mixed ones are counted and
+   *  left */
   unlinked?: { outbox: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
   /** members scope with rig: whether the rig was found and verified, its records erased and left per table, the
    *  tables whose records can't be counted (an unverified removed rig), and when its erasure completed */
@@ -425,6 +430,9 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const ledgerReason = (action: EraseAction) => scope.kind === "routine" && action === "scrub" ? "retention-content" : reason;
   const memberSet = new Set(scope.kind === "members" ? scope.members : []);
   const members = JSON.stringify([...memberSet]);
+  // Members scope: a row is the account's when one endpoint is a member and the other is a member or OpenRig's own.
+  const accountRow = (source: string, destination: string) => (memberSet.has(source) || memberSet.has(destination))
+    && (memberSet.has(source) || isOpenRigSender(source)) && (memberSet.has(destination) || isOpenRigSender(destination));
   // A ledger replay applies only the batches that committed, by their own commit line or this database's record of
   // them. A rolled-back batch is skipped; one that is neither is reported and never replayed.
   let listed = scope.kind === "ids" ? scope.entries : [];
@@ -488,10 +496,8 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           ORDER BY qitem_id LIMIT @limit`).all({ members, after, limit: batchSize }) as Array<Omit<Candidate, "action">>;
       const rows: Candidate[] = [];
       for (const row of found) {
-        const fromMember = memberSet.has(row.source);
-        const toMember = memberSet.has(row.destination);
-        if (fromMember && toMember) rows.push({ ...row, action: "delete" });
-        else report.mixed.push({ qitemId: row.qitemId, memberEndpoint: fromMember ? "source" : "destination" });
+        if (accountRow(row.source, row.destination)) rows.push({ ...row, action: "delete" });
+        else report.mixed.push({ qitemId: row.qitemId, memberEndpoint: memberSet.has(row.source) ? "source" : "destination" });
       }
       return { rows, last: found.at(-1)?.qitemId ?? null, seen: found.length };
     }
@@ -511,10 +517,14 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
 
   // Whose copies these are: the account's (members scope), or the row's own participants (other scopes).
   const ownerOf = (candidate: Candidate) => scope.kind === "members" ? memberSet : new Set([candidate.source, candidate.destination]);
+  // OpenRig's own sessions (its wake for the row, say) aren't counted when the copy has any other: an OpenRig wake to
+  // the owner is the owner's, and one to no owner is foreign.
   const ownership = (copy: Copy, owners: Set<string>): "owned" | "mixed" | "foreign" => {
     const sessions = copy.sessions.filter((session): session is string => session !== null);
-    const owned = sessions.filter((session) => owners.has(session)).length;
-    return owned === sessions.length ? "owned" : owned > 0 ? "mixed" : "foreign";
+    const others = sessions.filter((session) => !isOpenRigSender(session));
+    const counted = others.length > 0 ? others : sessions;
+    const owned = counted.filter((session) => owners.has(session)).length;
+    return owned === counted.length ? "owned" : owned > 0 ? "mixed" : "foreign";
   };
   // Stream actions and dispositions this run deletes, so the unlinked pass plans on the same references either way.
   const plannedActions: string[] = [];
@@ -635,7 +645,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           else plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
         } else if (referenced.has(candidate.qitemId)) {
           plan.dropped.push({ code: "workflow-reference", qitemId: candidate.qitemId });
-        } else if (scope.kind === "members" && !(memberSet.has(now.source) && memberSet.has(now.destination))) {
+        } else if (scope.kind === "members" && !accountRow(now.source, now.destination)) {
           // Rerouted since selection (a fallback, say): no longer the account's own row.
           plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
         } else if (scope.kind === "routine" && routineAction(now) !== candidate.action) {
@@ -787,10 +797,11 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   return report;
 }
 
-/** Account deletion's second pass: outbox and inbox entries between two members that no queue row owns, and the
- *  members' stream items. An entry with one member endpoint, or a stream item something still references, is counted
- *  and left. Rows and references this run erases are counted as they were before it, so a dry run and an apply report
- *  the same set. */
+/** Account deletion's second pass: outbox and inbox entries no queue row owns between two members, or between a
+ *  member and OpenRig (its wake for a row erased earlier, say), and the members' stream items. An entry with one
+ *  member endpoint and the other outside the account, or a stream item something still references, is counted and
+ *  left. Rows and references this run erases are counted as they were before it, so a dry run and an apply report the
+ *  same set. */
 function eraseUnlinked(db: Database.Database, st: Statements,
   plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean): NonNullable<EraseReport["unlinked"]> {
   // A row this run erased still owns its copies here: they were reported with it (keptCopies), not as unowned.
@@ -799,9 +810,14 @@ function eraseUnlinked(db: Database.Database, st: Statements,
   const ownedOutbox = `(COALESCE(audit_pointer, '') IN ${rows}
       OR (outbox_id LIKE 'wake-intent-%' AND substr(outbox_id, 13) IN ${rows}))`;
   const ownedInbox = `(COALESCE(absorbed_qitem_id, '') IN ${rows} OR COALESCE(audit_pointer, '') IN ${rows})`;
-  const both = `sender_session IN ${MEMBERS} AND destination_session IN ${MEMBERS}`;
-  const fromMember = `sender_session IN ${MEMBERS} AND destination_session NOT IN ${MEMBERS}`;
-  const toMember = `destination_session IN ${MEMBERS} AND sender_session NOT IN ${MEMBERS}`;
+  // A member, or OpenRig's own session: isOpenRigSender in SQL. The prefix is compared exactly, since LIKE ignores
+  // ASCII case and reads _ as a wildcard.
+  const accountSide = (column: string) =>
+    `(${column} IN ${MEMBERS} OR ${column} = '${OPENRIG_SENDER}' OR substr(${column}, 1, 7) = 'system:')`;
+  const both = `${accountSide("sender_session")} AND ${accountSide("destination_session")}
+      AND (sender_session IN ${MEMBERS} OR destination_session IN ${MEMBERS})`;
+  const fromMember = `sender_session IN ${MEMBERS} AND NOT ${accountSide("destination_session")}`;
+  const toMember = `destination_session IN ${MEMBERS} AND NOT ${accountSide("sender_session")}`;
   // The same references the stream pass keeps an item for (queue-retention pruneStreamItems), less this run's own.
   const classificationColumns = new Set((db.prepare("PRAGMA table_info(project_classifications)").all() as Array<{ name: string }>)
     .map((column) => column.name));

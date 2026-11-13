@@ -1,3 +1,4 @@
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 // A runner seat's answered permission path, through the real activity routes, queue, Mission Control answer route,
 // activity store and seat grant. The chosen person's one offered option reaches only that live request; nothing else
 // ever reads as an answer. No model, Slack or terminal is involved.
@@ -465,6 +466,30 @@ describe("a runner seat's answered permission path", () => {
     }
   });
 
+  it.each([false, true])("refuses unverified grant reads and writes without changing the live ask, then recovers (guest=%s)", async guest => {
+    const f = fixture({ guest });
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b',?,?,'%1')").run(f.runner.id, SEAT);
+    const session = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.runner.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "launch", run: {
+      runId: "permission-run", sessionId: session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const askId = String((await f.submit({}, grant.token)).body.askId);
+    const before = f.queueRepo.getById(askId);
+    const events = f.db.prepare("SELECT COUNT(*) AS n FROM events").get();
+    const read = vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("observation unavailable"); });
+    try {
+      for (const reply of [await f.read(askId, 0, grant.token), await f.withdraw(askId, "turn_ended", grant.token),
+        await f.submit({ requestId: "unverified-new" }, grant.token)]) {
+        expect(reply).toMatchObject({ status: 409, body: { code: "activity_grant_unverified", retryable: true } });
+      }
+      expect(f.queueRepo.getById(askId)).toEqual(before);
+      expect(f.db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(events);
+      expect(f.grants.get(grant.grantId)?.revokedAt).toBeNull();
+    } finally { read.mockRestore(); }
+    expect(await f.read(askId, 0, grant.token)).toMatchObject({ status: 200, body: { state: "pending" } });
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+  });
+
   it("serves the real guest listener's app for a seat grant, and never for the install token", async () => {
     const f = fixture({ realGuest: true });
     const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
@@ -642,6 +667,10 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(handed).toMatchObject({ destinationSession: DECIDER, state: "pending" });
     expect(handed.body).toContain(`${PERSON} answered ${SEAT}'s permission request ${askId}: they chose "Allow" (option allow).`);
     expect(handed.body).toContain(`Decide with: rig seat decide-permission ${askId} --option <id>`);
+    // The receiver reads who to ask back (the person who answered), and that closing without a decision permits nothing.
+    expect(handed.body).toContain(`ask them back with an ask to ${PERSON} that names request ${askId}`);
+    expect(handed.body).toContain("Closing this item without deciding permits nothing: the person's answer stays kept and the runner keeps waiting");
+    expect(handed.body).not.toContain("is how OpenRig records any answer typed at this machine's terminal");
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { ok: true, state: "answered", optionId: "allow" } });
     expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
@@ -649,6 +678,25 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(note).toContain(`runner-permission-decided by ${DECIDER}, an agent, not the person: allow, because they said so`);
     // Deciding again changes nothing: the request isn't pending any more.
     expect(await f.decide(askId, "reject")).toMatchObject({ status: 200, body: { state: "answered", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("an answer typed at the terminal reaches the agent with what it means, who's who, and the asked person to ask back", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = String((await f.submit()).body.askId);
+    const asked = f.queueRepo.getById(askId)!.destinationSession;
+    await f.contract.act({ verb: "answer", qitemId: askId, actorSession: "human@host", authority: "primary-user",
+      questionId: "permission", optionId: "allow" } as never);
+    const handed = f.queueRepo.list({ limit: 100 }).find((row) => row.handedOffFrom === askId)!;
+    expect(handed).toMatchObject({ destinationSession: DECIDER, state: "pending" });
+    // Provenance stays truthful: the answerer is human@host, never a registered person.
+    expect(handed.body).toContain(`human@host answered ${SEAT}'s permission request ${askId}: they chose "Allow" (option allow).`);
+    expect(handed.body).toContain(`- **Who's who:** ${SEAT} is the agent asking to run the tool; ${asked} is the person it asked; human@host answered.`);
+    expect(handed.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
+    expect(handed.body).toContain(`ask them back with an ask to ${asked} that names request ${askId}`);
+    expect(handed.body).toContain("Don't write to human@host: nothing is delivered there.");
+    expect(handed.body).toContain("Closing this item without deciding permits nothing");
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
   });
 
