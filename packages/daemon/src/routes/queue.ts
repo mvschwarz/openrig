@@ -600,8 +600,8 @@ export function queueRoutes(): Hono {
     const receiverReportedTags = fwd.payload && typeof fwd.payload === "object" && !Array.isArray(fwd.payload)
       ? (fwd.payload as { tags?: unknown }).tags
       : undefined;
-    const hasAcceptedTags = Array.isArray(receiverReportedTags);
-    const acceptedTags = hasAcceptedTags
+    const hasAcceptedTags = receiverReportedTags === null || Array.isArray(receiverReportedTags);
+    const acceptedTags = Array.isArray(receiverReportedTags)
       ? receiverReportedTags.filter((tag): tag is string => typeof tag === "string")
       : [];
     const requestedTags = forwardBody.tags as string[];

@@ -610,6 +610,70 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(advisory?.message).toContain(`queue ${verb} scope check skipped for cross-host write`);
   });
 
+  const absorbedNullTagHandoffCases = handoffVerbs.flatMap(({ verb, closedState }) => [
+    { path: "cross-host" as const, scope: "inherited" as const, tags: undefined },
+    { path: "cross-host" as const, scope: "explicit" as const, tags: ["mission:explicit-missing"] },
+    { path: "self-id" as const, scope: "inherited" as const, tags: undefined },
+    { path: "self-id" as const, scope: "explicit" as const, tags: ["mission:explicit-missing"] },
+  ].map(row => ({ ...row, verb, closedState })));
+
+  it.each(absorbedNullTagHandoffCases)("keeps native null tags quiet on an absorbed $path $scope $verb successor", async row => {
+    const receiver = row.path === "cross-host" ? await fixture("null-tags-receiver") : source;
+    const original = await seedHandoffSource(["mission:missing-mission", "project:alpha"]);
+    setSelfHostId(source.hostId);
+    const targetHostId = row.path === "cross-host" ? "remote-fixture" : source.hostId;
+    const successorId = deriveCrossHostSuccessorId(original.qitemId, "worker@scope", targetHostId);
+    const accepted = await receiver.daemon.deps.queueRepo.create({
+      qitemId: successorId,
+      sourceSession: stampSelfHostSuffix("writer@scope"),
+      destinationSession: "worker@scope",
+      body: original.body,
+      summary: "previously absorbed null-tag successor",
+      priority: original.priority,
+      chainOfRecord: [original.qitemId],
+      nudge: false,
+      identityProvenance: "claimed:v1",
+      // Omit tags to model the repository's native response for an untagged row.
+    });
+    expect(accepted.tags).toBeNull();
+    expect(accepted.sourceSession).toBe(stampSelfHostSuffix("writer@scope"));
+
+    let app: Hono;
+    if (row.path === "cross-host") {
+      app = forwardingApp(receiver).app;
+      setSelfHostId(source.hostId);
+    } else {
+      app = source.app;
+      setSelfHostId(source.hostId);
+    }
+    await handoff(app, original.qitemId, row.verb, {
+      json: true,
+      host: targetHostId,
+      ...(row.tags === undefined ? {} : { tags: row.tags }),
+    });
+
+    const data = handoffResponses[0]!.data;
+    const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
+    const returned = data.created as Record<string, unknown>;
+    const stored = receiver.daemon.deps.queueRepo.getById(successorId);
+    expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
+    expect(returned.tags).toBeNull();
+    expect(returned).toEqual(JSON.parse(JSON.stringify(accepted)));
+    expect(stored).toEqual(accepted);
+    expect(receiver.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = ?").get(successorId)).toEqual({ n: 1 });
+    expect(handoffScopeAdvisories(data)).toEqual([]);
+    expect(scopeLines()).toBe("");
+    expect(closed).toMatchObject({
+      qitemId: original.qitemId,
+      state: row.closedState,
+      closureReason: "handed_off_to",
+      handedOffTo: "worker@scope",
+      closureTarget: `${successorId}@${targetHostId}`,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    expectHandoffJsonProjection(data);
+  });
+
   it.each(handoffVerbs)("qualifies requested explicit tags for fresh cross-host $verb rows", async ({ verb }) => {
     const receiver = await fixture("receiver");
     const original = await seedHandoffSource(["mission:source-scope"]);
