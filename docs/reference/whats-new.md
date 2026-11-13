@@ -1,10 +1,12 @@
 # What changed in OpenRig 0.7.14
 
 This note is for an agent on an install that was just upgraded to 0.7.14.
-OpenRig 0.7.14 makes concurrent node reads take turns, so other reads and sends
-aren't held behind a whole burst, and indexes bounded queue listings over
-retained history. A connected assistant reaches a seat by its plain name and
-hears three new errors when it can't. Connected assistants show in `rig ps`,
+OpenRig 0.7.14 makes concurrent node reads take turns and indexes bounded queue
+listings over retained history. In the change's own tests, taking turns kept
+health checks and queue reads from waiting behind a whole burst; a comparison
+under load didn't attribute that gain to this change. A connected assistant
+reaches a seat by its plain name and hears three new errors when it can't.
+Connected assistants show in `rig ps`,
 `rig_team` and the TUI. It adds three database migrations. If you upgraded from
 0.7.12 or earlier, also read "What changed in OpenRig 0.7.13" below, and so on
 back. For the full capability map, read
@@ -70,7 +72,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 - An ordinary send is refused as needing input while an open Claude Code or
   Codex `/model` picker is positively identified; nothing is typed. Close the
-  picker before trying to deliver the message. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
+  picker before trying to deliver the message. This is shown by the change's
+  own tests; it hasn't yet been checked with the real Claude Code and Codex
+  programs on this release. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
 - On a resume of a Codex seat's own conversation in a rig with pods, including
   `rig up --existing`, OpenRig avoids adding missing guidance blocks to the
   repository's tracked `AGENTS.md` when Codex is 0.164.0 or later, no guidance
@@ -94,6 +98,10 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **Queue listings:** the new indexes aren't a cure for every stall. Listings of
   active work showed no gain, one case was slower, and writes weren't measured.
   ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
+- **Daemon memory:** in a comparison under load, the daemon's resident
+  anonymous memory and its memory when idle afterwards had medians about
+  23-25 MiB higher than on 0.7.13, but the runs overlapped. Neither equal
+  memory nor a regression is established.
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic notice can still be left beside a
   draft started during delivery. On a conditional send, one that names the
   conversation it expects, an isolated test with a scripted terminal also showed
@@ -109,10 +117,15 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   read is reported missing.
 - **From 0.7.13:** its limits below still apply, except where this release
   fixes them. The runtime fixes cover adding missing guidance on the eligible
-  Codex resumes described above, recognized model pickers and the unquoted
-  pairing description. This release also changes the operator-first
-  registration and pre-launch login guidance; their observed outcomes aren't
-  established yet.
+  Codex resumes described above and the unquoted pairing description. The fix
+  for recognized model pickers is shown by the change's own tests and hasn't
+  yet been checked with the real programs on this release. This release also
+  changes the operator-first registration and pre-launch login guidance. In a
+  few test runs with real agents, the operator offered registration once in its
+  greeting, on Claude Code and on Codex (one run each); a no registered nobody,
+  and a yes registered the default person. The person saw the offer in 3 of 4
+  runs; in the fourth, the setup agent didn't pass the operator's offer on. The
+  login guidance worked in both runs tested.
 
 ## What changed in OpenRig 0.7.13
 

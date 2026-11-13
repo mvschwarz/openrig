@@ -11,9 +11,10 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 ## [0.7.14]
 
 OpenRig 0.7.14 is a patch for steadier circulation on a busy team. A burst of node
-reads now takes turns, so a health check, a queue read or a send waits for one
-step of it instead of the whole burst, and bounded queue listings over a long
-retained history use indexes instead of scanning it. An assistant connected to
+reads now takes turns. In the change's own tests, a health check or a queue read
+then waited for one step of it instead of the whole burst; a comparison under
+load didn't attribute that gain to this change. Bounded queue listings over a
+long retained history use indexes instead of scanning it. An assistant connected to
 your team can reach a seat by the name its team shows, connected assistants
 appear in `rig ps` and the TUI, and setup guidance tells the agent to fit a
 first team to your logins. There are fixes across delivery, seats and the TUI,
@@ -55,11 +56,14 @@ release doesn't fix.
 - **The `openrig` plugin carries the CLI's version, 0.7.14; openrig-core stays
   0.1.29.**
 
-### Steadier under load
+### Under load
 
 - Node reads (`rig ps --nodes`, the TUI, several agents at once) take turns,
-  one step at a time, so other reads and sends are no longer held behind a
-  whole burst. ([#3101](https://github.com/mvschwarz/openrig/pull/3101))
+  one step at a time. In the change's own tests, health checks and queue reads
+  were no longer held behind a whole burst. A comparison under load didn't
+  attribute a gain to this change: health checks and queue reads were faster
+  for the release as a whole, `rig ps --nodes` showed no change, and sends were
+  inconclusive. ([#3101](https://github.com/mvschwarz/openrig/pull/3101))
 - Bounded queue listings over retained history use indexes for their ordering
   and for live and archived owner notifications. ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
 - Codex seats re-checked in one readiness poll share process listings where
@@ -101,7 +105,9 @@ release doesn't fix.
 
 - An ordinary send is refused as needing input while an open Claude Code or
   Codex `/model` picker is positively identified; nothing is typed. Close the
-  picker before trying to deliver the message. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
+  picker before trying to deliver the message. This is shown by the change's
+  own tests; it hasn't yet been checked with the real Claude Code and Codex
+  programs on this release. ([#3083](https://github.com/mvschwarz/openrig/pull/3083))
 - On a resume of a Codex seat's own conversation in a rig with pods, including
   `rig up --existing`, OpenRig avoids adding missing guidance blocks to the
   repository's tracked `AGENTS.md` when Codex is 0.164.0 or later, no guidance
@@ -155,6 +161,10 @@ release doesn't fix.
 
 - **Queue listings:** the new indexes aren't a cure for every stall. Listings of
   active work showed no gain, one case was slower, and writes weren't measured. ([#3090](https://github.com/mvschwarz/openrig/pull/3090))
+- **Daemon memory:** in a before-and-after comparison under load, the daemon's
+  resident anonymous memory and its memory when idle afterwards had medians
+  about 23-25 MiB higher on 0.7.14 than on 0.7.13, but the two versions' runs
+  overlapped. Neither equal memory nor a regression is established.
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** an automatic OpenRig notice can still be left beside
   a draft started during delivery. In the reproduced paste-window cases the person's draft
   stayed intact and no Enter was sent, but OpenRig's text stayed in the input.
@@ -174,12 +184,18 @@ release doesn't fix.
 - **From 0.7.13:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.13)
   still apply, except where this release fixes them. The runtime fixes cover
   adding missing guidance on the eligible Codex resumes described above
-  ([#3039](https://github.com/mvschwarz/openrig/pull/3039)), recognized model pickers ([#3083](https://github.com/mvschwarz/openrig/pull/3083)) and the unquoted
-  pairing description ([#3067](https://github.com/mvschwarz/openrig/pull/3067)).
+  ([#3039](https://github.com/mvschwarz/openrig/pull/3039)) and the unquoted pairing description ([#3067](https://github.com/mvschwarz/openrig/pull/3067)). The fix for
+  recognized model pickers ([#3083](https://github.com/mvschwarz/openrig/pull/3083)) is shown by the change's own tests and
+  hasn't yet been checked with the real programs on this release.
   This release also changes the operator-first registration ([#3041](https://github.com/mvschwarz/openrig/pull/3041),
-  [#3071](https://github.com/mvschwarz/openrig/pull/3071)) and pre-launch login guidance ([#3077](https://github.com/mvschwarz/openrig/pull/3077)); their observed
-  outcomes aren't established yet. They weren't re-checked for this release
-  unless named here.
+  [#3071](https://github.com/mvschwarz/openrig/pull/3071)) and pre-launch login guidance ([#3077](https://github.com/mvschwarz/openrig/pull/3077)). In a few test
+  runs with real agents, the operator offered registration once in its
+  greeting, on Claude Code and on Codex (one run each); a no registered nobody,
+  and a yes registered the default person. The person saw the offer in 3 of 4
+  runs; in the fourth, the setup agent didn't pass the operator's offer on.
+  The login guidance worked in both runs tested, once from the setup agent and
+  once from the operator. 0.7.13's other limits weren't re-checked for this
+  release unless named here.
 
 ### Credits
 
