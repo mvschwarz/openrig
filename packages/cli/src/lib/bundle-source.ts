@@ -9,7 +9,7 @@ import { resolveEffectiveHost } from "../host-selection.js";
 import { readLocalOrigin } from "../local-origin.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import type { StatusDeps } from "../commands/status.js";
-import { authoredMapping, readDeclaredConfigurations, resolveConfiguration, stageConfiguration, ConfigurationError } from "./bundle-configuration.js";
+import { authoredMapping, readDeclaredConfigurations, checkDeclaredConfigurations, resolveConfiguration, stageConfiguration, ConfigurationError } from "./bundle-configuration.js";
 
 export interface BundleSource {
   repository: string;
@@ -283,8 +283,8 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
     compatibility = authoredCompatibility(folder);
     if (opts.minDaemonVersion) compatibility.minDaemonVersion = opts.minDaemonVersion;
     if (opts.minCliVersion) compatibility.minCliVersion = opts.minCliVersion;
+    const declared = readDeclaredConfigurations(folder);
     if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
-      const declared = readDeclaredConfigurations(folder);
       if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
       const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
       // Preserve monorepo-relative refs when a preset changes the selected rig.
@@ -293,7 +293,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       specPath = staged.rigSpecPath;
       folder = path.dirname(specPath);
       configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
-    }
+    } else if (declared) checkDeclaredConfigurations(declared, authoredMapping(specPath));
     if (configurationStaging || opts.includePackages) {
       // An absolute in-checkout ref still names the retained original; both owned trees stay until create settles.
       checkGitHubBundleRefs(folder, configurationStaging ?? prepared.checkoutDir, prepared.checkoutDir, opts.includePackages);
