@@ -14,6 +14,9 @@ import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { recordReaderAction } from "../src/domain/stream-reader-actions.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { ChatRepository } from "../src/domain/chat-repository.js";
+import { subscribe } from "../src/domain/stream-subscriptions.js";
+import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -614,6 +617,83 @@ describe("account deletion of a rig that never had a member", () => {
     expect(report.rig!.erased.events).toBe(1000);
     expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ? AND type = 'node.claimed'").get(RIG)).toEqual({ n: 1 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  // More of what a seat with no session row leaves under its address, each through the code that writes it.
+  it.each([
+    ["an inbox check-in", () => repo.recordInboxCheckIn("helper@n-empty", new Date(NOW))],
+    ["a reader's decline on another rig's stream item", () => {
+      db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-else', ?, 'k', ?, 'x')").run(NOW, OUT);
+      recordReaderAction(db, { streamItemId: "s-else", readerSession: "helper@n-empty", action: "decline", reason: "not mine" }, NOW);
+    }],
+    ["a post in another rig's chatroom", () => { new ChatRepository(db).send("rig-else-id", "helper@n-empty", "hello"); }],
+    ["a stream subscription", () => { subscribe(db, { readerSession: "helper@n-empty", hintType: "note", actor: "helper@n-empty" }, NOW); }],
+  ] as const)("refuses [] when %s names a seat at the rig, and erases nothing", async (_label, seed) => {
+    seed();
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty") });
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    expect(everything()).toBe(before);
+  });
+
+  // A reroute changes an old row instead of adding one. The real reroute lands between two delete chunks; a later
+  // check sees the row now at the rig, stops the run, and keeps it.
+  it("stops when an existing row is rerouted to a seat at the rig during the run, and writes no receipt", async () => {
+    await row("g-move", OUT, "x-gone@n-else");
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const count = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG) as { n: number }).n;
+    const full = count();
+    const run = erase();
+    for (let i = 0; i < 10_000 && count() === full; i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(count()).toBeLessThan(full);
+    repo.routeToFallback("g-move", "helper@n-empty", "owner unavailable");
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("a row moved to an address at the rig") } });
+    expect(repo.getById("g-move")?.destinationSession).toBe("helper@n-empty");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  // An address at the rig qualified with a host: this host's own id is this rig's seat, and so is a host that can't be
+  // resolved; another known host's is that host's same-named rig, which doesn't refuse and isn't erased.
+  it("reads a host-qualified address by its host: this one refuses, another known host doesn't, an unresolved one refuses", async () => {
+    await row("g-host", "helper@n-empty@some-host", OUT, [{ state: "done", daysAgo: 2 }]);
+    db.prepare("INSERT OR REPLACE INTO self_host_identity (singleton, host_id, minted_at, reconciled_at) VALUES (1, 'some-host', ?, ?)").run(NOW, NOW);
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty@some-host") });
+    db.prepare("DELETE FROM self_host_identity").run();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty@some-host") });
+    const other = await eraseQueue(db, { scope: { kind: "members", members: [], rig: RIG }, apply: true, nowIso: NOW, classifyHost: () => "other" });
+    expect(other).toMatchObject({ complete: true, clean: true, rig: { found: true, verified: true } });
+    expect(exists("g-host")).toBe(true);
+  });
+
+  it("the route reads a host by this daemon's id and its host registry", async () => {
+    await row("g-host", "helper@n-empty@remote-host", OUT, [{ state: "done", daysAgo: 2 }]);
+    const post = async (hosts: Array<Record<string, unknown>>) => {
+      const hono = new Hono();
+      hono.use("*", async (c, next) => {
+        c.set("db" as never, db as never);
+        c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
+        c.set("hostRegistryLoader" as never, (() => ({ ok: true, registry: { hosts } })) as never);
+        await next();
+      });
+      hono.route("/api/queue", queueRoutes());
+      const res = await hono.request("/api/queue/erase", {
+        method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "ops-admin@n-ops" },
+        body: JSON.stringify({ members: [], rig: RIG }),
+      });
+      return [res.status, await res.json()] as const;
+    };
+    const remote = { id: "remote-host", transport: "http", url: "http://127.0.0.1:9" };
+    expect(await post([])).toMatchObject([400, { error: "erase_rig_had_sessions" }]);
+    setSelfHostId("remote-host");
+    try {
+      expect(await post([remote])).toMatchObject([400, { error: "erase_rig_had_sessions" }]);
+    } finally {
+      setSelfHostId(null);
+    }
+    expect(await post([{ id: "alias", hostId: "remote-host", transport: "http", url: "http://127.0.0.1:9" }]))
+      .toMatchObject([200, { applied: false, rig: { found: true, verified: true } }]);
   });
 
   it("refuses a removed rig no earlier run recorded with no members, and members [] without a rig", async () => {

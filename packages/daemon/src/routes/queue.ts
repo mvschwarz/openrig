@@ -42,7 +42,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
-import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -798,10 +798,22 @@ export function queueRoutes(): Hono {
       }
       scope = { kind: "routine", contentDays, metadataDays };
     }
+    // Whose host a host-qualified address at the rig names, for a never-member erase: this one (its own id, or a
+    // registered entry carrying it), another registered host, or neither, which counts as this rig's (unknown refuses).
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    let registry: ReturnType<typeof loadHostRegistry> | undefined;
+    const classifyHost = (host: string): HostClass => {
+      const self = getSelfHostId();
+      if (resolvesToLocalHost(host, self)) return "self";
+      const loaded = (registry ??= registryLoader());
+      const match = loaded.ok ? resolveHost(loaded.registry, host) : undefined;
+      if (!match?.ok) return "unknown";
+      return self !== null && match.host.hostId === self ? "self" : "other";
+    };
     try {
       const ledger = settings?.resolveOne("retention.erasure_ledger").value;
       const report = await eraseQueue(c.get("db" as never) as Database.Database, {
-        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(), classifyHost,
         ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
       });
       console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `

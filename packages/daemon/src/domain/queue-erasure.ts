@@ -80,6 +80,9 @@ export interface EraseOptions {
    *  changes anything, then {batch, committed} once the batch commits or rolls back. The file is opened before the run
    *  writes anything at all */
   ledgerPath?: string;
+  /** For a never-member erase: whose host a host-qualified address names. Without it, this database's own host id is
+   *  this host and anything else is unknown (so it refuses). */
+  classifyHost?: (host: string) => HostClass;
 }
 
 type Stage = "ledger" | "select" | "events" | "rows" | "unlinked" | "rig";
@@ -367,8 +370,18 @@ const ADDRESS_COLUMNS: ReadonlyArray<{ table: string; columns: string[] }> = [
   { table: "inbox_entries", columns: ["sender_session", "destination_session"] },
   { table: "outbox_entries", columns: ["sender_session", "destination_session"] },
   { table: "stream_items", columns: ["source_session"] },
+  // A seat listing its own inbox (an MCP grant or hosted seat polling before it has any row) records a check-in.
+  { table: "queue_inbox_checkins", columns: ["session"] },
+  // A reader's decline or other action on a stream item, which leaves no queue row.
+  { table: "stream_reader_actions", columns: ["reader_session"] },
+  // A chatroom post, which an MCP grant or hosted seat can make in any rig's room.
+  { table: "chat_messages", columns: ["sender"] },
+  // A reader seat's stream subscription.
+  { table: "stream_subscriptions", columns: ["reader_session", "created_by"] },
 ];
 const ADDRESS_WINDOW = 5_000;
+/** How many matches past the watermark the in-run guard reads per table. */
+const GUARD_PAGE = 100;
 /** A session address at the rig, `<name>@<rig>` or host-qualified `<name>@<rig>@<host>`: matched exactly on the part after
  *  the first `@` (LIKE would read `_` in a rig name as a wildcard). */
 const AT_RIG = (column: string) => `(instr(${column}, '@') > 0 AND (substr(${column}, instr(${column}, '@') + 1) = @rigName
@@ -378,6 +391,31 @@ const atRig = (address: unknown, rigName: string): address is string => {
   const rest = address.slice(address.indexOf("@") + 1);
   return rest === rigName || rest.startsWith(`${rigName}@`);
 };
+
+/** Whose host a host-qualified address names: this one, another known host, or one that can't be resolved. */
+export type HostClass = "self" | "other" | "unknown";
+/** Whether an address at the rig is evidence of a member of this daemon's rig. Unqualified, or qualified with this
+ *  host: yes. Qualified with another known host: no, that's that host's same-named rig. A host that can't be resolved:
+ *  yes, since unknown refuses. */
+function memberEvidence(address: string, rigName: string, classifyHost: (host: string) => HostClass): boolean {
+  const rest = address.slice(address.indexOf("@") + 1);
+  if (rest === rigName) return true;
+  return classifyHost(rest.slice(rigName.length + 1)) !== "other";
+}
+/** Without a resolver from the caller: this database's own host id is this host, and anything else is unknown. */
+function defaultHostClassifier(db: Database.Database): (host: string) => HostClass {
+  let self: string | null | undefined;
+  return (host) => {
+    if (self === undefined) {
+      try {
+        self = (db.prepare("SELECT host_id FROM self_host_identity WHERE singleton = 1").get() as { host_id: string } | undefined)?.host_id ?? null;
+      } catch {
+        self = null;
+      }
+    }
+    return self !== null && host === self ? "self" : "unknown";
+  };
+}
 
 /** How far each table reached when a never-member proof was taken; whatever lands past it came during the run. */
 type Watermark = { seq: number; rowids: Record<string, number> };
@@ -391,7 +429,8 @@ function watermark(db: Database.Database, tables: Set<string>): Watermark {
 
 /** Addresses at the rig in queue work, read in rowid windows with a yield between them (from a watermark: only rows past
  *  it). At most `limit` are listed. */
-async function addressesAtRig(db: Database.Database, tables: Set<string>, rigName: string, limit = 20): Promise<string[]> {
+async function addressesAtRig(db: Database.Database, tables: Set<string>, rigName: string, classifyHost: (host: string) => HostClass,
+  limit = 20): Promise<string[]> {
   const found = new Set<string>();
   for (const { table, columns } of ADDRESS_COLUMNS) {
     if (!tables.has(table)) continue;
@@ -400,7 +439,10 @@ async function addressesAtRig(db: Database.Database, tables: Set<string>, rigNam
         WHERE rowid > @lo AND rowid <= @hi AND (${columns.map(AT_RIG).join(" OR ")})`);
     for (let lo = 0; lo < top && found.size < limit; lo += ADDRESS_WINDOW) {
       for (const row of read.all({ lo, hi: Math.min(lo + ADDRESS_WINDOW, top), rigName }) as Array<Record<string, unknown>>) {
-        for (const column of columns) if (atRig(row[column], rigName)) found.add(row[column] as string);
+        for (const column of columns) {
+          const address = row[column];
+          if (atRig(address, rigName) && memberEvidence(address, rigName, classifyHost)) found.add(address);
+        }
       }
       await yieldToLoop();
     }
@@ -412,7 +454,7 @@ async function addressesAtRig(db: Database.Database, tables: Set<string>, rigNam
  *  the watermark (an event of the rig or its nodes, a session on its nodes, queue work at its address). A seat that
  *  arrives while the run yields stops it before its records go, and no receipt is written. */
 function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id: string; name: string | null; found: boolean },
-  mark: Watermark): () => void {
+  mark: Watermark, classifyHost: (host: string) => HostClass): () => void {
   const params = { rig: rig.id, rigName: rig.name ?? "", seq: mark.seq };
   const stop = (what: string) => {
     throw new Error(`rig ${rig.name ?? rig.id} changed during the run (${what}), so nothing more was erased and no receipt was written; rerun to check it again`);
@@ -424,11 +466,22 @@ function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id:
     if (event !== undefined) stop(`event ${event.type}`);
     if (db.prepare("SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = @rig LIMIT 1").get(params) !== undefined) stop("a session");
     if (rig.name === null) return;
+    const rigName = rig.name;
+    // A full page could hide evidence past it, and unknown refuses: it stops too (a rerun reads it all again).
+    const evidence = (rows: Array<Record<string, unknown>>, columns: string[]) => rows.length >= GUARD_PAGE
+      || rows.some((row) => columns.some((column) => atRig(row[column], rigName) && memberEvidence(row[column] as string, rigName, classifyHost)));
     for (const { table, columns } of ADDRESS_COLUMNS) {
       if (!tables.has(table)) continue;
-      const row = db.prepare(`SELECT 1 FROM ${table} WHERE rowid > @after AND (${columns.map(AT_RIG).join(" OR ")}) LIMIT 1`)
-        .get({ ...params, after: mark.rowids[table] ?? 0 });
-      if (row !== undefined) stop(`queue work at the rig in ${table}`);
+      const rows = db.prepare(`SELECT ${columns.join(", ")} FROM ${table} WHERE rowid > @after AND (${columns.map(AT_RIG).join(" OR ")}) LIMIT ${GUARD_PAGE}`)
+        .all({ ...params, after: mark.rowids[table] ?? 0 }) as Array<Record<string, unknown>>;
+      if (evidence(rows, columns)) stop(`queue work at the rig in ${table}`);
+    }
+    // An existing row moved to an address at the rig (a fallback reroute, say) leaves a transition, not a new row.
+    if (tables.has("queue_transitions") && tables.has("queue_items")) {
+      const moved = db.prepare(`SELECT q.source_session, q.destination_session FROM queue_transitions t JOIN queue_items q ON q.qitem_id = t.qitem_id
+          WHERE t.transition_id > @after AND (${AT_RIG("q.source_session")} OR ${AT_RIG("q.destination_session")}) LIMIT ${GUARD_PAGE}`)
+        .all({ ...params, after: mark.rowids.queue_transitions ?? 0 }) as Array<Record<string, unknown>>;
+      if (evidence(moved, ["source_session", "destination_session"])) stop("a row moved to an address at the rig");
     }
   };
 }
@@ -509,6 +562,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   // A never-member erase (no members, with its rig): the tables read, and where they stood when its proof was taken.
   let tables: Set<string> | undefined;
   let proofMark: Watermark | undefined;
+  const classifyHost = opts.classifyHost ?? defaultHostClassifier(db);
   if (scope.kind === "members" && scope.members.length === 0 && scope.rig === undefined) {
     throw new EraseRefusal("erase_members_invalid", "An empty members list names an account rig that never had a member: give its rig.");
   }
@@ -529,7 +583,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         tables ??= tableNames(db);
         proofMark = watermark(db, tables);
         refuseUnlessNeverHadSession(db, scope.rig, name);
-        const addresses = await addressesAtRig(db, tables, name);
+        const addresses = await addressesAtRig(db, tables, name, classifyHost);
         if (addresses.length > 0) {
           throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${name}: ${addresses.join(", ")}. Name them.`);
         }
@@ -549,7 +603,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         proofMark = watermark(db, tables);
         refuseIfMemberSinceReceipt(db, scope.rig);
         if (kept!.name !== "") {
-          const addresses = await addressesAtRig(db, tables, kept!.name);
+          const addresses = await addressesAtRig(db, tables, kept!.name, classifyHost);
           if (addresses.length > 0) {
             throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${kept!.name}: ${addresses.join(", ")}. Name them.`);
           }
@@ -921,7 +975,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       if (rig !== null) {
         stage = "rig";
         report.rig = { id: rig.id, found: rig.found, verified: rig.verified, erased: {}, left: {}, unknown: [] };
-        const guard = proofMark !== undefined && tables !== undefined ? neverMemberGuard(db, tables, rig, proofMark) : undefined;
+        const guard = proofMark !== undefined && tables !== undefined ? neverMemberGuard(db, tables, rig, proofMark, classifyHost) : undefined;
         await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig, guard);
       }
     }
