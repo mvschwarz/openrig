@@ -199,6 +199,26 @@ describe("compatible policies and inconclusive reads", () => {
       .toMatchObject({ ok: true, verified: false });
   });
 
+  it.each([
+    { ":workspace_roots": "read", ":project_roots": "read" },
+    { ":project_roots": "read", ":workspace_roots": "read" },
+  ])("refuses an outside write despite lower-layer duplicate aliases %#", aliases => {
+    const own = { ...permissions, filesystem: { ":root": "read", "/work": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, ...aliases, "/outside": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('"/outside"') });
+  });
+
+  it("leaves only the lower-layer duplicate aliases unverified when there is no separate conflict", () => {
+    const own = { ...permissions, filesystem: { ":root": "read", "/work": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem,
+      ":workspace_roots": "read", ":project_roots": "read" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: true, verified: false });
+  });
+
   it("leaves an extra absolute rule unverified when a native selector may cover it", () => {
     const own = { ...permissions, filesystem: { ":root": "read", ":tmpdir": "write" } } satisfies CodexFilesystemPermissions;
     const read = config();
@@ -209,6 +229,65 @@ describe("compatible policies and inconclusive reads", () => {
     Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...literal.filesystem, "/outside": "write" }, network: { enabled: false } } });
     expect(decideCodexFilesystemPolicy({ permissions: literal, configRead: read, requirementsRead: { requirements: null } }))
       .toMatchObject({ ok: false });
+  });
+
+  it("checks authored selectors before refusing a write beneath a read-only literal ancestor", () => {
+    const own = { ...permissions, filesystem: { "/": "read", ":slash_tmp": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/tmp/child": "write" }, network: { enabled: false } } });
+    const result = decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } });
+    expect(result).toMatchObject({ ok: true, verified: false, reason: expect.stringContaining('"/tmp/child"') });
+    expect(result).toMatchObject({ reason: expect.stringContaining("write") });
+  });
+
+  it("still refuses a direct literal-root widening beside an authored selector", () => {
+    const own = { ...permissions, filesystem: { "/": "read", ":slash_tmp": "write" } } satisfies CodexFilesystemPermissions;
+    const read = config();
+    Object.assign(read.config.permissions, { "openrig-seat": { filesystem: { ...own.filesystem, "/": "write" }, network: { enabled: false } } });
+    expect(decideCodexFilesystemPolicy({ permissions: own, configRead: read, requirementsRead: { requirements: null } }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('"/"') });
+  });
+
+  it("names the extra selector and access in an inconclusive coverage warning", () => {
+    const read = config();
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { ":slash_tmp": "write" });
+    const result = decide(read);
+    expect(result).toMatchObject({ ok: true, verified: false, reason: expect.stringContaining('":slash_tmp"') });
+    expect(result).toMatchObject({ reason: expect.stringContaining("write") });
+  });
+
+  it.each(["never", "on-request"] satisfies CodexFilesystemPermissions["approval"][])(
+    "reports an unfamiliar approval string as unverified for authored %s", approval => {
+      const read = config();
+      read.config.approval_policy = "future-native-approval";
+      expect(decideCodexFilesystemPolicy({ permissions: { ...permissions, approval }, configRead: read, requirementsRead: { requirements: null } }))
+        .toMatchObject({ ok: true, verified: false, reason: expect.stringContaining("approval") });
+    });
+
+  it("still refuses a recognized untrusted approval instead of treating it as a future spelling", () => {
+    const read = config();
+    read.config.approval_policy = "untrusted";
+    expect(decide(read)).toMatchObject({ ok: false, error: expect.stringContaining("approval_policy") });
+  });
+
+  it("does not let an unfamiliar approval hide a known filesystem or network conflict", () => {
+    const read = config();
+    read.config.approval_policy = "future-native-approval";
+    Object.assign(read.config.permissions["openrig-seat"].filesystem, { "/outside": "write" });
+    expect(decide(read)).toMatchObject({ ok: false, error: expect.stringContaining('"/outside"') });
+    Object.assign(read.config.permissions["openrig-seat"], { filesystem: permissions.filesystem, network: { enabled: true } });
+    expect(decide(read)).toMatchObject({ ok: false, error: expect.stringContaining("network.enabled") });
+  });
+
+  it.each([
+    { allowedApprovalPolicies: ["on-request"] },
+    { allowedPermissionProfiles: { "openrig-seat": false } },
+  ])("reports an excluding managed allowlist ahead of effective selection or approval mismatches %#", requirements => {
+    const read = config();
+    Object.assign(read.config, { default_permissions: "other", approval_policy: "on-request" });
+    expect(decide(read, { requirements })).toMatchObject({ ok: false, error: expect.stringContaining("managed allowlist") });
+    read.config.default_permissions = "openrig-seat";
+    expect(decide(read, { requirements })).toMatchObject({ ok: false, error: expect.stringContaining("managed allowlist") });
   });
 
   it.each(["default_permissions", "approval_policy"])("reports absent or null %s without inventing a conflict", key => {

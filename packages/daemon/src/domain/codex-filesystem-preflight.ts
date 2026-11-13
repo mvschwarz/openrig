@@ -31,6 +31,14 @@ function combine(...checks: CodexFilesystemDecision[]): CodexFilesystemDecision 
 const accessRank = { deny: 0, read: 1, write: 2 };
 const isAccess = (value: unknown): value is CodexFilesystemAccess => value === "read" || value === "write" || value === "deny";
 const canonicalKey = (key: string) => key === ":project_roots" ? ":workspace_roots" : key;
+function ambiguousKeys(keys: string[]): Set<string> {
+  const seen = new Set<string>(), ambiguous = new Set<string>();
+  for (const key of keys.map(canonicalKey)) {
+    if (seen.has(key)) ambiguous.add(key);
+    seen.add(key);
+  }
+  return ambiguous;
+}
 const literalAbsolute = (key: string) => path.isAbsolute(key) && path.normalize(key) === key && !/[?*\[\]{}]/.test(key);
 const nativeSelectors = new Set([":root", ":minimal", ":workspace_roots", ":tmpdir", ":slash_tmp"]);
 const literalHomePath = (key: string) => key.startsWith("~/") && path.normalize(key) === key && !/[?*\[\]{}]/.test(key);
@@ -46,33 +54,30 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
     "Restore the intended filesystem mapping in the effective Codex profile before launching.");
   const authored = Object.fromEntries(Object.entries(permissions.filesystem).map(([key, value]) => [canonicalKey(key), value]));
   const effective = Object.fromEntries(entries.map(([key, value]) => [canonicalKey(key), value]));
-  const ambiguous = new Set<string>();
-  for (const keys of [Object.keys(permissions.filesystem), entries.map(([key]) => key)]) {
-    const seen = new Set<string>();
-    for (const key of keys.map(canonicalKey)) {
-      if (seen.has(key)) ambiguous.add(key);
-      seen.add(key);
-    }
-  }
+  const authoredAmbiguous = ambiguousKeys(Object.keys(permissions.filesystem));
+  const ambiguous = new Set([...authoredAmbiguous, ...ambiguousKeys(entries.map(([key]) => key))]);
   const at = (rules: Record<string, unknown>, key: string, extraAccess?: CodexFilesystemAccess): CodexFilesystemAccess | undefined => {
     if (ambiguous.has(key)) return undefined;
     if (isAccess(rules[key])) return rules[key];
     const fullRoot = rules[":root"] ?? (literalAbsolute(path.sep) ? rules[path.sep] : undefined);
     const rootAccess = isAccess(fullRoot) ? fullRoot : "deny";
+    const ancestors = Object.keys(rules).filter(root => (literalAbsolute(root) || literalHomePath(root)) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
+      .sort((a, b) => b.length - a.length);
+    const root = ancestors[0];
+    const ancestorAccess = root ? rules[root] : rootAccess;
     // Native selectors/home paths can overlap authored literal paths or other
     // selectors. Do not infer a widening where an existing grant may cover it;
     // native expansion remains Codex's job, not another policy engine here.
-    const possibleCoverage = extraAccess !== undefined && accessRank[extraAccess] > accessRank[rootAccess]
-      && (ambiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
+    // Only the agent's own ambiguity can affect coverage of another key;
+    // duplicate aliases introduced by a lower layer stay local to those aliases.
+    const possibleCoverage = extraAccess !== undefined && (!isAccess(ancestorAccess) || accessRank[extraAccess] > accessRank[ancestorAccess])
+      && (authoredAmbiguous.size > 0 || Object.entries(rules).some(([rule, access]) => rule !== ":root" && rule !== path.sep
         && (nativeSelectors.has(key) || literalHomePath(key) || !literalAbsolute(rule))
         && isAccess(access) && accessRank[access] >= accessRank[extraAccess]));
     if (nativeSelectors.has(key)) return key !== ":root" && possibleCoverage ? undefined : rootAccess;
     if (!literalAbsolute(key) && !literalHomePath(key)) return undefined;
-    const ancestors = Object.keys(rules).filter(root => (literalAbsolute(root) || literalHomePath(root)) && key.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
-      .sort((a, b) => b.length - a.length);
-    const root = ancestors[0];
-    if (root) return isAccess(rules[root]) ? rules[root] : undefined;
     if (key !== path.sep && possibleCoverage) return undefined;
+    if (root) return isAccess(rules[root]) ? rules[root] : undefined;
     if (isAccess(fullRoot)) return fullRoot;
     if (literalHomePath(key)) return "deny";
     if (Object.keys(rules).some(rule => !literalAbsolute(rule) && rule !== ":minimal")) return undefined;
@@ -86,7 +91,7 @@ function compareFilesystem(actual: unknown, permissions: CodexFilesystemPermissi
   for (const [key, value] of Object.entries(effective)) {
     if (!isAccess(value)) { checks.push(unknown("Codex returned an unfamiliar filesystem access value or nested mapping")); continue; }
     const expected = at(authored, key, value);
-    if (expected === undefined) { checks.push(unknown("Filesystem rule coverage could not be compared")); continue; }
+    if (expected === undefined) { checks.push(unknown(`Filesystem rule ${JSON.stringify(key)}: a lower Codex layer grants ${value}; agent coverage could not be compared.`)); continue; }
     if (accessRank[value] > accessRank[expected]) return refuse(
       `Filesystem rule ${JSON.stringify(key)}: agent coverage is at most ${expected}; a lower Codex layer (account or trusted project) grants ${value}.`,
       "Remove the conflicting lower-layer grant, or deliberately update the agent's codex_permissions to the intended access.");
@@ -154,13 +159,15 @@ export function decideCodexFilesystemPolicy(request: {
   permissions: CodexFilesystemPermissions; configRead: unknown; requirementsRead: unknown;
 }): CodexFilesystemDecision {
   const { permissions, configRead, requirementsRead } = request;
-  const checks = [compareRequirements(requirementsRead, permissions)];
+  const requirements = compareRequirements(requirementsRead, permissions);
+  if (!requirements.ok) return requirements;
+  const checks: CodexFilesystemDecision[] = [requirements];
   if (!isRecord(configRead) || !isRecord(configRead.config)) return combine(...checks, unknown("Codex config/read did not return a recognized effective configuration"));
   const config = configRead.config;
   if (config.default_permissions == null || typeof config.default_permissions !== "string") checks.push(unknown("Codex permission selection is absent or has an unfamiliar representation"));
   else if (config.default_permissions !== CODEX_SEAT_PERMISSION_PROFILE) return refuse("Rule default_permissions: the agent selects its filesystem profile; the effective Codex configuration selects a different profile.",
     "Remove the conflicting account or trusted-project selection, or deliberately change the agent's codex_permissions.");
-  if (config.approval_policy == null || typeof config.approval_policy !== "string") checks.push(unknown("Codex approval selection is absent or has an unfamiliar representation"));
+  if (typeof config.approval_policy !== "string" || !["never", "on-request", "untrusted"].includes(config.approval_policy)) checks.push(unknown("Codex approval selection is absent or unfamiliar"));
   else if (config.approval_policy !== permissions.approval) return refuse("Rule approval_policy: the effective Codex configuration conflicts with the agent's approval choice.",
     "Align the account, trusted-project or managed approval policy with the agent's intended approval choice.");
   if (config.permissions == null) return refuse("Rule permissions.openrig-seat: the agent selects a filesystem profile, but the effective Codex configuration has no profile mapping.",
