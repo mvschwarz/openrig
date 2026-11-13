@@ -2052,6 +2052,8 @@ export class RestoreOrchestrator {
     // and the guidance record read the saved context only, so no guidance is put back and no startup context is written
     // for this seat; the adapter's ordinary bootstrap and the seat's existing skill restoration still run, as on any resume.
     const resumeWithoutContext = isPodAware && !startupCtx && replayContained && startupRuntime !== null && startupRuntime !== "terminal";
+    // A fresh seat launch reads the saved startup context and refuses without one, so a rollback names none for this seat.
+    const noContextFresh = "This seat has no saved startup context, and no command records one for it yet, so no fresh start is offered here.";
     const replayCtx: NodeStartupSnapshot | null = startupCtx
       ?? (resumeWithoutContext ? { runtime: startupRuntime!, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } : null);
     if (resumeWithoutContext && startupAdapter && launchResult) {
@@ -2266,7 +2268,9 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
-                  error: `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. If that degradation is acceptable, start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+                  error: resumeWithoutContext
+                    ? `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. ${noContextFresh}`
+                    : `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. If that degradation is acceptable, start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
                 };
               }
               const finalStatus = (isPodAware && resumeRequested)
@@ -2312,7 +2316,9 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
-                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
+                  error: resumeWithoutContext
+                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. ${noContextFresh} Restore the original session manually.`
+                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
                 };
               }
               return {

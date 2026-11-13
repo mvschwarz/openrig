@@ -2899,6 +2899,9 @@ describe("RestoreOrchestrator", () => {
     const node0 = result.result.nodes[0]!;
     expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
     expect(node0.status).toBe(status);
+    // A fresh seat launch refuses without a saved startup context, so the rollback offers none.
+    expect(node0.error ?? "").not.toContain("--fresh");
+    if (status === "awaiting-decision") expect(node0.error).toContain("This seat has no saved startup context, and no command records one for it yet, so no fresh start is offered here. Restore the original session manually.");
     expect(node0.restoreGaps).toEqual(["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."]);
     expect(result.result.warnings).toContain("Restore: dev.moved: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
     expect([...(node0.restoreGaps ?? []), ...result.result.warnings].filter((line) => line.includes("startup context"))

@@ -7,7 +7,6 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
-import { freshSeatLaunchCommand } from "./active-occupant.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -919,7 +918,6 @@ export class RestoreCheckService {
           check,
           runningReady,
           `Startup context cannot be inspected because node id is missing for ${session}`,
-          node.logicalId,
           rigName,
         ),
       };
@@ -947,17 +945,17 @@ export class RestoreCheckService {
               check,
               status: "yellow",
               evidence: `${probe.evidence}. Restore tries ${session}'s saved conversation without replaying a saved startup plan${node.podId ? ", and names this gap" : ""}.`,
-              remediation: `No startup-context repair is needed to restore it. To record startup context, start it fresh from its spec, in a new conversation: ${freshSeatLaunchCommand(node.logicalId, rigName)}`,
+              remediation: "No startup-context repair is needed to restore it.",
               remediationSafe: false,
             },
           };
         }
         return {
-          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, node.logicalId, rigName),
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, rigName),
         };
       case "malformed":
         return {
-          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, node.logicalId, rigName),
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence, rigName),
         };
       case "ok":
         break;
@@ -1038,14 +1036,14 @@ export class RestoreCheckService {
     check: string,
     runningReady: boolean,
     evidence: string,
-    logicalId: string,
     rigName: string,
   ): CheckEntry {
     return {
       check,
       status: runningReady ? "yellow" : "red",
       evidence,
-      remediation: `Start the seat fresh from its spec, which records its startup context in a new conversation: ${freshSeatLaunchCommand(logicalId, rigName)}`,
+      // A fresh seat launch reads the saved startup context and refuses without one, so it isn't offered here.
+      remediation: `No command records startup context for this seat yet. To see what restore would do for it, preview with: rig up ${shellQuote(rigName)} --existing --plan (read-only; it records nothing).`,
       remediationSafe: false,
     };
   }

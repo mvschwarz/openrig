@@ -185,8 +185,8 @@ describe("restore-check current-state eligibility correction", () => {
     expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!)).toEqual({ ok: true, blockers: [] });
     const ctx = startupContextCheck(await check(rig.name));
     expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore tries dev-moved@moved's saved conversation without replaying a saved startup plan, and names this gap.") });
-    expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
-    expect(ctx.remediation).toContain("rig seat launch 'dev.moved@moved' --fresh");
+    // A fresh seat launch refuses without a saved startup context, so none is offered.
+    expect(ctx.remediation).toBe("No startup-context repair is needed to restore it.");
   });
 
   it("a legacy seat with a resume token and no saved startup context reads yellow without promising a named gap", async () => {
@@ -202,7 +202,7 @@ describe("restore-check current-state eligibility correction", () => {
     expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!).blockers)
       .toContain("node dev.moved is pod-aware but has no persisted startup context or resume token");
     const ctx = startupContextCheck(await check(rig.name));
-    expect(ctx).toMatchObject({ status: "red", remediation: expect.stringContaining("rig seat launch 'dev.moved@unmoved' --fresh") });
-    expect(ctx.remediation).not.toContain("Recreate");
+    expect(ctx).toMatchObject({ status: "red", remediation: "No command records startup context for this seat yet. To see what restore would do for it, preview with: rig up unmoved --existing --plan (read-only; it records nothing)." });
+    expect(ctx.remediation).not.toContain("--fresh");
   });
 });
