@@ -2392,7 +2392,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // seat can hold a newer one, and a context watchdog would then read that node's telemetry. An external-CLI seat
       // addressed by its external session name, which the guard's address rules don't match, reads its own.
       resolveTargetGeneration: (s) => { const target = resolveGuardTarget(db, s); return target ? target.occupant ?? null : resolveExternalCliOccupant(db, s); },
-      targetNameCarried: (s) => sessionRegistry.currentOccupantGenerationForSession(s) !== null,
+      targetNameCarried: (s) => sessionRegistry.carriesSessionName(s),
       // Issue #1180 — sampled context use for token/percent context watchdogs,
       // generation-guarded against a predecessor's frozen telemetry.
       resolveContextUsage: (s, occupantGeneration) =>
