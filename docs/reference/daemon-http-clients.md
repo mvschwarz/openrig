@@ -182,8 +182,9 @@ With `needs-me.read` supported:
   about the open rows blocked on it (at most 100; empty when none are recorded).
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
-  already reflected in it. Recording one answer of several emits no event yet, so re-read the snapshot (or the row)
-  rather than relying on events alone for partial answers.
+  already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
+  is partial. An identical repeated choice, or a later click after a pending ask's answer set is complete, records
+  nothing new and emits none. Events are best effort; re-read the snapshot or row after a stream gap.
 - **The answers returned to a request:** `GET /api/queue/<qitemId>` adds `answers`, oldest first, each
   `{ qitemId, by, at, text, episode, recordedIdentity }`. They are found by the answer row's link to the request, not
   by its text, so don't parse the `In reply to:` line in an answer's body. `text` is the person's answer without that
