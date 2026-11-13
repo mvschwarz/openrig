@@ -878,7 +878,7 @@ it('manual: a prompt before the map, answered, then the completed map compacts o
  expect(compacts(f)).toHaveLength(1);
 });
 it.each(['running','unknown'] as const)('manual: a prompt answered into %s is not reported as current at expiry',async(after)=>{
- const f=fixture(20_000);let n=0;
+ const f=fixture(20_000);let n=0;vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
  f.onSleep(async()=>{n++;stageMap(f);f.activity(n<8?'needs_input':after);});
  expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
  const state=f.e.getPreparationState(seat)!;
@@ -892,6 +892,34 @@ it('manual: prompt, then idle, then busy before the map is done: no stale prompt
  expect(readsBy(20_000)).toBeGreaterThanOrEqual(4);
  expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_incomplete'});
  expect(f.e.getPreparationState(seat)!.awaitingInput).toBeUndefined();
+ expect(compacts(f)).toHaveLength(0);
+});
+// The idle wait after the map can run to the deadline, so readings it completes must reach the attempt as they land: a
+// --state read (which also reconciles the deadline) during that wait describes the seat now.
+it.each(['running','unknown'] as const)('manual: a prompt answered into %s while the post-map wait runs; --state reads during the wait, and at the deadline, see no current prompt',async(after)=>{
+ const f=fixture(20_000);vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
+ let n=0;let prompt:any;let attempt='';
+ f.onSleep(async()=>{n++;if(n===1){attempt=f.e.getPreparationState(seat)!.attemptId;stageMap(f);f.activity('needs_input');}
+  else if(n===2){prompt=f.e.getPreparationState(seat)?.awaitingInput;f.activity(after);}});
+ // After the prompt the seat works on, or can't be read; on the third such reading of one wait, two --state reads land:
+ // one as it is, one at the deadline, while that wait is still in flight.
+ const read=(f.transport as any).classifySendReadiness;let later=0;let during:any;let atDeadline:any;
+ (f.transport as any).classifySendReadiness=async(...args:any[])=>{
+  if(n>=2&&++later===3){
+   during=f.e.getPreparationState(seat)?.awaitingInput??null;
+   f.advance(f.e.getPreparationState(seat)!.deadlineAt!-f.clock());
+   atDeadline=f.e.getPreparationState(seat);
+  }
+  return read(...args);
+ };
+ const outcome=await f.e.triggerManualCompact(input,{operatorInitiated:true});
+ expect(prompt).toMatchObject({reason:'target_needs_input',current:true});
+ // A working seat clears the prompt; one that can't be read keeps it only as an earlier observation, never a current one.
+ const earlier=after==='running'?undefined:expect.objectContaining({reason:'target_needs_input',current:false});
+ expect(during??undefined).toEqual(earlier);
+ expect(atDeadline).toMatchObject({attemptId:attempt,status:'stopped',reason:'map_complete_seat_never_idle'});
+ expect(atDeadline.awaitingInput).toEqual(earlier);
+ expect(outcome).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
  expect(compacts(f)).toHaveLength(0);
 });
 it('manual default accepts a map after120s but before180s',async()=>{

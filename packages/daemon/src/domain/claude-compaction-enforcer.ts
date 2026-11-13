@@ -1473,7 +1473,10 @@ export class ClaudeCompactionEnforcer {
       do {
         const remaining = attempt.deadlineAt! - this.now();
         if (remaining <= 0) return failed(expired());
-        try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal, { allowDraft: true }); }
+        // The wait can run to the deadline. Each reading it completes reaches the attempt as it lands, so a --state read or
+        // deadline reconciliation during the wait never takes an answered prompt for a current one.
+        try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal,
+          { allowDraft: true, onObservation: (activity) => observe({ ok: false, activity }) }); }
         catch { idle = { ok: false, reason: "transport_unavailable" }; }
         observe(idle);
         this.reconcilePreparations();
