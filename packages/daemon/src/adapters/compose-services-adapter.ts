@@ -1,4 +1,6 @@
 import { connect } from "node:net";
+import http from "node:http";
+import https from "node:https";
 import type { ExecFn } from "./tmux.js";
 
 // -- Result types --
@@ -214,16 +216,50 @@ export class ComposeServicesAdapter {
   }
 
   /** Probe an HTTP wait target. Any 2xx or 3xx response passes this target;
-   * redirects are not followed. This proves the server answered, not application readiness. */
+   * redirects are not followed (Node's request never follows them). The probe
+   * answers at the response headers: the server answered, not application
+   * readiness. A URL with no scheme is tried as `http://`, and credentials in
+   * the URL are sent as basic auth, as curl did. Certificates and proxies follow
+   * Node (its own trust store, `NODE_EXTRA_CA_CERTS`), not curl's config files,
+   * and the timeout is exact milliseconds. */
   async probeHttp(url: string, timeoutMs: number = 5000): Promise<boolean> {
+    const target = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `http://${url}`;
+    let parsed: URL;
     try {
-      const cmd = `curl -sf -o /dev/null -w '%{http_code}' --max-time ${Math.ceil(timeoutMs / 1000)} ${sq(url)} 2>/dev/null`;
-      const output = await this.exec(cmd);
-      const code = parseInt(output.trim(), 10);
-      return code >= 200 && code < 400;
+      parsed = new URL(target);
     } catch {
       return false;
     }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const done = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(value);
+      };
+      try {
+        const transport = parsed.protocol === "https:" ? https : http;
+        const auth = parsed.username
+          ? `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`
+          : undefined;
+        const request = transport.request(parsed, { method: "GET", auth }, (response) => {
+          const status = response.statusCode ?? 0;
+          // Settle first, then drop the socket on every status: an unread body
+          // would hold the connection until timeout or GC, and a late error
+          // from the destroy must not flip an already-decided answer.
+          done(status >= 200 && status < 400);
+          response.destroy();
+        });
+        timer = setTimeout(() => request.destroy(new Error("probe timeout")), timeoutMs);
+        request.on("error", () => done(false));
+        request.end();
+      } catch {
+        done(false);
+      }
+    });
   }
 
   /** Probe a TCP wait target. Returns true if the port is open. */

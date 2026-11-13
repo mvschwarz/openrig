@@ -7,6 +7,8 @@ import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { evaluateWaitTargets, deriveEnvHealth } from "../src/domain/services-readiness.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { RigServicesSpec } from "../src/domain/types.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 function mockExec(responses?: Record<string, string | Error>): ExecFn {
   return async (cmd: string) => {
@@ -20,6 +22,29 @@ function mockExec(responses?: Record<string, string | Error>): ExecFn {
     }
     return "";
   };
+}
+
+/** A local HTTP fixture the wait-target probe can reach. */
+async function startHealthServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((_req, res) => { res.writeHead(200); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/v1/sys/health`,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    }),
+  };
+}
+
+/** A port nothing listens on, so a probe fails by connection refusal. */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
 }
 
 const COMPOSE_PS_LINE = JSON.stringify({
@@ -241,22 +266,25 @@ describe("ComposeServicesAdapter", () => {
 
 describe("services-readiness", () => {
   it("evaluateWaitTargets — HTTP target healthy", async () => {
-    const adapter = new ComposeServicesAdapter(mockExec({ "curl": "200" }));
+    const health = await startHealthServer();
+    try {
+      const adapter = new ComposeServicesAdapter(mockExec());
 
-    const results = await evaluateWaitTargets(
-      [{ url: "http://localhost:8200/v1/sys/health" }],
-      adapter,
-    );
+      const results = await evaluateWaitTargets([{ url: health.url }], adapter);
 
-    expect(results).toHaveLength(1);
-    expect(results[0]!.status).toBe("healthy");
+      expect(results).toHaveLength(1);
+      expect(results[0]!.status).toBe("healthy");
+    } finally {
+      await health.close();
+    }
   });
 
   it("evaluateWaitTargets — HTTP target unhealthy", async () => {
-    const adapter = new ComposeServicesAdapter(mockExec({ "curl": new Error("connection refused") }));
+    const port = await closedPort();
+    const adapter = new ComposeServicesAdapter(mockExec());
 
     const results = await evaluateWaitTargets(
-      [{ url: "http://localhost:8200/v1/sys/health" }],
+      [{ url: `http://127.0.0.1:${port}/v1/sys/health` }],
       adapter,
     );
 
@@ -334,46 +362,50 @@ describe("ServiceOrchestrator", () => {
   }
 
   it("boot — boots services, waits for health, persists receipt", async () => {
-    const spec: RigServicesSpec = {
-      kind: "compose",
-      composeFile: "docker-compose.yml",
-      waitFor: [{ url: "http://localhost:8200/v1/sys/health" }],
-    };
-    const rig = seedRigWithServices(spec);
+    const health = await startHealthServer();
+    try {
+      const spec: RigServicesSpec = {
+        kind: "compose",
+        composeFile: "docker-compose.yml",
+        waitFor: [{ url: health.url }],
+      };
+      const rig = seedRigWithServices(spec);
 
-    const adapter = new ComposeServicesAdapter(mockExec({
-      "up -d": "",
-      "ps --format json": COMPOSE_PS_LINE,
-      "curl": "200",
-    }));
+      const adapter = new ComposeServicesAdapter(mockExec({
+        "up -d": "",
+        "ps --format json": COMPOSE_PS_LINE,
+      }));
 
-    const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: adapter });
-    const result = await orchestrator.boot(rig.id, { waitTimeoutMs: 5000, waitPollIntervalMs: 100 });
+      const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: adapter });
+      const result = await orchestrator.boot(rig.id, { waitTimeoutMs: 5000, waitPollIntervalMs: 100 });
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.health).toBe("healthy");
-    expect(result.receipt.services).toHaveLength(1);
-    expect(result.receipt.waitFor).toHaveLength(1);
-    expect(result.receipt.waitFor[0]!.status).toBe("healthy");
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.health).toBe("healthy");
+      expect(result.receipt.services).toHaveLength(1);
+      expect(result.receipt.waitFor).toHaveLength(1);
+      expect(result.receipt.waitFor[0]!.status).toBe("healthy");
 
-    // Verify receipt persisted
-    const record = rigRepo.getServicesRecord(rig.id);
-    expect(record?.latestReceiptJson).toBeTruthy();
+      // Verify receipt persisted
+      const record = rigRepo.getServicesRecord(rig.id);
+      expect(record?.latestReceiptJson).toBeTruthy();
+    } finally {
+      await health.close();
+    }
   });
 
   it("boot — wait target failure returns honest error with receipt", async () => {
+    const port = await closedPort();
     const spec: RigServicesSpec = {
       kind: "compose",
       composeFile: "docker-compose.yml",
-      waitFor: [{ url: "http://localhost:8200/v1/sys/health" }],
+      waitFor: [{ url: `http://127.0.0.1:${port}/v1/sys/health` }],
     };
     const rig = seedRigWithServices(spec);
 
     const adapter = new ComposeServicesAdapter(mockExec({
       "up -d": "",
       "ps --format json": COMPOSE_PS_LINE,
-      "curl": new Error("connection refused"),
     }));
 
     const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: adapter });
