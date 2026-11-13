@@ -126,6 +126,8 @@ person needs in their project or home folder and name that path.
   OpenRig in a plain shell so the operator sees a named teammate instead of "unknown sender". Inside tmux, offer
   joining as optional, with the effects below. Ask the person yes or no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
+  - While the team works, I bring each seat's permission prompt to you here as a question and send your answer, so
+    you don't need to open the seats' terminals. Joining puts my name on those answers.
   - In a plain shell, joining writes no files in your project or personal settings.
   - Inside tmux on 0.6.11, my sender and reply address is your existing tmux session name, even a number like `0`.
     `rig attach --self` returns that address and `rig whoami` confirms it; `--display-name` does not change it.
@@ -201,10 +203,16 @@ person needs in their project or home folder and name that path.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
-  read it with `rig capture <seat>@<rig>`. A permission prompt is the person's to answer: show it to them, with any
-  others waiting, one line each (seat, exact action, the choices offered). For a commit, also say whether the team's
+  read it with `rig capture <seat>@<rig>`.
+- **Seat permission prompts come to the person here, as questions, for as long as the team works,** whether you or
+  the operator started it, and whether or not they joined. This is the default, not a fallback. A permission prompt
+  is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
+  relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
+  seat stopped at a prompt. Show the person each one, with any others waiting, one line each (seat, exact action,
+  the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
   review has run; they may be expecting one. Before sending their choice, capture that
-  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
+  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
+  `rig send <seat>@<rig> "<their choice>" --dangerously-interact --reason "<their choice, in a few words>"`
   (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
