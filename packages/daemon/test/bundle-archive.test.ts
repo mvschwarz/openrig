@@ -386,6 +386,31 @@ describe("Bundle archive", () => {
     expect(fs.statSync(outputPath).size).toBeGreaterThan(0);
   });
 
+  it.skipIf(process.platform === "win32")("pack creates a credential-bearing archive owner-only (0600)", async () => {
+    const staging = createStaging();
+    fs.mkdirSync(path.join(staging, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(staging, ".claude/.credentials.json"), "{}\n");
+    const outputPath = path.join(tmpDir, "private.rigbundle");
+
+    await pack(staging, outputPath);
+
+    expect(fs.statSync(outputPath).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === "win32")("pack leaves an ordinary archive at the umask's mode", async () => {
+    const staging = createStaging();
+    const outputPath = path.join(tmpDir, "shared.rigbundle");
+    const previous = process.umask(0o022);
+
+    try {
+      await pack(staging, outputPath);
+    } finally {
+      process.umask(previous);
+    }
+
+    expect(fs.statSync(outputPath).mode & 0o777).toBe(0o644);
+  });
+
   it.skipIf(process.platform === "win32")("preserves executable file modes through pack and unpack", async () => {
     const staging = createStaging();
     const scriptPath = path.join(staging, "packages/pkg/bin/hello.sh");
