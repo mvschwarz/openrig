@@ -485,3 +485,47 @@ it("#2889 follow-up: a resumed episode keeps its id and diagnosis when its first
   expect(actions.map((a) => a.action)).not.toContain("create");
   expect(t.service.list()).toHaveLength(diagnoses);
 });
+
+it("#3192 review: a resumed episode keeps its id when its non-counting opener ages out of the window", async () => {
+  const t = await setup();
+  const first = t.projection.list().records[0]!;
+  const id0 = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.dispose(id0, t.assessment("false-positive"));
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  // The first raw transition after the cut is daemon bookkeeping (never counted) and is a day older than the counted ones.
+  insert.run("root", "2026-09-05T12:02:00.000Z", "pending", "daemon@kernel");
+  for (let i = 0; i < 20; i++) insert.run("root", `2026-09-06T12:00:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-06T12:01:00.000Z");   // the opener is still inside the 24 h window
+  const resumed = t.projection.list().records.filter((r) => r.id !== first.id);
+  expect(resumed).toHaveLength(1);
+  expect((await t.service.evaluate("system:health", true)).actions).toContainEqual(expect.objectContaining({ findingId: resumed[0]!.id, action: "create" }));
+  const diagnoses = t.service.list().length;
+  t.time("2026-09-06T12:05:00.000Z");   // the opener ages out; the counted transitions stay fresh
+  expect(t.projection.list().records.filter((r) => r.id !== first.id).map((r) => r.id)).toEqual([resumed[0]!.id]);
+  const { actions } = await t.service.evaluate("system:health", true);
+  expect(actions.map((a) => a.action)).not.toContain("create");
+  expect(t.service.list()).toHaveLength(diagnoses);
+});
+
+it("#3192 review: the opener is found in a dormant member of the family, not only in the touched ones", async () => {
+  const t = await setup();
+  const first = t.projection.list().records[0]!;
+  const id0 = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.dispose(id0, t.assessment("false-positive"));
+  // The first raw transition after the cut is a non-counting one on a child; the counted ones stay on the root.
+  await t.queue.create({ qitemId: "child", sourceSession: "builder@rig", destinationSession: "owner@rig", body: "Part", tags: ["mission:mission", "slice:slice-1"], nudge: false });
+  t.db.prepare("UPDATE queue_items SET handed_off_from = ? WHERE qitem_id = ?").run("root", "child");
+  t.db.prepare("UPDATE queue_transitions SET ts = ?, actor_session = ? WHERE qitem_id = ?").run("2026-09-05T12:02:00.000Z", "daemon@kernel", "child");
+  const insert = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,?,?)");
+  for (let i = 0; i < 20; i++) insert.run("root", `2026-09-06T12:00:${String(i).padStart(2, "0")}.000Z`, "pending", "builder@rig");
+  t.time("2026-09-06T12:01:00.000Z");
+  const resumed = t.projection.list().records.filter((r) => r.id !== first.id);
+  expect(resumed).toHaveLength(1);
+  expect((await t.service.evaluate("system:health", true)).actions).toContainEqual(expect.objectContaining({ findingId: resumed[0]!.id, action: "create" }));
+  const diagnoses = t.service.list().length;
+  t.time("2026-09-06T12:05:00.000Z");   // the child, and with it the opener, leaves the window
+  expect(t.projection.list().records.filter((r) => r.id !== first.id).map((r) => r.id)).toEqual([resumed[0]!.id]);
+  const { actions } = await t.service.evaluate("system:health", true);
+  expect(actions.map((a) => a.action)).not.toContain("create");
+  expect(t.service.list()).toHaveLength(diagnoses);
+});
