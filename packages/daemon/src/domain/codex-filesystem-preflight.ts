@@ -97,7 +97,11 @@ export async function verifyCodexFilesystemPolicy(request: {
   cwd: string;
   codexHome?: string;
   launchPath?: string;
+  launchWrapper?: readonly string[];
 }): Promise<Decision> {
+  if (request.launchWrapper?.length) {
+    return refuse("Filesystem codex_permissions cannot be combined with launch_wrapper: a wrapper can change the configuration the native process loads; no agent was started");
+  }
   if (!request.codexHome || !isAbsolute(request.codexHome) || /[\0\r\n]/.test(request.codexHome)) {
     return refuse("Seat filesystem policy requires a known absolute CODEX_HOME; configure member/rig env.CODEX_HOME or daemon CODEX_HOME");
   }

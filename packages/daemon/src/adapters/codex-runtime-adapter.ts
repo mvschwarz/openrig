@@ -1099,7 +1099,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (filesystemPermissions) {
       if (profile) return { ok: false, error: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify that configuration profile. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
       try {
-        const verified = await this.verifyFilesystemPolicy({ permissions: filesystemPermissions, cwd: binding.cwd, codexHome: home, launchPath: this.launchPath });
+        const verified = await this.verifyFilesystemPolicy({ permissions: filesystemPermissions, cwd: binding.cwd, codexHome: home, launchPath: this.launchPath, launchWrapper: binding.launchWrapper });
         if (!verified.ok) return verified;
       } catch (error) { return { ok: false, error: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
     }

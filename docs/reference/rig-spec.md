@@ -368,6 +368,11 @@ profile on the supported path. Clear the configuration profile before selecting
 `filesystem`, or keep the legacy `sandbox` envelope. The spec and setters reject
 this combination early, and launch checks stored records defensively.
 
+A filesystem policy also refuses a nonempty `launch_wrapper`: an arbitrary
+wrapper can change `CODEX_HOME` or other configuration after the native read.
+Clear the wrapper before using this option. Legacy sandbox selections retain
+their existing wrapper support.
+
 The filesystem selection replaces permission-mode and team/kernel defaults,
 including ambient YOLO. Fresh launches, both resume paths and restore emit the
 same selection. A rebuild uses the saved filesystem policy ahead of an observed

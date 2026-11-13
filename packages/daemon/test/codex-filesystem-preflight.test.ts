@@ -101,6 +101,13 @@ describe("Codex seat filesystem configuration preflight", () => {
 });
 
 describe("Codex seat filesystem verifier reader boundary", () => {
+  it.each([["env", "CODEX_HOME=/other"], ["custom-wrapper"]])("refuses a launch wrapper before reading %#", async launchWrapper => {
+    vi.mocked(readCodexConfiguration).mockClear();
+    expect(await verifyCodexFilesystemPolicy({ permissions, cwd: "/work", codexHome: "/account", launchWrapper }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("launch_wrapper") });
+    expect(readCodexConfiguration).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, "", "relative/home", "/absolute\nother"])("refuses an unestablished account home %# before reading", async codexHome => {
     vi.mocked(readCodexConfiguration).mockClear();
     expect(await verifyCodexFilesystemPolicy({ permissions, cwd: "/work", codexHome })).toMatchObject({ ok: false });

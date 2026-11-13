@@ -98,7 +98,7 @@ export class CodexResumeAdapter {
     if (codexPermissions && "filesystem" in codexPermissions) {
       if (codexConfigProfile?.trim()) return { ok: false, code: "resume_failed", message: "Filesystem codex_permissions cannot be combined with codex_config_profile: the native config reader cannot verify it. Clear the profile or keep the legacy sandbox envelope; no agent was started." };
       try {
-        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: codexPermissions, cwd, codexHome, launchPath: this.options.launchPath });
+        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: codexPermissions, cwd, codexHome, launchPath: this.options.launchPath, launchWrapper });
         if (!verified.ok) return { ok: false, code: "resume_failed", message: verified.error };
       } catch (error) { return { ok: false, code: "resume_failed", message: `Cannot verify filesystem codex_permissions: ${error instanceof Error ? error.message : String(error)}. No agent was started.` }; }
     }

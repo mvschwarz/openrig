@@ -8,6 +8,7 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import type { CodexFilesystemVerifier } from "../src/domain/codex-filesystem-preflight.js";
 import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { codexNonLoginShellArg } from "../src/domain/native-resume-probe.js";
@@ -2846,6 +2847,31 @@ describe("a seat's own permission envelope (argv only, not native enforcement)",
 
 describe("a seat's explicit filesystem policy (argv and native-read preflight, not enforcement)", () => {
   const filesystemChoice = { approval: "never", filesystem: { ":minimal": "read", "/same": "write", "/same/private": "deny" }, network_access: false } satisfies import("../src/domain/codex-member-permissions.js").CodexFilesystemPermissions;
+
+  it.each(["fresh", "resume", "codex_id", "codex_last"])("refuses a wrapped filesystem launch before dispatch on %s", async kind => {
+    const tmux = mockTmux();
+    const environment = new SeatLaunchEnvironment(tmux, { PATH: "/bin" }, "/same");
+    const command = vi.spyOn(environment, "command").mockImplementation(async (_session, core) => core);
+    const verifyFilesystemPolicy: CodexFilesystemVerifier = async request => request.launchWrapper?.length
+      ? { ok: false, error: "launch_wrapper can change the checked configuration" } : { ok: true };
+    const launchWrapper = ["env", "CODEX_HOME=/other"];
+    const options = { codexHome: "/shared-home", verifyFilesystemPolicy, seatLaunchEnvironment: environment,
+      sleep: async () => {} };
+    if (kind === "fresh" || kind === "resume") {
+      const adapter = new CodexRuntimeAdapter({ ...options, tmux, fsOps: mockFs() });
+      const binding = { ...makeBinding("/same"), codexPermissions: filesystemChoice, launchWrapper };
+      const result = kind === "fresh" ? await adapter.launchHarness(binding, { name: "dev-a@test-rig" })
+        : await adapter.buildResumeCommand(binding, { name: "dev-a@test-rig", resumeToken: "thread-A" });
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("launch_wrapper") });
+    } else {
+      const restore = new CodexResumeAdapter(tmux, { ...options, maxWaitMs: 0 });
+      expect(await restore.resume("dev-a@test-rig", kind, "thread-A", "/same", undefined, "floor", undefined, undefined,
+        undefined, undefined, undefined, undefined, filesystemChoice, undefined, launchWrapper))
+        .toMatchObject({ ok: false, message: expect.stringContaining("launch_wrapper") });
+    }
+    expect(command).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
 
   it.each(["fresh", "resume"])("emits the selected policy on %s without extra writable roots or shared policy files", async path => {
     const tmux = mockTmux(), filesystem = mockFs();
