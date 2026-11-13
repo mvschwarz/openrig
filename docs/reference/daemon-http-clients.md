@@ -208,8 +208,8 @@ With `needs-me.read` supported:
   seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required; with
   both, `senderSession` is used and `rig` is ignored. `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
   states.
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
-  a missing, zero, negative or unparseable `limit` means 20.
+- **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
+  a missing, zero, negative or unparseable `limit` defaults to 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body

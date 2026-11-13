@@ -299,6 +299,9 @@ interface RecentQueueTransitionRow {
   source_session: string;
 }
 
+export const DEFAULT_RECENT_TRANSITIONS_LIMIT = 20;
+export const MAX_RECENT_TRANSITIONS_LIMIT = 1000;
+
 /** How much of a body is read for bodyPreview, and the longest preview shown (the Story card's preview bound). */
 const BODY_HEAD_CODE_POINTS = 2000;
 const BODY_PREVIEW_MAX_CODE_POINTS = 240;
@@ -518,10 +521,10 @@ export class QueueTransitionLog {
    * newest last. The window function observes the complete per-qitem state
    * sequence before the allowlist is applied, so note-only same-state writes
    * cannot masquerade as claims, resumes, or blocks. */
-  listRecent(scope: RecentQueueTransitionScope, requestedLimit = 20): RecentQueueTransition[] {
+  listRecent(scope: RecentQueueTransitionScope, requestedLimit = DEFAULT_RECENT_TRANSITIONS_LIMIT): RecentQueueTransition[] {
     const limit = Number.isFinite(requestedLimit)
-      ? Math.min(20, Math.max(1, Math.floor(requestedLimit)))
-      : 20;
+      ? Math.min(MAX_RECENT_TRANSITIONS_LIMIT, Math.max(1, Math.floor(requestedLimit)))
+      : DEFAULT_RECENT_TRANSITIONS_LIMIT;
     const activeRigWhere = archiveWhereClause("archived_at");
     const rigNames = scope.kind === "rig"
       ? [scope.rig]
@@ -605,7 +608,7 @@ export class QueueTransitionLog {
     return rows;
   }
 
-  listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
+  listRecentForRig(rig: string, requestedLimit = DEFAULT_RECENT_TRANSITIONS_LIMIT): RecentQueueTransition[] {
     return this.listRecent({ kind: "rig", rig }, requestedLimit);
   }
 
