@@ -15,6 +15,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
+import { declaredCapabilities } from "./connection-contract.js";
 import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILITIES, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
@@ -92,11 +93,17 @@ export interface SeatHandoverMutationResult {
     /** How the previous occupant's process ended: it exited on TERM, or was killed after the TERM window, before the
      *  successor started in its pane. A discovered successor leaves it alone. */
     departingProcess: "ended-graceful" | "ended-forced" | "not-touched";
+    /** The startup context (restore or priming packet) was typed and submitted to the successor. That's "accepted": read
+     *  `restorePacket` for whether its leaving the input box was seen. Kept for existing readers; new ones read the status. */
     startupContextDelivered: boolean;
     /** This handover's lineage record (its occupant tenure) exists. Its write is best-effort, so it's read back. */
     provenanceRecordWritten: boolean;
   };
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  /** The packet wasn't seen leaving the successor's input box. `unconfirmed`: its runtime's input box is read, but that
+   *  reading was unclear; check the screen before sending it again. `accepted`: typed and submitted on a runtime whose
+   *  input box isn't read (member-connection.v1, `continuity.restorePacketConfirmation`). Absent: no unconfirmed or
+   *  accepted packet status was recorded; where a packet was sent, it was seen consumed. */
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
    *  rebuild: EXACTLY which durable artifacts primed the successor, which
    *  declared addresses were gaps, and (when the chain is empty) the named
@@ -132,7 +139,7 @@ type ClaudeRestorePacketObservation =
 
 type RestorePacketDelivery =
   | { ok: true; confirmation: "confirmed" }
-  | { ok: true; confirmation: "unconfirmed"; reason: string }
+  | { ok: true; confirmation: "unconfirmed" | "accepted"; reason: string }
   | { ok: false; message: string; kind?: "staged" };
 
 interface NodeRow {
@@ -668,6 +675,7 @@ export class SeatHandoverService {
       if (delivered.confirmation === "unconfirmed") {
         restorePacket = { status: "unconfirmed", reason: delivered.reason };
       } else {
+        if (delivered.confirmation === "accepted") restorePacket = { status: "accepted", reason: delivered.reason };
         contextDelivered = true;
       }
     }
@@ -753,6 +761,7 @@ export class SeatHandoverService {
       if (delivered.confirmation === "unconfirmed") {
         restorePacket = { status: "unconfirmed", reason: delivered.reason };
       } else {
+        if (delivered.confirmation === "accepted") restorePacket = { status: "accepted", reason: delivered.reason };
         contextDelivered = true;
       }
     }
@@ -1166,30 +1175,34 @@ export class SeatHandoverService {
     packet: string,
     runtime: string | null,
   ): Promise<RestorePacketDelivery> {
-    if (runtime === "claude-code") {
-      const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
-      if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
-      if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"
-        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
-
-      // Retry only when full-text captures show this exact packet still in Claude's composer.
-      await this.sleep(200);
-      const beforeRetry = await this.readClaudeRestorePacketComposer(successorSession, packet);
-      if (beforeRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
-      if (beforeRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: beforeRetry.reason === "unobservable"
-        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
-
-      const retry = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
-      if (!retry.ok) {
-        return { ok: false, message: (retry as { message?: string }).message ?? "retry submit failed" };
-      }
-      const afterRetry = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
-      if (afterRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
-      if (afterRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterRetry.reason === "unobservable"
-        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
-      return { ok: false, kind: "staged", message: STARTUP_UNCONFIRMED_REASON.staged };
+    // Only a runtime declared to support it has its input box read, and the only reader is Claude Code's; anywhere else
+    // the packet was typed and submitted, and that's all that's known.
+    if (declaredCapabilities("typed", runtime).continuity.restorePacketConfirmation !== "supported" || runtime !== "claude-code") {
+      return { ok: true, confirmation: "accepted",
+        reason: `${runtime ?? "this runtime"}'s input box isn't read, so the packet was typed and submitted but not seen consumed` };
     }
-    return { ok: true, confirmation: "confirmed" };
+    // Claude Code, the runtime declared to support it: its composer is read until the packet leaves it.
+    const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
+    if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
+    if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"
+      ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+
+    // Retry only when full-text captures show this exact packet still in Claude's composer.
+    await this.sleep(200);
+    const beforeRetry = await this.readClaudeRestorePacketComposer(successorSession, packet);
+    if (beforeRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
+    if (beforeRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: beforeRetry.reason === "unobservable"
+      ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+
+    const retry = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
+    if (!retry.ok) {
+      return { ok: false, message: (retry as { message?: string }).message ?? "retry submit failed" };
+    }
+    const afterRetry = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
+    if (afterRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
+    if (afterRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterRetry.reason === "unobservable"
+      ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+    return { ok: false, kind: "staged", message: STARTUP_UNCONFIRMED_REASON.staged };
   }
 
   private async waitForClaudeRestorePacketComposer(

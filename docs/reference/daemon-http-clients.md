@@ -224,6 +224,18 @@ succeeded is `unknown`: whether the prompt took it isn't known; if the send fail
 `failed-effect-unknown`. `reporter` says who established it.
 None of them means the member read the work: picking it up is a claim on the row.
 
+What reads these declarations:
+- **A handover's packet.** Only a runtime declared with `continuity.restorePacketConfirmation` has its input box read
+  until the restore or priming packet leaves it. On any other runtime the handover's result carries
+  `restorePacket: { status: "accepted", reason }`: typed and submitted, not seen consumed. `sideEffects.startupContextDelivered`
+  stays `true` there for existing readers and means the same thing, accepted; read `restorePacket` for what was seen.
+- **A send's dialog check.** After a fresh hook, the dialog and picker checks run before typing only on a runtime
+  declared with `observe.dialog`. The other screen checks before a send don't read the declaration.
+- **A watchdog's history.** When a send returns, the watchdog's history records its `deliveryFact` and, when the screen
+  showed it, `deliveryRenderVerified: true`. Exceptions and receipt reconciliation may have no fact; absence of a fact
+  or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
+  gate: the reminder's status, receipts and retries don't change with them.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
