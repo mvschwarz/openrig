@@ -204,3 +204,36 @@ describe("aggregateFleetScopes — registry honesty", () => {
     expect(dialed.every(u => !u.includes("127.0.0.1"))).toBe(true);
   });
 });
+
+describe("the cache follows the resolved address, not the registry alias", () => {
+  const mission = (hostId: string) => ({ hostId, hostLabel: hostId, project: null, mission: "m-old", slices: [] as unknown[] });
+  const URL_A = "http://host-a:7433";
+
+  it("stale rows from a renamed entry re-stamp with the entry's current id", async () => {
+    const cache = new Map([[URL_A, { at: "2026-01-01T00:00:00.000Z", missions: [mission("old-name")], project: null }]] as never);
+    // The registry renamed the entry but it points at the same address; the read now fails.
+    const renamed = { hosts: [{ id: "new-name", transport: "http" as const, url: URL_A }] } as HostRegistry;
+    const failing = (async () => { throw new Error("connect ECONNREFUSED"); }) as typeof fetch;
+    const payload = await aggregateFleetScopes(deps({ loadRegistry: () => ({ ok: true, registry: renamed }), fetchImpl: failing, cache }));
+    const host = payload.hosts.find((h) => h.hostId === "new-name")!;
+    expect(host.status).toBe("stale");
+    // The served rows carry the CURRENT id, so the view still groups them.
+    expect(payload.missions.filter((m) => m.mission === "m-old").map((m) => m.hostId)).toEqual(["new-name"]);
+    expect(payload.missions.filter((m) => m.mission === "m-old")[0]!.hostLabel).toBe("new-name");
+  });
+
+  it("a deadline-skipped host finds its warm entry under the resolved address and re-stamps it", async () => {
+    const cache = new Map([[URL_A, { at: "2026-01-01T00:00:00.000Z", missions: [mission("old-name")], project: null }]] as never);
+    const renamed = { hosts: [{ id: "new-name", transport: "http" as const, url: URL_A }] } as HostRegistry;
+    const payload = await aggregateFleetScopes(deps({
+      loadRegistry: () => ({ ok: true, registry: renamed }),
+      fetchImpl: (async () => scopesCountsResponse([])) as typeof fetch,
+      cache,
+      viewDeadlineMs: -1, // every leg starts past the deadline
+    }));
+    const host = payload.hosts.find((h) => h.hostId === "new-name")!;
+    expect(host.status).toBe("stale");
+    expect(host.error).toContain("deadline exceeded");
+    expect(payload.missions.filter((m) => m.mission === "m-old").map((m) => m.hostId)).toEqual(["new-name"]);
+  });
+});

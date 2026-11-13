@@ -160,15 +160,28 @@ export function scopesRoutes(): Hono {
     const listLocalScopes = (): LocalScopesCounts => {
       const root = localRoot();
       if ("reason" in root) return { project: selected?.id ?? null, missions: [], error: root.reason };
-      let missionNames: string[];
+      // The ROOT listing has its own handler: a missing root (ENOENT) is an
+      // empty-but-honest workspace; any other root failure (EACCES, EIO…) is
+      // the local leg's own error state, never an empty list stamped ok.
+      let entries: string[];
       try {
-        missionNames = fs.readdirSync(root.root).filter((e) => fs.statSync(path.join(root.root, e)).isDirectory());
+        entries = fs.readdirSync(root.root);
       } catch (err) {
-        // ENOENT is an empty-but-honest workspace; any other read failure
-        // (EACCES, EIO…) is the local leg's own error state, never an empty
-        // list stamped ok.
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return { project: selected?.id ?? null, missions: [] };
         return { project: selected?.id ?? null, missions: [], error: `local missions read failed: ${(err as Error).message}` };
+      }
+      // Each ENTRY is checked in its own handler: one vanished entry (a dangling
+      // symlink, a folder removed between listing and checking) is skipped, and
+      // any other per-entry failure reports on the leg — one bad entry must not
+      // hide every local mission behind a healthy-looking empty list.
+      const missionNames: string[] = [];
+      for (const e of entries) {
+        try {
+          if (fs.statSync(path.join(root.root, e)).isDirectory()) missionNames.push(e);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+          return { project: selected?.id ?? null, missions: [], error: `local missions read failed at '${e}': ${(err as Error).message}` };
+        }
       }
       const missions = missionNames.map((name) => {
         try {

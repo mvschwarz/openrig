@@ -183,10 +183,19 @@ async function readHostScopes(
   nowFn: () => string,
 ): Promise<HostOutcome> {
   const cache = deps.cache ?? fleetScopesCache;
+  // Cached rows are re-stamped with the CURRENT host id and label on the way
+  // out: the view groups by host id, so rows stamped with an old registry id
+  // would vanish after a rename instead of reading stale under the new id.
   const fromCache = (key: string, status: FleetScopesStatusKind, error: string): HostOutcome => {
     const at = nowFn();
     const cached = cache.get(key);
-    if (cached) return { status: { hostId, status: "stale", observedAt: at, lastSuccessAt: cached.at, error }, missions: cached.missions };
+    if (cached) return {
+      status: { hostId, status: "stale", observedAt: at, lastSuccessAt: cached.at, error },
+      missions: cached.missions.map((m) => ({
+        ...m, hostId, hostLabel: label,
+        slices: m.slices.map((sl) => ({ ...sl, hostId, hostLabel: label })),
+      })),
+    };
     return { status: { hostId, status, observedAt: at, lastSuccessAt: null, error }, missions: [] };
   };
   if (!reg.ok) return fromCache(hostId, "unreachable", reg.error);
@@ -291,9 +300,14 @@ export async function aggregateFleetScopes(deps: FleetScopesDeps): Promise<Fleet
       // A leg that cannot start inside the view deadline reports honestly
       // instead of stretching the read — stale when last-known rows exist.
       if (remaining <= 0) {
-        const cached = (deps.cache ?? fleetScopesCache).get(entry.id);
+        // Same resolved-address key as the main path, so a warm entry under a
+        // repointed alias is found; its rows re-stamp with the current id.
+        const resolved0 = resolveHost(reg.registry, entry.id);
+        const key0 = resolved0.ok && resolved0.host.transport === "http" && resolved0.host.url ? resolved0.host.url : entry.id;
+        const cached = (deps.cache ?? fleetScopesCache).get(key0);
         outcomes[i]!.outcome = cached
-          ? { status: { hostId: entry.id, status: "stale", observedAt: now(), lastSuccessAt: cached.at, error: "fleet view deadline exceeded before this host was read" }, missions: cached.missions }
+          ? { status: { hostId: entry.id, status: "stale", observedAt: now(), lastSuccessAt: cached.at, error: "fleet view deadline exceeded before this host was read" },
+              missions: cached.missions.map((m) => ({ ...m, hostId: entry.id, hostLabel: entry.id, slices: m.slices.map((sl) => ({ ...sl, hostId: entry.id, hostLabel: entry.id })) })) }
           : { status: { hostId: entry.id, status: "unreachable", observedAt: now(), lastSuccessAt: null, error: "fleet view deadline exceeded before this host was read" }, missions: [] };
         continue;
       }

@@ -192,6 +192,17 @@ describe("GET /api/scopes/fleet — local leg + registry honesty", () => {
     }
   });
 
+  it("a dangling symlink beside a real mission is skipped; the mission is listed and the leg reads ok", async () => {
+    fs.symlinkSync(path.join(root, "nowhere-at-all"), path.join(root, "dangling"));
+    const body = await (await appWith(root, { registry: { ok: true, registry: { hosts: [] } } }).request("/api/scopes/fleet")).json() as {
+      missions: Array<{ mission: string }>;
+      hosts: Array<{ status: string; error?: string }>;
+    };
+    expect(body.missions.map((m) => m.mission).sort()).toEqual(["release-x", "release-y"]);
+    expect(body.hosts[0]).toMatchObject({ status: "ok" });
+    expect(body.hosts[0]!.error).toBeUndefined();
+  });
+
   it("a really empty, readable local root still reads ok", async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "scopes-empty-"));
     const body = await (await appWith(empty, { registry: { ok: true, registry: { hosts: [] } } }).request("/api/scopes/fleet")).json() as {

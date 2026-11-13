@@ -3,7 +3,7 @@ import type { Action, FleetSnapshot, ViewState } from "../types.js";
 import { scopesContentLines, sliceGlyph, type SliceScopeSnap } from "./scopes-model.js";
 
 // #3093 first increment — the FLEET PROJECTS view: every registered host's Projects rows as
-// this daemon's GET /api/fleet/scopes served them. Each row keeps its origin host, host
+// this daemon's GET /api/scopes/fleet served them. Each row keeps its origin host, host
 // label, project context and native ids (composite identity: identical native ids on two
 // hosts are two rows and never collapse). This view renders what the daemon read — it
 // aggregates nothing itself, writes nothing, and never re-times a host's rows. The local
