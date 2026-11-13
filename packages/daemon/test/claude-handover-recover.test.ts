@@ -55,7 +55,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   let nativeAt: number;
   let paneProcesses: () => NativeProcessRow[];
   let panes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
-  const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn() };
+  const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn(), signalPaneProcess: vi.fn() };
   const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
   const startedAt = "Tue Nov 10 16:21:00 2026";
 
@@ -75,7 +75,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       killSession: vi.fn(async (...a: unknown[]) => { calls.killSession(...a); return { ok: true }; }),
       respawnPane: vi.fn(async (...a: unknown[]) => { calls.respawnPane(...a); return { ok: true }; }),
       setRemainOnExit: vi.fn(async () => ({ ok: true })),
-      signalPaneProcess: vi.fn(async () => ({ ok: true })),
+      signalPaneProcess: vi.fn(async (...a: unknown[]) => { calls.signalPaneProcess(...a); return { ok: true }; }),
       isPaneDead: vi.fn(async () => true),
       sendText: vi.fn(async (session: string, text: string) => {
         calls.sendText(session, text);
@@ -142,7 +142,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     handovers: db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'seat.handover_completed'").get(),
   });
   const inputs = () => ({ respawn: calls.respawnPane.mock.calls.length, text: calls.sendText.mock.calls.length,
-    keys: calls.sendKeys.mock.calls.length, kill: calls.killSession.mock.calls.length });
+    keys: calls.sendKeys.mock.calls.length, kill: calls.killSession.mock.calls.length, signal: calls.signalPaneProcess.mock.calls.length });
 
   /** The #2985 failure: a rebuild handover whose readiness times out at 30 s; then the successor comes up. */
   async function failedHandover(): Promise<string> {
@@ -590,7 +590,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         parentSessionId = parent.id;
       });
       const parentState = () => ({
-        session: db.prepare("SELECT status, resume_token, resume_type, resume_provenance FROM sessions WHERE id = ?").get(parentSessionId),
+        session: db.prepare("SELECT status, resume_token, resume_type, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?").get(parentSessionId),
         node: db.prepare("SELECT tmux_session, tmux_pane FROM bindings WHERE node_id = ?").get(parentNodeId),
         tenure: sessionRegistry.currentOccupantTenure(parentNodeId),
       });
@@ -653,7 +653,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
         expect(resumeTarget()).toBe(otherToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("could not be resolved again") });
-        expect(result.result.warnings).toEqual([expect.stringContaining("could not be resolved again")]);
+        expect(result.result.warnings).toBeUndefined();   // said once, in the outcome
       });
 
       // A fork of the seat itself: its parent is the retiring occupant. The seat's live context row may already name the
@@ -677,6 +677,61 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         expect(resumeTarget()).toBe(previousToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "none",
           limit: expect.stringContaining(`the retiring occupant's conversation, the one its fork parent ${SEAT} was on`) });
+        expect(result.result.warnings).toBeUndefined();
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+      });
+
+      // B1 of the delta review (CodeRabbit on the head): the retiring occupant and the live parent are on one conversation.
+      it("a fork of another seat whose live parent is on the retiring occupant's conversation reports the parent, both seats on it", async () => {
+        sessionRegistry.updateResumeToken(parentSessionId, "claude_id", previousToken, "hook");
+        await failedFork();
+        pidFile({ name: SEAT, sessionId: previousToken });
+        const parentBefore = parentState();
+        const before = inputs();
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(previousToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+        const limit = (result.result.sourceOutcome as { limit: string }).limit;
+        expect(limit).toContain(`its fork parent ${PARENT}, which is also the retiring occupant's`);
+        expect(limit).toContain("both seats now name the same conversation");
+        expect(limit).not.toContain("not its fork parent");
+        expect(parentState()).toEqual(parentBefore);
+        expect(inputs()).toEqual(before);
+      });
+
+      // B2 of the delta review: a fork of the seat itself whose retiring occupant has no recorded conversation (the launch
+      // forked from the seat's context row). The parent is the one the launch forked from, as the process's argv names it.
+      describe("a fork of the seat itself whose retiring occupant has no recorded conversation", () => {
+        const P = "55555555-5555-4555-8555-555555555555";
+        async function failedSelfFork(argvParent: boolean): Promise<void> {
+          db.prepare("INSERT INTO context_usage (node_id, session_id, session_name) VALUES (?, ?, ?)").run(nodeId, P, SEAT);
+          db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(sessionId);
+          await failedFork(`fork:${SEAT}`);
+          if (argvParent) {
+            paneProcesses = () => [
+              { pid: 100, ppid: 1, pgid: 100, tpgid: 102, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+              { ...claudeIn(successorToken), command: `claude --resume ${P} --fork-session --session-id ${successorToken} --name ${SEAT}` },
+            ];
+          }
+        }
+        it("reports no distinct fork when the successor is on the conversation its launch forked from", async () => {
+          await failedSelfFork(true);
+          pidFile({ name: SEAT, sessionId: P });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(P);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "none" });
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
+        it("says the distinctness was not checked when neither the argv nor the retiree names the parent", async () => {
+          await failedSelfFork(false);
+          pidFile({ name: SEAT, sessionId: P });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(P);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("was not checked") });
+        });
       });
     });
 

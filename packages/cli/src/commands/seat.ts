@@ -397,6 +397,8 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     } else {
       console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
       if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
+      // #3044: a recovered fork whose parent couldn't be checked says so.
+      else if (result.sourceOutcome.limit) console.log(result.sourceOutcome.limit);
     }
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
@@ -450,7 +452,8 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     }
     if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.source.mode === "fork") {
-    console.log("No packet delivery: fork context rides the native conversation itself.");
+    // #3044: a fork recovered on its parent's or the retiring occupant's conversation carries that one, not a fork of it.
+    if (!(result.sourceOutcome?.mode === "fork" && result.sourceOutcome.forkId === "none")) console.log("No packet delivery: fork context rides the native conversation itself.");
   } else {
     // discovered handover: the operator-prepared successor is already live, so no
     // separate context delivery is performed.

@@ -880,6 +880,41 @@ describe("rig seat status", () => {
     expect(output).not.toContain("session stop");
   });
 
+  // #3044: a recovered successor on its fork parent's or the retiring occupant's conversation.
+  describe("a recovered successor on a conversation that is not its own", () => {
+    const resumedStatus = { ...HANDOVER_RESULT.currentStatus, continuityOutcome: "resumed" };
+    const run = async (data: Record<string, unknown>, source: string) => {
+      const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, ...data } }, []);
+      const { logs } = await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", source, "--reason", "adopt"]);
+      });
+      return logs.join("\n");
+    };
+    it("a fork on its parent's conversation prints no distinct fork, not a native fork", async () => {
+      const output = await run({ source: { mode: "fork", ref: "dev-parent@seat-rig", raw: "fork:dev-parent@seat-rig" },
+        sourceOutcome: { mode: "fork", forkedFrom: "dev-parent@seat-rig", forkId: "none", limit: "No distinct fork was recovered: the parent's." },
+        currentStatus: resumedStatus }, "fork:dev-parent@seat-rig");
+      expect(output).toContain("Fork of dev-parent@seat-rig: no distinct fork. No distinct fork was recovered: the parent's.");
+      expect(output).not.toContain("Native fork of");
+      expect(output).not.toContain("No packet delivery");
+    });
+    it("a captured fork whose parent couldn't be checked prints its limit", async () => {
+      const output = await run({ source: { mode: "fork", ref: "dev-parent@seat-rig", raw: "fork:dev-parent@seat-rig" },
+        sourceOutcome: { mode: "fork", forkedFrom: "dev-parent@seat-rig", forkId: "captured", limit: "It was not checked." } }, "fork:dev-parent@seat-rig");
+      expect(output).toContain("Native fork of dev-parent@seat-rig");
+      expect(output).toContain("It was not checked.");
+    });
+    it.each([
+      ["delivered", { startupContextDelivered: true }, undefined],
+      ["unconfirmed", { startupContextDelivered: false }, { status: "unconfirmed", reason: "the prompt still looked staged in the input box" }],
+    ])("a resumed rebuild (%s packet) doesn't say it started a new or fresh conversation", async (_name, side, restorePacket) => {
+      const output = await run({ source: { mode: "rebuild", raw: "rebuild" }, sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+        sideEffects: { ...HANDOVER_RESULT.sideEffects, ...side }, currentStatus: resumedStatus, ...(restorePacket ? { restorePacket } : {}) }, "rebuild");
+      expect(output).not.toContain("Rebuild starts a new conversation");
+      expect(output).not.toContain("No conversation continuity was carried");
+    });
+  });
+
   it("handover human output from an older daemon, whose receipt has no departingProcess, claims neither side effect", async () => {
     const older = { departingSessionKilled: false, startupContextDelivered: false, provenanceRecordWritten: false };
     const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, sideEffects: older } }, []);
