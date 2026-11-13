@@ -42,7 +42,7 @@ it.each(["0", "person-terminal"])("real attach -> returned env -> actual From ->
   const db = createDb(); migrate(db, ALL_MIGRATIONS);
   const rigs = new RigRepository(db), pods = new PodRepository(db), sessions = new SessionRegistry(db), bus = new EventBus(db);
   const rig = rigs.createRig("sample-team"), person = rigs.addNode(rig.id, "person.agent", { runtime: "terminal" });
-  const operator = rigs.addNode(rig.id, "operator.agent", { runtime: "terminal" });
+  const operator = rigs.addNode(rig.id, "operator.agent", { runtime: "claude-code" });
   sessions.updateBinding(operator.id, { tmuxSession: "operator-physical", tmuxPane: "%43" }); sessions.registerClaimedSession(operator.id, "operator-physical");
   const writes: Array<{ target: string; pane: string; text: string }> = [];
   const tmux = { hasSession: async () => true, probeSession: async () => ({ state: "present" }),
@@ -92,7 +92,7 @@ it.each(["0", "person-terminal"])("real attach -> returned env -> actual From ->
     vi.stubEnv("OPENRIG_SESSION_NAME", "operator-agent@sample-team"); vi.stubEnv("OPENRIG_NODE_ID", operator.id);
     await run(sendCommand(deps), ["send", from, "A reply to the actual From address.", "--json"]);
     expect(writes[1]).toMatchObject({ target: physical, pane: "%42" });
-    expect(writes[1]?.text).toContain("A reply to the actual From address.");
+    expect(writes[1]?.text).toBe("A reply to the actual From address.");
     expect(sessions.getBindingForNode(person.id)?.tmuxSession).toBe(physical);
     expect(sessions.getSessionsForRig(rig.id).filter(s => s.nodeId === person.id).map(s => s.sessionName)).toEqual([physical]);
     expect(rigs.getRig(rig.id)?.nodes.find(n => n.id === person.id)?.label).toBe("Taylor");
