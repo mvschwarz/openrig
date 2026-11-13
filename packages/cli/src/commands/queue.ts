@@ -347,9 +347,7 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
-  if (status >= 400 && body && typeof body === "object"
-    && (body as { error?: unknown }).error === "remote_queue_write_failed"
-    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+  if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
   }
   if (json) {
@@ -463,17 +461,32 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
   return !full && compactOutputEnabled() ? ctx : null;
 }
 
-/** A handoff whose answer was lost (no answer in time, a lost connection, or an unreadable response) may have committed.
- *  Its error names the source row to read before any retry, on the daemon the command used, and where a successor would
- *  be. Nothing here says the handoff failed, names a successor id, or asks for the handoff to be repeated. */
+/** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
+ *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
+ *  asks for the handoff to be repeated. */
+function handoffRecoveryHint(qitemId: string, hostId: string | undefined): string {
+  const remote = remoteHostOf(hostId);
+  return `Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
+    + `rig queue show ${shellQuote(qitemId)} --full --json. Read its recorded outcome: a handed-off row names its successor`
+    + (remote ? ` on host ${shellQuote(remote)}` : "")
+    + ", or says why it can't. A row that still reads open doesn't show the handoff failed: it may still commit.";
+}
+
+/** A handoff whose answer was lost (no answer in time, a lost connection, or an unreadable response) carries the hint in
+ *  its error. A pre-header disconnect can follow a committed handoff, as it can a create, so the shared renderer must not
+ *  call it undelivered. */
 function withHandoffRecovery(error: unknown, qitemId: string, hostId: string | undefined): unknown {
   if (!(error instanceof DaemonConnectionError || error instanceof DaemonResponseError)) return error;
-  const remote = remoteHostOf(hostId);
-  error.message += ` Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
-    + `rig queue show ${shellQuote(qitemId)} --full --json. A handed-off row names its successor`
-    + (remote ? `, which lives on host ${shellQuote(remote)}.` : ".")
-    + " A row that still reads open doesn't show the handoff failed: it may still commit.";
+  if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
+  error.message += ` ${handoffRecoveryHint(qitemId, hostId)}`;
   return error;
+}
+
+/** The selected daemon's forward to another host lost the remote's answer: the write was sent and may still commit. */
+function isIndeterminateRemoteWrite(status: number, body: unknown): boolean {
+  return status >= 400 && !!body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate";
 }
 
 /** A `--host` id that may name another daemon. Empty and `local` never do; one that
@@ -1706,6 +1719,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
@@ -1808,6 +1822,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
