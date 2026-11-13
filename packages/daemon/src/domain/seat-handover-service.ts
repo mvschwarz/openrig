@@ -48,6 +48,8 @@ import type { RuntimeHint } from "./discovery-types.js";
 
 /** #2985 (#3044 review S6): what a guidance says once the unadopted successor is recorded, instead of "retry". */
 const NO_RETRY = "do not retry the handover; it ends the running successor.";
+/** #3044 delta review SD1: how long the recovery waits before a second sample confirms a not-provable foreground. */
+const UNPROVABLE_CONFIRM_MS = 3_000;
 
 /** #2985: the commit of a recovery found that another occupant took the seat since its checks (rolled back). */
 class RecoveryAttemptSuperseded extends Error {}
@@ -894,7 +896,7 @@ export class SeatHandoverService {
     if (!proof.ok) {
       return { ok: false, code: "successor_identity_unproven", message: proof.message,
         guidance: "unprovable" in proof && proof.unprovable
-          ? `Nothing was changed. The successor runs in the pane (rig capture ${quotedSeat}), but --recover can't prove it, and running it again will not change that; the seat keeps its previous occupant. Another handover, or rig seat launch ${quotedSeat} --fresh --stop --reason "<why>", ends the running successor.`
+          ? `Nothing was changed. The successor runs in the pane (rig capture ${quotedSeat}), but --recover can't prove it, and running it again will not change that; the seat stays bound to its previous occupant, which the failed handover already ended. Another handover, or rig seat launch ${quotedSeat} --fresh --stop --reason "<why>", ends the running successor.`
           : `Nothing was changed. Look at the pane: rig capture ${quotedSeat}. If the successor is still starting, run the recovery again in a moment; another handover ends whatever runs there.` };
     }
 
@@ -962,6 +964,23 @@ export class SeatHandoverService {
    *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
    *  process. Reads only. */
   private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string } | { ok: false; message: string; unprovable?: true }> {
+    const first = await this.proveAttemptSuccessorOnce(attempt, cwd);
+    if (first.ok || !first.unprovable) return first;
+    // #3044 delta review SD1: a #! wrapper in its start window (only the wrapper with the token, before its exec or its
+    // Claude child) looks the same as one that never starts a Claude the proof knows. Not provable is said only when a
+    // second sample, a few seconds later, finds the same foreground; one that changed is still starting.
+    await this.sleep(UNPROVABLE_CONFIRM_MS);
+    const second = await this.proveAttemptSuccessorOnce(attempt, cwd);
+    if (second.ok || !second.unprovable) return second;
+    if (second.foreground !== first.foreground) {
+      return { ok: false, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} is not proven to run the failed handover's successor: its foreground changed between two samples (a launch still starting).` };
+    }
+    return { ok: false, unprovable: true, message: second.message };
+  }
+
+  /** One sample of proveAttemptSuccessor; a not-provable answer carries the foreground it saw (pid and command of each
+   *  process of the pane's foreground group), so two samples can be compared. */
+  private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
     const onlyPane = async () => {
@@ -994,7 +1013,8 @@ export class SeatHandoverService {
           && nativeCandidateCount(rows, panePid!, "claude-code", selectedExecutable, scriptLaunch) === 0
           && !rows.some(row => row.pid !== panePid && row.pgid === root.tpgid && unwitnessedClaudeRow(row))
           && rows.some(row => row.pid !== panePid && row.pgid === root.tpgid && row.command.includes(token))) {
-          return { ok: false, unprovable: true, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} runs the failed handover's conversation, but not as a process the recovery can prove: the launch recorded no executable (a classic launch), so a Claude started by a #! wrapper without exec, or under another name, is not recognized.` };
+          const foreground = rows.filter(row => row.pgid === root.tpgid).map(row => `${row.pid} ${row.command}`).sort().join("\n");
+          return { ok: false, unprovable: true, foreground, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} runs the failed handover's conversation, but not as a process the recovery can prove: the launch recorded no executable (a classic launch), so a Claude started by a #! wrapper without exec, or under another name, is not recognized.` };
         }
         const detail = why?.kind === "other_conversation" ? "its Claude runs another conversation, not the one the failed handover launched"
           : why?.kind === "names_no_conversation" ? "its Claude names no conversation"

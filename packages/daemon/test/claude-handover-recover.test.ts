@@ -553,13 +553,72 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     await failedHandover();
     expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: null, executableIsScript: false });
     const before = state();
+    const from = elapsed;
     const result = await service().recover({ seatRef: SEAT, reason: "adopt the classic wrapper's successor" });
+    // SD1: said only after a second sample, a few seconds later, finds the same foreground.
+    expect(elapsed - from).toBeGreaterThanOrEqual(3_000);
     expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
     if (result.ok) throw new Error("expected a refusal");
     expect(result.message).toContain("recorded no executable");
     expect(result.guidance).toContain("--recover can't prove it");
     expect(result.guidance).not.toMatch(/run the recovery again/i);
     expect(result.guidance).toContain(`--fresh --stop --reason "<why>"`);
+    expect(state()).toEqual(before);
+  });
+
+  // SD1 of the review of the #3044 delta: a classic launch caught in a #! wrapper's start window (only the wrapper with
+  // the token, before its exec or its Claude child) is not refused as never provable: a second sample, a few seconds
+  // later, sees the Claude and proves it. On 282ea4c08 this was the "running it again will not change that" refusal.
+  const WRAPPER_ONLY = (launched: string) => [
+    { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/bin/sh /home/user/.local/bin/claude ${launched}`, executableName: "claude", startedAt },
+  ] as NativeProcessRow[];
+  it.each([
+    ["execs Claude", (launched: string) => [
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: `/opt/claude/bin/claude ${launched}`, executableName: "claude", startedAt },
+    ]],
+    ["starts a Claude child", (launched: string) => [
+      ...WRAPPER_ONLY(launched),
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `/opt/claude/bin/claude ${launched}`, executableName: "claude", startedAt },
+    ]],
+  ] as Array<[string, (launched: string) => NativeProcessRow[]]>)("a classic launch caught in its #! wrapper's start window is proven when the wrapper %s", async (_name, later) => {
+    const launched = `--session-id ${successorToken} --name ${SEAT}`;
+    let from = Number.POSITIVE_INFINITY;
+    const fg = () => elapsed - from >= 3_000 ? later(launched) : WRAPPER_ONLY(launched);
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? fg() : []),
+    ];
+    const generation = await failedHandover();
+    expect(openHandoverAttempt(db, nodeId)).toMatchObject({ executable: null, executableIsScript: false });
+    from = elapsed;
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt the slow wrapper's successor" });
+    expect(result).toMatchObject({ ok: true });
+    expect(elapsed - from).toBeGreaterThanOrEqual(3_000);
+    expect(sessionRegistry.currentOccupantTenure(nodeId)).toMatchObject({ generationUuid: generation, kind: "handover" });
+  });
+
+  // A foreground that changed between the two samples and still holds no Claude the proof knows (the wrapper started a
+  // node child) is a launch still starting: the refusal says to run the recovery again, not "can't prove it".
+  it("a classic launch whose foreground changes between the two samples says to run the recovery again", async () => {
+    const launched = `--session-id ${successorToken} --name ${SEAT}`;
+    let from = Number.POSITIVE_INFINITY;
+    const fg = () => elapsed - from >= 3_000 ? [
+      ...WRAPPER_ONLY(launched),
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, command: `node /home/user/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js ${launched}`, executableName: "node", startedAt },
+    ] as NativeProcessRow[] : WRAPPER_ONLY(launched);
+    paneProcesses = () => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+      ...(running() ? fg() : []),
+    ];
+    await failedHandover();
+    from = elapsed;
+    const before = state();
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("changed between two samples");
+    expect(result.guidance).toMatch(/run the recovery again in a moment/);
+    expect(result.guidance).not.toContain("--recover can't prove it");
     expect(state()).toEqual(before);
   });
 

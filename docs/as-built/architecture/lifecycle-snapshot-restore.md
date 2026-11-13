@@ -321,13 +321,16 @@ cited here by number with the code that carries them):
   `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
   does; a `/clear` rotates it), then commits through the same `commit()` with
   the reserved generation (rolled back if it doesn't register). A classic
-  launch (no permission mode) records no executable, so a Claude a `#!`
+  launch (one not in a native Claude permission mode: the `floor` and
+  `full_bypass` postures included) records no executable, so a Claude a `#!`
   wrapper starts without exec is proven only when it is itself one the proof
-  recognizes (`claude`, the native installer's version, Nix); as `node
-  cli.js` or a renamed binary it is not, and when the foreground runs the
-  launch's conversation with no such Claude (nor a native one whose
-  executable path this sample could not read), the refusal says `--recover`
-  can't prove it instead of asking to run it again.
+  recognizes (`claude`, the native installer's version, Nix); as `node cli.js`
+  or a renamed binary it is not, and when the foreground runs the launch's
+  conversation with no such Claude (nor a native one whose executable path
+  this sample could not read), the refusal says `--recover` can't prove it
+  instead of asking to run it again, but only when a second sample,
+  `UNPROVABLE_CONFIRM_MS` (3 s) later, finds the same foreground: a `#!`
+  wrapper in its start window has not yet exec'd or started its Claude.
   The result and
   `seat.handover_completed` carry `recoveredFrom`. Codes: 404
   `no_handover_to_recover`, 409 `handover_attempt_superseded` and
