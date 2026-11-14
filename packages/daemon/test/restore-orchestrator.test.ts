@@ -3268,6 +3268,52 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // The blank attempt's terminal stop isn't confirmed (tmux refused, or the call threw): the session may still be running,
+  // so its session record and binding are left as they are and the seat needs attention, not "no session is running".
+  it.each([
+    ["a false kill", async () => ({ ok: false as const, code: "kill_failed", message: "fixture: stop unconfirmed" })],
+    ["a thrown kill", async () => { throw new Error("fixture: tmux call failed"); }],
+  ] as const)("an unconfirmed rollback stop leaves the blank session's record and binding, and asks for attention: %s", async (_label, kill) => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-stop", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-stop" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token", "scrape");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const })),
+    };
+    const tmux = mockTmux();
+    tmux.killSession = vi.fn(kill) as typeof tmux.killSession;
+
+    const result = await createOrchestrator({ tmux }).launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, adapters: { "claude-code": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.launched!.find((n) => n.nodeId === node.id)!;
+      expect(nodeResult.status).toBe("attention_required");
+      expect(nodeResult.error).toContain("the blank session this restore launched couldn't be confirmed stopped: it may still be running");
+      expect(nodeResult.error).toContain(`rig seat stop '${node.logicalId}@test-rig' --reason "<why>"`);
+      expect(nodeResult.error).not.toContain("no session is running");
+    }
+    expect(tmux.killSession).toHaveBeenCalledOnce();
+    // Nothing was rolled back: the launched session isn't superseded, and its binding still names it.
+    const rows = db.prepare("SELECT id, status FROM sessions WHERE node_id = ?").all(node.id) as Array<{ id: string; status: string }>;
+    const launched = rows.filter(row => row.id !== session.id);
+    expect(launched).toHaveLength(1);
+    expect(launched[0]!.status).not.toBe("superseded");
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@test-rig");
+  });
+
   // The pause is the same whatever the records say about use: a seat that reached its prompt, had an output observed or has a
   // token Claude's hook reported, and one whose startup failed after typing a turn with no hook or telemetry to show it.
   async function missingConversationRestore(setup: (node: { id: string }, sessionId: string) => void) {
