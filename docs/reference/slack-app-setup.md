@@ -132,6 +132,10 @@ reaction on any other message, including a person's reply in the thread, is igno
 `reaction_added` event: add both under **OAuth & Permissions** and **Event Subscriptions**, then
 reinstall the app to the workspace.
 
+Human-row posts suppress link and media previews by default. Run `rig slack setup --unfurl on` to
+allow Slack previews, or `rig slack setup --unfurl off` to suppress them again. The selection reaches
+the running connector on its next rewire or daemon restart; it does not remove already posted previews.
+
 To have reactions ignored instead, run `rig slack setup --reactions off`. The agent that asked
 never hears of a reaction, including one still waiting to be retried, and a person answers an ask by
 typing a reply in its thread. Slack still sends the event and the manifest keeps it, so switching

@@ -951,7 +951,7 @@ export class SeatLifecycleService {
       let persisted: PersistedEvent | null = null;
       const result = this.db.transaction(() => {
         // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
-        const row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null } | undefined;
+        const row = this.db.prepare("SELECT codex_permissions_json, codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null; codex_config_profile: string | null } | undefined;
         if (!row) throw new Error("Seat runtime changed; the envelope was not changed.");
         let from: unknown = null;
         try { from = readCodexMemberPermissions(this.db, seat.nodeId) ?? null; }
@@ -968,7 +968,7 @@ export class SeatLifecycleService {
             nodeId: seat.nodeId, from, to, ...(replaced ? { replaced } : {}), actor, reason, effect: "future_launches_only" });
         }
         return { ok: true as const, seat, from, to, changed, ...(replaced ? { replaced } : {}),
-          effect: `The envelope applies at the next separately authorized managed launch or resume, as explicit sandbox and approval flags that a profile or policy posture doesn't override.${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
+          effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, with native configuration conflicts refused and inconclusive checks reported as policy not verified." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       return result;
@@ -1940,7 +1940,11 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
-      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.` };
+      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.`,
+        // A recoverable seat (#3131) comes back in its saved conversation through the ordinary launch, leaving the rest of the rig alone.
+        ...(resolved.entry.lifecycleState === "recoverable"
+          ? { guidance: `The seat is recoverable from its saved conversation: rig launch ${shellQuote(seat.rigName)} ${shellQuote(seat.logicalId)} (add --plan to preview).` }
+          : {}) };
     }
     const binding = this.sessionRegistry.getBindingForNode(node.id);
     if (!binding?.tmuxSession || binding.tmuxSession !== session.session_name || !binding.tmuxPane) {

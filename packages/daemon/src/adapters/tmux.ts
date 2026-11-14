@@ -1237,8 +1237,10 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const submit = keys.some(isSubmitKey);
       const check = async () => {
-        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+        // The caller's checks can wait (a conversation lookup), so they run first and the guard's input read runs
+        // last, as in sendText (#3076): input typed while they wait is seen, and a key is not sent onto it.
         if (options?.beforeKeys) await options.beforeKeys();
+        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
       };
       await check();
       beforeWrite(); beforeInput?.();

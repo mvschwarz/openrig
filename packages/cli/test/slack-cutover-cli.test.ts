@@ -121,6 +121,19 @@ describe("S10 CLI cutover — admin verbs route to the daemon", () => {
 });
 
 describe("S10 CLI cutover — config surfaces survive on the daemon-homed modules", () => {
+  it("saves and reports the human-row preview choice", async () => {
+    const home = mkdtempSync(join(tmpdir(), "slack-preview-"));
+    homes.push(home);
+    const logs: string[] = [];
+    const deps: SlackDeps = { home, log: message => logs.push(message), clientFactory: () => ({ get: async () => { throw new Error("offline"); } }) };
+    await run(slackCommand(deps), ["setup", "--unfurl", "on"]);
+    expect(JSON.parse(readFileSync(join(home, "slack-connector.json"), "utf8")).unfurl).toBe("on");
+    logs.length = 0;
+    await run(slackCommand(deps), ["status"]);
+    expect(logs.join("\n")).toContain("human-row previews");
+    expect(logs.join("\n")).toContain("on");
+  });
+
   it("retires the legacy alert-tag setup knob", () => {
     const { deps } = makeDeps();
     const setup = slackCommand(deps).commands.find((command) => command.name() === "setup");
