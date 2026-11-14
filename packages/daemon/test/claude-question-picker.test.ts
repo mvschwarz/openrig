@@ -29,12 +29,19 @@ const picker12 = ["Which region?", "❯ 1. us-east", "     First region descript
   "     Fourth region description", "     Description continuation A", "     Description continuation B",
   "     Description continuation C", footer].join("\n");
 const picker13 = picker12.replace(footer, "     One extra description continuation\n" + footer);
+// The native question with the footers Claude Code 2.1.282's bundle draws for several questions (its own string) and with
+// an external editor's chord (constructed: that chord's wording isn't natively captured). Only the footer differs.
+const severalQuestions = native.picker100!.replace(footer, "Enter to select · Tab/Arrow keys to navigate · Esc to cancel");
+const editorChord = native.picker100!.replace(footer, "Enter to select · ↑/↓ to navigate · ctrl+g to edit in vim · Esc to cancel");
 const shapes: Record<string, { content: string; state: string }> = {
   picker160: { content: native.picker160!, state: "attention" },
   picker100: { content: native.picker100!, state: "attention" },
   dismissed100: { content: native.dismissed100!, state: "agent_idle" },
   picker12: { content: picker12, state: "attention" },
   picker13: { content: picker13, state: "attention" },
+  several_questions: { content: severalQuestions, state: "attention" },
+  editor_chord: { content: editorChord, state: "attention" },
+  several_questions_history: { content: severalQuestions + "\n" + framed("❯ "), state: "agent_idle" },
   history_idle: { content: picker13 + "\n" + framed("❯ "), state: "agent_idle" },
   // Existing ordinary-send behavior for this draft is not changed by picker recognition.
   history_draft: { content: picker13 + "\n" + framed("❯ unfinished message"), state: "agent_idle" },
@@ -158,7 +165,7 @@ describe("ordinary transport under current and historical questions", () => {
         // A latest person-waiting hook keeps an UNREADABLE pane held past the send window (a watchdog
         // wake answered an unrecognized question menu, 2026-10-08); recognized idle or work still sends.
         const staleWaiting = hook.name === "send_stale_permission" || hook.name === "display_stale_permission";
-        const currentQuestion = ["picker160", "picker100", "picker12", "picker13"].includes(shape)
+        const currentQuestion = ["picker160", "picker100", "picker12", "picker13", "several_questions", "editor_chord"].includes(shape)
           || shape === "footer_in_multiline_draft";
         // A fresh running, idle or unknown (SessionStart) hook reads the pane once for a current dialog: a picker
         // opened after Stop or SessionStart fires no hook.

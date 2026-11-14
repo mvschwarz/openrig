@@ -150,7 +150,10 @@ const PERMISSION_PROMPT_PATTERNS = [
 // after hitting this. Erring toward "prompt detected" is the SAFE direction for this guard: a false
 // refusal is overridable; a false-idle lets a message land on a prompt. (EXA: ntm e28763e; AgentDeck.)
 const PROMPT_SCAN_LINES = 12;
-const CLAUDE_QUESTION_FOOTER = "Enter to select · ↑/↓ to navigate · Esc to cancel";
+// AskUserQuestion's footer. One question draws "Enter to select · ↑/↓ to navigate · Esc to cancel"; Claude Code 2.1.282's
+// bundle also draws "Tab/Arrow keys to navigate" for several questions and adds chords such as "ctrl+g to edit in <editor>",
+// always from "Enter to select" to "Esc to cancel".
+const CLAUDE_QUESTION_FOOTER = /^Enter to select · .+ · Esc to cancel$/;
 
 export interface PaneActivityClassification {
   state: "agent_active" | "agent_idle" | "attention" | "unknown";
@@ -270,7 +273,7 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   // Anchor at its terminal footer, then follow only the adjoining choice block.
   // Preserve columns so indented draft/quoted text does not gain new authority.
   const lines = paneContent.split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
-  if (lines.at(-1) !== CLAUDE_QUESTION_FOOTER) return null;
+  if (!CLAUDE_QUESTION_FOOTER.test(lines.at(-1) ?? "")) return null;
   for (let i = lines.length - 2; i >= 0; i--) {
     const line = lines[i]!;
     if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
@@ -810,7 +813,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  const oldQuestionEnd = promptScanLines.map(line => CLAUDE_QUESTION_FOOTER.test(line)).lastIndexOf(true);
   // Above Claude's complete, empty input box with its mode bar, a permission question counts only with its numbered
   // choices after it, as every native menu draws them: a bare question there is a finished reply quoting one, and
   // refusing on it held wakes until the line scrolled out of the scan. Without that box, or on another runtime, any
