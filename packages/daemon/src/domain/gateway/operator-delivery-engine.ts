@@ -115,6 +115,10 @@ export function makeOperatorDeliveryEngine(deps: {
 
       const decisionId = `operator:${notificationKey}`;
       const accepted = () => new DispatchBuffer(deps.home).pending().some(d => d.decisionId === decisionId);
+      const deferred = () => deliveryDeferred?.() ? accepted()
+        ? { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId }
+        : { decision: "deferred:rig_delivery_drain", resolved: false, dispatched: false }
+        : null;
       const resolved = resolvedFor(row, notificationKey);
       if (resolved) return { decision: resolved, resolved: true, dispatched: true, notificationKey, decisionId };
       // An accepted decision belongs to the gateway even if registry access or
@@ -144,9 +148,9 @@ export function makeOperatorDeliveryEngine(deps: {
           botToken: resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined }),
           home: deps.home,
         }, { entities: reg.entities }));
-        if (!readiness.ready) return { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
+        if (!readiness.ready) return deferred() ?? { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
       } catch {
-        return { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
+        return deferred() ?? { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
       }
       const decision = decideDelivery({
         level: "ALERT",
@@ -180,10 +184,8 @@ export function makeOperatorDeliveryEngine(deps: {
       };
       // Readiness can yield. An already accepted decision still belongs to the gateway;
       // a new dispatch must recheck the original destination as well as its carrier.
-      if (deliveryDeferred?.()) {
-        if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
-        return { decision: "deferred:rig_delivery_drain", resolved: false, dispatched: false };
-      }
+      const held = deferred();
+      if (held) return held;
       let res: DispatchResult;
       try {
         res = deps.dispatch(OUTBOUND_OP, human.address, payload, { decisionId });

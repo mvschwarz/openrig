@@ -119,6 +119,48 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     return repo.getById(row.qitemId)!;
   }
 
+  it.each(["negative", "rejected"])("cross-rig %s readiness during a destination drain preserves the carrier rung", async failure => {
+    const original = await refusal();
+    const rigs = new RigRepository(db), target = rigs.createRig("fixture");
+    rigs.createRig("carrier");
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run("sender@carrier", original.qitemId);
+    const jobs = new WatchdogJobsRepository(db);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    let reject!: (error: Error) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>((resolve, fail) => { release = resolve; reject = fail; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 120_000);
+    const inFlight = tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const alert = alerts()[0]!;
+    expect(alert.destinationSession).toBe("sender@carrier");
+    const before = repo.listTransitions(alert.qitemId);
+    const lastRung = () => repo.listTransitions(alert.qitemId).filter(t => t.transitionNote?.startsWith("escalation-rung:"));
+    const previousRung = lastRung();
+    expect(previousRung.length).toBeGreaterThan(0);
+    const drain = repo.deliveryDrains.begin(target.id, { drainId: "cross-rig-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    if (failure === "negative") release({ ready: false, reason: "fixture not ready" });
+    else reject(new Error("fixture readiness rejected"));
+    const result = await inFlight;
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    expect(lastRung()).toEqual(previousRung);
+    expect(result.actions.filter(a => a.action === "escalate-operator")).toEqual([]);
+    repo.deliveryDrains.end(target.id, drain.drainId, jobs);
+    readiness.mockResolvedValue({ ready: true, reason: "ready after END" });
+    // Same time and episode: END must not wait out a marker written during the hold.
+    await tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).toBe(alert.qitemId);
+    await tick(port, { humanRung: "always", now: new Date(now.getTime() + 120_000) });
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
   it("a drain begun during operator readiness defers the originating prompt episode before gateway enqueue", async () => {
     await refusal();
     const rig = new RigRepository(db).createRig("fixture");
