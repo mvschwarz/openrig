@@ -132,6 +132,27 @@ export function composeLayout(text: string, width: number, caret = text.length):
   return { rows: row + 1, caretRow, caretColumn };
 }
 
+// ── Pane text styles ───────────────────────────────────────────────────────
+// Emphasis for the lines the runner itself writes. The words carry the meaning on their
+// own — a plain log or a captured pane reads the same — so colour is an addition, never
+// the only signal. Model output and the READY/EXITED/ERROR markers stay unstyled: adapters
+// grep the transcript for those markers. NO_COLOR and a non-TTY output disable styling.
+export interface PaneStyle {
+  bold(text: string): string;
+  dim(text: string): string;
+  /** The operator's own lines: `you ▸ …`, `you (steer) ▸ …`. */
+  commit(text: string): string;
+  /** A failed tool call's verdict. */
+  failed(text: string): string;
+}
+
+export function paneStyles(enabled: boolean): PaneStyle {
+  const sgr = (open: string) => (text: string) => (enabled ? `\u001b[${open}m${text}\u001b[0m` : text);
+  return { bold: sgr("1"), dim: sgr("2"), commit: sgr("1;36"), failed: sgr("1;31") };
+}
+
+const STYLE: PaneStyle = paneStyles(process.stdout.isTTY === true && !process.env.NO_COLOR);
+
 // ── Pane live region (compose + status) ────────────────────────────────────────
 // A seat pane is a plain terminal: one bottom live region holds the operator's draft
 // and the runner's status line, and is erased and repainted around every transcript
@@ -158,11 +179,14 @@ export interface PaneCompositor {
   /** A keypress is about to echo: close an open transcript line first, or the echo
    *  and the next streamed deltas would land on top of it. */
   beforeInput(): void;
-  /** Pin the latest diagnostic on the status line. The transcript copy is the caller's;
-   *  this pin is never the only copy. */
+  /** Pin the latest diagnostic on the region's diagnostic row. The transcript copy is the
+   *  caller's; this pin is never the only copy. The seat's own status row is untouched. */
   diagnostic(text: string): void;
-  /** Drop a pinned status line. */
+  /** Drop the pinned diagnostic. The seat's own status row stays. */
   clearStatus(): void;
+  /** The seat's own status row above the diagnostic row: what it runs and the state the
+   *  runner observed. Empty text clears it. */
+  status(text: string): void;
   /** Before the submit commits: drop the draft line so no partial copy scrolls, and
    *  finish any held streamed line; the durable copy is the commit line below. */
   beforeSubmit(): void;
@@ -171,10 +195,16 @@ export interface PaneCompositor {
 }
 
 export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
-  let status: string | null = null;
-  /** The status text actually on screen: clipped when it was painted. A resize must
-   *  size the region from this, not from the longer text it was pinned with. */
-  let paintedStatus: string | null = null;
+  /** The seat's own status row (`model · thinking:… · state`), and the pinned diagnostic
+   *  below it. They are independent: a turn clears the pin and keeps the seat row. */
+  let seat: string | null = null;
+  let pinned: string | null = null;
+  /** The status rows actually on screen, clipped when they were painted. A resize must
+   *  size the region from these, not from the longer text they were set with. */
+  let paintedSeat: string | null = null;
+  let paintedPinned: string | null = null;
+  /** The unfinished streamed line, as displayed above the status rows (null when it is not). */
+  let paintedHeld: string | null = null;
   let readInput: (() => string) | null = null;
   let redrawLine: (() => void) | null = null;
   let held = "";
@@ -206,18 +236,68 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     for (let index = 0; index < lines; index += 1) sequence += index === 0 ? "\r\u001b[2K" : "\u001b[1A\r\u001b[2K";
     if (sequence) out.write(sequence);
   };
+  /** The visible tail of the held streamed line: at most the pane's spare rows, so a
+   *  newline-free paragraph longer than the viewport never scrolls its own repaint —
+   *  what scrolls stays in history, and the whole line is committed once when it ends. */
+  const heldTail = (text: string): string => {
+    const height = typeof out.rows === "number" && out.rows > 0 ? out.rows : 24;
+    const budget = Math.max(1, height - 2
+      - (seat !== null ? 1 : 0) - (pinned !== null ? 1 : 0) - composeRows());
+    if (composeLayout(text, out.columns).rows <= budget) return text;
+    // Bound by the final wrapped layout, ellipsis included: at an odd width a two-cell
+    // character can't fill the last column, so a cell-count bound would overflow the
+    // region. A shorter suffix never wraps to more rows, so bisect on its start.
+    const graphemes = [...graphemesOf(text)];
+    const fits = (start: number) =>
+      composeLayout(`\u2026${graphemes.slice(start).join("")}`, out.columns).rows <= budget;
+    let low = 0;
+    let high = graphemes.length; // the ellipsis alone fits any budget
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+    return `\u2026${graphemes.slice(low).join("")}`;
+  };
   /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
    *  except a reflow, which the resize handler owns. */
   const paint = () => {
-    paintedStatus = status !== null ? clip(status) : null;
-    if (paintedStatus !== null) {
-      out.write(paintedStatus);
+    // Without a width nothing can be placed, erased or measured; the status text is kept
+    // and painted once a width is known (a resize or the next write calls back here).
+    if (!widthKnown()) {
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
+      screenRows = 0;
+      return;
+    }
+    // A transcript line a verbatim write left open must not be spliced by the region:
+    // close it first, so the region starts on its own row and the line stays whole.
+    if (openLine && (seat !== null || pinned !== null || composeRows() > 0)) {
+      out.write("\n");
+      openLine = false;
+    }
+    paintedSeat = seat !== null ? clip(seat) : null;
+    paintedPinned = pinned !== null ? clip(pinned) : null;
+    const statusRows = [paintedSeat, paintedPinned].filter((text): text is string => text !== null);
+    // An in-progress streamed line stays visible as the region's first row while a status
+    // row is painted — bounded to the pane's spare rows so its own repaint never scrolls;
+    // without one the pane keeps its verbatim fallback and the line is held until it ends.
+    paintedHeld = statusRows.length > 0 && held.length > 0 ? heldTail(held) : null;
+    let heldRows = 0;
+    if (paintedHeld !== null) {
+      out.write(paintedHeld);
+      out.write("\n");
+      heldRows = Math.max(1, composeLayout(paintedHeld, out.columns).rows);
+    }
+    for (const text of statusRows) {
+      out.write(text);
       out.write("\n");
     }
     const rows = composeRows();
     if (rows) redrawLine?.();
-    screenRows = (status !== null ? 1 : 0) + (rows || (status !== null ? 1 : 0));
+    screenRows = heldRows + statusRows.length + (rows || (heldRows + statusRows.length > 0 ? 1 : 0));
     // Only a painted region closes an open transcript line. With nothing painted the
     // cursor still sits on the line a flush left open, and the next keystroke belongs
     // to that line's context, not to a fresh one.
@@ -258,15 +338,28 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       screenRows = 0;
       return;
     }
+    if (screenRows === 0) {
+      // Nothing painted: nothing to erase. A line a verbatim write left open is closed
+      // so the retained region starts on its own row instead of splicing into it.
+      if (openLine) {
+        out.write("\n");
+        openLine = false;
+      }
+      paint();
+      return;
+    }
     const draft = composeText();
     const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
     const draftRows = layout ? layout.rows : 0;
-    const statusLines = paintedStatus !== null ? Math.max(1, Math.ceil(stringWidth(paintedStatus) / out.columns)) : 0;
+    const statusLines = [paintedSeat, paintedPinned].reduce((sum, text) =>
+      text !== null ? sum + Math.max(1, Math.ceil(stringWidth(text) / out.columns)) : sum, 0);
+    // The held streamed row reflowed at the new width: a long partial line wraps here too.
+    const heldLines = paintedHeld !== null ? composeLayout(paintedHeld, out.columns).rows : 0;
     const down = layout ? layout.rows - 1 - layout.caretRow : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
-    // A pinned status without a draft also owns the blank row its trailing newline
+    // Status and held rows without a draft also own the blank row their trailing newline
     // left the cursor on — the same row paint() counts into screenRows.
-    eraseLines(statusLines + (draftRows || (status !== null ? 1 : 0)));
+    eraseLines(heldLines + statusLines + (draftRows || (heldLines + statusLines > 0 ? 1 : 0)));
     screenRows = 0;
     paint();
   };
@@ -285,6 +378,12 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       redrawLine = null;
       readCaretUp = null;
       readCaretIndex = null;
+      // The region is gone; nothing of it may be repainted after the pane falls back.
+      seat = null;
+      pinned = null;
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
       openLine = false;
       screenRows = 0;
     },
@@ -292,7 +391,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       eraseScreen();
       // With no region left, an unfinished streamed line goes out verbatim so the
       // next delta continues it on the same row instead of splitting mid-word.
-      if (held && status === null && !composeText()) {
+      if (held && (!widthKnown() || (pinned === null && seat === null)) && !composeText()) {
         writeVerbatim(held);
         held = "";
       }
@@ -300,7 +399,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     },
     transcript(text) {
       if (!text) return;
-      if (status === null && composeRows() === 0 && screenRows === 0) {
+      if (!widthKnown() || (pinned === null && seat === null && composeRows() === 0 && screenRows === 0)) {
         if (held) {
           writeVerbatim(held);
           held = "";
@@ -309,13 +408,25 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
         return;
       }
       held += text;
-      let newline = held.indexOf("\n");
-      while (newline >= 0) {
-        const line = held.slice(0, newline + 1);
-        held = held.slice(newline + 1);
-        writeAbove(line);
-        newline = held.indexOf("\n");
+      const first = held.indexOf("\n");
+      if (first < 0) {
+        // A delta with no newline yet must still show as it streams: repaint the region
+        // (the painted tail is bounded) while a status row is painted.
+        if (seat !== null || pinned !== null) {
+          eraseScreen();
+          paint();
+        }
+        return;
       }
+      // Drain every complete line in one batch: erase once, write them above in order,
+      // then repaint. Painting the remainder between lines would scroll a long chunk.
+      const last = held.lastIndexOf("\n");
+      const complete = held.slice(0, last + 1);
+      held = held.slice(last + 1);
+      eraseScreen();
+      out.write(complete);
+      openLine = false;
+      paint();
     },
     line(text) {
       pane.transcript(`${text}\n`);
@@ -334,13 +445,27 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
         openLine = false;
       }
       eraseScreen();
-      status = clip(text);
+      pinned = text;
       paint();
     },
     clearStatus() {
-      if (status === null) return;
+      if (pinned === null) return;
       eraseScreen();
-      status = null;
+      pinned = null;
+      paint();
+    },
+    status(text) {
+      const next = text ? text : null;
+      if (next === seat) return;
+      // Without a width nothing is painted or measured, but the text is kept: the next
+      // resize (or paint with a width) shows the state it named, instead of dropping it
+      // until some later state change.
+      if (!widthKnown()) {
+        seat = next;
+        return;
+      }
+      eraseScreen();
+      seat = next;
       paint();
     },
     beforeSubmit() {
@@ -566,6 +691,12 @@ function diagnosticText(details: unknown[]): string {
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
 }
+/** A runner-owned label for the pane (a configured model or effort): painted as given, so
+ *  terminal controls and bidi/format characters are neutralized first, as diagnostics are. */
+function paneLabel(text: string): string {
+  return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
 
 function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   const text = diagnosticText(details);
@@ -589,7 +720,7 @@ function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime
   return {};
 }
 
-export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi"): MirrorAndActivity {
+export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi", style: PaneStyle = STYLE): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
     case "agent_start":
@@ -631,12 +762,12 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       return { mirrorLines: [""], ...modelErrorNotice(event, runtime) };
     case "tool_execution_start": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
-      return { mirrorLines: [`  ⚙ ${tool} …`], activity: { hookEvent: "PreToolUse", subtype: tool } };
+      return { mirrorLines: [`  ${style.dim(`⚙ ${tool} …`)}`], activity: { hookEvent: "PreToolUse", subtype: tool } };
     }
     case "tool_execution_end": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
       const failed = event.isError === true || event.error != null;
-      return { mirrorLines: [`  ⚙ ${tool} ${failed ? "FAILED" : "done"}`] };
+      return { mirrorLines: [`  ${style.dim(`⚙ ${tool}`)} ${failed ? style.failed("FAILED") : "done"}`] };
     }
     case "queue_update":
       return { mirrorLines: [] };
@@ -686,6 +817,9 @@ export interface RunnerIo {
   diagnostic?(text: string): void;
   /** Drop a pinned status line at the start of a new agent turn. */
   clearStatus?(): void;
+  /** Paint the seat's own status row (what it runs, and the state the runner observed).
+   *  Always plain text: the pane clips and repaints it, and an empty string clears it. */
+  status?(text: string): void;
   /** POST to the daemon activity endpoint. May resolve to the parsed JSON
    *  response (null on transport failure) so identity delivery can retry. */
   postActivity(payload: Record<string, unknown>): void | Promise<Record<string, unknown> | null>;
@@ -779,6 +913,12 @@ export async function readPiSessionEntryIds(
 
 export class RunnerCore {
   private streaming = false;
+  /** The child is gone; the status row says exited, never idle. */
+  private paneExited = false;
+  /** A failure is known and no new turn has started: the status row says error, not idle. */
+  private paneError = false;
+  /** A runtime-reported automatic retry is in flight; the row says retrying until it ends. */
+  private paneRetrying = false;
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
   private sessionFile: string | undefined;
@@ -829,6 +969,10 @@ export class RunnerCore {
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string; runId?: string },
     private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
+      /** The seat profile's configured model and effort, shown on the status row when known. */
+      model?: string; thinking?: string;
+      /** How the runner emphasises its own pane lines. */
+      style?: PaneStyle;
       /** K4: the credential observation taken before Pi was spawned. */
       launchCredentialEvidence?: PiCredentialEvidence;
       /** The session file this launch resumes (--session). */
@@ -867,6 +1011,7 @@ export class RunnerCore {
       // are live-only signals.
       this.io.sendRpc({ type: "get_entries", since: this.opts.catchUpSince, id: CATCH_UP_ID });
     }
+    this.refreshPaneStatus();
   }
 
   /** One LF-delimited JSONL record from pi stdout. */
@@ -934,7 +1079,7 @@ export class RunnerCore {
     if (block.startsWith("/followup ")) {
       const message = block.slice("/followup ".length);
       this.io.sendRpc({ type: "follow_up", message });
-      this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
+      this.io.mirrorLine(`${this.style.commit("you (follow-up) ▸")} ${message}`);
       this.acceptIntoOpenRun();
       return;
     }
@@ -943,7 +1088,7 @@ export class RunnerCore {
     // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
-    this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
+    this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
     this.acceptIntoOpenRun();
   }
 
@@ -960,10 +1105,12 @@ export class RunnerCore {
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
+    this.paneExited = true;
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
     this.io.postActivity(this.activityPayload("Stop", `${this.runtime}_exited`));
+    this.refreshPaneStatus();
   }
 
   private handleResponse(record: Record<string, unknown>): void {
@@ -982,8 +1129,10 @@ export class RunnerCore {
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
       if (record.id === GET_STATE_ID) {
         this.ready = false;
+        this.paneError = true;
         this.writeSidecar({});
         this.diag(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
+        this.refreshPaneStatus();
         // OMP cannot provide a resume token without get_state; stop it so the
         // launch fails now instead of waiting out readiness.
         if (this.runtime === "omp") this.io.stopChild?.();
@@ -1021,6 +1170,8 @@ export class RunnerCore {
         // For custom protocol: pi-rpc community harnesses, reporting no session file
         // reads as needing attention rather than stopping the child process.
         this.diag(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
+        this.paneError = true;
+        this.refreshPaneStatus();
         this.raiseAttention("runtime_error");
         return;
       }
@@ -1029,6 +1180,8 @@ export class RunnerCore {
         // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
         // seat asks for attention rather than beating idle on a session nothing records.
         this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
+        this.paneError = true;
+        this.refreshPaneStatus();
         this.raiseAttention("runtime_error");
         return;
       }
@@ -1037,6 +1190,8 @@ export class RunnerCore {
         // Subsequent get_state evaluations confirm liveness silently to avoid
         // terminal output spam while preserving state updates.
         this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+        this.paneError = false;
+        this.refreshPaneStatus();
       }
       // Re-post session identity on every successful get_state reply so the
       // daemon can discover replacement runners and keep session records current.
@@ -1140,6 +1295,7 @@ export class RunnerCore {
     this.attention = next;
     this.attentionIsLatest = true;
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
+    this.refreshPaneStatus();
   }
 
   /** Idle and streaming heartbeat. A Pi runner only reports at turn and tool boundaries, and the
@@ -1181,6 +1337,7 @@ export class RunnerCore {
   private clearAttention(): void {
     this.attention = null;
     this.attentionIsLatest = false;
+    this.refreshPaneStatus();
   }
 
   /** A diagnostic stays in the transcript — the readiness probe and the operator both read
@@ -1189,6 +1346,37 @@ export class RunnerCore {
     this.io.mirrorLine(text);
     this.io.diagnostic?.(text);
   }
+
+  /** The pane's status row: what this seat runs, and the state the runner observed.
+   *  Only what is known is shown — a model or effort the launch did not name is omitted,
+   *  and a seat that is not ready yet, waiting on the operator, or failed never reads as
+   *  idle. Plain text; the pane owns clipping and repainting. */
+  private refreshPaneStatus(): void {
+    if (!this.io.status) return;
+    const parts: string[] = [];
+    // The labels are runner-owned text painted as given: neutralize terminal controls so a
+    // configured value cannot act on the terminal, exactly as diagnostics are treated.
+    if (this.opts.model) parts.push(paneLabel(this.opts.model));
+    if (this.opts.thinking) parts.push(`thinking:${paneLabel(this.opts.thinking)}`);
+    parts.push(this.paneState());
+    this.io.status(parts.join(" \u00b7 "));
+  }
+
+  private paneState(): string {
+    if (this.paneExited) return "exited";
+    if (!this.ready) return this.paneError ? "error" : "starting";
+    if (this.attention === "permission_prompt") return "waiting for input";
+    if (this.attention === "runtime_error") return "error";
+    if (this.attention === "transient_turn_error") return "retrying";
+    // A known failure outranks an open turn, and an observed retry outranks "working".
+    if (this.paneError) return "error";
+    if (this.paneRetrying) return "retrying";
+    if (this.streaming) return "working";
+    return "idle";
+  }
+
+  /** Emphasis for the lines the runner writes itself; model output stays plain. */
+  private get style(): PaneStyle { return this.opts.style ?? STYLE; }
 
   private handleEvent(event: Record<string, unknown>): void {
     if (event.type === "extension_ui_request") {
@@ -1216,6 +1404,11 @@ export class RunnerCore {
     const message = event.message as Record<string, unknown> | undefined;
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
+      // A new assistant message supersedes the failed one it follows, even in the same turn.
+      if (event.type === "message_start" && this.paneError) {
+        this.paneError = false;
+        this.refreshPaneStatus();
+      }
     }
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
@@ -1229,6 +1422,31 @@ export class RunnerCore {
     if (event.type === "agent_start") {
       this.clearAttention();
       this.io.clearStatus?.();
+      this.paneError = false;
+      this.paneRetrying = false;
+      this.refreshPaneStatus();
+    }
+    // A retry replaces the failed attempt it retries, so the row follows the attempt until
+    // its matching end, exit or a superseding turn.
+    if (event.type === "auto_retry_start") {
+      this.paneError = false;
+      this.paneRetrying = true;
+      this.refreshPaneStatus();
+    }
+    if (event.type === "auto_retry_end") {
+      this.paneRetrying = false;
+      this.refreshPaneStatus();
+    }
+    // A turn's opening supersedes the previous turn's failure — on either runtime, since
+    // both can open a turn with turn_start alone. omp's attention policy is untouched.
+    if (event.type === "turn_start") {
+      this.paneError = false;
+      this.paneRetrying = false;
+      if (this.runtime === "omp" && !this.streaming) {
+        // A turn the runtime opened itself is work in flight; agent_end still closes it.
+        this.streaming = true;
+      }
+      this.refreshPaneStatus();
     }
     if (this.runtime === "omp") {
       if (event.type === "agent_start" || event.type === "turn_start"
@@ -1244,12 +1462,16 @@ export class RunnerCore {
       // Some paths omit agent_start; turn_start still opens a new turn.
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
-    const mapped = mapPiEvent(event, this.runtime);
+    const mapped = mapPiEvent(event, this.runtime, this.style);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
     const opening = this.runtime !== "omp" && mapped.streaming === true && !this.streaming;
-    if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
+    if (mapped.streaming !== undefined) {
+      const changed = this.streaming !== mapped.streaming;
+      this.streaming = mapped.streaming;
+      if (changed) this.refreshPaneStatus();
+    }
     if (opening) {
       this.turn += 1;
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
@@ -1258,6 +1480,11 @@ export class RunnerCore {
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
     if (event.type === "agent_end") {
+      // A retry that never reported its end must not outlive the turn it belonged to.
+      if (this.paneRetrying) {
+        this.paneRetrying = false;
+        this.refreshPaneStatus();
+      }
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
@@ -1276,6 +1503,9 @@ export class RunnerCore {
         this.diag(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
+      // The failure is known: the row says so until a new turn starts, never idle.
+      this.paneError = true;
+      this.refreshPaneStatus();
       // Only typed, explicitly transient HTTP failures may release the send
       // guard at agent_end. Unknown/auth/configuration failures stay attention;
       // diagnostic prose is never used to decide whether a retry is safe.
@@ -1839,6 +2069,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     mirrorLine: (line) => pane.line(line),
     mirrorAppend: (text) => pane.transcript(text),
     diagnostic: (text) => pane.diagnostic(text),
+    status: (text) => pane.status(text),
     clearStatus: () => pane.clearStatus(),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
@@ -1896,7 +2127,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
     runId: runId,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
-    requestedSessionFile: args.sessionFile });
+    requestedSessionFile: args.sessionFile, model: args.model, thinking: args.thinking });
 
   let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
