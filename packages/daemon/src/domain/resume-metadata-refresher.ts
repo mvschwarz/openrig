@@ -283,6 +283,7 @@ export class ResumeMetadataRefresher {
     try {
       const nodeId = opts?.nodeId ?? this.sessionRegistry.findResumeContextByName(sessionName)?.nodeId;
       let target = nodeId ? this.sessionRegistry.getBindingForNode(nodeId)?.tmuxPane : undefined;
+      if (target && !(await this.tmuxAdapter.listPanes(sessionName, true)).some(pane => pane.id === target)) return undefined;
       if (!target) {
         const pane = await observeSolePane({ listPanes: name => this.tmuxAdapter.listPanes(name, true) }, sessionName);
         if (!pane.ok) return undefined;

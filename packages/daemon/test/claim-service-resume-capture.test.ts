@@ -115,6 +115,7 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
         { pid: 4243, ppid: 4242, pgid: 4243, tpgid: 4243, executableName: "claude", command: "claude", startedAt },
       ];
       const probe = vi.fn(async () => "inconclusive" as const);
+      mockTmux.listPanes = vi.fn(async () => [{ id: "%0" }] as never);
       const reader = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: mockTmux,
         claudeConfigDir: home, listClaudeProcesses: async () => rows, probeClaudeResume: probe });
       const rig = rigRepo.createRig("test-rig");

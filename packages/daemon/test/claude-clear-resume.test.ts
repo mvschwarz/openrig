@@ -63,6 +63,7 @@ describe("Claude current conversation at shutdown", () => {
     const listClaudeProcesses = vi.fn(async () => rows);
     const probe = vi.fn(async () => "resumable" as const); // Old history still exists after /clear.
     const tmux = {
+      listPanes: vi.fn(async () => [{ id: "%1" }] as never),
       getPanePid: vi.fn(async () => 900),
       killSession: vi.fn(async () => ({ ok: true })),
     } as unknown as TmuxAdapter;
@@ -135,8 +136,20 @@ describe("Claude current conversation at shutdown", () => {
     const f = multiplePaneFixture();
     vi.mocked(f.tmux.getPanePid).mockImplementation(async target => target === "%1" ? null : 910);
     expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
-    expect(f.tmux.listPanes).not.toHaveBeenCalled();
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
     expect(f.tmux.getPanePid).toHaveBeenCalledWith("%1");
+  });
+
+  it("does not capture from a recorded pane id reused by another session", async () => {
+    const f = multiplePaneFixture();
+    // This tmux server still resolves %1, but the seat's session now contains only %2.
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%2" }] as never);
+    fs.writeFileSync(f.file, JSON.stringify({ name: "Other session", sessionId: "33333333-3333-4333-8333-333333333333" }));
+    await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBeNull();
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(f.tmux.getPanePid).not.toHaveBeenCalled();
+    expect(f.probe).not.toHaveBeenCalled();
   });
 
   it("captures the post-clear conversation in the actual auto-pre-down snapshot", async () => {
