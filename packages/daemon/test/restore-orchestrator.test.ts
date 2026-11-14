@@ -5833,23 +5833,28 @@ describe("RestoreOrchestrator", () => {
     });
 
     // An adopted seat is bound to its own tmux session's name (`rig adopt` registers it as found), which need not follow
-    // OpenRig's pattern. Restore keeps it when tmux keeps it as given, so the seat's peers still reach it by that name.
-    it("an adopted seat's own session name: restore keeps it, so the seat's address doesn't change", async () => {
-      const { snapId, nodeId } = seedSeat({ logicalId: "main.lead", podAware: true, boundName: "c42a-lead" });
+    // OpenRig's pattern. Restore keeps it when tmux creates and finds the session under exactly that name and OpenRig's
+    // address readers read it back unchanged, so the seat's peers still reach it by that name.
+    it.each(["c42a-lead", "bad name!", "c42a+lead"])("an adopted seat's own session name %s: restore keeps it, so the seat's address doesn't change", async (bound) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "main.lead", podAware: true, boundName: bound });
       const tmux = mockTmux();
       const result = await createOrchestrator({ tmux }).restore(snapId);
       expect(result.ok).toBe(true);
-      expect(createdSessionNames(tmux)).toContain("c42a-lead");
+      expect(createdSessionNames(tmux)).toContain(bound);
       expect(createdSessionNames(tmux)).not.toContain("main-lead@r99");
-      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("c42a-lead");
-      expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND session_name = 'c42a-lead'").get(nodeId)).toEqual({ n: 1 });
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe(bound);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND session_name = ?").get(nodeId, bound)).toEqual({ n: 1 });
       expect(result.result.warnings.some((w) => w.includes("FR-5"))).toBe(false);
     });
 
     it.each([
-      ["bad name!", "a space and \"!\""],
-      ["c42a.lead", "a \".\", which tmux would turn into \"_\""],
-    ])("a bound name tmux can't keep (%s, %s): the derived name, with the address change said old to new", async (bound) => {
+      ["c42a.lead", 'tmux turns "." into "_" in a session name'],
+      ["c42a#lead", 'tmux expands "#" in a new session\'s name'],
+      ["%c42a", 'tmux reads a target starting with "%" as a pane id, so the session couldn\'t be found by its name'],
+      ["c42a lead@main", 'it contains "@", which OpenRig reads as the separator between a seat and its rig'],
+      ["c42a,lead", 'it contains ",", which `rig send --to` reads as a list separator'],
+      [" c42a-lead", "it starts or ends with whitespace, which OpenRig trims when it reads an address"],
+    ])("a bound name that can't be launched again as given (%s): the derived name, with the change and its reason said", async (bound, problem) => {
       const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: bound });
       const tmux = mockTmux();
       const result = await createOrchestrator({ tmux }).restore(snapId);
@@ -5857,10 +5862,24 @@ describe("RestoreOrchestrator", () => {
       expect(createdSessionNames(tmux)).toContain("r99-worker-a");
       expect(createdSessionNames(tmux)).not.toContain(bound);
       expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r99-worker-a");
-      expect(result.result.warnings).toContain(`FR-5: worker-a comes back as "r99-worker-a", not "${bound}", the session name it was bound to, because tmux can't keep that name as given. Peers that address "${bound}" need the new name.`);
+      expect(result.result.warnings).toContain(`FR-5: restore starts worker-a as "r99-worker-a", not "${bound}", the session name it was bound to: ${problem}. Once it runs there, peers that address "${bound}" need "r99-worker-a".`);
     });
 
-    it("only a launch that keeps the seat's bound name accepts one outside the naming pattern, and only when tmux keeps it", () => {
+    it("a failed launch under the derived name: the line names only the attempt, the node fails and keeps its bound name", async () => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: "c42a.lead" });
+      const tmux = mockTmux();
+      (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false as const, code: "duplicate_session", message: "err" });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes.find((n) => n.logicalId === "worker-a")?.status).toBe("failed");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("c42a.lead");
+      const line = result.result.warnings.find((w) => w.startsWith("FR-5: restore starts worker-a"));
+      expect(line).toContain('as "r99-worker-a", not "c42a.lead"');
+      expect(result.result.warnings.some((w) => /comes back as|now answers at|has moved to/.test(w))).toBe(false);
+    });
+
+    it("only a launch that keeps the seat's bound name accepts one outside the naming pattern, and only one it can reuse", () => {
       const { nodeId } = seedSeat({ logicalId: "worker-a", boundName: null });
       expect(() => sessionRegistry.registerSession(nodeId, "c42a-lead")).toThrow(/Invalid session name "c42a-lead"/);
       expect(() => sessionRegistry.registerSession(nodeId, "c42a.lead", "initial", null, { keptBoundName: true }))

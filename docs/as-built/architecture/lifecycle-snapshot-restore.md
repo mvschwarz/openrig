@@ -160,11 +160,12 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   `:780`; if `status === "restoring"` the node is skipped with a warning and
   reported as `fresh`, `:783–785`; `degraded` only adds a warning).
 - Reuses the seat's durably bound tmux session name when the prior binding
-  has a usable one: a canonical or legacy name, or any other name tmux keeps
-  as given (OpenRig's session-name characters and no `.`), such as an adopted
-  seat's own session name (`isReusableBoundSessionName`, `session-name.ts`).
-  Otherwise it falls back to the derived name and says the address change,
-  old name to new. A missing binding after the latest session's recorded
+  has a usable one: a canonical or legacy name, or any other name that tmux
+  creates and finds as given and OpenRig's address readers read back
+  unchanged, such as an adopted seat's own session name
+  (`boundSessionNameProblem`, `session-name.ts`). Otherwise it launches the
+  derived name and says so before the launch, old name to planned name, with
+  the reason. A missing binding after the latest session's recorded
   intentional exit is quiet; unclean/legacy missing bindings and incomplete
   binding rows still warn.
 - Replays restore-safe startup using persisted startup context;

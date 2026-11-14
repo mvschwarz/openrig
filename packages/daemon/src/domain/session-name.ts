@@ -115,13 +115,36 @@ export function tmuxRenamedSessionError(sessionName: string): string | null {
   return `session name "${sessionName}" contains "." and tmux would create it as "${sessionName.replace(/\./g, "_")}", so OpenRig could not reach the seat; use a rig name without dots`;
 }
 
+const TMUX_TARGET_PREFIXES: Record<string, string> = { $: "a session id", "%": "a pane id", "=": "an exact-match prefix" };
+
 /**
- * A name a seat is already bound to can be launched again under that same name when tmux keeps it exactly: the
- * allowed characters above, and no "." (see tmuxRenamedSessionError). An adopted seat keeps its own tmux session's
- * name, which need not follow the canonical or legacy pattern validateSessionName checks.
+ * Why a seat can't be launched again under the name it is bound to, or null when it can. An adopted seat keeps its own
+ * tmux session's name, which need not follow the canonical or legacy pattern validateSessionName checks. Such a name is
+ * reused when tmux creates and finds the session under exactly that name, and OpenRig's address readers read it back
+ * unchanged. From tmux 3.6a's source: session_check_name turns ":" and "." into "_" and escapes control characters and
+ * "\" (utf8_stravis), new-session expands "#" formats, and a target starting with "$", "@", "%" or "=" is read as an
+ * id or a prefix. OpenRig's readers split an address on "@" (parseSessionName) and `rig send --to` on ",", and trim.
  */
-export function isReusableBoundSessionName(sessionName: string): boolean {
-  return validateSessionNameChars(sessionName, "session name") === null && tmuxRenamedSessionError(sessionName) === null;
+export function boundSessionNameProblem(sessionName: string): string | null {
+  if (!sessionName) return "it is empty";
+  if (sessionName !== sessionName.trim()) return "it starts or ends with whitespace, which OpenRig trims when it reads an address";
+  if (sessionName.includes("@")) return 'it contains "@", which OpenRig reads as the separator between a seat and its rig';
+  if (sessionName.includes(",")) return 'it contains ",", which `rig send --to` reads as a list separator';
+  const renamed = [":", "."].find((ch) => sessionName.includes(ch));
+  if (renamed) return `tmux turns "${renamed}" into "_" in a session name`;
+  if (sessionName.includes("#")) return 'tmux expands "#" in a new session\'s name';
+  // Control characters, and unpaired surrogates (which aren't valid UTF-8): iterating by code point leaves a lone
+  // surrogate as its own value in 0xd800-0xdfff.
+  const escaped = [...sessionName].some((ch) => {
+    const code = ch.codePointAt(0)!;
+    return code < 0x20 || code === 0x7f || (code >= 0xd800 && code <= 0xdfff);
+  });
+  if (sessionName.includes("\\") || escaped) {
+    return 'tmux escapes "\\", control characters and invalid UTF-8 in a session name';
+  }
+  const prefix = TMUX_TARGET_PREFIXES[sessionName[0]!];
+  if (prefix) return `tmux reads a target starting with "${sessionName[0]}" as ${prefix}, so the session couldn't be found by its name`;
+  return null;
 }
 
 // ============================================================================
