@@ -1537,7 +1537,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
     settlePermissionPrompt: (sessionName) => seatActivityService.settlePermissionPrompt(sessionName),
-    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
+    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId, runtimeAdaptersMap),
     sendVerify: attentionProbeSend(() => deps.sessionTransport),
     capture: async (session, opts) => {
       const transport = deps.sessionTransport;

@@ -1,5 +1,10 @@
 import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
 import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
+import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import { startPiRecoveryServer, type RunnerRecoveryReply } from "../src/adapters/pi-recovery-rpc.js";
+import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -4762,7 +4767,7 @@ describe("RestoreOrchestrator", () => {
     function seedFailedAttempt(opts: {
       rigName?: string;
       logicalId?: string;
-      runtime?: "claude-code" | "codex";
+      runtime?: "claude-code" | "codex" | "pi" | "omp";
       restoreOutcome: "failed" | "attention_required";
       withResumeToken?: boolean;
       withBinding?: boolean;
@@ -4807,6 +4812,134 @@ describe("RestoreOrchestrator", () => {
 
       return { rig, nodeId: node.id, sessionName };
     }
+
+    describe.each(["pi", "omp"] as const)("%s runner recovery", (runtime) => {
+      async function runnerFixture(status: "failed" | "attention_required" = "attention_required", stateRoot = "/scratch") {
+        const tmux = mockTmuxForReconciler();
+        vi.mocked(tmux.hasSession).mockResolvedValue(true);
+        vi.mocked(tmux.getPaneCommand).mockResolvedValue("node");
+        const seeded = seedFailedAttempt({ runtime, restoreOutcome: status, withResumeToken: true });
+        const token = `/scratch/${seeded.sessionName}/sessions/history.jsonl`;
+        db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ? WHERE node_id = ?").run(`${runtime}_session_file`, token, seeded.nodeId);
+        const verify = vi.fn(async (): Promise<RunnerRecoveryReply> => ({ ok: true, sessionFile: token, sessionId: "session" }));
+        const server = await startPiRecoveryServer("launch", verify);
+        let state: PiRunnerState | null = { ready: true, launchId: "launch", sessionFile: token, updatedAt: new Date().toISOString(),
+          recovery: { port: server.port, pid: 1235, childPid: 1236 } };
+        const argv = ["node", "/dist/pi-runner.js", "--session-name", seeded.sessionName, "--state-root", stateRoot, "--cwd", "/work", "--launch-id", "launch",
+          ...(runtime === "omp" ? ["--runtime", "omp"] : ["--no-approve"])];
+        const rows: NativeProcessRow[] = [
+          { pid: 1234, ppid: 1, command: "bash" },
+          { pid: 1235, ppid: 1234, command: argv.join(" "), argv, pgid: 1235, tpgid: 1235, startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1236, ppid: 1235, command: `${runtime} --mode rpc`, startedAt: "Sat Jan  1 12:00:01 2000" },
+        ];
+        const Adapter = runtime === "pi" ? PiRuntimeAdapter : OmpRuntimeAdapter;
+        const adapter = new Adapter({ tmux, stateRoot: "/scratch", stateRootForSession: () => stateRoot, runnerEntryPath: "/dist/pi-runner.js",
+          fsOps: { exists: () => state !== null, readFile: () => JSON.stringify(state), writeFile: vi.fn(), mkdirp: vi.fn() } });
+        const orch = createOrchestrator({ tmux, listProcesses: async () => rows });
+        return { ...seeded, tmux, token, rows, argv, verify, server,
+          setState: (next: PiRunnerState | null) => { state = next; },
+          reconcile: () => orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId, { [runtime]: adapter }) };
+      }
+
+      it.each(["failed", "attention_required"] as const)("reconciles %s with live runner evidence and keeps the failed attempt", async (status) => {
+        const f = await runnerFixture(status);
+        try {
+          const original = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();
+          const result = await f.reconcile();
+          expect(result).toMatchObject({ ok: true, from: status, to: "operator_recovered", evidence: {
+            fgProcess: runtime, runner: { pid: 1235, childPid: 1236, launchId: "launch", rpcConfirmed: true, identityConfirmed: true },
+          } });
+          expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all()).toEqual(original);
+          expect(getNodeInventory(db, f.rig.id)[0]).toMatchObject({ restoreOutcome: "operator_recovered" });
+          expect(sessionRegistry.getBindingForNode(f.nodeId)?.tmuxPane).toBe("%1");
+          expect(f.tmux.sendText).not.toHaveBeenCalled();
+          expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+          expect(f.tmux.capturePaneContent).not.toHaveBeenCalled();
+        } finally { f.server.close(); }
+      });
+
+      it("clears full-restore attention through the seat reconciler", async () => {
+        const f = await runnerFixture();
+        try {
+          const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(f.nodeId) as { id: string };
+          sessionRegistry.updateStartupStatus(session.id, "attention_required");
+          const clear = new SeatAttentionReconciler({ db, sessionRegistry, eventBus,
+            agentActivityStore: new AgentActivityStore({ db, eventBus }), reconcileRestoreOutcome: () => f.reconcile() });
+          expect(await clear.clearAttention(f.sessionName)).toMatchObject({ ok: true, clearedBy: "evidence",
+            clearedClasses: expect.arrayContaining(["restore_outcome", "startup_status"]) });
+          expect(getNodeInventory(db, f.rig.id)[0]).toMatchObject({ startupStatus: "ready", restoreOutcome: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("uses the state root selected for this session", async () => {
+        const f = await runnerFixture("attention_required", "/scratch/account-switch");
+        try {
+          expect(await f.reconcile()).toMatchObject({ ok: true, to: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("accepts a new session row id for the same canonical session and token", async () => {
+        const f = await runnerFixture();
+        try {
+          f.verify.mockImplementation(async () => {
+            db.prepare("UPDATE sessions SET id = ? WHERE node_id = ?").run("replacement-row-id", f.nodeId);
+            return { ok: true, sessionFile: f.token, sessionId: "session" };
+          });
+          expect(await f.reconcile()).toMatchObject({ ok: true, to: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("records one receipt when two live recovery checks overlap", async () => {
+        const f = await runnerFixture();
+        try {
+          const results = await Promise.all([f.reconcile(), f.reconcile()]);
+          expect(results.every((result) => result.ok)).toBe(true);
+          expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+        } finally { f.server.close(); }
+      });
+
+      it.each([
+        ["wrong runner", "runner_identity_mismatch"], ["wrong launch", "runner_identity_mismatch"],
+        ["wrong runtime", "runner_identity_mismatch"], ["background runner", "runner_identity_mismatch"],
+        ["missing child", "runner_missing"], ["missing runner", "runner_missing"],
+        ["different session", "runner_session_mismatch"], ["missing sidecar", "runner_state_unavailable"],
+        ["dead RPC", "runner_rpc_unavailable"], ["unconfirmed identity", "runner_identity_unconfirmed"],
+        ["replaced child", "runner_identity_mismatch"], ["changed token", "proof_superseded"],
+        ["new restore attempt", "proof_superseded"], ["changed binding", "proof_superseded"],
+        ["changed session name", "proof_superseded"], ["superseded failed proof", "proof_superseded"],
+      ])("keeps the failed outcome for %s", async (failure, code) => {
+        const f = await runnerFixture();
+        try {
+          if (failure === "wrong runner") f.argv[1] = "/other/pi-runner.js";
+          if (failure === "wrong launch") f.argv[f.argv.indexOf("--launch-id") + 1] = "other";
+          if (failure === "wrong runtime") {
+            if (runtime === "pi") f.argv.push("--runtime", "omp");
+            else f.argv[f.argv.indexOf("--runtime") + 1] = "pi";
+          }
+          if (failure === "background runner") f.rows[1]!.pgid = 9999;
+          if (failure === "missing child") f.rows.pop();
+          if (failure === "missing runner") f.rows.splice(1, 1);
+          if (failure === "different session") db.prepare("UPDATE sessions SET resume_token = ? WHERE node_id = ?").run("/other/history.jsonl", f.nodeId);
+          if (failure === "missing sidecar") f.setState(null);
+          if (failure === "dead RPC") f.verify.mockResolvedValue({ ok: false, code: "runner_rpc_unavailable", detail: "RPC unavailable" });
+          if (failure === "unconfirmed identity") f.verify.mockResolvedValue({ ok: false, code: "runner_identity_unconfirmed", detail: "Identity unconfirmed" });
+          if (["replaced child", "changed token", "new restore attempt", "changed binding", "changed session name", "superseded failed proof"].includes(failure)) f.verify.mockImplementation(async () => {
+            if (failure === "replaced child") f.rows[2]!.startedAt = "Sat Jan  1 12:00:02 2000";
+            else if (failure === "new restore attempt") eventBus.emit({ type: "restore.started", rigId: f.rig.id, snapshotId: "new-attempt" });
+            else if (failure === "changed binding") sessionRegistry.updateBinding(f.nodeId, { tmuxSession: "replacement@demo" });
+            else if (failure === "changed session name") db.prepare("UPDATE sessions SET session_name = ? WHERE node_id = ?").run("replacement@demo", f.nodeId);
+            else db.prepare("UPDATE sessions SET resume_token = ? WHERE node_id = ?").run("/other/history.jsonl", f.nodeId);
+            if (failure === "superseded failed proof") return { ok: false, code: "runner_identity_unconfirmed", detail: "The old identity was not confirmed." };
+            return { ok: true, sessionFile: f.token, sessionId: "session" };
+          });
+          expect(await f.reconcile()).toMatchObject({ ok: false, code });
+          if (failure === "changed binding") expect(sessionRegistry.getBindingForNode(f.nodeId)?.tmuxSession).toBe("replacement@demo");
+          expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);
+          expect(f.tmux.sendText).not.toHaveBeenCalled();
+          expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+        } finally { f.server.close(); }
+      });
+    });
 
     it.each([
       ["OpenAI Codex (v0.155.1)\n› continue", true],

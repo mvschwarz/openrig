@@ -496,7 +496,7 @@ function deriveContinuityOutcome(
 
 interface RestoreProjection {
   outcome: NodeRestoreOutcome;
-  resumedRuntime?: "claude-code" | "codex";
+  resumedRuntime?: "claude-code" | "codex" | "pi" | "omp";
 }
 
 function restoreKey(rigId: string, nodeId: string): string {
@@ -573,11 +573,13 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && event.to === "operator_recovered" && (event.from === "failed" || event.from === "attention_required")
         && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
         && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
-        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
+        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex"
+          || ((evidence.fgProcess === "pi" || evidence.fgProcess === "omp")
+            && evidence.runner?.rpcConfirmed === true && evidence.runner?.identityConfirmed === true));
       const key = restoreKey(row.rig_id, event.nodeId);
       map.set(key, {
         outcome: mapStatus(event.to),
-        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
+        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" as const : evidence!.fgProcess as "codex" | "pi" | "omp" } : {}),
       });
       // A zero attemptId names no attempt (every subset clear writes it): it acknowledges the outcome it
       // replaces, so it is as current as that outcome. With nothing replaced, it describes no attempt.

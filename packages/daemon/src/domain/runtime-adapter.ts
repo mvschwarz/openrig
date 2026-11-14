@@ -270,6 +270,9 @@ export interface RuntimeAdapter {
    *  cleared when read, and when a later projection carries guidance). Undefined when that launch sent none or the adapter doesn't carry any. */
   launchGuidanceSent?(tmuxSession: string): string[] | undefined;
 
+  /** Prove operator recovery without submitting a prompt or launching a replacement. */
+  verifyRecovery?(input: import("./runtime-recovery.js").RecoveryVerificationInput): Promise<import("./runtime-recovery.js").RecoveryVerificationResult>;
+
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;
 
