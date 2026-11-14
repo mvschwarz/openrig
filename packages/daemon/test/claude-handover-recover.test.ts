@@ -263,13 +263,18 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   ])("#3044 C3: a recovery's cleanup %s, and clears the retiree's compaction state", async (_label, writer, kept) => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), "recover-sidecar-"));
     try {
-      const contextUsage = new ContextUsageStore(db, { stateDir });
+      // The readers' generation gate, wired as the daemon wires it.
+      const contextUsage = new ContextUsageStore(db, { stateDir,
+        resolveOccupantBootAt: (node) => sessionRegistry.currentOccupantTenure(node)?.bootAt ?? null,
+        resolveOccupantGeneration: (node) => sessionRegistry.currentOccupantTenure(node)?.generationUuid ?? null });
       const enforcer = { invalidateOccupant: vi.fn() };
       const generation = await failedHandover();
       const sidecar = contextUsage.getSidecarPath(SEAT);
       mkdirSync(path.dirname(sidecar), { recursive: true });
       writeFileSync(sidecar, JSON.stringify({ session_name: SEAT, occupant_generation: writer(generation),
         context_window: { used_percentage: 41 }, sampled_at: "2026-11-10T16:21:30Z" }));
+      // The context monitor read it before the commit, while the successor ran unadopted.
+      contextUsage.persist(nodeId, contextUsage.readAndNormalize(SEAT));
 
       const result = await service({ occupantInvalidator: new DefaultOccupantInvalidator({ enforcer, contextUsage }) })
         .recover({ seatRef: SEAT, reason: "adopt the running successor" });
@@ -277,6 +282,9 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       expect(result).toMatchObject({ ok: true });
       expect(contextUsage.readSidecar(SEAT).ok).toBe(kept);
       expect(enforcer.invalidateOccupant).toHaveBeenCalledWith(SEAT);
+      // The sample predates the tenure the commit minted. The successor's own still reads current; the retiree's doesn't.
+      expect(contextUsage.getForNode(nodeId, SEAT)).toMatchObject(kept
+        ? { availability: "known", usedPercentage: 41 } : { availability: "unknown", reason: "stale_generation" });
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
     }

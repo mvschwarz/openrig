@@ -10,9 +10,12 @@
 //     so a name-scoped delete clears exactly the retiree's entries. (The name does NOT isolate the
 //     retiree from the successor — they share it — the timing does.)
 //     #3044 C3: a recovery (`rig seat handover --recover`) commits a successor that has already run, so the timing
-//     doesn't hold there. Its compaction maps are still cleared: the unadopted successor's hooks were refused until
-//     this commit, so they hold only the retiree's or the failed attempt's state. Its sidecar is the successor's
-//     own sample once it has written one, so the delete keeps a sidecar recording `successorGeneration`.
+//     doesn't hold there. Its compaction maps are still cleared: a preparation, whether the hooks, the context monitor
+//     or the manual route began it, is stamped with the occupant generation registered then, which before this commit
+//     is the retiree's, and the commit registers the successor and clears the maps with no daemon callback between.
+//     Its sidecar is the successor's own sample once it has written one, so the delete keeps a sidecar it reads
+//     recording `successorGeneration`. Best effort: the collector replaces the file from another process, so a sample
+//     written between that read and the delete can still be removed, until the successor's next write.
 //   Class-B (durable queue_items / watchdog_jobs, seat-ROLE-bearing): a name-scoped drop would
 //     NEUTRALIZE THE SUCCESSOR'S OWN legitimate role items, so it MUST gen-scope. That requires the
 //     occupant-generation identity (atom-B). Until `retiringGeneration` is supplied, Class-B is a LOUD
@@ -70,7 +73,8 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
     const { retiringSessionName, retiringGeneration } = args;
     const log = this.deps.log ?? (() => {});
 
-    // Class-A — hard-delete by name (safe by TIMING; runs at commit() before the successor writes).
+    // Class-A — hard-delete by name (safe by TIMING; runs at commit() before the successor writes, except a recovery's
+    // successor, whose own sidecar is kept by generation, best effort).
     this.deps.enforcer.invalidateOccupant(retiringSessionName);
     this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName, args.successorGeneration);
 
