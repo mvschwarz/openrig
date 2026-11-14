@@ -4854,6 +4854,63 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
     });
 
+    // A subset launch records no restore.started: its completion is its attempt.
+    function seedSubsetAttempt(restoreOutcome: "failed" | "attention_required") {
+      const rigName = `r${nextSeed++}`;
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "codex" });
+      const sessionName = `test-worker@${rigName}`;
+      sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+      const sess = sessionRegistry.registerSession(node.id, sessionName);
+      db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'tok-abc-123' WHERE id = ?").run(sess.id);
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: restoreOutcome }], warnings: [],
+      } } as any);
+      return { rig, nodeId: node.id, attemptId: completed.seq };
+    }
+    const resumedCodexPane = (token: string) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("bash");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("OpenAI Codex (v0.155.1)\n› continue");
+      const listProcesses = async () => [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: `codex resume ${token}`,
+          argv: ["codex", "resume", token], executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ];
+      return { tmux, listProcesses };
+    };
+
+    it.each(["attention_required", "failed"] as const)("reconciles a subset-launched Codex seat (%s) from the same exact lineage, keeping its outcome and appending the recovery", async (outcome) => {
+      const seeded = seedSubsetAttempt(outcome);
+      const original = db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get();
+      const { tmux, listProcesses } = resumedCodexPane("tok-abc-123");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" });
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get()).toEqual(original);
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled.map((row) => JSON.parse(row.payload))).toEqual([expect.objectContaining({
+        nodeId: seeded.nodeId, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" })]);
+      // One receipt per attempt: a repeated check reports it without appending another.
+      await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
+    it("a subset-launched seat running another conversation keeps its outcome, and nothing is appended", async () => {
+      const seeded = seedSubsetAttempt("attention_required");
+      const { tmux, listProcesses } = resumedCodexPane("tok-other-999");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: false, code: "process_lineage_mismatch" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);
+    });
+
     it.each([
       ["Claude Code v2.1.220\n ❯ accept edits on", true],
       ["Choose a conversation to resume:\n  1. project-foo", false],
