@@ -768,6 +768,9 @@ export class SeatRuntimeSwitchService {
           canonicalPane: row.successor_pane!, stagedPane: row.predecessor_pane });
         if (!back.ok) return stuck(`The panes couldn't be exchanged back: ${back.message}`);
       } else if (canonicalPane !== row.predecessor_pane && !successorGone) {
+        if (canonicalPane !== null && canonicalPane === row.successor_pane) {
+          return stuck(`The seat's pane (${canonicalPane}) is the staged successor's, but the switch wasn't committed; nothing was touched.`);
+        }
         return stuck(`The seat's pane (${canonicalPane ?? "none"}) is neither the predecessor's nor the successor's; nothing was touched.`);
       } else if (successorPresent) {
         // The predecessor's pane is current, but the successor is still in another of the seat's windows: it keeps its hold.
@@ -779,10 +782,11 @@ export class SeatRuntimeSwitchService {
       // An abandoned switch keeps why it stopped; recovery only settles the successor it couldn't retire then.
       // An unreadable listing settles too (a hold needs positive evidence), and the outcome doesn't claim who holds the seat.
       // An empty listing can also come from an unreachable tmux server, so it says only that no pane was found.
+      // Only a pane identified as the predecessor's is named as its occupant.
       const occupant = exchanged || canonicalPane === row.predecessor_pane ? `the ${row.from_runtime} occupant holds the seat`
         : seatPanes === null ? "the seat's current occupant is unknown (its panes couldn't be read)"
         : seatPanes.length === 0 ? "no pane was found at the seat"
-        : seatPanes.length === 1 ? `the ${row.from_runtime} occupant holds the seat`
+        : seatPanes.length === 1 ? `one pane is at the seat, not identified as the ${row.from_runtime} occupant`
         : "the seat's current occupant is unknown (it has several panes)";
       const outcome = row.phase === "abandoned" ? `${row.outcome ?? "abandoned before commit"} The staged ${row.to_runtime} successor was retired at recovery.`
         : `interrupted before commit: ${occupant}; the staged ${row.to_runtime} successor ${successorGone ? "was already gone" : "was retired"}`;

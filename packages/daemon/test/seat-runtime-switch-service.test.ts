@@ -1040,8 +1040,16 @@ describe("live seat runtime switch", () => {
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(panes.get(SEAT)).toBe("%9");
       expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
-      expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
+      expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null, outcome: expect.stringMatching(/one pane is at the seat, not identified as the codex occupant; the staged claude-code successor was already gone/) });
+      expect(openSwitch()).not.toMatchObject({ outcome: expect.stringMatching(/occupant holds the seat/) });
       expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: "No runtime switch needs recovery." });
+    });
+
+    it("#3103: past its deadline, an expired switch with the predecessor's pane at the seat names the codex occupant", async () => {
+      record("preparing");
+      clock = Date.parse("2026-10-24T04:00:00Z");
+      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
+      expect(panes.get(SEAT)).toBe("%0");
     });
 
     it("#3103: with the successor's pane still at the seat, an expired switch isn't settled by the deadline alone", async () => {
@@ -1049,7 +1057,7 @@ describe("live seat runtime switch", () => {
       panes.set(SEAT, "%5");
       clock = Date.parse("2026-10-24T04:00:00Z");
       expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
-      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: expect.stringMatching(/neither the predecessor's nor the successor's/) });
+      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: "The seat's pane (%5) is the staged successor's, but the switch wasn't committed; nothing was touched." });
     });
 
     it("#3103: a seat restored after a tmux server restart on the old successor's pane number isn't taken for the successor", async () => {
@@ -1058,7 +1066,7 @@ describe("live seat runtime switch", () => {
       serverStart = Date.parse("2026-10-24T03:30:00Z") / 1000;
       sessionCreated.set(SEAT, String(Date.parse("2026-10-24T03:30:00Z") / 1000));
       clock = Date.parse("2026-10-24T04:00:00Z");
-      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
+      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/one pane is at the seat, not identified as the codex occupant; the staged claude-code successor was already gone/) });
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(panes.get(SEAT)).toBe("%5");
       expect(runtimeSwitchSummary(db, { nodeId })).toBeNull();
@@ -1094,7 +1102,7 @@ describe("live seat runtime switch", () => {
       clock = Date.parse("2026-10-24T04:00:00Z");
       expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
       expect(openSwitch()).toMatchObject({ phase: "preparing" });
-      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: expect.stringMatching(/neither the predecessor's nor the successor's/) });
+      expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", attention: expect.stringMatching(/The seat's pane \(%5\) is the staged successor's, but the switch wasn't committed/) });
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
     });
 
@@ -1170,7 +1178,7 @@ describe("live seat runtime switch", () => {
       db.exec("UPDATE seat_runtime_switches SET successor_pane = NULL");
       panes.set(SEAT, "%9");
       clock = Date.parse("2026-10-24T04:00:00Z");
-      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/the codex occupant holds the seat; the staged claude-code successor was already gone/) });
+      expect(await service().recover(nodeId)).toMatchObject({ ok: true, outcome: expect.stringMatching(/one pane is at the seat, not identified as the codex occupant; the staged claude-code successor was already gone/) });
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null });
     });
