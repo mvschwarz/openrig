@@ -266,17 +266,11 @@ function outcomeComplete(slice: SliceFacts): boolean {
   const r = slice.readiness;
   return !!r?.configured && r.state === "ready" && r.items.length > 0 && r.items.every(i => i.state === "accepted");
 }
-/** The `closed-<reason>` words `rig scope slice close --in-place` writes, and the word each one reads as. An explicit close
- *  decides the slice's word; bare statuses (`deferred`, `superseded`, …) keep their earlier reading. */
-const EXPLICIT_CLOSE_WORDS = new Map([
-  ["closed-deferred", "deferred"],
-  ["closed-superseded", "superseded"],
-  ["closed-wontfix", "closed"],
-  ["closed-stale", "closed"],
-]);
+/** The `closed-<reason>` words `rig scope slice close --in-place` writes. An explicit close reads as "closed"; the reason stays
+ *  visible as the declared word on the strip. Bare statuses (`deferred`, `superseded`, …) keep their earlier reading. */
+const EXPLICIT_CLOSE_WORDS = new Set(["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"]);
 function explicitCloseWord(slice: SliceFacts): string | null {
-  const word = EXPLICIT_CLOSE_WORDS.get(declaredText(slice));
-  if (word) return word;
+  if (EXPLICIT_CLOSE_WORDS.has(declaredText(slice))) return "closed";
   return record(slice.ladder["recorded_status"])["bucket"] === "closed" ? "closed" : null;
 }
 function stateWord(slice: SliceFacts): string {

@@ -1209,6 +1209,87 @@ describe("#2727 rig scope slice close --in-place", () => {
     expect(indexerRawStatus(seeded.sliceName)).toBe("closed-deferred");
   });
 
+  it.each([false, true])("never promises restoration when a read-back mismatch is followed by a failed rollback: keeps the mismatch and file, lists the failure, says recovery is incomplete (json=%s)", async (json) => {
+    const missionName = `m-partial-rollback-${json ? "json" : "human"}`;
+    const seeded = await seedAcceptedSlice(missionName);
+    const specPath = path.join(seeded.sliceDir, "SPEC.md");
+    const progressPath = path.join(seeded.sliceDir, "PROGRESS.md");
+    const manifestPath = path.join(seeded.missionDir, "mission.yaml");
+    writeFile(specPath, fs.readFileSync(specPath, "utf8").replace("status: active", "status: active # keep this note"));
+    const before = { spec: fs.readFileSync(specPath, "utf8"), progress: fs.readFileSync(progressPath, "utf8"), manifest: fs.readFileSync(manifestPath, "utf8") };
+    const manifestTmpPrefix = `${path.resolve(manifestPath)}.openrig-`;
+    const origWriteFileSync = fs.writeFileSync.bind(fs);
+    let manifestWrites = 0;
+    const failManifestRestore = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+      if (path.resolve(String(file)).startsWith(manifestTmpPrefix) && ++manifestWrites >= 2) {
+        throw Object.assign(new Error("EPERM: simulated mission membership restore failure"), { code: "EPERM" });
+      }
+      return origWriteFileSync(file, data, options as fs.WriteFileOptions);
+    }) as typeof fs.writeFileSync);
+    let refused: CaptureResult;
+    try {
+      refused = await runScope(["slice", "close", seeded.sliceName, "--mission", missionName, "--in-place", "--reason", "deferred", ...(json ? ["--json"] : [])], missionsRoot);
+    } finally {
+      failManifestRestore.mockRestore();
+    }
+
+    const reported = json ? (JSON.parse(refused.stdout) as { ok: boolean; error: { fact: string; consequence: string; action: string } }) : null;
+    if (reported) expect(reported.ok).toBe(false);
+    const message = reported ? `${reported.error.fact}\n${reported.error.consequence}\n${reported.error.action}` : refused.stderr;
+    expect(refused.exitCode).toBe(1);
+    expect(manifestWrites, "the membership edit and its failed restore were both attempted").toBe(2);
+    // The original mismatch, the named file and every rollback failure stay visible.
+    expect(message).toContain(`the slice indexer reads "closed-deferred # keep this note" from ${specPath}`);
+    expect(message).toContain("rollback mission composition: EPERM: simulated mission membership restore failure");
+    // Recovery is reported as incomplete, never as restored, and tells the user what to inspect.
+    expect(message).toContain("Rollback did NOT complete");
+    expect(message).toContain(manifestPath);
+    expect(message).not.toMatch(/every file it changed was restored|readers cannot disagree/);
+    // Actual state: the node file really was restored, the membership edit really was left behind.
+    expect(fs.readFileSync(specPath, "utf8")).toBe(before.spec);
+    expect(fs.readFileSync(progressPath, "utf8")).toBe(before.progress);
+    const left = YAML.parse(fs.readFileSync(manifestPath, "utf8")) as { composition: { slices: Array<{ ref: string; active?: boolean }> } };
+    expect(left.composition.slices.find((entry) => entry.ref === `slices/${seeded.sliceName}/slice.yaml`)?.active).toBe(false);
+    expect(fs.readFileSync(manifestPath, "utf8")).not.toBe(before.manifest);
+  });
+
+  it("states that every changed file was restored only when a read-back mismatch rolled back completely", async () => {
+    const seeded = await seedAcceptedSlice("m-full-rollback");
+    const specPath = path.join(seeded.sliceDir, "SPEC.md");
+    writeFile(specPath, fs.readFileSync(specPath, "utf8").replace("status: active", "status: active # keep this note"));
+    const before = fs.readFileSync(specPath, "utf8");
+    const refused = await runScope(["slice", "close", seeded.sliceName, "--mission", "m-full-rollback", "--in-place", "--reason", "deferred"], missionsRoot);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("every file it changed was restored");
+    expect(refused.stderr).not.toContain("Rollback did NOT complete");
+    expect(fs.readFileSync(specPath, "utf8")).toBe(before);
+  });
+
+  it("closes a slice whose PROGRESS.md has a nested-only status: keeping the nested checks, with the indexer and CLI both reading the new status", async () => {
+    const seeded = await seedAcceptedSlice("m-nested-only");
+    const progressPath = path.join(seeded.sliceDir, "PROGRESS.md");
+    const manifestPath = path.join(seeded.missionDir, "mission.yaml");
+    const judgmentPath = path.join(seeded.sliceDir, "proof", "judgments", "00000001.md");
+    writeFile(progressPath, "---\ndoc: slice-progress\nchecks:\n  status: active\n  verdict: pass\n---\n# Progress\n\n- Kept note.\n");
+    commitAll(projectRoot, "nested-only progress status");
+    expect(indexerRawStatus(seeded.sliceName), "before: the indexer reads the nested status").toBe("active");
+    const beforeJudgment = fs.readFileSync(judgmentPath, "utf8");
+
+    const closed = await runScope(["slice", "close", seeded.sliceName, "--mission", "m-nested-only", "--in-place", "--reason", "deferred", "--json"], missionsRoot);
+
+    expect(closed.exitCode, closed.stderr || closed.stdout).toBe(0);
+    expect(JSON.parse(closed.stdout).closed).toMatchObject({ inPlace: true, status: "closed-deferred" });
+    expect(indexerRawStatus(seeded.sliceName)).toBe("closed-deferred");
+    expect(readIndexerSliceStatus(seeded.sliceDir).status).toBe("closed-deferred");
+    const progress = fs.readFileSync(progressPath, "utf8");
+    expect(readFrontmatter(progressPath)).toMatchObject({ doc: "slice-progress", status: "closed-deferred", checks: { status: "active", verdict: "pass" } });
+    expect(progress).toContain("checks:\n  status: active\n  verdict: pass");
+    expect(progress).toContain("- Kept note.");
+    const manifest = YAML.parse(fs.readFileSync(manifestPath, "utf8")) as { composition: { slices: Array<{ ref: string; active?: boolean }> } };
+    expect(manifest.composition.slices.find((entry) => entry.ref === `slices/${seeded.sliceName}/slice.yaml`)?.active).toBe(false);
+    expect(fs.readFileSync(judgmentPath, "utf8")).toBe(beforeJudgment);
+  });
+
   it("indexes every status shape the read-back sees exactly as the daemon's SliceIndexer does", () => {
     const sliceNameOf = (index: number) => `${String(index + 1).padStart(2, "0")}-shape`;
     const cases: Array<{ shape: string; files: Record<string, string> }> = [

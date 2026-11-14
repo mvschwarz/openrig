@@ -117,7 +117,7 @@ describe("#2761 execution view on the default flow", () => {
     return { execution, scopes, ids, dir };
   }
 
-  it("#2727 reads the closed-<reason> words as deferred/superseded/closed whatever the proof judgments say", () => {
+  it("#2727 reads every closed-<reason> word as closed, with the reason kept on the strip, whatever the proof judgments say", () => {
     const words = ["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"];
     const rows: Row[] = words.flatMap((word) => [
       { word, bucket: "closed" },
@@ -128,11 +128,11 @@ describe("#2761 execution view on the default flow", () => {
 
     const body = text(executionContentLines(execution, scopes, [], null, 200));
     for (const word of ["declared done", "planned", "outcomes pending", "outcome complete", "reopened"]) expect(body).not.toContain(word);
-    expect(body).toContain("3 deferred");
-    expect(body).toContain("3 superseded");
-    expect(body).toContain("6 closed");
+    expect(body).not.toMatch(/\d+ (deferred|superseded)/);
+    expect(body).toContain("12 closed");
     rows.forEach((row, i) => {
       const strip = text(executionSliceStripLines(execution, ids[i]!, dir(i), 200, row.word));
+      expect(strip).toContain(`declared    ${row.word} (slice file)`);
       expect(strip).toContain(`next        none — declared ${row.word}`);
     });
   });

@@ -215,8 +215,10 @@ exits) updates status in place under `<mission>/slices/<slice>` (and writes the 
 status to a `status:` that the slice indexer reads in `PROGRESS.md` frontmatter).
 It then reads the status back the way the slice indexer does; if the indexer does
 not read the new status (for example a duplicate, nested or commented `status:`
-line), it restores every file it changed and refuses with one message naming the
-file. It does not move the folder, so recorded judgments stay applicable while the item
+line), it restores the files it changed and refuses with one message naming the
+file. If a restore itself fails, the message keeps the mismatch, lists every failed
+restore, and says the slice's files and `mission.yaml` may be partly changed, so
+inspect them before closing again. It does not move the folder, so recorded judgments stay applicable while the item
 text, policy and cited evidence bytes are unchanged (judgments citing files
 updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,
 reopen to `unknown`), and parent mission status is never automatically marked

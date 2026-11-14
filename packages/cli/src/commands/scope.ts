@@ -637,6 +637,7 @@ function buildSliceCloseCommand(): Command {
 
           applyMissionCompositionEdits(edits);
           let attemptedProgressWrite = false;
+          let readBackMismatch: ScopeCliError | null = null;
           try {
             const updates: Record<string, unknown> = {
               status: targetStatus,
@@ -652,11 +653,12 @@ function buildSliceCloseCommand(): Command {
             const readBack = readIndexerSliceStatus(slice.absPath);
             if (readBack.status !== targetStatus) {
               const readFile = readBack.file ?? nodePath;
-              throw new ScopeCliError({
+              readBackMismatch = new ScopeCliError({
                 fact: `After writing status "${targetStatus}", the slice indexer reads ${readBack.status === null ? "no status" : `"${readBack.status}"`} from ${readFile}.`,
-                consequence: "In-place closure rolled back: every file it changed was restored, so readers cannot disagree about this slice's status.",
+                consequence: "In-place closure refused.",
                 action: `Give ${path.basename(readFile)} one top-level scalar "status:" line, with no inline "#" comment and no duplicate or nested "status:" entry, or close without --in-place, then retry.`,
               });
+              throw readBackMismatch;
             }
           } catch (error) {
             const rollbackFailures: string[] = [];
@@ -687,10 +689,16 @@ function buildSliceCloseCommand(): Command {
             }
             if (rollbackFailures.length > 0) {
               if (error instanceof ScopeCliError) {
+                // Never promise restoration here: the slice may be left partly changed, and the failures below say where.
+                const stateKnown = error === readBackMismatch
+                  ? ` Rollback did NOT complete (${rollbackFailures.join("; ")}). The slice's files and ${path.join(mission.absPath, "mission.yaml")} may be partly changed and their current state is unknown.`
+                  : ` (rollback failure(s): ${rollbackFailures.join("; ")})`;
                 throw new ScopeCliError({
                   fact: error.fact,
-                  consequence: `${error.consequence} (rollback failure(s): ${rollbackFailures.join("; ")})`,
-                  action: error.action,
+                  consequence: `${error.consequence}${stateKnown}`,
+                  action: error === readBackMismatch
+                    ? `Inspect ${nodePath}, ${progressPath} and ${path.join(mission.absPath, "mission.yaml")} and repair any leftover change before closing this slice again. ${error.action}`
+                    : error.action,
                 });
               }
               const origMessage = error instanceof Error ? error.message : String(error);
@@ -698,6 +706,13 @@ function buildSliceCloseCommand(): Command {
                 `${origMessage} (rollback failure(s): ${rollbackFailures.join("; ")})`,
                 { cause: error },
               );
+            }
+            if (error === readBackMismatch) {
+              throw new ScopeCliError({
+                fact: error.fact,
+                consequence: "In-place closure rolled back: every file it changed was restored, so readers cannot disagree about this slice's status.",
+                action: error.action,
+              });
             }
             throw error;
           }
