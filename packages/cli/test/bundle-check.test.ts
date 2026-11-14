@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { checkBundleFolder } from "../src/lib/bundle-check.js";
 import { bundleCommand } from "../src/commands/bundle.js";
+import { readDeclaredConfigurations, resolveConfiguration } from "../src/lib/bundle-configuration.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
 const SPEC = `version: "0.2"
@@ -116,5 +117,25 @@ presets:
     expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "configurations", status: "pass" }));
     fs.writeFileSync(path.join(root, "configurations.yaml"), config.replace("recommended: authored", "recommended: alternate"));
     expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "configurations", status: "finding" }));
+  });
+
+  it("reports schema-invalid preset and runtime names even when mappings resolve", async () => {
+    const config = `schema: openrig.bundle-configurations/v1
+recommended: authored
+seats:
+  infra.observer: { runtimes: { terminal: none, codex: default } }
+presets:
+  authored: { infra.observer: terminal }
+`;
+    const check = async (text: string) => {
+      fs.writeFileSync(path.join(root, "configurations.yaml"), text);
+      return (await checkBundleFolder(root)).checks.find(c => c.ruleId === "configurations")?.status;
+    };
+    expect(await check(config)).toBe("pass");
+    expect(await check(config.replaceAll("authored", "Authored"))).toBe("finding");
+    expect(await check(config.replace("codex: default", "Codex: default"))).toBe("finding");
+    fs.writeFileSync(path.join(root, "configurations.yaml"), config.replaceAll("authored", "Authored"));
+    const declared = readDeclaredConfigurations(root)!;
+    expect(resolveConfiguration(declared, { "infra.observer": "terminal" }, { preset: "Authored" }).mapping).toEqual({ "infra.observer": "terminal" });
   });
 });
