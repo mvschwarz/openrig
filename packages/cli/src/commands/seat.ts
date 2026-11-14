@@ -593,6 +593,35 @@ Examples:
         ...(opts.mode === undefined ? { enabled: opts.enabled === "true" } : { mode: opts.mode }), reason: opts.reason,
       }, opts.json);
     });
+  cmd.command("set-hook-bridge").argument("<seat>")
+    .requiredOption("--enabled <boolean>", "true opts this Claude seat in to its hook bridge; false opts it out")
+    .requiredOption("--reason <text>").option("--json").description("Opt a Claude seat in or out of delivery through its launch-owned hook bridge")
+    .addHelpText("after", `
+Opted in, a Claude seat's next launch or restore adds two asyncRewake hooks (SessionStart, Stop) that run one waiter
+for the seat, and a quick UserPromptSubmit marker. Messages to the seat are then queued and delivered into its
+context at its next turn boundary: OpenRig doesn't type into its input box or touch a dialog. A seat mid-turn gets
+them when the turn ends.
+
+It takes effect only for an occupant launched with it, once its waiter has armed; until then delivery is typed as
+before. With no live waiter (never armed, expired after the hook timeout, or gone), messages are typed after 20 s,
+and the sender is told the bridge wasn't available. The typing guard's hold and levels still decide first.
+
+Each wake is one model turn on the seat's own login. A delivered message is recorded as delivered into the seat's
+context, not as acted on: a queue row's claim and result stay with the agent.
+
+Examples:
+  rig seat set-hook-bridge dev-impl@my-rig --enabled true --reason "wake at turn boundaries"
+  rig seat hook-bridge dev-impl@my-rig
+`)
+    .action(async (seat: string, opts: { enabled: string; reason: string; json?: boolean }) => {
+      if (!["true", "false"].includes(opts.enabled)) { console.error("Choose --enabled true or false."); process.exitCode = 1; return; }
+      await guardRequest("POST", `/api/hook-bridge/seat/${encodeURIComponent(seat)}`, { enabled: opts.enabled === "true", reason: opts.reason }, opts.json);
+    });
+  cmd.command("hook-bridge").argument("<seat>").option("--json")
+    .description("Show a seat's hook bridge: opted in, effective for this occupant, its waiter, queued messages and wakes")
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      await guardRequest("GET", `/api/hook-bridge/seat/${encodeURIComponent(seat)}`, undefined, opts.json);
+    });
   cmd.command("held-messages").argument("<seat>").option("--limit <n>", "Page size", "100").option("--offset <n>", "Page offset", "0").option("--id <id>", "Read one retained or retired record by ID").option("--json")
     .description("Read retained messages outside the protected terminal; reading never delivers them")
     .action(async (seat: string, opts: {limit: string; offset: string; id?: string; json?: boolean}) => {

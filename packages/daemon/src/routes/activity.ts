@@ -302,7 +302,7 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
 /** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
  *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
  *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
-function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
+export function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;

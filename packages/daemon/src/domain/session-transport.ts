@@ -54,6 +54,7 @@ import { hashSentText, type CaptureObserverSink, type CaptureSlot, type Observat
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
+import type { HookBridge } from "./hook-bridge.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -1976,6 +1977,9 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 
 export interface SendOpts {
   expectedIdentity?: ExpectedConversation;
+  /** Internal: a message the seat's hook bridge couldn't deliver, handed back for typed delivery under its own outbox id.
+   *  Never accepted from the public transport route. */
+  hookBridgeFallback?: boolean;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -2153,7 +2157,8 @@ export interface SendResult {
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
    */
-  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained";
+  /** "bridged": queued for the seat's hook bridge, delivered into its context at its next turn boundary (slice 13). */
+  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "bridged";
   outboxIds?: string[];
   delivery?: GuardedDeliverySummary;
   warning?: string;
@@ -2246,6 +2251,8 @@ interface SessionTransportDeps {
   // A positive-picker override requires a working audit sink. Other explicit interaction attempts
   // audit too, but an unavailable sink stays advisory so an already accepted send is not refused.
   eventBus?: EventBus;
+  /** Slice 13: an opted-in Claude seat's hook bridge. Absent, every seat gets typed delivery as before. */
+  hookBridge?: HookBridge;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   waitForIdlePollMs?: number;
@@ -2305,6 +2312,7 @@ export class SessionTransport {
   private tmuxAdapter: TmuxAdapter;
   private agentActivityStore?: AgentActivityStore;
   private eventBus?: EventBus;
+  private hookBridge?: HookBridge;
   private now: () => Date;
   private sleep: (ms: number) => Promise<void>;
   private waitForIdlePollMs: number;
@@ -2326,6 +2334,7 @@ export class SessionTransport {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.agentActivityStore = deps.agentActivityStore;
     this.eventBus = deps.eventBus;
+    this.hookBridge = deps.hookBridge;
     this.now = deps.now ?? (() => new Date());
     this.sleep = deps.sleep ?? delay;
     this.waitForIdlePollMs = deps.waitForIdlePollMs ?? 500;
@@ -2801,7 +2810,7 @@ export class SessionTransport {
       await resolveExpectedConversation(expected, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
       const result = await this.sendClassifiedInput(sessionName, text, { ...opts, expectedIdentity: expected,
         ...(opts?.committedOutboxIds ? {} : { deliveryId: ids[0] }) });
-      if (result.outcome !== "retained") {
+      if (result.outcome !== "retained" && result.outcome !== "bridged") {
         try {
           for (const id of ids) {
             if (result.ok) {
@@ -2834,6 +2843,38 @@ export class SessionTransport {
         ...(error instanceof DeliveryGuardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}),
         ...(receiptUnconfirmed ? { warning: "Conditional input receipt could not be finalized; inspect before retrying." } : {}) };
     }
+  }
+
+  /** Slice 13: type the messages queued for a hook bridge that has no live arm (or, with `nodeId`, every message queued
+   *  for that seat), oldest first, each under its own outbox id through the ordinary send path. The daemon runs this on
+   *  an interval; a send that finds the bridge unavailable runs it for its seat. */
+  async sweepHookBridge(opts: { nodeId?: string } = {}): Promise<Array<{ outboxId: string; result: SendResult }>> {
+    const bridge = this.hookBridge;
+    if (!bridge) return [];
+    bridge.reconcileUnacked();
+    const due = bridge.dueForFallback();
+    if (opts.nodeId && !due.some((d) => d.nodeId === opts.nodeId) && !bridge.live(opts.nodeId)) {
+      const ids = bridge.queued(opts.nodeId).map((m) => m.outboxId);
+      if (ids.length) due.push({ nodeId: opts.nodeId, outboxIds: ids, reason: bridge.unavailable(opts.nodeId) });
+    }
+    const outbox = new OutboxHandler(this.db);
+    const typed: Array<{ outboxId: string; result: SendResult }> = [];
+    for (const { nodeId, outboxIds, reason } of due) {
+      for (const outboxId of outboxIds) {
+        const entry = outbox.getById(outboxId);
+        if (!entry) continue;
+        bridge.releaseForTyping(nodeId, entry.destinationSession, [outboxId], reason);
+        const result = await this.send(entry.destinationSession, entry.body, { deliveryId: outboxId, hookBridgeFallback: true,
+          actorSession: entry.senderSession, ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}), ...(entry.urgency === "urgent" ? { urgent: { by: entry.senderSession } } : {}) });
+        if (result.outcome !== "retained") {
+          if (result.ok) outbox.markDelivered(outboxId);
+          else if (result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(outboxId);
+          else outbox.markFailed(outboxId);
+        }
+        typed.push({ outboxId, result });
+      }
+    }
+    return typed;
   }
 
   private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
@@ -2901,10 +2942,29 @@ export class SessionTransport {
           sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
         }
       }
+      let bridgeWarning: string | undefined;
       const result = await guard.operation(sessionName, async () => {
         const members = recheck(false);
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
+        // Slice 13: an occupant launched with its hook bridge gets the message at its next turn boundary, nothing typed.
+        // Admission (hold, the levels) has already decided above. With no live arm, it's typed, with a warning; messages
+        // already queued go first, so a send never overtakes them.
+        const bridge = this.hookBridge;
+        if (bridge && !memberOpts?.hookBridgeFallback && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract) {
+          const target = guard.target(sessionName);
+          if (bridge.routes(target)) {
+            const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
+            if (bridge.live(target.nodeId)) return bridge.deposit(target, sessionName, memberText, memberOpts ?? {}, bridgeIds);
+            const reason = bridge.unavailable(target.nodeId);
+            if (bridge.queued(target.nodeId).length) {
+              const queued = bridge.deposit(target, sessionName, memberText, memberOpts ?? {}, bridgeIds);
+              setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
+              return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
+            }
+            bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
+          }
+        }
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
@@ -2944,6 +3004,7 @@ export class SessionTransport {
         }
         return retainedResult();
       }, admission);
+      if (bridgeWarning) result.warning = [bridgeWarning, result.warning].filter(Boolean).join(" ");
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
       }

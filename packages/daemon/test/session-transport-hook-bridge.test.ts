@@ -1,0 +1,99 @@
+// Slice 13: the hook bridge is one branch inside the delivery owner. A live bridge queues the message and nothing is
+// typed. A bridge with no live arm gets today's typed delivery with a warning. The typing guard's hold still decides
+// first. A message queued before its waiter vanished is typed by the sweep, under its own outbox id.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { ProcessCensus } from "../src/domain/process-census.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+
+const cleanup: Array<() => unknown> = [];
+afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) close(); });
+
+async function seat() {
+  const root = mkdtempSync(join(tmpdir(), "hook-bridge-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
+  const repo = new RigRepository(db), rig = repo.createRig("team"), node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+  const registry = new SessionRegistry(db), sessionName = "dev-impl@team";
+  const session = registry.registerSession(node.id, sessionName); registry.updateStatus(session.id, "running");
+  registry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" });
+  const occupant = registry.currentOccupantTenure(node.id)?.generationUuid ?? null;
+
+  const writes: string[] = [];
+  const tmux = new TmuxAdapter(async (command) => {
+    if (command.includes("paste-buffer") || command.includes("send-keys")) writes.push(command.includes("paste-buffer") ? "paste" : "keys");
+    return "";
+  }, { writeFile: async () => {}, unlink: async () => {}, tmpName: () => join(root, "paste"), bufferName: () => "bridge-test" });
+  vi.spyOn(tmux, "getPanePid").mockResolvedValue(10);
+  vi.spyOn(tmux, "getPaneCommand").mockResolvedValue("claude");
+  vi.spyOn(tmux, "listPanes").mockResolvedValue([{ id: "%1", index: 0, cwd: root, width: 120, height: 40, active: true }]);
+  vi.spyOn(tmux, "probeSession").mockResolvedValue({ state: "present" } as never);
+  vi.spyOn(tmux, "isPaneInMode").mockResolvedValue(false);
+  vi.spyOn(tmux, "capturePaneContent").mockResolvedValue("● ready\n────────\n❯ \n────────");
+  vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue([{ pid: 10, ppid: 1, command: "zsh" }, { pid: 20, ppid: 10, command: "claude" }] as never);
+  const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name), async () => {});
+  tmux.deliveryGuard = guard;
+  let now = Date.parse("2026-11-14T18:00:00Z");
+  const bridge = new HookBridge(db, { now: () => now });
+  const transport = new SessionTransport({ db, rigRepo: repo, sessionRegistry: registry, tmuxAdapter: tmux, hookBridge: bridge, sleep: async () => {},
+    listProcesses: async () => [] } as never);
+  const optInAndArm = () => {
+    bridge.setPreference(node.id, true, "human@team", "wake at turn boundaries");
+    return bridge.arm({ nodeId: node.id, sessionName, generation: occupant, hookEvent: "SessionStart" });
+  };
+  return { db, guard, bridge, transport, writes, nodeId: node.id, sessionName, optInAndArm, advance: (ms: number) => { now += ms; } };
+}
+
+describe("the transport's hook-bridge branch (slice 13)", () => {
+  it("queues for a live bridge and types nothing", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" });
+    expect(result).toMatchObject({ ok: true, outcome: "bridged", sent: false });
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId)).toHaveLength(1);
+  });
+
+  it("types when the bridge has no live arm, and says the bridge wasn't available", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" });
+    expect(result.outcome).not.toBe("bridged");
+    expect(s.writes).toContain("paste");
+    expect(result.warning).toMatch(/hook bridge isn't available .*delivered by typing instead/);
+  });
+
+  it("lets the typing guard's hold decide first: held, not queued for the bridge", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    await s.guard.set(s.nodeId, { mode: "hold" }, "human@team", "quiet");
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" });
+    expect(result).toMatchObject({ outcome: "retained", reason: "typing_guard_enabled" });
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
+
+  it("types a message queued before its waiter vanished, under its own outbox id, after the bound", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" });
+    const id = queued.outboxIds![0]!;
+    expect(await s.transport.sweepHookBridge()).toEqual([]); // still live
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed.map((t) => t.outboxId)).toEqual([id]);
+    expect(s.writes).toContain("paste");
+    expect(new OutboxHandler(s.db).getById(id)?.deliveryState).not.toBe("sending");
+  });
+});

@@ -6,6 +6,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { shellQuote } from "./shell-quote.js";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import { HOOK_BRIDGE_TIMEOUT_SECONDS } from "../domain/hook-bridge.js";
 
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../../assets/claude-permission-policies.cjs";
 export { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
@@ -13,7 +14,30 @@ export { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
 type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions"> & {
   /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */
   managedCompaction?: boolean;
+  /** Slice 13: the seat opted in to its hook bridge, so this launch adds the bridge's hooks. */
+  hookBridge?: boolean;
 };
+
+/** Slice 13: an opted-in Claude seat's hook bridge, merged into the session's one --settings value beside any hooks
+ *  already there. SessionStart and Stop run the waiter as `asyncRewake` command hooks (Claude Code 2.1.322's schema:
+ *  "runs in background and wakes the model on exit code 2"), with a timeout past an hour idle; UserPromptSubmit runs the
+ *  quick turn marker. Each command is this daemon's node and the bundled script, quoted for the shell. */
+export function withHookBridge(args: string[], on: boolean, script = fileURLToPath(new URL("../../assets/claude-hook-bridge.cjs", import.meta.url))): string[] {
+  if (!on || !existsSync(script)) return args;
+  const command = (mode: string) => [process.execPath, script, mode].map(shellQuote).join(" ");
+  const waiter = { type: "command", command: command("waiter"), asyncRewake: true, timeout: HOOK_BRIDGE_TIMEOUT_SECONDS };
+  const bridge: Record<string, unknown[]> = {
+    SessionStart: [{ hooks: [waiter] }],
+    Stop: [{ hooks: [waiter] }],
+    UserPromptSubmit: [{ hooks: [{ type: "command", command: command("turn"), timeout: 5 }] }],
+  };
+  const at = args.indexOf("--settings");
+  const settings = at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>;
+  const hooks = { ...((settings.hooks ?? {}) as Record<string, unknown[]>) };
+  for (const [event, entries] of Object.entries(bridge)) hooks[event] = [...(hooks[event] ?? []), ...entries];
+  const value = JSON.stringify({ ...settings, hooks });
+  return at < 0 ? [...args, "--settings", value] : [...args.slice(0, at + 1), value, ...args.slice(at + 2)];
+}
 
 /** OpenRig's managed compaction acts on Claude seats while its policy is on with a threshold the enforcer accepts (it
  *  treats any other threshold as off). Read fresh at each launch; an unreadable policy reads as off. */
@@ -60,7 +84,7 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
       choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
   }
   if (runtime === "claude-code") {
-    const args = withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+    const args = withHookBridge(withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive()), choice.hookBridge === true);
     if (choice.claudePermissions === undefined) return args;
     const rules = validateClaudePermissionRules(choice.claudePermissions);
     const at = args.indexOf("--settings");

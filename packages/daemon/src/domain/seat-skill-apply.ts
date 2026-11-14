@@ -174,7 +174,7 @@ export interface SeatSkillApplyResult {
 }
 
 export interface SeatSkillSender {
-  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "unknown"; error?: string; reason?: string }>;
+  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "bridged" | "unknown"; error?: string; reason?: string }>;
 }
 
 /**

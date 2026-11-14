@@ -1,0 +1,116 @@
+// Slice 13: the hook bridge's routes.
+//
+// - /seat/:seatRef reads and sets a seat's opt-in. The actor comes from the transport header, never the body.
+// - The waiter's routes (arm, poll, ack, turn, expired) accept what the activity hooks accept: the install-wide hook
+//   token, or the seat's own activity grant, which speaks only for its own seat. A waiter must name the seat's current
+//   occupant generation, so a replaced occupant's waiter is refused and exits.
+import { Hono, type Context } from "hono";
+import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AgentActivityStore } from "../domain/agent-activity-store.js";
+import { HOOK_BRIDGE_EXPIRE_MARGIN_SECONDS, HOOK_BRIDGE_TIMEOUT_SECONDS, HookBridgeError, type HookBridge } from "../domain/hook-bridge.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import { activityPrincipal } from "./activity.js";
+import { transportSenderSession } from "./require-sender-identity.js";
+
+export const hookBridgeRoutes = new Hono();
+
+const bridgeOf = (c: Context) => c.get("hookBridge" as never) as HookBridge | undefined;
+const guardOf = (c: Context) => (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+
+function unavailable(c: Context) {
+  return c.json({ ok: false, code: "hook_bridge_unavailable", error: "This daemon has no hook bridge." }, 503);
+}
+
+hookBridgeRoutes.get("/seat/:seatRef", (c) => {
+  const bridge = bridgeOf(c);
+  const guard = guardOf(c);
+  if (!bridge || !guard) return unavailable(c);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    return c.json({ ok: true, session: target.session, ...bridge.status(target.nodeId, target.occupant) });
+  } catch (error) {
+    return c.json({ ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", error: (error as Error).message }, 404);
+  }
+});
+
+hookBridgeRoutes.post("/seat/:seatRef", async (c) => {
+  const bridge = bridgeOf(c);
+  const guard = guardOf(c);
+  if (!bridge || !guard) return unavailable(c);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const actor = transportSenderSession(c);
+  if (typeof body.enabled !== "boolean") return c.json({ ok: false, code: "invalid_hook_bridge", error: "enabled must be true or false." }, 400);
+  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ ok: false, code: "hook_bridge_attribution_required", error: "Sender identity and reason required" }, 400);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    const preference = bridge.setPreference(target.nodeId, body.enabled, actor, body.reason);
+    return c.json({ ok: true, session: target.session, preference,
+      note: body.enabled ? "Takes effect when this seat is next launched or restored; until its waiter arms, delivery is typed as before."
+        : "Off now: new messages are typed. A running occupant keeps its hooks until it is next launched; its waiter gets nothing." });
+  } catch (error) {
+    const code = error instanceof HookBridgeError ? error.code : (error as { code?: string }).code ?? "guard_target_unknown";
+    return c.json({ ok: false, code, error: (error as Error).message }, error instanceof HookBridgeError ? 400 : 404);
+  }
+});
+
+/** The waiter's seat: authenticated like an activity hook, and naming the seat's current occupant. */
+async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string; sessionName: string; generation: string | null; body: Record<string, unknown> } | Response> {
+  const bridge = bridgeOf(c);
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+  const guard = guardOf(c);
+  if (!bridge || !store || !registry || !guard) return unavailable(c);
+  const principal = activityPrincipal(c, store, c.get("activityHookToken" as never) as string | undefined);
+  if ("refused" in principal) return principal.refused;
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const sessionName = typeof body.sessionName === "string" ? body.sessionName : "";
+  let target;
+  try { target = guard.target(sessionName); } catch { return c.json({ ok: false, code: "hook_bridge_seat_unknown", error: "This seat isn't known here." }, 404); }
+  if ((principal.grant && principal.grant.nodeId !== target.nodeId) || (typeof body.nodeId === "string" && body.nodeId !== target.nodeId)) {
+    return c.json({ ok: false, code: "hook_bridge_seat_mismatch", error: "This waiter speaks for another seat." }, 403);
+  }
+  const generation = typeof body.generation === "string" ? body.generation : null;
+  const current = registry.currentOccupantTenure(target.nodeId)?.generationUuid ?? null;
+  if (generation !== current) return c.json({ ok: false, code: "hook_bridge_stale_occupant", stop: true, error: "This waiter's occupant was replaced." }, 409);
+  return { bridge, nodeId: target.nodeId, sessionName: target.session, generation, body };
+}
+
+hookBridgeRoutes.post("/arm", async (c) => {
+  const w = await waiter(c);
+  if (w instanceof Response) return w;
+  const pref = w.bridge.preference(w.nodeId);
+  if (!pref?.desired) return c.json({ ok: true, stop: true, reason: "This seat isn't opted in to the hook bridge." });
+  const hookEvent = typeof w.body.hookEvent === "string" ? w.body.hookEvent : "unknown";
+  const { armId } = w.bridge.arm({ nodeId: w.nodeId, sessionName: w.sessionName, generation: w.generation, hookEvent,
+    ...(typeof w.body.armId === "string" ? { armId: w.body.armId } : {}) });
+  return c.json({ ok: true, armId, expireAfterSeconds: HOOK_BRIDGE_TIMEOUT_SECONDS - HOOK_BRIDGE_EXPIRE_MARGIN_SECONDS });
+});
+
+hookBridgeRoutes.post("/poll", async (c) => {
+  const w = await waiter(c);
+  if (w instanceof Response) return w;
+  if (typeof w.body.armId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId required." }, 400);
+  return c.json({ ok: true, ...w.bridge.poll(w.nodeId, w.body.armId) });
+});
+
+hookBridgeRoutes.post("/ack", async (c) => {
+  const w = await waiter(c);
+  if (w instanceof Response) return w;
+  if (typeof w.body.armId !== "string" || typeof w.body.batchId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId and batchId required." }, 400);
+  return c.json({ ok: true, ...w.bridge.ack(w.nodeId, w.sessionName, w.body.armId, w.body.batchId) });
+});
+
+hookBridgeRoutes.post("/turn", async (c) => {
+  const w = await waiter(c);
+  if (w instanceof Response) return w;
+  w.bridge.turnStarted(w.nodeId);
+  return c.json({ ok: true });
+});
+
+hookBridgeRoutes.post("/expired", async (c) => {
+  const w = await waiter(c);
+  if (w instanceof Response) return w;
+  if (typeof w.body.armId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId required." }, 400);
+  w.bridge.expired(w.nodeId, w.sessionName, w.body.armId);
+  return c.json({ ok: true });
+});

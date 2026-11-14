@@ -38,6 +38,8 @@ interface ClaudeResumeOptions {
   openrigHome?: string;
   /** The compaction settings the restore reads from, so the launch grants those files too. */
   restoreReadPolicy?: () => RestoreReadPolicy | null;
+  /** Slice 13: whether a seat opted in to its hook bridge, read at each restore. */
+  hookBridgeLaunch?: (nodeId: string) => boolean;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -118,7 +120,8 @@ export class ClaudeResumeAdapter {
     const requiresApiKey = seatToken?.ref.kind === "api-key";
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
-    const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
+    const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
+      hookBridge: nodeId ? this.options.hookBridgeLaunch?.(nodeId) === true : false };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {

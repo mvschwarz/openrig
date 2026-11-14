@@ -1331,6 +1331,8 @@ export class QueueRepository {
     // retention is the draft-aware delivery's (a draft, an unreadable input, a native prompt), which can clear.
     if (res.outcome === "retained") return { classified: "retained", nudgeResult: res.reason === "typing_guard_enabled"
       ? "retained:typing_guard" : "retained:draft_aware" };
+    // Queued for the seat's hook bridge: it reaches the seat's context at the next turn boundary, which isn't a claim.
+    if (res.outcome === "bridged") return { classified: "indeterminate", nudgeResult: "bridged:queued" };
     if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified" } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending" };
     const detail = res.error ?? res.reason ?? "unknown";
     // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
