@@ -133,6 +133,7 @@ import { healthRoutes } from "./routes/health.js";
 import { gatewayRoutes } from "./routes/gateway.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import { createSlowOpRequestMiddleware, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { createMutationTraceMiddleware, type MutationTraceSink } from "./domain/mutation-trace.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -223,6 +224,8 @@ export interface AppDeps {
   streamStore?: StreamStore;
   streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
+  /** Edge trace of state-changing requests through the diagnostics path; absent = off. */
+  mutationTrace?: MutationTraceSink;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
@@ -712,6 +715,12 @@ export function createApp(deps: AppDeps): Hono {
   // only when a recorder is wired (production); measurement-only + isolated (a throw never becomes a 500).
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
+  }
+  // Mutation trace: same registration seam and isolation contract as the request-timing
+  // observer above — registered only when the trace is turned on (opt-in), and it rides
+  // the recorder's bounded diagnostics path rather than writing on the request thread.
+  if (deps.mutationTrace) {
+    app.use("*", createMutationTraceMiddleware(deps.mutationTrace));
   }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
