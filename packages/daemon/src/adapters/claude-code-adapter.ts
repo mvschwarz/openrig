@@ -77,13 +77,20 @@ function claudeNotFoundReason(line: string): string {
     + "being reinstalled at that moment; relaunch this seat once claude is back.";
 }
 
-/** #3245: Claude Code's own startup refusal when managed settings set `disableSideloadFlags`, from the last lines of a pane
- *  back at its shell. As reported: `CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings
- *  (disableSideloadFlags). ...`. Both the setting's name and "managed settings" must be on the line, so a settings file
- *  printed in the shell doesn't count. */
+/** #3245: Claude Code's own startup refusal when managed settings set `disableSideloadFlags`: what it rejected, then
+ *  `is disabled by your organization's managed settings (disableSideloadFlags)`. Claude's plugin troubleshooting gives that
+ *  line for `--plugin-dir`, and #3245 reports it for `CLAUDE_CODE_PLUGIN_DIRS`. */
+const CLAUDE_SIDELOAD_REFUSAL =
+  /(?:CLAUDE_CODE_PLUGIN_DIRS|--plugin-dir|--plugin-url|--agents|--mcp-config) is disabled by your organi[sz]ation['’]s managed settings \(disableSideloadFlags\)/;
+
+/** The refusal itself, from the last lines of a pane back at its shell; only the refusal is quoted, not the rest of its line.
+ *  A settings file or a sentence that merely names the setting doesn't count. */
 function claudeSideloadRefusalLine(paneContent: string): string | null {
-  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse()
-    .find((line) => line.includes("disableSideloadFlags") && /managed settings/i.test(line)) ?? null;
+  for (const line of paneContent.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6).reverse()) {
+    const refusal = CLAUDE_SIDELOAD_REFUSAL.exec(line)?.[0];
+    if (refusal) return refusal;
+  }
+  return null;
 }
 
 /** Whether a plain capture may hold a refusal, even one wrapped mid-word; only then is a joined capture read. */

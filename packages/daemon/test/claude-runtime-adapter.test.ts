@@ -411,12 +411,19 @@ describe("Claude Code runtime adapter", () => {
   });
 
   // #3245: an organization's Claude Code managed settings set disableSideloadFlags, so Claude refuses the plugin folders
-  // OpenRig passes and exits at startup. The refusal line is the reported one; these are tmux fixtures, not a native run.
-  const sideloadRefusal = "CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings (disableSideloadFlags). Unset it to continue.";
+  // OpenRig passes and exits at startup. The variable's line is the reported one and the flag's is the one Claude's plugin
+  // troubleshooting gives; these are tmux fixtures, not a native run. Only the refusal itself is quoted.
+  const sideloadRefusalCore = "CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings (disableSideloadFlags)";
+  const sideloadRefusal = `${sideloadRefusalCore}. Unset it to continue.`;
   const sideloadReason = (line: string) => `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load this seat's skills and plugins, so this seat can't start while that setting applies.`;
 
-  it("checkReady names Claude's sideload refusal on a pane back at its shell, and keeps waiting (#3245)", async () => {
-    expect(await idleShellAfter(sideloadRefusal)).toEqual({ ready: false, reason: sideloadReason(sideloadRefusal), code: "returned_to_shell" });
+  it.each([
+    ["the plugin-folder variable, as reported", sideloadRefusal, sideloadRefusalCore],
+    ["a rejected flag, as Claude's troubleshooting gives it", "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)",
+      "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)"],
+    ["a refusal after other text on its line, which isn't quoted", `Error: token=example ${sideloadRefusal}`, sideloadRefusalCore],
+  ])("checkReady names Claude's sideload refusal for %s on a pane back at its shell, and keeps waiting (#3245)", async (_label, line, quoted) => {
+    expect(await idleShellAfter(line)).toEqual({ ready: false, reason: sideloadReason(quoted), code: "returned_to_shell" });
   });
 
   it("checkReady keeps a wrapped sideload refusal whole by reading the joined capture (#3245)", async () => {
@@ -434,12 +441,14 @@ describe("Claude Code runtime adapter", () => {
         { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
       ],
     });
-    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: sideloadReason(sideloadRefusal), code: "returned_to_shell" });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: sideloadReason(sideloadRefusalCore), code: "returned_to_shell" });
   });
 
   it.each([
     ["an ordinary failed start", "Error: something else went wrong"],
     ["a settings file printed in the shell", `"disableSideloadFlags": true`],
+    ["settings output holding both terms with a false value", `{"managed settings":{"disableSideloadFlags":false}}`],
+    ["a sentence that discusses the setting", "# disableSideloadFlags in managed settings rejects CLAUDE_CODE_PLUGIN_DIRS"],
   ])("checkReady keeps the plain returned-to-shell reason for %s (#3245)", async (_label, line) => {
     expect(await idleShellAfter(line)).toEqual({
       ready: false,
@@ -954,7 +963,7 @@ describe("Claude Code runtime adapter", () => {
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
 
-    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusal)}`, recovery: "retry_fresh" });
+    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusalCore)}`, recovery: "retry_fresh" });
   });
 
   describe("a resume still starting is watched, not failed (pane command is sh for every OpenRig launch)", () => {
