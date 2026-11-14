@@ -195,6 +195,10 @@ describe("mission parent links", () => {
     const slice = await createSlice(env, "parent");
     const sliceInfo = await run(["slice", "show", slice, "--json"], env.missionsRoot);
     const sliceId = JSON.parse(sliceInfo.stdout).slice.id as string;
+    const duplicate = await run(["mission", "create", "different-name", "--id", "OPR.0.4.0", "--parent", sliceId, "--json"], env.missionsRoot);
+    expect(duplicate.exitCode).toBe(1);
+    expect(duplicate.stdout).toContain("already in use");
+    expect(fs.existsSync(path.join(env.missionsRoot, "different-name"))).toBe(false);
     const created = await run(["mission", "create", "child", "--parent", sliceId, "--json"], env.missionsRoot);
     expect(created.exitCode).toBe(0);
     const childId = JSON.parse(created.stdout).mission.id as string;

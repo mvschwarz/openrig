@@ -944,6 +944,7 @@ function buildMissionCreateCommand(): Command {
         const parentWarnings: string[] = [];
         if (opts.parent !== undefined) {
           const nodes = readParentScope(missionsRoot, { onInvalid: (message) => parentWarnings.push(message) });
+          if (nodes.some((node) => node.id === id)) throw new ScopeCliError({ fact: `Mission ID ${id} is already in use.`, consequence: "Mission not created.", action: "Choose an unused mission ID." });
           validateMissionParent(nodes, id, opts.parent, (message) => parentWarnings.push(message));
         }
         const project = id.split(".")[0];
