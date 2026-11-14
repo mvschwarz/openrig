@@ -5,7 +5,7 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
-import { validateSessionName, deriveSessionName } from "./session-name.js";
+import { validateSessionName, deriveSessionName, boundSessionNameProblem } from "./session-name.js";
 import {
   startTranscriptRotation,
   getTranscriptRotationOptionsFromEnv,
@@ -55,6 +55,9 @@ interface LaunchOpts {
   /** Launch into this pane of the seat's existing session (named by `sessionName`) instead of a new session: its process
    *  is ended in place and a shell started there, so the pane and its scrollback stay. */
   keepPane?: string;
+  /** `sessionName` is the name this seat was bound to (restore keeps it). It is launched under that name even outside
+   *  OpenRig's naming pattern, as an adopted seat's own tmux session name is, when boundSessionNameProblem finds none. */
+  keepsBoundSessionName?: boolean;
 }
 
 interface NodeLauncherDeps {
@@ -175,7 +178,8 @@ export class NodeLauncher {
 
     // 2. Derive or validate session name
     const sessionName = opts?.sessionName ?? deriveSessionName(rig.rig.name, logicalId);
-    if (!validateSessionName(sessionName)) {
+    const keptBoundName = opts?.keepsBoundSessionName === true && opts.sessionName !== undefined && boundSessionNameProblem(sessionName) === null;
+    if (!validateSessionName(sessionName) && !keptBoundName) {
       return {
         ok: false,
         code: "invalid_session_name",
@@ -315,6 +319,7 @@ export class NodeLauncher {
           sessionName,
           opts?.occupantKind ?? "initial",
           occupantGeneration,
+          { keptBoundName },
         );
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
