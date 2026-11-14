@@ -96,6 +96,47 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(before);
   });
 
+  it("updates malformed closed frontmatter through the tolerant writer", async () => {
+    const slice = await createSlice(env, "malformed-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: [invalid\n---\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
+    const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("## Current state\n\nReady");
+    expect(content).toContain("## Other\n\nKeep");
+    expect(content).toContain("current_state_updated:");
+    expect(result.stderr).toContain("frontmatter isn't valid YAML");
+  });
+
+  it("updates an unterminated header without adding a timestamp block", async () => {
+    const slice = await createSlice(env, "unterminated-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: alice\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
+    const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(file, "utf8");
+    expect(content.match(/^---$/gm)).toHaveLength(1);
+    expect(content).not.toContain("current_state_updated:");
+    expect(content).toContain("## Other\n\nKeep");
+    expect(result.stderr).toContain("without a timestamp");
+  });
+
+  it("recognizes closing hashes and does not rewrite an identical state", async () => {
+    const slice = await createSlice(env, "closing-hashes");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "# Progress\n\n## Current state ##\n\nOld\n\n## Other\n\nKeep\n");
+    const args = ["slice", "progress", slice, "--current-state", "Ready", "--json"];
+    expect((await run(args, env.missionsRoot)).exitCode).toBe(0);
+    const updated = fs.readFileSync(file, "utf8");
+    expect(updated.match(/^## Current state/gm)).toHaveLength(1);
+    expect(updated).toContain("## Current state ##\n\nReady");
+    expect(updated).toContain("## Other\n\nKeep");
+    const again = await run(args, env.missionsRoot);
+    expect(JSON.parse(again.stdout).progress.changed).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(updated);
+  });
+
   it("--add appends a UI-valid checkbox row into the default Rail section", async () => {
     const slicePath = await createSlice(env, "verb-add");
     const r = await run(["slice", "progress", slicePath, "--add", "Guard approved", "--json"], env.missionsRoot);

@@ -101,7 +101,7 @@ export function setCurrentState(content: string, value: string): ProgressEditRes
   const visible = progressLines(lines);
   const matches = visible.flatMap((line, i) => {
     const heading = line.match(HEADING_RE);
-    return heading && heading[1] === "##" && heading[2]!.trim().toLowerCase() === "current state" ? [i] : [];
+    return heading && heading[1] === "##" && heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim().toLowerCase() === "current state" ? [i] : [];
   });
   if (matches.length > 1) throw new ScopeCliError({ fact: "Multiple Current state sections found.", consequence: "No progress update was made.", action: "Keep one Current state section and retry." });
   if (!matches.length) {

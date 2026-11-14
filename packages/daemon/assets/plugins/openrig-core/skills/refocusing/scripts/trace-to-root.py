@@ -245,16 +245,52 @@ def age_cue(path, text):
     return f"OLD NOTES — {path}, {age:.0f} days old, source {source}, threshold {threshold:g} days"
 
 
-def current_state_cue(text):
-    """Use the state stamp, never the file mtime (other edits change it)."""
-    match = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---", text or "", re.S)
-    stamp = re.search(r'^current_state_updated:[ \t]*["\']?(\d{4}-\d\d-\d\dT[^\s"\']+)', match.group(1), re.M) if match else None
-    if stamp:
+def parsed_frontmatters(texts):
+    """Parse all trace frontmatter in one batch; unknown documents stay unknown."""
+    blocks = []
+    for text in texts:
+        match = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", text or "", re.S)
+        blocks.append(match.group(1) if match else None)
+    try:
+        import yaml
+        def parse(block):
+            if block is None:
+                return None
+            try:
+                value = yaml.load(block, Loader=yaml.BaseLoader)
+                return value if isinstance(value, dict) else None
+            except yaml.YAMLError:
+                return None
+        return [parse(block) for block in blocks]
+    except ImportError:
+        # OpenRig ships Node and the same YAML parser used by its scope writer.
+        program = r'''const fs = require("fs"), path = require("path");
+const yaml = require(require.resolve("yaml", {paths: [path.dirname(process.argv[1])]}));
+const blocks = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(blocks.map(block => {
+  if (block === null) return null;
+  try { const doc = yaml.parseDocument(block); const value = doc.toJS();
+    return !doc.errors.length && value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+})));'''
         try:
-            updated = datetime.datetime.fromisoformat(stamp.group(1).replace("Z", "+00:00"))
+            result = subprocess.run(["node", "-e", program, str(Path(__file__).resolve())],
+                                    input=json.dumps(blocks), capture_output=True, text=True, timeout=1, check=True)
+            values = json.loads(result.stdout)
+            return values if isinstance(values, list) and len(values) == len(blocks) else [None] * len(blocks)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return [None] * len(blocks)
+
+
+def current_state_cue(text, metadata):
+    """Use the state stamp, never the file mtime (other edits change it)."""
+    stamp = metadata.get("current_state_updated") if isinstance(metadata, dict) else None
+    if isinstance(stamp, str):
+        try:
+            updated = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             if updated.tzinfo is not None:
                 hours = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() / 3600
-                return f"CURRENT STATE — written {stamp.group(1)} ({hours:.1f} hours ago)"
+                return f"CURRENT STATE — written {stamp} ({hours:.1f} hours ago)"
         except ValueError:
             pass
     return "CURRENT STATE — write time unknown"
@@ -295,6 +331,15 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
     if error:
         failures.append(error)
         return "\n".join(output + [f"TRACE GAP — {error}"])
+    texts = []
+    if packet:
+        for node in nodes:
+            spec_file = next((candidate for candidate in (node / "SPEC.md", node / "README.md") if candidate.is_file()), None)
+            for candidate in (spec_file, node / "PROGRESS.md"):
+                value = read(candidate) if candidate is not None else None
+                if value is not None and value not in texts:
+                    texts.append(value)
+    metadata_by_text = dict(zip(texts, parsed_frontmatters(texts))) if texts else {}
     for node in nodes:
         label = node.relative_to(root) or Path(".")
         spec = next((candidate for candidate in (node / "SPEC.md", node / "README.md") if candidate.is_file()), None)
@@ -351,13 +396,19 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
         progress_path = node / "PROGRESS.md"
         progress_text = read(progress_path) if packet else None
         if packet and progress_text is None and spec is not None:
-            frontmatter = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---", text, re.S)
-            if frontmatter and re.search(r"^progress_rail:[ \t]*['\"]?readme-only['\"]?[ \t]*\r?$", frontmatter.group(1), re.M):
+            frontmatter = metadata_by_text.get(text)
+            if isinstance(frontmatter, dict) and frontmatter.get("progress_rail") == "readme-only":
                 progress_path, progress_text = spec, text
         if progress_text is not None:
             progress_body = progress_text.strip() if depth == "full" else by_section(progress_text, NOTES_STATE_HEADINGS, progress_path)
             output.append(f"\nPROGRESS · {progress_path.name}\n{progress_body}")
-            output.append(current_state_cue(progress_text))
+            metadata = metadata_by_text.get(progress_text)
+            has_state = any((match := HEADING.match(line)) and match.group(1) == "##" and match.group(2).strip().lower() == "current state" for line in progress_text.splitlines())
+            if has_state or (isinstance(metadata, dict) and "current_state_updated" in metadata):
+                output.append(current_state_cue(progress_text, metadata))
+            cue = age_cue(progress_path, progress_text)
+            if cue:
+                output.append(cue)
     return "\n".join(output)
 
 

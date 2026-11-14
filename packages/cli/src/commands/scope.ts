@@ -1424,7 +1424,16 @@ function runProgressUpdate(
   if (hasCurrentState) {
     operation = "current-state";
     result = setCurrentState(before, opts.currentState!);
-    if (result.changed) result.content = editFrontmatter(result.content, { current_state_updated: new Date().toISOString() }, targetPath, true);
+    if (result.changed) {
+      const hasOpening = /^---[ \t]*\r?\n/.test(before);
+      const emptyHeader = /^---[ \t]*(\r?\n)---[ \t]*(?=\r?\n|$)/.test(before);
+      const hasClosing = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?=\r?\n|$)/.test(before);
+      if (hasOpening && !hasClosing && !emptyHeader) console.warn(`[warn] ${targetPath}: frontmatter is unterminated; Current state was updated without a timestamp.`);
+      else {
+        if (emptyHeader) result.content = result.content.replace(/^(---[ \t]*)(\r?\n)(---[ \t]*)(?=\r?\n|$)/, "$1$2$2$3");
+        result.content = editFrontmatter(result.content, { current_state_updated: new Date().toISOString() }, targetPath);
+      }
+    }
   } else if (hasAdd) {
     operation = "add";
     result = addProgressRow(before, {
