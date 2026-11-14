@@ -269,6 +269,19 @@ describe("compositor status region", () => {
     expect(buf.match(/START/g)).toHaveLength(1); // committed once when the line ends
   });
 
+  it("bounds the kept tail by its wrapped layout, ellipsis included, at an odd width", () => {
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 21, rows: 4 });
+    let buf = "";
+    output.on("data", (chunk: Buffer) => { buf += chunk.toString(); });
+    const pane = createPaneCompositor(output as unknown as NodeJS.WriteStream);
+    pane.status("seat-lead · working"); // one status row; the tail's budget is 4 - 2 - 1 = 1 row
+    pane.transcript("\u6f22".repeat(50)); // two-cell glyphs: 10 fit after the one-cell ellipsis
+    expect(buf).toContain(`\u2026${"\u6f22".repeat(10)}\n`);
+    expect(buf).not.toContain(`\u2026${"\u6f22".repeat(11)}`);
+    pane.transcript("\n");
+    expect(buf.match(/\u6f22{50}/g)).toHaveLength(1); // committed once, whole
+  });
+
   it("drains a multiline chunk in one batch, without repainting the remainder between lines", () => {
     const out = paneOut(40);
     const pane = createPaneCompositor(out.output);

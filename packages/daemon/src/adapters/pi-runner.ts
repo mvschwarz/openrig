@@ -244,17 +244,20 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     const budget = Math.max(1, height - 2
       - (seat !== null ? 1 : 0) - (pinned !== null ? 1 : 0) - composeRows());
     if (composeLayout(text, out.columns).rows <= budget) return text;
-    const cells = Math.max(1, budget * out.columns - 1);
+    // Bound by the final wrapped layout, ellipsis included: at an odd width a two-cell
+    // character can't fill the last column, so a cell-count bound would overflow the
+    // region. A shorter suffix never wraps to more rows, so bisect on its start.
     const graphemes = [...graphemesOf(text)];
-    let used = 0;
-    let start = graphemes.length;
-    while (start > 0) {
-      const width = Math.max(0, stringWidth(graphemes[start - 1]!));
-      if (used + width > cells) break;
-      used += width;
-      start -= 1;
+    const fits = (start: number) =>
+      composeLayout(`\u2026${graphemes.slice(start).join("")}`, out.columns).rows <= budget;
+    let low = 0;
+    let high = graphemes.length; // the ellipsis alone fits any budget
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
     }
-    return `\u2026${graphemes.slice(start).join("")}`;
+    return `\u2026${graphemes.slice(low).join("")}`;
   };
   /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
