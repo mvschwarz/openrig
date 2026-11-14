@@ -128,9 +128,12 @@ describe("see and answer as self", () => {
   });
   it("records a partial option and its receipt atomically, while a later answer cannot replace the original receipt", async () => {
     const f = await jobFixture(true); const first = f.binding();
+    const observed: Array<{ type: string; inTransaction: boolean }> = [];
+    closes.push(f.bus.subscribe(event => observed.push({ type: event.type, inTransaction: f.db.inTransaction })));
     const partial = await f.send("/v1/answers/answer_part1", first, f.token);
     expect(partial.status).toBe(200); const receipt = await partial.json();
     expect(receipt.submission).toMatchObject({ state: "committed", outcome: "recorded" });
+    expect(observed).toEqual([{ type: "queue.answer_recorded", inTransaction: false }, { type: "mission_control.action_executed", inTransaction: false }]);
     for (let i = 0; i < 55; i++) await f.writes.act({ verb: "annotate", qitemId: f.ask.qitemId, actorSession: PERSON, annotation: `later note ${i}` });
     expect((await f.send("/v1/answers/answer_part2", f.binding(OTHER, "q2"), f.token)).status).toBe(200);
     f.db.prepare("UPDATE core_app_submissions SET receipt_json = NULL WHERE answer_id = ?").run("answer_part1"); // immutable audit evidence still owns the original result
@@ -146,14 +149,16 @@ describe("see and answer as self", () => {
 describe("submission interruption and fencing", () => {
   it("rolls a partial choice and receipt back when audit append fails; retry commits exactly once", async () => {
     const f = await jobFixture(true), binding = f.binding();
+    const observed: string[] = []; closes.push(f.bus.subscribe(event => observed.push(event.type)));
     const original = f.log.record.bind(f.log); vi.spyOn(f.log, "record").mockImplementationOnce(() => { throw new Error("fixture audit failure"); }).mockImplementation(original);
     const beforeSeq = f.bus.maxSeq();
     expect((await f.send("/v1/answers/answer_atomic", binding, f.token)).status).toBe(503);
     expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({});
-    expect(f.bus.maxSeq()).toBe(beforeSeq); expect(f.log.countAll()).toBe(0);
+    expect(f.bus.maxSeq()).toBe(beforeSeq); expect(f.log.countAll()).toBe(0); expect(observed).toEqual([]);
     expect(f.db.prepare("SELECT receipt_json FROM core_app_submissions").get()).toEqual({ receipt_json: null });
     expect((await f.send("/v1/answers/answer_atomic", binding, f.token)).status).toBe(200);
     expect(f.log.countAll()).toBe(1);
+    expect(observed).toEqual(["queue.answer_recorded", "mission_control.action_executed"]);
   });
   it.each(["typed-reply", "option"])("recovers an unclosed %s return after restart and nondecision annotations, including uncheckpointed own reply", async kind => {
     const f = await jobFixture(), binding = { ...f.binding(), answer: kind === "option" ? { kind, optionId: "yes" } : { kind, text: "Original words" } };
@@ -630,4 +635,46 @@ it("retains an unfinished permission submission's own choice/checkpoint while en
   expect(f.repo.getById(f.askId)?.humanAnswers).toEqual({ permission: "allow" });
   expect(f.repo.relatedTo(f.askId)).toEqual([]); expect(f.log.countAll()).toBe(0);
   expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+
+
+it.each(["missing", "failed"] as const)("retains an unfinished permission answer through a %s tenure read and recovers its original submission", async cause => {
+  const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
+  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+    expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } };
+  const answerId = `answer_unknown_${cause}`, path = `/v1/answers/${answerId}`;
+  vi.spyOn(f.repo, "createHumanAnswer").mockRejectedValueOnce(new Error("fixture interruption after choice"));
+  expect((await f.send(path, binding, f.token)).status).toBe(503);
+  const evidence = () => f.db.prepare("SELECT binding_json, checkpoint_json, receipt_json FROM core_app_submissions WHERE answer_id = ?").get(answerId);
+  const saved = evidence(), seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+  const unreadable = () => vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(() => {
+    if (cause === "failed") throw new Error("fixture tenure read unavailable");
+    return null;
+  });
+  const fault = unreadable();
+  try {
+    for (const sent of [undefined, binding]) {
+      const response = await f.send(sent ? path : `${path}?actor=${encodeURIComponent(PERSON)}`, sent, f.token);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ error: "app_job_unavailable", retrySameSubmission: true });
+    }
+    expect(evidence()).toEqual(saved); expect(f.bus.maxSeq()).toBe(seq); expect(f.log.countAll()).toBe(0);
+    expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+  } finally { fault.mockRestore(); }
+  expect(await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json())
+    .toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true });
+  const recovered = await f.send(path, binding, f.token);
+  expect(recovered.status).toBe(200); const receipt = await recovered.json();
+  expect(receipt.submission.state).toBe("committed"); expect(f.log.countAll()).toBe(1);
+  await new Promise(resolve => setImmediate(resolve));
+  const committedSeq = f.bus.maxSeq(), committedChanges = f.db.prepare("SELECT total_changes() n").get();
+  const later = unreadable();
+  try {
+    for (const sent of [undefined, binding]) {
+      const response = await f.send(sent ? path : `${path}?actor=${encodeURIComponent(PERSON)}`, sent, f.token);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ submission: receipt.submission, replayed: true });
+    }
+    expect(f.bus.maxSeq()).toBe(committedSeq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(committedChanges);
+  } finally { later.mockRestore(); }
 });

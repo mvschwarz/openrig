@@ -70,7 +70,13 @@ export class CoreAppJob {
     const reason = appAskUnsupported(this.queue, item);
     if (reason) return reason;
     const origin = runnerPermissionOrigin(item);
-    if (origin && new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid !== origin.generation) return "request_stale";
+    if (origin) {
+      let generation: string | undefined;
+      try { generation = new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid; }
+      catch { throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true }); }
+      if (!generation) throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true });
+      if (generation !== origin.generation) return "request_stale";
+    }
     return null;
   }
   request(credential: CoreAppCredential, requestId: string, actor: string) {

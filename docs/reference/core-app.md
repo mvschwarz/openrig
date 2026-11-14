@@ -123,7 +123,10 @@ and actual reply ID.
 An interruption may return 503 `submission_incomplete` with the answer ID and
 `retrySameSubmission:true`. Read status before retrying: `submission.state:incomplete`
 permits identical repair only while original own-effect evidence/current decision
-allow it. `state:conflict` includes `conflictCode`, current revision and links, with
+allow it. Missing or unreadable current-occupant evidence is temporary `503 app_job_unavailable`
+with `retrySameSubmission:true`, not proof of replacement. Retain the same submission ID and retry
+after recovery; committed receipts remain readable without repeating effects. A positively replaced
+occupant remains stale. `state:conflict` includes `conflictCode`, current revision and links, with
 `retrySameSubmission:false`; obtain a new human decision instead of looping or
 automatically minting a replacement ID. Missing scoped IDs return 404. Authorized
 source erasure removes binding/checkpoint/receipt text and leaves an opaque hash

@@ -4728,9 +4728,10 @@ export class QueueRepository {
     // The click is on the ask before anyone hears of it; a failed event never takes it back or holds up its return.
     if (changed && result.status === "recorded") {
       try {
-        this.eventBus.emit({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
+        const event = this.eventBus.persistWithinTransaction({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
           questionId: input.questionId, answered: changed.answered, questions: result.questions.length,
           complete: result.complete, summary: changed.summary });
+        if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
       } catch (error) {
         console.warn(`[queue] ${input.qitemId}'s recorded answer has no event`, error);
       }
