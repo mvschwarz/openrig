@@ -102,7 +102,9 @@ limits for what this release doesn't fix.
   OpenRig re-checks: it holds the paste after recent client activity, re-reads
   the input after a short wait, and holds when tmux can't be read. The message
   is held and retained; `rig seat held-messages` shows it. An ordinary guarded
-  paste waits about 300 ms longer. This narrows [#3076](https://github.com/mvschwarz/openrig/issues/3076)'s window; it doesn't close it. ([#3097](https://github.com/mvschwarz/openrig/pull/3097))
+  paste waits about 300 ms longer. This narrows [#3076](https://github.com/mvschwarz/openrig/issues/3076)'s window; it doesn't close it.
+  This is shown by the change's own tests; it's not yet checked with the real
+  programs on this release. ([#3097](https://github.com/mvschwarz/openrig/pull/3097))
 - A terminal seat whose tmux session runs under another name gets the exact
   text of a send, and a queued wake no longer types OpenRig's From/To envelope
   into its shell. ([#3074](https://github.com/mvschwarz/openrig/pull/3074))
@@ -181,7 +183,8 @@ limits for what this release doesn't fix.
   seat restore didn't start (one claimed or added after its roster or snapshot
   was recorded), or a seat kept in its external CLI attachment, goes unnamed.
   A seat restore left as a bare shell after "Harness not started" still counts
-  as running in `rig ps`.
+  as running in `rig ps`. `restore-check` can also say "Restore tries …" for a
+  self-attached member that restore leaves out; that member isn't restored.
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** typing after the guard's final check and before
   the paste can still leave the notice beside the person's draft. In the tested
   append-mode schedule Enter was refused and nothing was submitted or deleted;
@@ -192,14 +195,27 @@ limits for what this release doesn't fix.
   full-width auto-update-failure footer on screen (seen at 200x50), a seat in
   the opt-in draft-aware typing mode whose input is empty can hold an ordinary
   send instead of delivering it. The message is kept, not lost, and
-  `rig seat held-messages` shows it. The clipped footer at 80x24 doesn't do
-  this.
+  `rig seat held-messages` shows it. On 0.7.14, the clipped footer at 80x24
+  didn't do this.
 - **Draft-aware delivery to a busy Codex seat:** on Codex (seen with 0.167.1
   and 0.167.2), a send to a seat in the opt-in draft-aware typing mode while
   it's busy can be pasted into its input without Enter. The message isn't
   delivered, and it isn't kept for `rig seat held-messages`. A deliberate send
   reports failed, and its text stays in the seat's input box. This was seen on
   0.7.12 and 0.7.14, and there's no fix for it in this release.
+- **Seats at the edit floor can stop for approval, OpenRig's own commands
+  included.** A Claude seat running at the harness's edit floor can ask for
+  approval before shell commands, including OpenRig's own read-only `rig`
+  commands such as `rig whoami` and `rig queue show`. Choosing a built-in
+  policy such as standard when your team is set up doesn't change that at
+  launch: the plan shows `launch_posture=floor`. Each prompt waits until
+  someone approves it, in the seat or through your own agent, so a team can
+  stall while nobody answers.
+- **Approvals your agent recorded:** In one Claude setup, your agent recorded
+  approvals it made itself as "Person approved". Those entries alone do not
+  establish your approval; check the conversation to see who actually decided.
+- **A new Claude agent's startup text can stay unsent in its input box while
+  the seat reads ready.** Press Enter in its terminal.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
@@ -215,8 +231,8 @@ limits for what this release doesn't fix.
 - **From 0.7.14:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.14)
   still apply, except where this release changes them. [#3105](https://github.com/mvschwarz/openrig/pull/3105) fixes the
   TUI tables' dropped check-in line, and [#3097](https://github.com/mvschwarz/openrig/pull/3097) narrows the draft-aware paste
-  window described above. 0.7.14's other limits weren't re-checked for this
-  release unless named here.
+  window described above, as its own tests show. 0.7.14's other limits weren't
+  re-checked for this release unless named here.
 
 ### Credits
 

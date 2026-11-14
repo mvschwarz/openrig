@@ -53,7 +53,8 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   work outside those steps. ([#3100](https://github.com/mvschwarz/openrig/pull/3100), [#3138](https://github.com/mvschwarz/openrig/pull/3138))
 - **Draft-aware pastes** re-check the input right before pasting, and hold
   after recent client activity or when tmux can't be read. An ordinary guarded
-  paste waits about 300 ms longer. ([#3097](https://github.com/mvschwarz/openrig/pull/3097))
+  paste waits about 300 ms longer. This is shown by the change's own tests; it's
+  not yet checked with the real programs on this release. ([#3097](https://github.com/mvschwarz/openrig/pull/3097))
 - **A terminal seat whose tmux session has another name** gets the exact text
   of a send, with no From/To envelope typed into its shell. ([#3074](https://github.com/mvschwarz/openrig/pull/3074))
 - **Slack:** when the arrival note is recorded before the answer is routed, an
@@ -95,7 +96,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **Restore's overall result:** a rig can still read `fully_restored` while a
   seat restore didn't start, or a seat kept in its external CLI attachment,
   goes unnamed. A seat restore left as a bare shell after "Harness not started"
-  still counts as running in `rig ps`.
+  still counts as running in `rig ps`. `restore-check` can also say "Restore
+  tries …" for a self-attached member that restore leaves out; that member
+  isn't restored.
 - **Draft-aware delivery ([#3076](https://github.com/mvschwarz/openrig/issues/3076)):** typing after the guard's final check and before
   the paste can still leave the notice beside the person's draft. In the tested
   append-mode schedule Enter was refused and nothing was submitted or deleted;
@@ -116,6 +119,19 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   delivered, and it isn't kept for `rig seat held-messages`. A deliberate send
   reports failed, and its text stays in the seat's input box. This was seen on
   0.7.12 and 0.7.14, and there's no fix for it in this release.
+- **Seats at the edit floor can stop for approval, OpenRig's own commands
+  included.** A Claude seat running at the harness's edit floor can ask for
+  approval before shell commands, including OpenRig's own read-only `rig`
+  commands such as `rig whoami` and `rig queue show`. Choosing a built-in
+  policy such as standard when your team is set up doesn't change that at
+  launch: the plan shows `launch_posture=floor`. Each prompt waits until
+  someone approves it, in the seat or through your own agent, so a team can
+  stall while nobody answers.
+- **Approvals your agent recorded:** In one Claude setup, your agent recorded
+  approvals it made itself as "Person approved". Those entries alone do not
+  establish your approval; check the conversation to see who actually decided.
+- **A new Claude agent's startup text can stay unsent in its input box while
+  the seat reads ready.** Press Enter in its terminal.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
@@ -125,7 +141,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **From 0.7.14:** its limits below still apply, except where this release
   changes them: the TUI keeps check-in lines ([#3105](https://github.com/mvschwarz/openrig/pull/3105)), and the draft-aware paste
-  window is narrower ([#3097](https://github.com/mvschwarz/openrig/pull/3097)).
+  window is narrower, as [#3097](https://github.com/mvschwarz/openrig/pull/3097)'s own tests show.
 
 ## What changed in OpenRig 0.7.14
 
