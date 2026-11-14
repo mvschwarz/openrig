@@ -1273,7 +1273,7 @@ export class RestoreOrchestrator {
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
-    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string } | undefined = node.cwd
+    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string; keepsBoundSessionName?: boolean } | undefined = node.cwd
       ? { cwd: node.cwd }
       : undefined;
     if (keptPane) launchOpts = { ...launchOpts, keepPane: keptPane };
@@ -1292,15 +1292,19 @@ export class RestoreOrchestrator {
     // derive (below) is observable, never a silent divergence.
     const pinnedTarget = priorState.binding?.tmuxSession ?? null;
     let pinnedTargetUsed = false;
+    let unusablePin: string | null = null;
     if (pinnedTarget) {
-      const { validateSessionName } = await import("./session-name.js");
-      if (validateSessionName(pinnedTarget)) {
+      const { isReusableBoundSessionName, validateSessionName } = await import("./session-name.js");
+      // An adopted seat is bound to its own tmux session's name, which need not follow OpenRig's pattern. It is kept
+      // when tmux keeps it as given, so the seat comes back at the address its peers use.
+      const conventional = validateSessionName(pinnedTarget);
+      if (conventional || isReusableBoundSessionName(pinnedTarget)) {
         expectedSessionName = pinnedTarget;
-        launchOpts = { ...launchOpts, sessionName: expectedSessionName };
+        launchOpts = { ...launchOpts, sessionName: expectedSessionName, ...(conventional ? {} : { keepsBoundSessionName: true }) };
         pinnedTargetUsed = true;
       } else {
-        // Binding present but the bound name is malformed → observable fallback.
-        warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
+        // Binding present but tmux can't keep the bound name: the seat gets a derived address, said old to new below.
+        unusablePin = pinnedTarget;
       }
     } else {
       // A supported stop deliberately removes the binding after recording an intentional exit.
@@ -1331,6 +1335,9 @@ export class RestoreOrchestrator {
         const { deriveSessionName } = await import("./session-name.js");
         expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
       }
+    }
+    if (unusablePin) {
+      warnings?.push(`FR-5: ${node.logicalId} comes back as ${expectedSessionName ? `"${expectedSessionName}"` : "a derived session name"}, not "${unusablePin}", the session name it was bound to, because tmux can't keep that name as given. Peers that address "${unusablePin}" need the new name.`);
     }
 
     // Write transcript boundary marker BEFORE launch (before pipe-pane attaches)

@@ -115,6 +115,15 @@ export function tmuxRenamedSessionError(sessionName: string): string | null {
   return `session name "${sessionName}" contains "." and tmux would create it as "${sessionName.replace(/\./g, "_")}", so OpenRig could not reach the seat; use a rig name without dots`;
 }
 
+/**
+ * A name a seat is already bound to can be launched again under that same name when tmux keeps it exactly: the
+ * allowed characters above, and no "." (see tmuxRenamedSessionError). An adopted seat keeps its own tmux session's
+ * name, which need not follow the canonical or legacy pattern validateSessionName checks.
+ */
+export function isReusableBoundSessionName(sessionName: string): boolean {
+  return validateSessionNameChars(sessionName, "session name") === null && tmuxRenamedSessionError(sessionName) === null;
+}
+
 // ============================================================================
 // OPR.0.4.6.MH1 FR-8 — THE session-name parse contract (parity-pinned).
 //

@@ -5832,15 +5832,40 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
     });
 
-    it("invalid pinned name: falls back to the derived name with an observable invalid-pin warning", async () => {
-      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: "bad name!" }); // fails validateSessionName
+    // An adopted seat is bound to its own tmux session's name (`rig adopt` registers it as found), which need not follow
+    // OpenRig's pattern. Restore keeps it when tmux keeps it as given, so the seat's peers still reach it by that name.
+    it("an adopted seat's own session name: restore keeps it, so the seat's address doesn't change", async () => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "main.lead", podAware: true, boundName: "c42a-lead" });
       const tmux = mockTmux();
-      const orch = createOrchestrator({ tmux });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain("c42a-lead");
+      expect(createdSessionNames(tmux)).not.toContain("main-lead@r99");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("c42a-lead");
+      expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND session_name = 'c42a-lead'").get(nodeId)).toEqual({ n: 1 });
+      expect(result.result.warnings.some((w) => w.includes("FR-5"))).toBe(false);
+    });
 
-      const result = await orch.restore(snapId);
+    it.each([
+      ["bad name!", "a space and \"!\""],
+      ["c42a.lead", "a \".\", which tmux would turn into \"_\""],
+    ])("a bound name tmux can't keep (%s, %s): the derived name, with the address change said old to new", async (bound) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: bound });
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snapId);
       expect(result.ok).toBe(true);
       expect(createdSessionNames(tmux)).toContain("r99-worker-a");
-      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("is invalid"))).toBe(true);
+      expect(createdSessionNames(tmux)).not.toContain(bound);
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r99-worker-a");
+      expect(result.result.warnings).toContain(`FR-5: worker-a comes back as "r99-worker-a", not "${bound}", the session name it was bound to, because tmux can't keep that name as given. Peers that address "${bound}" need the new name.`);
+    });
+
+    it("only a launch that keeps the seat's bound name accepts one outside the naming pattern, and only when tmux keeps it", () => {
+      const { nodeId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a-lead")).toThrow(/Invalid session name "c42a-lead"/);
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a.lead", "initial", null, { keptBoundName: true }))
+        .toThrow(/Invalid session name "c42a.lead"/);
+      expect(sessionRegistry.registerSession(nodeId, "c42a-lead", "initial", null, { keptBoundName: true }).sessionName).toBe("c42a-lead");
     });
 
     it("subset launch surfaces the FR-5 fallback warning (not discarded) — API result + restore.subset_completed event", async () => {
