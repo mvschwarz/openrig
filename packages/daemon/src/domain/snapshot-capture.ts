@@ -226,13 +226,13 @@ export class SnapshotCapture {
   }
 
   private materializedRoster(rigId: string): string[] | null {
-    return readTopologyRoster(this.db, rigId);
+    return readMaterializedRoster(this.db, rigId);
   }
 }
 
-/** The rig's latest recorded topology roster, or null when none is recorded. A snapshot taken without an explicit roster,
- *  an auto-rehydrate one included, restores these members and leaves the rest as they are. Throws on a malformed roster. */
-export function readTopologyRoster(db: Database.Database, rigId: string): string[] | null {
+/** The rig's latest recorded topology roster (node ids), or null when none is recorded. A malformed recorded roster
+ *  throws: it isn't the same as no roster, which means every current node. */
+export function readMaterializedRoster(db: Database.Database, rigId: string): string[] | null {
   const row = db.prepare(
     "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
   ).get(rigId) as { payload: string } | undefined;
@@ -247,3 +247,6 @@ export function readTopologyRoster(db: Database.Database, rigId: string): string
     throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
   }
 }
+
+// Both restore-check call sites use the same authoritative roster reader.
+export { readMaterializedRoster as readTopologyRoster };

@@ -7,6 +7,7 @@ import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry, ty
 import { createDesiredClaudeActivityHooksReader } from "../domain/desired-claude-activity-hooks.js";
 import { deriveRelayEvents } from "../domain/claude-activity-hooks.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
+import { readMaterializedRoster } from "../domain/snapshot-capture.js";
 import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
@@ -191,6 +192,9 @@ export function createRestoreCheckService(
     getStartupContext: (nodeId: string) => {
       return getStartupContext(rigRepo.db, nodeId);
     },
+    // The roster a current-state restore uses: the latest recorded one, read as snapshot capture reads it (a malformed
+    // one throws, and restore-check reports the restore inputs as unknown).
+    getMaterializedRoster: (rigId: string) => readMaterializedRoster(rigRepo.db, rigId),
     hasSnapshot: (rigId: string) => {
       return snapshotRepo.listSnapshots(rigId).length > 0;
     },

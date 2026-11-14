@@ -499,7 +499,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
