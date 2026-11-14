@@ -806,6 +806,38 @@ describe("rig seat status", () => {
       }
     });
 
+  it("handover --recover posts to the recovery route with the reason and prints the adoption (#2985)", async () => {
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    const recovered = { ...HANDOVER_RESULT, source: { mode: "rebuild", ref: null, raw: "rebuild", defaulted: false },
+      recoveredFrom: { attemptId: "a1", failedStep: "start_agent", failureCode: "successor_not_ready", failedAt: "2026-11-10T16:21:34.000Z" },
+      sideEffects: { ...HANDOVER_RESULT.sideEffects, departingProcess: "ended-graceful", startupContextDelivered: false } };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(makeDeps({ status: 200, data: recovered }, paths, bodies)).parseAsync([
+        "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--recover", "--reason", "adopt the running successor"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/handover/dev-impl%40seat-rig/recover"]);
+    expect(bodies).toEqual([{ reason: "adopt the running successor", operator: undefined }]);
+    const output = logs.join("\n");
+    expect(output).toContain('Adopted the running successor of the handover that failed at "start_agent" (successor_not_ready, 2026-11-10T16:21:34.000Z); its conversation was kept and nothing was typed into its pane.');
+    expect(output).toContain("The context packet that handover didn't deliver was not delivered now either");
+    expect(output).not.toContain("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
+  });
+
+  it("handover --recover takes no --source or --dry-run and does not contact the daemon", async () => {
+    for (const extra of [["--source", "rebuild"], ["--dry-run"]]) {
+      const paths: string[] = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCommand(makeDeps({ status: 200, data: HANDOVER_RESULT }, paths)).parseAsync([
+          "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--recover", "--reason", "adopt", ...extra, "--json"]);
+      });
+      expect(exitCode).toBe(2);
+      expect(paths).toEqual([]);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ ok: false, code: "invalid_options" });
+    }
+  });
+
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
 
@@ -846,6 +878,41 @@ describe("rig seat status", () => {
     expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
     expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
     expect(output).not.toContain("session stop");
+  });
+
+  // #3044: a recovered successor on its fork parent's or the retiring occupant's conversation.
+  describe("a recovered successor on a conversation that is not its own", () => {
+    const resumedStatus = { ...HANDOVER_RESULT.currentStatus, continuityOutcome: "resumed" };
+    const run = async (data: Record<string, unknown>, source: string) => {
+      const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, ...data } }, []);
+      const { logs } = await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", source, "--reason", "adopt"]);
+      });
+      return logs.join("\n");
+    };
+    it("a fork on its parent's conversation prints no distinct fork, not a native fork", async () => {
+      const output = await run({ source: { mode: "fork", ref: "dev-parent@seat-rig", raw: "fork:dev-parent@seat-rig" },
+        sourceOutcome: { mode: "fork", forkedFrom: "dev-parent@seat-rig", forkId: "none", limit: "No distinct fork was recovered: the parent's." },
+        currentStatus: resumedStatus }, "fork:dev-parent@seat-rig");
+      expect(output).toContain("Fork of dev-parent@seat-rig: no distinct fork. No distinct fork was recovered: the parent's.");
+      expect(output).not.toContain("Native fork of");
+      expect(output).not.toContain("No packet delivery");
+    });
+    it("a captured fork whose parent couldn't be checked prints its limit", async () => {
+      const output = await run({ source: { mode: "fork", ref: "dev-parent@seat-rig", raw: "fork:dev-parent@seat-rig" },
+        sourceOutcome: { mode: "fork", forkedFrom: "dev-parent@seat-rig", forkId: "captured", limit: "It was not checked." } }, "fork:dev-parent@seat-rig");
+      expect(output).toContain("Native fork of dev-parent@seat-rig");
+      expect(output).toContain("It was not checked.");
+    });
+    it.each([
+      ["delivered", { startupContextDelivered: true }, undefined],
+      ["unconfirmed", { startupContextDelivered: false }, { status: "unconfirmed", reason: "the prompt still looked staged in the input box" }],
+    ])("a resumed rebuild (%s packet) doesn't say it started a new or fresh conversation", async (_name, side, restorePacket) => {
+      const output = await run({ source: { mode: "rebuild", raw: "rebuild" }, sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+        sideEffects: { ...HANDOVER_RESULT.sideEffects, ...side }, currentStatus: resumedStatus, ...(restorePacket ? { restorePacket } : {}) }, "rebuild");
+      expect(output).not.toContain("Rebuild starts a new conversation");
+      expect(output).not.toContain("No conversation continuity was carried");
+    });
   });
 
   it("handover human output from an older daemon, whose receipt has no departingProcess, claims neither side effect", async () => {
@@ -1246,6 +1313,38 @@ describe("seat request deadlines (#260)", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     },
   );
+
+  // #3044 CodeRabbit: the recovery's proof can wait for the seat's lifecycle lease and, when a first sample can't prove
+  // the successor, sleeps 3 s before a second one that can still commit, so the 5 s default could abort a recovery the
+  // daemon still commits. It gets 60 s, and reaching them is an unknown outcome. One request.
+  it.each([false, true])("handover --recover outlasts the 5 s default and reports an unknown outcome at 60 s (json=%s)", async json => {
+    vi.useFakeTimers();
+    const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
+    const result = captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+      "--recover", "--reason", "adopt the running successor", ...(json ? ["--json"] : [])]).then(() => undefined))
+      .catch(error => ({ error: error as Error }));
+    await vi.advanceTimersByTimeAsync(59_999);
+    const signal = (fetchImpl.mock.calls[0]![1] as RequestInit).signal!;
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted).toBe(true);
+    const output = await result;
+    if (!("logs" in output)) throw output.error;
+    expect(output.exitCode).toBe(1);
+    const text = json ? output.logs.join("\n") : output.errors.join("\n");
+    if (json) {
+      expect(output.errors).toEqual([]);
+      expect(JSON.parse(text)).toMatchObject({ ok: false, code: "handover_outcome_unknown", status: "unknown",
+        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig") });
+    } else {
+      expect(output.logs).toEqual([]);
+      expect(text).toContain("outcome of the handover recovery is unknown");
+    }
+    expect(text).toContain("may still be working");
+    expect(text).not.toMatch(/recovery failed|timed out after/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]![0]).toContain("/api/seat/handover/dev-impl%40seat-rig/recover");
+  });
 
   it("a mutating handover's connection failure stays a transport error, not an unknown outcome", async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError("fetch failed"); });

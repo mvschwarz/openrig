@@ -20,7 +20,8 @@ The CLI itself finds the daemon in these orders:
   `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
   `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
 - **Status** (`rig status`, `rig daemon status`): `OPENRIG_URL` (or `RIGGED_URL`) first, probed directly; else
-  the state file below.
+  the state file below. If no state is read, probe the configured `daemon.host` and `daemon.port` instead (defaulting
+  to `127.0.0.1:7433`).
 - **Start and stop** (`rig daemon start`, `stop`): the state file, `$OPENRIG_HOME/daemon.json`, then the legacy
   `~/.rigged/daemon.json`.
 
@@ -231,6 +232,7 @@ With `needs-me.read` supported:
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the

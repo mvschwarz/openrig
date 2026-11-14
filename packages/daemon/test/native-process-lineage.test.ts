@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { claudeCommandForkParent, codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
@@ -882,5 +882,29 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     });
   it("delivery still reports a conflict when two Claude processes name different conversations without a fork", async () => {
     expect((await delivery(realRows(`claude --session-id ${other} --name dev@rig`), token)).state).toBe("conflict");
+  });
+});
+
+// #3044: the parent a fork launch forked from, read from the command line by the identity proof's own parser, and only
+// from a command line the proof accepts as a fork (its own --session-id, its parent's --resume, --fork-session).
+describe("claudeCommandForkParent", () => {
+  const parent = "11111111-1111-4111-8111-111111111111";
+  const own = "22222222-2222-4222-8222-222222222222";
+  it.each([
+    `claude --resume ${parent} --fork-session --session-id ${own}`,
+    `claude --resume=${parent} --fork-session --session-id ${own} --name seat@rig`,
+    `claude --fork-session --session-id=${own} --resume=${parent}`,
+    `claude --no-chrome --session-id ${own} --fork-session --resume ${parent}`,
+  ])("names the parent of %s", (command) => {
+    expect(claudeCommandForkParent(command)).toBe(parent);
+  });
+  it.each([
+    `claude --resume ${parent} --session-id ${own}`,
+    `claude --resume ${parent}`,
+    `claude --resume ${parent} --fork-session`,
+    `claude --session-id ${own}`,
+    "",
+  ])("names none for a command line that is no fork the proof accepts: %s", (command) => {
+    expect(claudeCommandForkParent(command)).toBeNull();
   });
 });

@@ -33,6 +33,7 @@ import type { WorkflowExceptionClass } from "./workflow-exception.js";
 import {
   WorkflowProjector,
   WorkflowProjectorError,
+  assertBoundWorkflowTarget,
   compileGate,
   nodeRuntimeOf,
   reconcileExplicitOwnerHarness,
@@ -420,7 +421,7 @@ export class WorkflowRuntime {
           spec,
           entryQitemId,
           entryOwnerSession: entryPacket.destinationSession,
-          advisories: [],
+          advisories: this.packetDestinationAdvisories([entryQitemId]),
           replayed: true,
         };
       }
@@ -637,8 +638,8 @@ export class WorkflowRuntime {
     // queue-gate archetype: human-seat classifier BEFORE parse (the
     // identical predicate the transport uses) → non-canonical
     // (raw/adopted destinations are legitimate; the inventory cannot
-    // vouch for them) → unregistered rig (the transport already rejects
-    // those loudly at queue-write — no double advisory) → member probe
+    // vouch for them) → unregistered rig (the actual packet's destination
+    // status is returned after recording below) → member probe
     // (existence at ANY lifecycle state/kind; liveness is projection's
     // business). ONE aggregated advisory per unique unknown target,
     // naming every declaring step/role pair.
@@ -735,6 +736,8 @@ export class WorkflowRuntime {
         { specPath: input.specPath, entryStepId: entryStep.id, entryRole: entryStep.actor_role },
       );
     }
+
+    assertBoundWorkflowTarget(entryOwner, this.queueRepo);
 
     const createdAt = this.now().toISOString();
     const preallocatedEntryQitemId = newQitemId();
@@ -884,14 +887,33 @@ export class WorkflowRuntime {
       spec: specRow,
       entryQitemId: entryQitemId!,
       entryOwnerSession: entryOwner,
-      advisories,
+      advisories: [...advisories, ...this.packetDestinationAdvisories([entryQitemId!])],
       replayed: false,
     };
   }
 
+  /** Observe only committed packets; unavailable teaching must never undo work. */
+  private packetDestinationAdvisories(packetIds: readonly string[]): string[] {
+    return [...new Set(packetIds)].flatMap(packetId => {
+      try {
+        const packet = this.queueRepo.getById(packetId);
+        if (!packet) throw new Error("packet lookup unavailable");
+        const advisory = this.queueRepo.destinationAdvisory(packet.destinationSession);
+        return advisory ? [advisory.message] : [];
+      } catch {
+        return [`Destination status unknown for recorded packet ${packetId}; advisory lookup unavailable.`];
+      }
+    });
+  }
+
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
     const owner = this.queueRepo.getById(input.currentPacketId)?.destinationSession;
-    const result = await this.projector.project(input);
+    const projected = await this.projector.project(input);
+    const destinationAdvisories = this.packetDestinationAdvisories(
+      projected.nextQitemIds ?? (projected.nextQitemId ? [projected.nextQitemId] : []));
+    const result = destinationAdvisories.length
+      ? { ...projected, advisories: [...(projected.advisories ?? []), ...destinationAdvisories] }
+      : projected;
     this.reconcileStuckExceptions(input.instanceId);
     // A known caller projecting another seat's packet is told so in the response. Nothing is refused and the owner isn't
     // notified: delegated work stays one call. A claimed or unknown-origin caller isn't a mismatch.
@@ -1196,6 +1218,8 @@ export class WorkflowRuntime {
         );
       }
 
+      assertBoundWorkflowTarget(owner, this.queueRepo);
+
       // Fresh frontier packet — the redrive delivery. The --decision
       // text lands durably in the packet body (the resumer’s
       // instruction reaches the step owner).
@@ -1429,6 +1453,7 @@ export class WorkflowRuntime {
       if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
       const owner = resolveDefaultOwner(specRow.spec, step, (session) => nodeRuntimeOf(this.db, session), roleResolutionContext(this.db, instance.boundRig));
       if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
+      assertBoundWorkflowTarget(owner, this.queueRepo);
       const redrivePacketId = newQitemId();
       const created = this.queueRepo.createWithinTransaction({
         qitemId: redrivePacketId,
@@ -1845,8 +1870,9 @@ export class WorkflowRuntime {
   /** List instances (optionally filtered) with the deadline verdict attached. */
   listInstancesWithDeadline(
     status?: "active" | "waiting" | "completed" | "failed" | "aborted",
+    filters?: Omit<Parameters<WorkflowInstanceStore["listFiltered"]>[0], "status">,
   ): WorkflowInstanceWithInspection[] {
-    const rows = status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
+    const rows = filters ? this.instanceStore.listFiltered({ ...filters, status }) : status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
     return rows.map((row) => {
       const inspected = this.inspect(row.instanceId);
       return {
