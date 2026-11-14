@@ -120,8 +120,8 @@ describe("pane status row", () => {
       type: "message_end",
       message: { role: "assistant", stopReason: "error", errorMessage: "401 Unauthorized" },
     }));
-    // The failed message is still the open turn until agent_end: working, never idle.
-    expect(statuses.at(-1)).toBe("seat-lead · working");
+    // A known failure outranks the still-open turn, and never reads as idle.
+    expect(statuses.at(-1)).toBe("seat-lead · error");
     core.handlePiLine(JSON.stringify({ type: "agent_end" }));
     expect(statuses.at(-1)).toBe("seat-lead · error");
   });
@@ -137,6 +137,43 @@ describe("pane status row", () => {
     const { core, statuses } = seat({ model: "seat-lead" });
     core.handlePiLine(JSON.stringify({ type: "response", id: GET_STATE, success: false, error: "no session" }));
     expect(statuses.at(-1)).toBe("seat-lead · error");
+  });
+
+  it("clears a failed turn's error when the next turn opens with turn_start alone", () => {
+    const { core, statuses, ready } = seat({ model: "seat-lead" });
+    ready();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", errorMessage: "401 Unauthorized" },
+    }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(statuses.at(-1)).toBe("seat-lead · error");
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    expect(statuses.at(-1)).toBe("seat-lead · working");
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(statuses.at(-1)).toBe("seat-lead · idle");
+  });
+
+  it("shows an automatic retry as retrying, and the failure when it exhausts", () => {
+    const { core, statuses, ready } = seat({ model: "seat-lead" });
+    ready();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 1 }));
+    expect(statuses.at(-1)).toBe("seat-lead · retrying");
+    core.handlePiLine(JSON.stringify({
+      type: "auto_retry_end", success: false, attempt: 1, finalError: "429 rate limited",
+    }));
+    expect(statuses.at(-1)).toBe("seat-lead · error");
+  });
+
+  it("neutralizes terminal controls in the configured labels", () => {
+    const { statuses } = seat({ model: "evil\u001b[31mred", thinking: "hi\u0007gh" });
+    const row = statuses.at(-1)!;
+    expect(row).not.toContain("\u001b");
+    expect(row).not.toContain("\u0007");
+    expect(row).toContain("evilred");
+    expect(row).toContain("thinking:hi gh");
   });
 
   it("reports a child that exited as exited", () => {
@@ -163,6 +200,24 @@ describe("compositor status region", () => {
     pane.diagnostic("[pi-runner] ERROR rpc: no session");
     expect(out.text()).toContain("seat-lead · idle\n");
     expect(out.text()).toContain("[pi-runner] ERROR rpc: no session\n");
+  });
+
+  it("shows an in-progress streamed line while the status row is on screen", () => {
+    const out = paneOut(40);
+    const pane = createPaneCompositor(out.output);
+    pane.status("seat-lead · working");
+    pane.transcript("Hello wor");
+    expect(out.text()).toContain("Hello wor\n");
+    pane.transcript("ld\n");
+    expect(out.text().match(/Hello world/g)).toHaveLength(1);
+  });
+
+  it("keeps the in-progress line visible above the pinned diagnostic too", () => {
+    const out = paneOut(40);
+    const pane = createPaneCompositor(out.output);
+    pane.diagnostic("[pi-runner] ERROR rpc: no session");
+    pane.transcript("partial reply");
+    expect(out.text()).toContain("partial reply\n");
   });
 
   it("drops only the pinned diagnostic on a new turn", () => {

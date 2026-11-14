@@ -203,6 +203,8 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
    *  size the region from these, not from the longer text they were set with. */
   let paintedSeat: string | null = null;
   let paintedPinned: string | null = null;
+  /** The unfinished streamed line, as displayed above the status rows (null when it is not). */
+  let paintedHeld: string | null = null;
   let readInput: (() => string) | null = null;
   let redrawLine: (() => void) | null = null;
   let held = "";
@@ -238,16 +240,35 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
    *  except a reflow, which the resize handler owns. */
   const paint = () => {
+    // Without a width nothing can be placed, erased or measured; the status text is kept
+    // and painted once a width is known (a resize or the next write calls back here).
+    if (!widthKnown()) {
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
+      screenRows = 0;
+      return;
+    }
     paintedSeat = seat !== null ? clip(seat) : null;
     paintedPinned = pinned !== null ? clip(pinned) : null;
     const statusRows = [paintedSeat, paintedPinned].filter((text): text is string => text !== null);
+    // An in-progress streamed line stays visible as the region's first row while a status
+    // row is painted; without one the pane keeps its verbatim fallback and the line is
+    // held until it ends, so the transcript is never split mid-word.
+    paintedHeld = statusRows.length > 0 && held.length > 0 ? held : null;
+    let heldRows = 0;
+    if (paintedHeld !== null) {
+      out.write(paintedHeld);
+      out.write("\n");
+      heldRows = Math.max(1, composeLayout(paintedHeld, out.columns).rows);
+    }
     for (const text of statusRows) {
       out.write(text);
       out.write("\n");
     }
     const rows = composeRows();
     if (rows) redrawLine?.();
-    screenRows = statusRows.length + (rows || (statusRows.length > 0 ? 1 : 0));
+    screenRows = heldRows + statusRows.length + (rows || (heldRows + statusRows.length > 0 ? 1 : 0));
     // Only a painted region closes an open transcript line. With nothing painted the
     // cursor still sits on the line a flush left open, and the next keystroke belongs
     // to that line's context, not to a fresh one.
@@ -293,11 +314,13 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     const draftRows = layout ? layout.rows : 0;
     const statusLines = [paintedSeat, paintedPinned].reduce((sum, text) =>
       text !== null ? sum + Math.max(1, Math.ceil(stringWidth(text) / out.columns)) : sum, 0);
+    // The held streamed row reflowed at the new width: a long partial line wraps here too.
+    const heldLines = paintedHeld !== null ? composeLayout(paintedHeld, out.columns).rows : 0;
     const down = layout ? layout.rows - 1 - layout.caretRow : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
-    // Status rows without a draft also own the blank row their trailing newline left
-    // the cursor on — the same row paint() counts into screenRows.
-    eraseLines(statusLines + (draftRows || (statusLines > 0 ? 1 : 0)));
+    // Status and held rows without a draft also own the blank row their trailing newline
+    // left the cursor on — the same row paint() counts into screenRows.
+    eraseLines(heldLines + statusLines + (draftRows || (heldLines + statusLines > 0 ? 1 : 0)));
     screenRows = 0;
     paint();
   };
@@ -316,6 +339,12 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       redrawLine = null;
       readCaretUp = null;
       readCaretIndex = null;
+      // The region is gone; nothing of it may be repainted after the pane falls back.
+      seat = null;
+      pinned = null;
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
       openLine = false;
       screenRows = 0;
     },
@@ -323,7 +352,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       eraseScreen();
       // With no region left, an unfinished streamed line goes out verbatim so the
       // next delta continues it on the same row instead of splitting mid-word.
-      if (held && pinned === null && seat === null && !composeText()) {
+      if (held && (!widthKnown() || (pinned === null && seat === null)) && !composeText()) {
         writeVerbatim(held);
         held = "";
       }
@@ -331,7 +360,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     },
     transcript(text) {
       if (!text) return;
-      if (pinned === null && seat === null && composeRows() === 0 && screenRows === 0) {
+      if (!widthKnown() || (pinned === null && seat === null && composeRows() === 0 && screenRows === 0)) {
         if (held) {
           writeVerbatim(held);
           held = "";
@@ -341,11 +370,19 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       }
       held += text;
       let newline = held.indexOf("\n");
+      let repainted = false;
       while (newline >= 0) {
         const line = held.slice(0, newline + 1);
         held = held.slice(newline + 1);
         writeAbove(line);
+        repainted = true;
         newline = held.indexOf("\n");
+      }
+      // A delta with no newline yet must still show as it streams: repaint the region so
+      // the held line stays visible while a status row is painted.
+      if (held && !repainted && (seat !== null || pinned !== null)) {
+        eraseScreen();
+        paint();
       }
     },
     line(text) {
@@ -375,9 +412,15 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       paint();
     },
     status(text) {
-      if (!widthKnown()) return;
       const next = text ? text : null;
       if (next === seat) return;
+      // Without a width nothing is painted or measured, but the text is kept: the next
+      // resize (or paint with a width) shows the state it named, instead of dropping it
+      // until some later state change.
+      if (!widthKnown()) {
+        seat = next;
+        return;
+      }
       eraseScreen();
       seat = next;
       paint();
@@ -605,6 +648,12 @@ function diagnosticText(details: unknown[]): string {
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
 }
+/** A runner-owned label for the pane (a configured model or effort): painted as given, so
+ *  terminal controls and bidi/format characters are neutralized first, as diagnostics are. */
+function paneLabel(text: string): string {
+  return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
 
 function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   const text = diagnosticText(details);
@@ -825,6 +874,8 @@ export class RunnerCore {
   private paneExited = false;
   /** A failure is known and no new turn has started: the status row says error, not idle. */
   private paneError = false;
+  /** A runtime-reported automatic retry is in flight; the row says retrying until it ends. */
+  private paneRetrying = false;
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
   private sessionFile: string | undefined;
@@ -1260,8 +1311,10 @@ export class RunnerCore {
   private refreshPaneStatus(): void {
     if (!this.io.status) return;
     const parts: string[] = [];
-    if (this.opts.model) parts.push(this.opts.model);
-    if (this.opts.thinking) parts.push(`thinking:${this.opts.thinking}`);
+    // The labels are runner-owned text painted as given: neutralize terminal controls so a
+    // configured value cannot act on the terminal, exactly as diagnostics are treated.
+    if (this.opts.model) parts.push(paneLabel(this.opts.model));
+    if (this.opts.thinking) parts.push(`thinking:${paneLabel(this.opts.thinking)}`);
     parts.push(this.paneState());
     this.io.status(parts.join(" \u00b7 "));
   }
@@ -1272,8 +1325,10 @@ export class RunnerCore {
     if (this.attention === "permission_prompt") return "waiting for input";
     if (this.attention === "runtime_error") return "error";
     if (this.attention === "transient_turn_error") return "retrying";
-    if (this.streaming) return "working";
+    // A known failure outranks an open turn, and an observed retry outranks "working".
     if (this.paneError) return "error";
+    if (this.paneRetrying) return "retrying";
+    if (this.streaming) return "working";
     return "idle";
   }
 
@@ -1320,11 +1375,25 @@ export class RunnerCore {
       this.clearAttention();
       this.io.clearStatus?.();
       this.paneError = false;
+      this.paneRetrying = false;
       this.refreshPaneStatus();
     }
-    // A retry replaces the failed attempt it retries, so the row follows the attempt.
+    // A retry replaces the failed attempt it retries, so the row follows the attempt until
+    // its matching end, exit or a superseding turn.
     if (event.type === "auto_retry_start") {
       this.paneError = false;
+      this.paneRetrying = true;
+      this.refreshPaneStatus();
+    }
+    if (event.type === "auto_retry_end") {
+      this.paneRetrying = false;
+      this.refreshPaneStatus();
+    }
+    // Pi can open a turn with turn_start alone: the previous turn's failure is then stale.
+    // OMP keeps its failures until agent_start, so its attention policy is untouched here.
+    if (event.type === "turn_start" && this.runtime !== "omp") {
+      this.paneError = false;
+      this.paneRetrying = false;
       this.refreshPaneStatus();
     }
     if (this.runtime === "omp") {
@@ -1341,7 +1410,7 @@ export class RunnerCore {
       // Some paths omit agent_start; turn_start still opens a new turn.
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
-    const mapped = mapPiEvent(event, this.runtime);
+    const mapped = mapPiEvent(event, this.runtime, this.style);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
