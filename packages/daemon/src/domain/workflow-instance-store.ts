@@ -353,6 +353,28 @@ export class WorkflowInstanceStore {
     return rows.map(rowToInstance);
   }
 
+  /** Apply selectors before the optional bound and before expensive inspection. */
+  listFiltered(filters: { status?: WorkflowInstanceStatus; project?: string; mission?: string; slice?: string; rig?: string; name?: string; tags?: string[]; limit?: number }): WorkflowInstance[] {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (filters.status) { clauses.push("status = ?"); args.push(filters.status); }
+    if (filters.name) { clauses.push("workflow_name = ?"); args.push(filters.name); }
+    if (filters.rig) { clauses.push(this.hasBoundRigColumn ? "bound_rig = ?" : "0"); if (this.hasBoundRigColumn) args.push(filters.rig); }
+    for (const field of ["project", "mission", "slice"] as const) {
+      if (!filters[field]) continue;
+      clauses.push(this.hasScopeColumn ? `json_extract(scope_json, '$.${field}') = ?` : "0");
+      if (this.hasScopeColumn) args.push(filters[field]!);
+    }
+    for (const tag of filters.tags ?? []) {
+      clauses.push(this.hasScopeColumn ? "EXISTS (SELECT 1 FROM json_each(workflow_instances.scope_json, '$.tags') WHERE value = ?)" : "0");
+      if (this.hasScopeColumn) args.push(tag);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const limit = filters.limit === undefined ? "" : " LIMIT ?";
+    if (filters.limit !== undefined) args.push(filters.limit);
+    return (this.db.prepare(`SELECT * FROM workflow_instances${where} ORDER BY created_at ASC${limit}`).all(...args) as InstanceRow[]).map(rowToInstance);
+  }
+
   /**
    * Update frontier + status atomically. Caller is responsible for
    * wrapping in a transaction when this needs to compose with other
