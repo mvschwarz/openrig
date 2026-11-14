@@ -192,8 +192,8 @@ export class ContextUsageStore {
   }
 
   /** Resolve an explicitly selected native thread, even before its first token count. */
-  readCodexTranscriptPath(threadId: string): string | null {
-    return this.readCodexThread(threadId)?.rollout_path ?? null;
+  readCodexTranscriptPath(threadId: string, codexHome?: string): string | null {
+    return this.readCodexThread(threadId, codexHome)?.rollout_path ?? null;
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
@@ -453,8 +453,11 @@ export class ContextUsageStore {
     }
   }
 
-  private readCodexThread(threadId: string): CodexThreadRow | null {
-    for (const dbPath of this.resolveCodexStateDbPaths()) {
+  private readCodexThread(threadId: string, codexHome?: string): CodexThreadRow | null {
+    // A qualified seat read is confined to the same home as its PID/start-time evidence.
+    // Unqualified telemetry readers keep their existing multi-home discovery.
+    const paths = codexHome ? resolveCodexDbPaths("", "state", undefined, codexHome) : this.resolveCodexStateDbPaths();
+    for (const dbPath of paths) {
       try {
         const codexDb = new Database(dbPath, { readonly: true });
         try {
@@ -474,8 +477,8 @@ export class ContextUsageStore {
 
   private resolveCodexStateDbPaths(): string[] {
     const daemon = this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
-    // A seat with its own CODEX_HOME keeps its threads there. A thread id is unique across homes, so each declared home is
-    // searched after the daemon's.
+    // Unqualified telemetry discovery searches declared homes after the daemon's.
+    // Qualified native-identity reads supply one explicit home instead (copies may share a UUID).
     const seats = declaredRuntimeHomes(this.db, "codex").flatMap(home => resolveCodexDbPaths("", "state", undefined, home));
     return [...new Set([...daemon, ...seats])];
   }
