@@ -238,7 +238,7 @@ describe("SeatLifecycleService", () => {
 
     const events = eventsOfType(db, "session.stopped");
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ nodeId: a.node.id, sessionName: a.sessionName, reason: "single-seat stop test", operator: "op@rig" });
+    expect(events[0]).toMatchObject({ nodeId: a.node.id, sessionId: a.session.id, sessionName: a.sessionName, reason: "single-seat stop test", operator: "op@rig" });
   });
 
   it("labels a managed community stop as pane-only while retaining its normal seat audit", async () => {

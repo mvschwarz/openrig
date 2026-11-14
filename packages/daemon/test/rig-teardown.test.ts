@@ -170,6 +170,19 @@ describe("RigTeardownOrchestrator", () => {
     expect(tmux.killSession).toHaveBeenCalledWith("r01-dev");
   });
 
+  it("attributes down to the exact session generation even after a reaper stop", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.markIntentionallyStopped(sessionId);
+    eventBus.emit({ type: "session.stopped", rigId, nodeId, sessionId, sessionName: "r01-dev",
+      reason: "idle_reap", operator: "daemon:seat-reaper" });
+    const tmux = mockTmux();
+    tmux.probeSession = async () => ({ state: "absent" });
+    await buildTeardown(tmux).teardown(rigId);
+    const event = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='session.stopped' ORDER BY seq DESC LIMIT 1")
+      .get(nodeId) as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ sessionId, operator: "rig-teardown", reason: "rig_down" });
+  });
+
   // T2: Bindings cleared
   it("bindings cleared after teardown", async () => {
     const { rigId, nodeId } = seedRig();
