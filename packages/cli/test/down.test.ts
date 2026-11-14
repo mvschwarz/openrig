@@ -344,7 +344,7 @@ describe("Down CLI", () => {
     expect(logs).toContain("  /work/project/CLAUDE.md: openrig-seat-skills.md");
   });
 
-  // A person's own session joined with rig attach --self (or one adopted without the seat's marker) keeps running: down
+  // A session OpenRig didn't start (joined with rig attach --self, adopted, bound or reconciled) keeps running: down
   // released its seat, says so, and that's a clean result.
   it("names each seat it released, whose session keeps running as its owner's, and exits 0", async () => {
     responseOverride = {
@@ -357,7 +357,7 @@ describe("Down CLI", () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
-    expect(logs).toContain("Released, not stopped: dev-impl@rig-1. OpenRig didn't create these sessions for their seats (joined with rig attach --self, or adopted without the seat's marker), so each keeps running as its owner's; the seat is no longer bound to it.");
+    expect(logs).toContain("Released, not stopped: dev-impl@rig-1. OpenRig didn't start these sessions (joined with rig attach --self, adopted, bound or reconciled), so each is left running as its owner's; the seat is no longer bound to it.");
     expect(exitCode).toBeUndefined();
   });
 

@@ -171,8 +171,8 @@ describe("ClaimService", () => {
     expect(metaMap.get("@rigged_rig_id")).toBe(rig.id);
     expect(metaMap.get("@rigged_rig_name")).toBe("test-rig");
     expect(metaMap.get("@rigged_logical_id")).toBe("orch.lead");
-    // The seat's marker makes the adopted session positively this seat's, so rig down stops it rather than releasing it.
-    expect(setSessionEnvSpy).toHaveBeenCalledWith("orch-lead@host", "OPENRIG_NODE_ID", node.id);
+    // An adopted session never gets the seat's OPENRIG_NODE_ID marker: OpenRig didn't launch it, so rig down releases it.
+    expect(setSessionEnvSpy).not.toHaveBeenCalled();
   });
 
   // T16: createAndBindToPod sets tmux metadata
@@ -192,7 +192,7 @@ describe("ClaimService", () => {
     const calls = setSessionOptionSpy.mock.calls as [string, string, string][];
     const metaMap = new Map(calls.map((c) => [c[1], c[2]]));
     expect(metaMap.get("@rigged_node_id")).toBe(result.nodeId);
-    expect(setSessionEnvSpy).toHaveBeenCalledWith("dev-coder@host", "OPENRIG_NODE_ID", result.nodeId);
+    expect(setSessionEnvSpy).not.toHaveBeenCalled();
     expect(metaMap.get("@rigged_session_name")).toBe("dev-coder@host");
     expect(metaMap.get("@rigged_rig_id")).toBe(rig.id);
     expect(metaMap.get("@rigged_rig_name")).toBe("test-rig");

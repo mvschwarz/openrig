@@ -145,9 +145,8 @@ export function downCommand(depsOverride?: DownDeps): Command {
     .addHelpText("after", `
 rig down stops every agent OpenRig started in the rig: their sessions end, and any work in progress stops
 with them. For a community harness only its pane stops: its own processes may keep running, and rig down
-names it. A session OpenRig didn't create for its seat is never ended: a person's own session joined with
-rig attach --self, or an adopted one without the seat's OpenRig marker, keeps running, and rig down releases
-the seat (as rig unclaim does) and names it. A session adopted with the marker is stopped like the rest.
+names it. A session OpenRig didn't start (adopted, bound, reconciled, or a person's own session joined with
+rig attach --self) is never ended: rig down releases its seat, as rig unclaim does, and names it.
 Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
@@ -316,7 +315,7 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
         console.log(`Not stopped: ${result.leftRunning.join(", ")}. Joined with rig attach as an external CLI, which OpenRig doesn't stop or check.`);
       }
       if (result.released && result.released.length > 0) {
-        console.log(`Released, not stopped: ${result.released.join(", ")}. OpenRig didn't create these sessions for their seats (joined with rig attach --self, or adopted without the seat's marker), so each keeps running as its owner's; the seat is no longer bound to it.`);
+        console.log(`Released, not stopped: ${result.released.join(", ")}. OpenRig didn't start these sessions (joined with rig attach --self, adopted, bound or reconciled), so each is left running as its owner's; the seat is no longer bound to it.`);
       }
       if (result.paneOnly && result.paneOnly.length > 0) {
         console.log(`Pane stopped: ${result.paneOnly.join(", ")}. A community harness's own processes may keep running after its pane; see its preset's limits.`);

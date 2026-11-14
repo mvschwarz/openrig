@@ -42,9 +42,8 @@ export interface TeardownResult {
   /** Sessions of community-harness seats whose pane was stopped. OpenRig stops only the pane; the harness's own
    *  processes (a gateway, say) may keep running, as its preset's limits say. Present only when there was one. */
   paneOnly?: string[];
-  /** Sessions OpenRig didn't create for their seat (joined with `rig attach --self`, or adopted without the seat's
-   *  OPENRIG_NODE_ID marker): down released each seat, as `rig unclaim` does, and left the session running as its owner's.
-   *  Present only when there was one. */
+  /** Sessions OpenRig didn't launch (joined with `rig attach --self`, adopted, bound or reconciled): down released each
+   *  seat, as `rig unclaim` does, and left the session running as its owner's. Present only when there was one. */
   released?: string[];
 }
 
@@ -67,8 +66,8 @@ interface TeardownDeps {
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   /** The shipped Claude context collector. A cwd's copy is removed only while its bytes match this file. */
   claudeCollectorAssetPath?: string;
-  /** Releases a claimed session's seat without stopping the session: `rig unclaim`'s own path. Absent: such a seat's
-   *  unproven stop stays a failure, as before. */
+  /** Releases a claimed session's seat without stopping the session: `rig unclaim`'s own path. Absent: such a session
+   *  goes through the marker-checked stop, as before. */
   releaseClaimedSession?: (sessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
@@ -208,22 +207,32 @@ export class RigTeardownOrchestrator {
       const ownedByAnotherRig = archived.archived_at !== null && findOtherSessionOwner(
         this.db, session.sessionName, session.nodeId, { ignoreArchived: true },
       ) !== null;
+      // A session OpenRig didn't launch (origin claimed: joined with rig attach --self, adopted, bound or reconciled) is
+      // its owner's, whatever marker it carries, so down never stops it. Unless it's positively gone, down releases the
+      // seat as rig unclaim does, after the file cleanups below have counted the seat as still in use.
+      const release = session.origin === "claimed" && this.deps.releaseClaimedSession !== undefined;
       let absent = ownedByAnotherRig;
       if (!absent && this.deps.tmuxAdapter.probeSession) {
         try {
           const probe = await this.deps.tmuxAdapter.probeSession(session.sessionName);
           // This is the daemon's own tmux namespace, as in the import guard; a missing socket file is not enough.
           absent = probe.state === "absent" || probeShowsNoServer(probe);
-          if (probe.state !== "present" && !absent) {
+          if (probe.state !== "present" && !absent && !release) {
             result.errors.push(`Could not confirm session '${session.sessionName}' is absent: ${probe.state === "transport_unavailable" ? probe.cause : probe.state}`);
             killFailures++;
             continue;
           }
         } catch (err) {
-          result.errors.push(`Could not check session '${session.sessionName}': ${(err as Error).message}`);
-          killFailures++;
-          continue;
+          if (!release) {
+            result.errors.push(`Could not check session '${session.sessionName}': ${(err as Error).message}`);
+            killFailures++;
+            continue;
+          }
         }
+      }
+      if (release && !absent) {
+        toRelease.push(session);
+        continue;
       }
       const killResult = absent ? { ok: false, code: "session_not_found" } :
         await this.deps.tmuxAdapter.killSession(session.sessionName);
@@ -240,12 +249,6 @@ export class RigTeardownOrchestrator {
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result, session.nodeId);
         if (killResult.ok) result.sessionsKilled++;
         if (killResult.ok && communityHarnessOf(session.communityHarness, session.runtime)) (result.paneOnly ??= []).push(session.sessionName);
-      } else if (session.origin === "claimed" && (killResult as { code?: string }).code === "seat_target_unproven"
-        && this.deps.releaseClaimedSession) {
-        // A session OpenRig didn't create for this seat (joined with rig attach --self, or adopted without the seat's
-        // marker) is its owner's: down releases the seat and leaves the session running. The release waits until the
-        // file cleanups below have counted the seat as still in use, so they leave its owner's files alone.
-        toRelease.push(session);
       } else {
         // Real kill failure — don't update this node
         result.errors.push(`Kill failed for session '${session.sessionName}': ${(killResult as { message?: string }).message ?? "unknown"}`);
@@ -423,6 +426,19 @@ export class RigTeardownOrchestrator {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }
 
+  /** This rig's seats whose files may still be in use: each live session, and each released one. A released seat's
+   *  session (claimed, then detached by rig unclaim or down) is its owner's and may still be running, so its cwd stays
+   *  in use until recordAlreadyStoppedIntent sees tmux report the session absent and marks it stopped. */
+  private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">> {
+    const released = this.db.prepare(`
+      SELECT n.id AS nodeId, n.runtime, n.cwd FROM nodes n JOIN sessions s ON s.node_id = n.id
+      WHERE n.rig_id = ? AND s.origin = 'claimed' AND s.status = 'detached' AND s.intentionally_stopped = 0
+        AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+    `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">>;
+    return [...this.getLatestLiveSessions(rigId), ...released];
+  }
+
   private liveGuidanceTargets(rigId: string): Set<string> {
     const rows = this.db.prepare(`
       SELECT n.id, n.rig_id, n.runtime, n.cwd FROM nodes n
@@ -434,9 +450,9 @@ export class RigTeardownOrchestrator {
       const target = this.guidanceTargetPath(row.rig_id, row.runtime, row.cwd, row.id);
       if (target) targets.add(this.guidancePathKey(target));
     }
-    // A failed kill or inconclusive probe leaves this rig's session live.
+    // A failed kill or inconclusive probe leaves this rig's session live, and a released one stays its owner's.
     // Its file may also be shared with a sibling that stopped successfully.
-    for (const session of this.getLatestLiveSessions(rigId)) {
+    for (const session of this.seatsInUse(rigId)) {
       const target = this.guidanceTargetPath(rigId, session.runtime, session.cwd, session.nodeId);
       if (target) targets.add(this.guidancePathKey(target));
     }
@@ -480,8 +496,8 @@ export class RigTeardownOrchestrator {
 
   /** What a Claude seat may still use, by the same rule as guidance files: the cwd of a Claude seat of any other rig that
    *  isn't archived, or of one of this rig's Claude seats still live (a failed stop, an inconclusive probe, an attached
-   *  CLI). Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by their own identity too, so a target
-   *  another directory reaches through a symlink or a hardlink counts as in use. */
+   *  CLI) or released and not seen gone. Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by
+   *  their own identity too, so a target another directory reaches through a symlink or a hardlink counts as in use. */
   private claudeTargetsInUse(rigId: string): Set<string> {
     const rows = this.db.prepare(`
       SELECT n.cwd FROM nodes n
@@ -489,7 +505,7 @@ export class RigTeardownOrchestrator {
       WHERE r.archived_at IS NULL AND r.id <> ? AND n.runtime = 'claude-code' AND n.cwd IS NOT NULL
     `).all(rigId) as Array<{ cwd: string }>;
     const cwds = rows.map((row) => row.cwd);
-    for (const session of this.getLatestLiveSessions(rigId)) {
+    for (const session of this.seatsInUse(rigId)) {
       if (session.runtime === "claude-code" && session.cwd) cwds.push(session.cwd);
     }
     const keys = new Set<string>();
