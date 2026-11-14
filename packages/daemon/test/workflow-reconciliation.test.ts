@@ -197,6 +197,40 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(frontier(id)).toEqual(["close"]);
   });
 
+  it.each([
+    ["an unrelated change", () => { step("close").objective = "Close carefully"; }, "compatible"],
+    ["a source-only change", () => { plan.sdlc.catalog.address = "second.md"; }, "source-only"],
+  ] as const)("leaves a step that was already ready and never started alone on %s: nothing projected, and the revision applies", async (_label, mutate, status) => {
+    release();
+    const id = await published();
+    // An adoption completion the projector never acted on: record is ready under the bound graph and was never started.
+    // (A second dependency-free root is the natural case, but an eligible lifecycle can't hold one: the validator
+    // refuses a step unreachable from the entry.)
+    runtime.trailLog.record({ instanceId: id, stepId: "adoption", stepRole: "owner", closedAt: new Date().toISOString(), closureReason: "handoff", closureEvidence: {}, actorSession: "owner@rig", nextQitemId: null, priorQitemId: null } as never);
+    mutate(); save();
+    expect(inspectGraph(db, id)).toMatchObject({ status, compatible: true, projects: [] });
+    const sent = sends.length;
+    expect((await runtime.reviseGraph(apply(id))).projected).toEqual([]);
+    expect(inspectGraph(db, id).status).toBe("current");
+    expect(frontier(id)).toEqual(["adoption"]);
+    expect(queue.list({ tag: "step:record" } as never)).toHaveLength(0);
+    expect(sends.length).toBe(sent);
+  });
+
+  it("carries the revised slice associations: the step it projects, and later ones, get their newly active slice's tag", async () => {
+    release();
+    const id = await published();
+    expect(runtime.instanceStore.getByIdOrThrow(id).scope?.stepSlices?.record).toBeUndefined();
+    mkdirSync(join(mission, "slices", "record"), { recursive: true });
+    write(join(mission, "slices", "record", "slice.yaml"), { kind: "slice", metadata: { id: "record" }, composition: { mission: "../../mission.yaml" } });
+    plan.composition.slices.push({ ref: "slices/record/slice.yaml", order: 20 });
+    step("record").depends_on = ["publish"]; save();
+    const revision = await runtime.reviseGraph(apply(id));
+    const scope = runtime.instanceStore.getByIdOrThrow(id).scope;
+    expect(scope).toMatchObject({ project: "trial", mission: "trial", stepSlices: { record: "record" } });
+    expect(queue.getByIdOrThrow(revision.projected[0]!.qitemId).tags).toContain("slice:record");
+  });
+
   it("projects nothing early while a remaining prerequisite is unfinished; the ordinary close projects it", async () => {
     release();
     const id = await planned();

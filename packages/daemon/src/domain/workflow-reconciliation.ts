@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { compileProjectLifecycle, type LifecycleCompilation, type LifecycleSourceDigest } from "./project-lifecycle-compiler.js";
 import { WorkflowInstanceStore, WorkflowInstanceError } from "./workflow-instance-store.js";
+import { normalizeWorkflowScope } from "./workflow-scope.js";
 import { WorkflowSpecCache } from "./workflow-spec-cache.js";
 import type { WorkflowInstance, WorkflowSpec } from "./workflow-types.js";
 import type { EventBus } from "./event-bus.js";
@@ -164,10 +165,17 @@ function compare(db: Database.Database, instance: WorkflowInstance): { view: Gra
   }
   for (const step of proposed.steps) if (!oldSpec.steps.some(s => s.id === step.id))
     view.changes.push({ kind: "step-added", ref: step.id });
-  // An unstarted step whose every prerequisite has completed, by the projector's own completion order (a completion
-  // older than its prerequisite's re-run doesn't count), is projected once by the apply, through the projector's path.
-  const ready = completedStepIds(proposed, new WorkflowStepTrailLog(db).listForInstanceInAppendOrder(instance.instanceId));
-  for (const step of proposed.steps) if (!protectedIds.has(step.id) && (step.depends_on ?? []).every(id => ready.has(id))) {
+  // An unstarted step this revision makes ready is projected once by the apply, through the projector's path: every
+  // prerequisite has completed under the revised graph, by the projector's own completion order (a completion older
+  // than its prerequisite's re-run doesn't count), and it wasn't ready under the bound graph or is new. A step that was
+  // already ready and never started (a second root, say) is left as it is, as ordinary projection leaves it.
+  const trail = new WorkflowStepTrailLog(db).listForInstanceInAppendOrder(instance.instanceId);
+  const readyIn = (spec: WorkflowSpec) => {
+    const completedNow = completedStepIds(spec, trail);
+    return (id: string) => { const step = spec.steps.find(s => s.id === id); return !!step && (step.depends_on ?? []).every(d => completedNow.has(d)); };
+  };
+  const readyAfter = readyIn(proposed), readyBefore = readyIn(oldSpec);
+  for (const step of proposed.steps) if (!protectedIds.has(step.id) && readyAfter(step.id) && !readyBefore(step.id)) {
     view.projects.push(step.id);
     view.changes.push({ kind: "step-projected", ref: step.id });
   }
@@ -235,11 +243,14 @@ export function reviseGraph(db: Database.Database, bus: EventBus, input: {
       actorSession: input.actorSession, reason: input.reason, at: new Date().toISOString(), sourceOnly: view.status === "source-only",
       preservedFrontier: instance.currentFrontier, changes: view.changes,
       projected: planned?.plans.map(plan => ({ stepId: plan.step.id, qitemId: plan.packetId, owner: plan.owner })) ?? [] };
+    // The revised slice associations go with the revision, so its packets and later ones carry their slice's tag. The
+    // instance's project, mission, slice and tags stay as they were.
+    const scope = normalizeWorkflowScope({ ...(instance.scope ?? {}), stepSlices: { ...compilation!.sliceDirs } });
     store.reviseLifecycle(instance.instanceId, instance.version, compilation!.workflowSpec!.version, compilation!.compiledInputDigest, {
       ...binding, initialInputDigest: binding.initialInputDigest ?? instance.compiledInputDigest,
       sources: compilation!.sources, dependencies: compilation!.dependencies, graphSource: compilation!.graphSource,
       revisionHistory: [...(Array.isArray(binding.revisionHistory) ? binding.revisionHistory : []), receipt],
-    });
+    }, scope);
     if (planned) projected = projector!.projectRevisionSuccessors({ instance: store.getByIdOrThrow(instance.instanceId), spec: planned.spec,
       plans: planned.plans, actorSession: input.actorSession, operationKey: input.operationKey, reason: input.reason, register });
     register(bus.persistWithinTransaction({ type: "workflow.revised", instanceId: instance.instanceId, workflowName: instance.workflowName, operationKey: input.operationKey, compiledInputDigest: compilation!.compiledInputDigest, revisedBy: input.actorSession }));
