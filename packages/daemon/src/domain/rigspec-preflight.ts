@@ -265,7 +265,8 @@ export function permissionPolicyDiscoveryWarnings(
 /** A config-surface policy (a built-in such as standard, open or locked, or a custom one) is recorded, but its rules
  *  aren't applied at launch. So its line says what the seat launches with, rather than a bare floor that reads as the
  *  policy taking effect: a team seat with standard or open keeps the team default's allowances (as with no policy),
- *  and any other one launches without them. */
+ *  and any other one launches without them. A seat's own native mode, Codex envelope or profile still decides first,
+ *  and the plan can't see those, so both branches say so. */
 function configPolicyNote(attachment: { ref: string; origin: string; surface?: string; launchPosture: string },
   runtime: string, kernel: boolean): string {
   const config = attachment.surface === "config" || (attachment.origin === "builtin" && attachment.surface === undefined);
@@ -276,8 +277,9 @@ function configPolicyNote(attachment: { ref: string; origin: string; surface?: s
     return `${notApplied}: this seat launches at the floor with the team default's allowances, unless it has its own permission`
       + " choice, rules or named Codex profile (the applying-a-permission-policy skill applies more per seat)";
   }
-  return `${notApplied}: this seat launches at the floor without the team default's allowances until its rules are applied`
-    + " per seat (the applying-a-permission-policy skill)";
+  return `${notApplied}: unless the seat has an explicit native permission mode, Codex envelope or named Codex profile, it`
+    + " launches at the floor without the team default's allowances until its rules are applied per seat (the"
+    + " applying-a-permission-policy skill)";
 }
 
 /**

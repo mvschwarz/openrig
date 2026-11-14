@@ -101,8 +101,9 @@ const policyLines = (warnings: string[]) => warnings.filter((warning) => warning
 const notApplied = (ref: string) => ref === "builtin:standard" || ref === "builtin:open"
   ? `; ${ref} is recorded, but its rules aren't applied at launch: this seat launches at the floor with the team default's allowances,`
     + " unless it has its own permission choice, rules or named Codex profile (the applying-a-permission-policy skill applies more per seat)"
-  : `; ${ref} is recorded, but its rules aren't applied at launch: this seat launches at the floor without the team default's allowances`
-    + " until its rules are applied per seat (the applying-a-permission-policy skill)";
+  : `; ${ref} is recorded, but its rules aren't applied at launch: unless the seat has an explicit native permission mode, Codex envelope`
+    + " or named Codex profile, it launches at the floor without the team default's allowances until its rules are applied per seat"
+    + " (the applying-a-permission-policy skill)";
 
 function createTestApp(...args: Parameters<typeof createBaseTestApp>) {
   const setup = createBaseTestApp(...args);
