@@ -262,14 +262,14 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
   });
 
   it("keeps role-only entry and next steps inside the bound pod", async () => {
-    const planner = seedSeat(rigAId, "factory-a", "feature-a", "planner", { role: "planner" });
-    const driver = seedSeat(rigAId, "factory-a", "feature-a", "driver", { role: "driver" });
-    seedSeat(rigAId, "factory-a", "feature-b", "planner", { role: "planner" });
-    seedSeat(rigAId, "factory-a", "feature-b", "driver", { role: "driver" });
+    seedSeat(rigAId, "factory-a", "feature-a", "planner", { role: "planner" });
+    seedSeat(rigAId, "factory-a", "feature-a", "driver", { role: "driver" });
+    const planner = seedSeat(rigAId, "factory-a", "feature-b", "planner", { role: "planner" });
+    const driver = seedSeat(rigAId, "factory-a", "feature-b", "driver", { role: "driver" });
     const specPath = writeSpec("pod-role-only.yaml", ROLE_ONLY_SPEC);
-    const inst = await runtime.instantiate({ specPath, rootObjective: "t", createdBySession: "orch@factory-a", targetPod: "feature-a" });
+    const inst = await runtime.instantiate({ specPath, rootObjective: "t", createdBySession: "orch@factory-a", targetPod: "feature-b" });
     expect(inst.entryOwnerSession).toBe(planner);
-    expect(runtime.instanceStore.getById(inst.instance.instanceId)?.boundPod).toBe("feature-a");
+    expect(runtime.instanceStore.getById(inst.instance.instanceId)?.boundPod).toBe("feature-b");
     const projected = await runtime.projector.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId, exit: "handoff", actorSession: planner });
     expect(projected.nextOwnerSession).toBe(driver);
   });

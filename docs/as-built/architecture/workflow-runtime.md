@@ -104,7 +104,7 @@ all database migrations:
 | [`040`](../../../packages/daemon/src/db/migrations/040_workflow_specs_diagnostic.ts), [`050`](../../../packages/daemon/src/db/migrations/050_workflow_spec_json.ts) | Cache diagnostics and complete parsed spec JSON. |
 | [`049`](../../../packages/daemon/src/db/migrations/049_workflow_instance_version.ts), [`051`](../../../packages/daemon/src/db/migrations/051_workflow_resume.ts), [`052`](../../../packages/daemon/src/db/migrations/052_workflow_instance_bound_rig.ts) | Optimistic version guard, resume/hop baseline, and bound rig. |
 | [`079`](../../../packages/daemon/src/db/migrations/079_workflow_lifecycle_parallel.ts) | Lifecycle operation key/digest/binding, packet-to-step frontier bindings, and failure occurrences. |
-| [`158`](../../../packages/daemon/src/db/migrations/158_workflow_bound_pod.ts) | Optional workflow pod binding. |
+| [`170`](../../../packages/daemon/src/db/migrations/170_workflow_bound_pod.ts) | Optional workflow pod binding. |
 
 Current instance states include `active`, `waiting`, `completed`, `failed`,
 and `aborted`. A multi-packet frontier needs packet-to-step bindings; a
