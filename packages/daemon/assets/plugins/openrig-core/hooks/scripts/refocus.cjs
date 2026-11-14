@@ -309,6 +309,7 @@ function renderTrace() {
   }
   const env = traceEnv(trees);
   const timeout = lookupTimeout(contentReserveMs());
+  env.OPENRIG_REFOCUS_PARENT_BUDGET_MS = String(Math.max(0, timeout - 350));
   const result = timeout <= MIN_LOOKUP_MS
     ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
     : spawnSync(process.env.PYTHON || "python3", args, {

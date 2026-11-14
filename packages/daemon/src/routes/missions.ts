@@ -38,6 +38,7 @@ import { parseWorkflowSpecRef } from "../domain/slices/slice-indexer.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
 import { projectSpecGraph } from "../domain/workflow/slice-workflow-projection.js";
 import { resolveNodeFile } from "../domain/scope/node-file.js";
+import { readParentScope } from "../domain/scope/mission-parent.js";
 
 export function missionsRoutes(): Hono {
   const app = new Hono();
@@ -65,10 +66,12 @@ export function missionsRoutes(): Hono {
     const missionId = c.req.param("missionId");
     const allSlices = indexer.list();
     const slices = allSlices.filter((s) => s.missionId === missionId);
-    if (slices.length === 0) {
+    const fallbackPath = path.resolve(indexer.slicesRoot, missionId);
+    const legacyLinked = slices.length === 0 && path.dirname(fallbackPath) === path.resolve(indexer.slicesRoot) && !fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && readParentScope(indexer.slicesRoot).some((node) => node.kind === "mission" && node.path === fallbackPath && node.parent !== null);
+    if (slices.length === 0 && (path.dirname(fallbackPath) !== path.resolve(indexer.slicesRoot) || !resolveNodeFile(fallbackPath) || (!fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && !legacyLinked))) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
-    const missionPath = computeMissionPath(slices[0]!);
+    const missionPath = slices.length ? computeMissionPath(slices[0]!) : fallbackPath;
     const workflowSpec = readMissionWorkflowSpec(missionPath);
     const topology = computeMissionTopology(
       workflowSpec,
@@ -76,6 +79,9 @@ export function missionsRoutes(): Hono {
     );
     const readiness = readMissionReadiness(missionPath);
     const status = readiness.historicalStatus ?? readMissionStatus(missionPath);
+    const parentNodes = readParentScope(path.resolve(missionPath, ".."));
+    const missionNode = parentNodes.find((node) => node.kind === "mission" && node.path === missionPath);
+    const parentMatches = missionNode?.parent ? parentNodes.filter((node) => node.id === missionNode.parent) : [];
     return c.json({
       missionId,
       missionPath,
@@ -84,6 +90,9 @@ export function missionsRoutes(): Hono {
       workflow_spec: workflowSpec,
       topology,
       status,
+      parentId: missionNode?.parent ?? null,
+      parent: parentMatches.length === 1 ? parentMatches[0] : null,
+      childMissions: missionNode && parentNodes.filter((node) => node.id === missionNode.id).length === 1 ? parentNodes.filter((node) => node.kind === "mission" && node.parent === missionNode.id) : [],
     });
   });
 
