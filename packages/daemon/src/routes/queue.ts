@@ -10,7 +10,7 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker, DEFAULT_RECENT_TRANSITIONS_LIMIT } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
@@ -1505,8 +1505,8 @@ export function queueRoutes(): Hono {
       return c.json({ error: "rig_required", message: "rig is required for a rig RECENT read" }, 400);
     }
     const raw = c.req.query("limit");
-    const parsed = raw == null ? 20 : Number.parseInt(raw, 10);
-    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+    const parsed = raw == null ? DEFAULT_RECENT_TRANSITIONS_LIMIT : Number.parseInt(raw, 10);
+    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_RECENT_TRANSITIONS_LIMIT;
     const scope = scopeKind === "instance"
       ? { kind: "instance" } as const
       : { kind: "rig", rig: rig! } as const;
