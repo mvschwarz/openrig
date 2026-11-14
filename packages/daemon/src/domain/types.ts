@@ -267,11 +267,13 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
-      startedWithoutRequired?: string[]; successorSessionId?: string }
+      startedWithoutRequired?: string[]; successorSessionId?: string;
+      /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
