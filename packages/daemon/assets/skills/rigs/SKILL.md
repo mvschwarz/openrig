@@ -226,6 +226,7 @@ person needs in their project or home folder and name that path.
   Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
   team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
   that keep asking, for their project only (`applying-a-permission-policy`); tell it what they chose.
+  Trust and hook-review prompts are the person's to answer, as permission prompts are.
   Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
 - **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
