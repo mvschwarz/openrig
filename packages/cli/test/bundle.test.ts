@@ -406,6 +406,22 @@ describe("Bundle CLI", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("default bundle create keeps the authored rig despite an inconsistent recommendation", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-default-config-"));
+    try {
+      const spec = nodePath.join(dir, "rig.yaml");
+      fs.writeFileSync(spec, 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n');
+      fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), "schema: openrig.bundle-configurations/v1\nrecommended: all-pi\nseats:\n  build.lead: { runtimes: { claude-code: lead, pi: lead-pi } }\npresets:\n  authored: { build.lead: claude-code }\n  all-pi: { build.lead: pi }\n");
+      capturedCreateBodies = [];
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "bundle", "create", spec, "-o", nodePath.join(dir, "out.rigbundle")]);
+      });
+      expect(capturedCreateBodies).toHaveLength(1);
+      expect(capturedCreateBodies[0]!["specPath"]).toBe(spec);
+      expect(capturedCreateBodies[0]!["configuration"]).toBeUndefined();
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("bundle create names the bundle after the rig unless --name says otherwise", async () => {
     const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-name-"));
     fs.writeFileSync(nodePath.join(dir, "rig.yaml"), 'version: "0.2"\nname: tipjar-team\npods: []\n');
