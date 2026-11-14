@@ -24,6 +24,7 @@ import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { ObservationPass } from "./process-observation-pass.js";
+import { observeSolePane } from "./pane-binding-observation.js";
 
 export interface ResumeRefreshSession {
   /** The seat, when known, so its own runtime home is read. */
@@ -280,12 +281,19 @@ export class ResumeMetadataRefresher {
    * A native title or launch argument cannot identify the current conversation. Missing/ambiguous evidence stays absent. */
   async captureClaudeSessionId(sessionName: string, opts?: { nodeId?: string; cwd?: string | null; listProcesses?: NativeProcessLister }): Promise<string | undefined> {
     try {
-      const input = { target: sessionName, tmux: this.tmuxAdapter, listProcesses: opts?.listProcesses ?? this.listClaudeProcesses };
+      const nodeId = opts?.nodeId ?? this.sessionRegistry.findResumeContextByName(sessionName)?.nodeId;
+      let target = nodeId ? this.sessionRegistry.getBindingForNode(nodeId)?.tmuxPane : undefined;
+      if (!target) {
+        const pane = await observeSolePane({ listPanes: name => this.tmuxAdapter.listPanes(name, true) }, sessionName);
+        if (!pane.ok) return undefined;
+        target = pane.pane;
+      }
+      const input = { target, tmux: this.tmuxAdapter, listProcesses: opts?.listProcesses ?? this.listClaudeProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (!first) return undefined;
       const started = Date.parse(first.process.startedAt ?? "");
       if (!Number.isFinite(started)) return undefined;
-      const seatHome = opts?.nodeId ? this.seatHome?.(opts?.nodeId, "claude-code") : undefined;
+      const seatHome = nodeId ? this.seatHome?.(nodeId, "claude-code") : undefined;
       const configDir = nodePath.resolve(opts?.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
       const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
       const fd = fs.openSync(file, "r");

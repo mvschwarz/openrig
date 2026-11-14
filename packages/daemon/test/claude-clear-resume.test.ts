@@ -86,6 +86,59 @@ describe("Claude current conversation at shutdown", () => {
     return { rig, node, session, name, rows, file, tmux, probe, listClaudeProcesses, refresher, teardown, contextUsageStore };
   }
 
+  function multiplePaneFixture() {
+    const f = fixture("scrape", path.join(root, ".claude"), { emptyToken: true, nativeTitle: "Seat A" });
+    const otherId = "33333333-3333-4333-8333-333333333333";
+    f.rows.push(
+      { pid: 910, ppid: 1, pgid: 910, tpgid: 911, executableName: "bash", command: "bash", startedAt },
+      { pid: 911, ppid: 910, pgid: 911, tpgid: 911, executableName: "claude", command: "claude", startedAt },
+    );
+    fs.writeFileSync(path.join(path.dirname(f.file), "911.json"), JSON.stringify({ name: "Seat B", sessionId: otherId }));
+    f.tmux.getPanePid = vi.fn(async target => target === "%1" ? 900 : 910);
+    f.tmux.listPanes = vi.fn(async (_target, allWindows) => (allWindows ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%2" }]) as never);
+    return f;
+  }
+
+  it.each(["derive", "snapshot", "shutdown"])("%s selects the bound pane while another Claude pane is active", async mode => {
+    const f = multiplePaneFixture();
+    if (mode === "derive") {
+      const r = await deriveResumeToken({ runtime: "claude-code", sessionName: f.name, nodeId: f.node.id },
+        { contextUsageStore: f.contextUsageStore, resumeTokenCapturer: f.refresher });
+      expect(r).toEqual({ outcome: "captured", resumeType: "claude_id", token: newId });
+    } else {
+      if (mode === "snapshot") await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+      else await f.teardown.teardown(f.rig.id);
+      expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(newId);
+    }
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
+  });
+
+  it("without a recorded pane declines a session with panes in different windows", async () => {
+    const f = multiplePaneFixture();
+    db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id=?").run(f.node.id);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(f.tmux.getPanePid).not.toHaveBeenCalled();
+  });
+
+  it("without a recorded pane uses the session's sole pane, even when no node id was supplied", async () => {
+    const f = multiplePaneFixture();
+    db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id=?").run(f.node.id);
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%1" }] as never);
+    expect(await f.refresher.captureClaudeSessionId(f.name)).toBe(newId);
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
+  });
+
+  it("does not replace a missing bound pane with the session's active pane", async () => {
+    const f = multiplePaneFixture();
+    vi.mocked(f.tmux.getPanePid).mockImplementation(async target => target === "%1" ? null : 910);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(f.tmux.listPanes).not.toHaveBeenCalled();
+    expect(f.tmux.getPanePid).toHaveBeenCalledWith("%1");
+  });
+
   it("captures the post-clear conversation in the actual auto-pre-down snapshot", async () => {
     const f = fixture();
     // Another seat has the same name; a name scan must not select its old conversation.
