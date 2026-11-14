@@ -82,7 +82,7 @@ export function workflowRoutes(): Hono {
     }
     if (err instanceof WorkflowProjectorError) {
       const status =
-        err.code === "instance_not_active" || err.code === "packet_not_on_frontier" ? 409
+        err.code === "instance_not_active" || err.code === "packet_not_on_frontier" || err.code === "packet_already_closed" ? 409
         : err.code === "frontier_packet_required" || err.code === "frontier_binding_indeterminate" ? 409
         : err.code === "failure_occurrence_required" || err.code === "failure_occurrence_not_unresolved" || err.code === "failure_occurrence_replay_indeterminate" || err.code === "failure_occurrence_replay_conflict" ? 409
         : err.code === "instance_not_abortable" || err.code === "instance_not_resumable" ? 409

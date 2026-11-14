@@ -27,7 +27,7 @@ import {
 import { resolveExceptionRoute, type ExceptionRoute } from "./workflow-exception-router.js";
 import type { WorkflowHumanDestination } from "./workflow-human-destination.js";
 import { classifyGateTrip, workflowExceptionTags } from "./workflow-exception.js";
-import { newQitemId } from "./queue-repository.js";
+import { isBlockerLive, isTerminalState, newQitemId } from "./queue-repository.js";
 import { HUMAN_ALERT_TAG } from "./gateway/human-registry.js";
 import type { WorkflowExceptionClass } from "./workflow-exception.js";
 import {
@@ -1525,6 +1525,8 @@ export class WorkflowRuntime {
     fromSession: string;
     toSession: string;
     instanceStatus: WorkflowInstance["status"];
+    /** The packet was already handed off by an ordinary queue handoff; its successor (in this state) was adopted. */
+    adoptedHandoff?: { successorState: string };
   }> {
     let result!: {
       instanceId: string;
@@ -1534,6 +1536,7 @@ export class WorkflowRuntime {
       fromSession: string;
       toSession: string;
       instanceStatus: WorkflowInstance["status"];
+      adoptedHandoff?: { successorState: string };
     };
     let nudgeTo: { qitemId: string; session: string; nudge: boolean | undefined } | null = null;
 
@@ -1576,7 +1579,31 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId },
         );
       }
+      // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+      // queue's own successor carries the step on. Routing it to that same handoff target adopts the successor onto the
+      // frontier, instead of closing the closed packet again (the queue refuses) and assigning the step a second time.
+      // Only a packet handed off to this target, with exactly one successor there, qualifies. No queue row is written.
+      const handoffSuccessorOf = (packetId: string) => {
+        const packet = this.queueRepo.getById(packetId);
+        if (packet?.state !== "handed-off" || packet.closureTarget !== input.toSession) return null;
+        const rows = this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ? LIMIT 2").all(packetId) as Array<{ qitem_id: string }>;
+        const successor = rows.length === 1 ? this.queueRepo.getById(rows[0]!.qitem_id) : null;
+        return successor?.destinationSession === input.toSession ? { packet, successor } : null;
+      };
       if (!instance.currentFrontier.includes(oldPacketId)) {
+        // The same adoption again: the successor already holds the packet's place, so it's reported with no writes.
+        const adopted = handoffSuccessorOf(oldPacketId);
+        if (adopted && instance.currentFrontier.includes(adopted.successor.qitemId)) {
+          const binding = this.instanceStore.getFrontierBinding(instance.instanceId, adopted.successor.qitemId);
+          result = {
+            instanceId: instance.instanceId,
+            stepId: binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null),
+            closedPacketId: oldPacketId,
+            newPacketId: adopted.successor.qitemId, fromSession: adopted.packet.destinationSession, toSession: input.toSession,
+            instanceStatus: instance.status, adoptedHandoff: { successorState: adopted.successor.state },
+          };
+          return;
+        }
         throw new WorkflowProjectorError(
           "packet_not_on_frontier",
           `qitem ${oldPacketId} is not in workflow instance ${instance.instanceId} frontier`,
@@ -1606,6 +1633,72 @@ export class WorkflowRuntime {
       if (step) {
         reconcileExplicitOwnerHarness(step, input.toSession, (session) =>
           nodeRuntimeOf(this.db, session),
+        );
+      }
+
+      // Re-binds the frontier from the old packet to its successor: same step, version guard held, no hop bump.
+      const rebindFrontier = (packetId: string) => {
+        const nextFrontier = instance.currentFrontier.map((id) => id === oldPacketId ? packetId : id);
+        if (oldBinding) {
+          this.instanceStore.removeFrontierBinding(instance.instanceId, oldPacketId);
+          this.instanceStore.bindFrontierPacket({
+            instanceId: instance.instanceId,
+            packetId,
+            stepId: oldBinding.stepId,
+            branchDrive: oldBinding.branchDrive,
+            hopCount: oldBinding.hopCount,
+            hopsBaseline: oldBinding.hopsBaseline,
+          });
+        }
+        const rebound = this.instanceStore.listFrontierBindings(instance.instanceId);
+        this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, instance.status, {
+          currentStepId: rebound.length === 1 ? rebound[0]!.stepId : rebound.length > 1 ? "clear" : "preserve",
+          expectedVersion: instance.version,
+        });
+      };
+
+      const adopted = handoffSuccessorOf(oldPacketId);
+      if (adopted) {
+        rebindFrontier(adopted.successor.qitemId);
+        // The keepalive follows a live successor, and a closed one needs none.
+        if (this.watchdogJobsRepo) {
+          disarmWorkflowKeepalive(this.watchdogJobsRepo, instance.instanceId,
+            `workflow route: adopted the queue handoff to ${input.toSession}`, oldBinding ? oldPacketId : undefined);
+          if (isBlockerLive(adopted.successor.state)) {
+            ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
+              instanceId: instance.instanceId,
+              packetId: oldBinding ? adopted.successor.qitemId : undefined,
+              targetSession: input.toSession,
+              registeredBySession: input.actorSession,
+            });
+          }
+        }
+        register(this.eventBus.persistWithinTransaction({
+          type: "workflow.routing_table_changed",
+          rigName: instance.boundRig ?? specRow?.targetRig ?? "",
+          cause: "workflow_route_adopted_handoff",
+          instanceId: instance.instanceId,
+          stepId: selectedStepId,
+          from: fromSession,
+          to: input.toSession,
+        }));
+        result = {
+          instanceId: instance.instanceId,
+          stepId: selectedStepId,
+          closedPacketId: oldPacketId,
+          newPacketId: adopted.successor.qitemId,
+          fromSession,
+          toSession: input.toSession,
+          instanceStatus: instance.status,
+          adoptedHandoff: { successorState: adopted.successor.state },
+        };
+        return;
+      }
+      if (isTerminalState(oldPacket.state)) {
+        throw new WorkflowProjectorError(
+          "packet_already_closed",
+          `frontier packet ${oldPacketId} is already ${oldPacket.state}${oldPacket.closureTarget ? ` (to ${oldPacket.closureTarget})` : ""}; route can adopt a queue handoff's successor only when routed to that same target and the handoff left exactly one successor there`,
+          { instanceId: instance.instanceId, packetId: oldPacketId, state: oldPacket.state, closureTarget: oldPacket.closureTarget ?? null },
         );
       }
 
@@ -1728,23 +1821,7 @@ export class WorkflowRuntime {
 
       // (2)+(5)+(7) frontier REBIND: same step, new packet, version
       // guard held; NO hop bump (not an advance).
-      const nextFrontier = instance.currentFrontier.map((packetId) => packetId === oldPacketId ? created.qitemId : packetId);
-      if (oldBinding) {
-        this.instanceStore.removeFrontierBinding(instance.instanceId, oldPacketId);
-        this.instanceStore.bindFrontierPacket({
-          instanceId: instance.instanceId,
-          packetId: created.qitemId,
-          stepId: oldBinding.stepId,
-          branchDrive: oldBinding.branchDrive,
-          hopCount: oldBinding.hopCount,
-          hopsBaseline: oldBinding.hopsBaseline,
-        });
-      }
-      const rebound = this.instanceStore.listFrontierBindings(instance.instanceId);
-      this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, instance.status, {
-        currentStepId: rebound.length === 1 ? rebound[0]!.stepId : rebound.length > 1 ? "clear" : "preserve",
-        expectedVersion: instance.version,
-      });
+      rebindFrontier(created.qitemId);
 
       // Keepalive re-target IN-TXN (arch n3: covers route's lost-nudge
       // window — the armed job re-nudges the new owner).
