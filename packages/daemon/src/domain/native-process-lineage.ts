@@ -331,6 +331,19 @@ function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | 
 const CLAUDE_SWITCH_FLAGS: ReadonlySet<string> = new Set(["--chrome", "--no-chrome"]);
 
 function claudeSessionToken(args: string[]): string | null {
+  const parsed = claudeArgvIds(args);
+  return parsed ? claudeArgvIdentity(parsed.ids, parsed.fork) ?? null : null;
+}
+
+/** #3044: the conversation a Claude fork launch forked from: the `--resume` of a command line that also carries
+ *  `--fork-session` and the fork's own `--session-id`, read by the same parser as its identity; null when it is no
+ *  fork the identity proof accepts or can't be parsed. */
+export function claudeCommandForkParent(command: string): string | null {
+  const parsed = claudeArgvIds(tokens(command).slice(1));
+  return parsed?.fork && parsed.ids["session-id"] !== null ? parsed.ids.resume : null;
+}
+
+function claudeArgvIds(args: string[]): { ids: ClaudeArgvIds; fork: boolean } | null {
   const ids: ClaudeArgvIds = { resume: null, "session-id": null };
   let fork = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -371,7 +384,7 @@ function claudeSessionToken(args: string[]): string | null {
     if (ids[kind] !== null || !value || value.startsWith("-")) return null;
     ids[kind] = value;
   }
-  return claudeArgvIdentity(ids, fork) ?? null;
+  return { ids, fork };
 }
 
 // Delivery-only reading of a Claude argv. Like the strict selector, it accepts
@@ -440,7 +453,13 @@ function witnessedClaudeRow(row: NativeProcessRow): boolean {
  * intermediate stop only, never to recognise a child that refuses its launcher or
  * takes the proof. */
 function claudeRuntimeRow(row: NativeProcessRow): boolean {
-  return witnessedClaudeRow(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
+  return witnessedClaudeRow(row) || unwitnessedClaudeRow(row);
+}
+
+/** A native or Nix Claude (argv0 claude, a version or Nix OS name) whose executable witness is missing from this
+ * sample (unreadable, timed out or over budget). The proof does not count it, but a later sample may. */
+export function unwitnessedClaudeRow(row: NativeProcessRow): boolean {
+  return needsClaudeExecutablePath(row) && row.executablePath === undefined;
 }
 
 /** Verified Claude runtimes that `parent` starts directly (same process group,
@@ -752,9 +771,17 @@ export type NativeRejection =
   | { kind: "conflicting_conversations" }
   | { kind: "rotation_process_mismatch"; conversation: string };
 
+/** #3044 delta review SR1: how many foreground processes of the pane the proof would take as the runtime (0, 1 or more),
+ *  with the same rules as explainNativeRejection. */
+export function nativeCandidateCount(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string,
+  scriptLaunch?: boolean): number {
+  return nativeProcessCandidates(rows, panePid, runtime, selectedExecutable, scriptLaunch).length;
+}
+
 export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
-  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string): NativeRejection {
-  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
+  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string,
+  scriptLaunch?: boolean): NativeRejection {
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable, scriptLaunch);
   const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return { kind: "no_single_process" };
   const { process } = chain[0]!;

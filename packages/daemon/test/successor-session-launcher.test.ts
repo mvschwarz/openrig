@@ -546,6 +546,14 @@ describe("SuccessorSessionLauncher", () => {
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
+  it("#3044: a readiness failure keeps what the launch applied, for the recovery to commit with the successor", async () => {
+    const appliedLaunch = { axis: "permission", value: "auto", source: "launch" };
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "t", resumeType: "claude_id", appliedLaunch });
+    checkReady.mockRejectedValueOnce(new Error("tmux socket closed"));
+    const threw = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(threw).toMatchObject({ ok: false, step: "start_agent", successorLaunched: true, appliedLaunch });
+  });
+
   it("readiness reports attention_required (auth/trust gate) → structured failure, preserved seat NOT killed", async () => {
     checkReady.mockResolvedValue({ ready: false, code: "trust_gate", reason: "trust prompt" });
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
