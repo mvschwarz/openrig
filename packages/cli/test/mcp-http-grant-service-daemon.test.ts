@@ -453,6 +453,32 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "grant-service", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
   });
 
+  it("labels who created a row and who made each change apart from this connection, so it doesn't take another's principal as its own", async () => {
+    thisHostsDaemon();
+    const asExternal = await connect((await listen()).url);
+    const you = { seat: CALLER, principal: active().principal.id, grant: active().grant.id, you: true };
+    const own = await asExternal("rig_queue_create", { destination: "lead@team-a", body: "mine" });
+    const shownOwn = await asExternal("rig_queue_show", { qitemId: own.structured.qitemId });
+    expect(shownOwn.structured.viewer).toEqual(you);
+    expect(shownOwn.structured.item.createdBy).toEqual(you);
+    expect(shownOwn.structured.transitions[0].actor).toEqual(you);
+    // A request the team sent to this caller, created under another principal and grant.
+    const sent = await repo.create({ sourceSession: "lead@team-a", destinationSession: CALLER, body: "for you", nudge: false,
+      identityProvenance: "principal:v1", identityPrincipal: JSON.stringify({ source: "grant-service", id: "another-caller-principal", grant: "another-grant-01", version: 2 }) } as never);
+    const shown = await asExternal("rig_queue_show", { qitemId: sent.qitemId });
+    expect(shown.structured.viewer).toEqual(you);
+    expect(shown.structured.item.createdBy).toEqual({ seat: "lead@team-a", principal: "another-caller-principal", grant: "another-grant-01", you: false });
+    expect(shown.structured.transitions.map((t: { actor: { you: boolean } }) => t.actor.you)).not.toContain(true);
+    // This connection's seat with no principal recorded (a write from its terminal) can't be told, and another principal isn't it.
+    await repo.update({ qitemId: sent.qitemId, actorSession: CALLER, transitionNote: "seen from the terminal" } as never);
+    await repo.update({ qitemId: sent.qitemId, actorSession: CALLER, transitionNote: "another connection of this seat", identityProvenance: "principal:v1",
+      identityPrincipal: JSON.stringify({ source: "grant-service", id: "another-caller-principal", grant: "another-grant-01", version: 2 }) } as never);
+    const later = await asExternal("rig_queue_show", { qitemId: sent.qitemId });
+    const actorOf = (note: string) => later.structured.transitions.find((t: { transitionNote?: string }) => t.transitionNote === note)?.actor;
+    expect(actorOf("seen from the terminal")).toEqual({ seat: CALLER, principal: null, grant: null, you: null });
+    expect(actorOf("another connection of this seat")).toEqual({ seat: CALLER, principal: "another-caller-principal", grant: "another-grant-01", you: false });
+  });
+
   it("refuses every answer but active, a timeout, an unbound instance and a missing seat, with no fallback and nothing written", async () => {
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
