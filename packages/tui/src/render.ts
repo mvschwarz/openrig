@@ -67,7 +67,7 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "effort" | "context" | "status" | "queue" | "work" | "now" | "actions";
+type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "account" | "model" | "effort" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
 
 function columnsWidth(columns: AgentColumn[]): number {
@@ -77,14 +77,14 @@ function columnsWidth(columns: AgentColumn[]): number {
 function agentColumns(contentWidth: number): AgentColumn[] {
   if (contentWidth >= 110) return [
     ["pod", "POD", 8, "left"], ["seat", "SEAT", 15, "left"], ["runtime", "RT", 4, "left"],
-    ["model", "MODEL", 12, "left"], ["effort", "CFG EFF", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
-    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 19, "left"],
+    ["account", "ACCT", 8, "left"], ["model", "MODEL", 12, "left"], ["effort", "CFG EFF", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
+    ["queue", "Q", 3, "right"], ["work", "WORK", 11, "left"], ["now", "NOW", 14, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   if (contentWidth >= 88) return [
     ["pod", "POD", 5, "left"], ["seat", "SEAT", 10, "left"], ["runtime", "RT", 3, "left"],
-    ["model", "MODEL", 8, "left"], ["effort", "CFG", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
-    ["queue", "Q", 2, "right"], ["work", "WORK", 6, "left"], ["now", "NOW", 11, "left"],
+    ["account", "ACCT", 6, "left"], ["model", "MODEL", 8, "left"], ["effort", "CFG", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", 4, "left"], ["now", "NOW", 6, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   // At 84x28 the L2 content pane is 58 cells. The three explicitly deferred
@@ -103,16 +103,16 @@ function instanceAgentColumns(contentWidth: number, longestRigName = 0): AgentCo
     const rig = Math.min(Math.max(longestRigName, 13), 24);
     return [
       ["rig", "RIG", rig, "left"], ["pod", "POD", 8, "left"], ["seat", "SEAT", 14, "left"],
-      ["runtime", "RT", 3, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 10, "left"],
-      ["queue", "Q", 2, "right"], ["work", "WORK", 12, "left"], ["now", "NOW", Math.max(18, contentWidth - 78 - (rig - 13)), "left"],
+      ["runtime", "RT", 3, "left"], ["account", "ACCT", 8, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 10, "left"],
+      ["queue", "Q", 2, "right"], ["work", "WORK", 12, "left"], ["now", "NOW", Math.max(9, contentWidth - 87 - (rig - 13)), "left"],
     ];
   }
   if (contentWidth >= 78) {
     const rig = Math.min(Math.max(longestRigName, 10), 16);
     return [
       ["rig", "RIG", rig, "left"], ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"],
-      ["runtime", "RT", 3, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"],
-      ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(8, contentWidth - 54 - (rig - 10)), "left"],
+      ["runtime", "RT", 3, "left"], ["account", "ACCT", 6, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"],
+      ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(4, contentWidth - 61 - (rig - 10)), "left"],
     ];
   }
   const fixed = 8 + 5 + 11 + 2 + 5 + 8 + 2 + 7;
@@ -410,6 +410,7 @@ function agentDetailLines(
           fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
+          ...(agent.runtime === "claude-code" ? wrapDetailValue("configured account", `${agent.configuredAccount ?? "unknown"} (not verified sign-in)`, contentWidth) : []),
           // #1347 — four values stay distinguishable on one wrapped row. "applied"
           // appears only for outcome `accepted`; unknowns stay unknown.
           ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
@@ -817,7 +818,7 @@ function instanceContentLines(
       .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter)),
   })).filter(({ rig, agents }) => !state.filter || agents.length > 0 || rig.name.includes(state.filter));
   const columns = instanceAgentColumns(contentWidth, Math.max(0, ...shownRigs.map(({ rig }) => rig.name.length)));
-  lines.push({ text: tableRow(columns, { rig: "RIG", pod: "POD", seat: "SEAT", runtime: "RT", context: "CTX", status: "STATE", queue: "Q", work: "WORK", now: "NOW" }) });
+  lines.push({ text: tableRow(columns, { rig: "RIG", pod: "POD", seat: "SEAT", runtime: "RT", account: "ACCT", context: "CTX", status: "STATE", queue: "Q", work: "WORK", now: "NOW" }) });
   lines.push({ text: "━".repeat(columnsWidth(columns)) });
   let seatCount = 0;
   let workingCount = 0;
@@ -853,6 +854,7 @@ function instanceContentLines(
         pod: firstInPod ? pod : "",
         seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
         runtime: runtimeShort(agent.runtime),
+        account: agent.runtime === "claude-code" ? agent.configuredAccount ?? "unknown" : "—",
         context: contextCompact(agent.context, contentWidth < 110),
         status: stateCell.word,
         queue: queueCount(snap, queue.count),
@@ -1058,10 +1060,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     lines.push(...queueSampleLines(snap, contentWidth));
     const narrowFactory = !agentCols.some(([key]) => key === "model");
     const effortCol = agentCols.find(([key]) => key === "effort");
-    if (narrowFactory) lines.push({ text: "MODEL/EFFORT/NOW/ACTIONS on drill (enter)" });
+    if (narrowFactory) lines.push({ text: "MODEL/EFFORT/NOW/ACTIONS on drill (enter); ACCT on drill" });
     lines.push({
       text: tableRow(agentCols, {
-        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: effortCol?.[1] ?? "CFG EFF", context: "CTX",
+        pod: "POD", seat: "SEAT", runtime: "RT", account: "ACCT", model: "MODEL", effort: effortCol?.[1] ?? "CFG EFF", context: "CTX",
         status: "STATE", queue: "Q", work: "WORK", now: "NOW", actions: "ACTIONS",
       }),
     });
@@ -1100,6 +1102,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           pod: firstInPod ? a.pod : "",
           seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
           runtime: runtimeShort(a.runtime),
+          account: a.runtime === "claude-code" ? a.configuredAccount ?? "unknown" : "—",
           model: tableModel(a.model),
           effort: tableEffort(a.effort, a.effortSource, effortCol?.[2] ?? 0),
           context: contextCompact(a.context, narrowFactory),
