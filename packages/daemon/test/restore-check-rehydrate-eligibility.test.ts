@@ -227,6 +227,20 @@ describe("restore-check current-state eligibility correction", () => {
     await expectLeftAttached(rig.name);
   });
 
+  it("a member the selected snapshot doesn't hold at all (it joined later and its session exited) reads as left attached", async () => {
+    const { rig, lead } = seedOutside("joined-after");
+    // With no fresh-launch record, the occupant match skips an exited session, so restore uses a snapshot that holds
+    // only the lead. Restore acts on that snapshot's roster and leaves the later member as it is.
+    setup.sessionRegistry.updateStatus(setup.sessionRegistry.getSessionsForRig(rig.id)[0]!.id, "exited");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    setup.snapshotRepo.createSnapshot(rig.id, "auto-pre-down", {
+      rig: live.rig, nodes: live.nodes.filter((node) => node.id === lead.id), edges: [], sessions: [], checkpoints: {},
+      activeSessionIdByNode: {},
+      topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [lead.id] },
+    });
+    await expectLeftAttached(rig.name);
+  });
+
   it("on a current-state rehydrate, a member outside the rig's recorded roster reads as left attached too", async () => {
     const { rig, lead } = seedOutside("outside-rehydrate");
     // No usable snapshot, so restore would rehydrate from current state, which takes the rig's recorded roster.

@@ -478,10 +478,12 @@ export class RestoreCheckService {
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const { blockers, warnings } = validation;
+      // Restore acts only on the snapshot's roster. A current member outside it is left as it is: one the roster leaves
+      // out, or one the snapshot doesn't hold at all (it joined after the snapshot).
+      const restored = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((member) => member.nodeId));
       return {
         snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
-        notRestored: new Set(resolveSnapshotRestoreTopology(input.snapshot.data).excludedNodes
-          .map((excluded) => excluded.nodeId)),
+        notRestored: new Set(inventory.flatMap((current) => current.nodeId && !restored.has(current.nodeId) ? [current.nodeId] : [])),
         check: {
           check,
           status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
