@@ -29,6 +29,8 @@ export const SCOPE = [
   { file: "packages/cli/src/commands/setup.ts", function: "goldenPathNextSteps" },
   { file: "packages/daemon/assets/onboarding/01-world-and-purpose.md" },
   { file: "packages/daemon/assets/onboarding/02-self-and-competent-action.md" },
+  // The installer procedure moved out of onboarding 02 into the rigs skill's reference (issue #3228); its commands stay checked.
+  { file: "packages/daemon/assets/skills/rigs/references/installing-for-someone.md" },
 ];
 
 // Not a builtin alias or an existence assertion. External bundles need their own

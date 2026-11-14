@@ -33,6 +33,28 @@ describe("the rigs skill installed globally", () => {
     }
   });
 
+  it("keeps the installer's whole procedure on demand, and the skill points to it (issue #3228)", () => {
+    // This procedure used to sit in every seat's startup text (onboarding file 02). It moved here intact; seat startup keeps a pointer.
+    const reference = readFileSync(join(PACKAGED, "references/installing-for-someone.md"), "utf8");
+    for (const kept of [
+      "rig daemon start",
+      "rig daemon start --no-kernel",
+      "rig status",
+      "rig ps --nodes --rig kernel",
+      "rig terminal open saved:kernel --window --json",
+      "rig tui --shared",
+      "Over headless SSH",
+      "operator.agent",
+      "tmuxAttachCommand",
+      "env -u TMUX",
+      "rig send <canonicalSessionName>",
+      "Installation is complete when the operator is ready and the person is talking to it",
+      "rig context get reference/getting-started.md#open-the-kernel-conversations",
+      "Opening a terminal is not permission to start or reset seats or provision accounts.",
+    ]) expect(reference, kept).toContain(kept);
+    expect(readFileSync(join(PACKAGED, "SKILL.md"), "utf8")).toContain("(references/installing-for-someone.md)");
+  });
+
   it("is not an openrig-core plugin skill", () => {
     expect(existsSync(resolve(import.meta.dirname, "../assets/plugins/openrig-core/skills/rigs"))).toBe(false);
   });
@@ -52,6 +74,8 @@ describe("the rigs skill installed globally", () => {
     try {
       const claude = join(root, ".claude/skills/rigs");
       expect(readFileSync(join(claude, "SKILL.md"))).toEqual(readFileSync(join(PACKAGED, "SKILL.md")));
+      expect(readFileSync(join(claude, "references/installing-for-someone.md")))
+        .toEqual(readFileSync(join(PACKAGED, "references/installing-for-someone.md")));   // the setup route reaches the whole procedure
       expect(readFileSync(join(claude, ".openrig-vendor-version"), "utf8")).toBe(`${getDaemonVersion()}\n`);
       expect(readFileSync(join(skillsSh, "SKILL.md"), "utf8")).toBe("# rigs, installed by skills.sh\n");
       expect(existsSync(join(skillsSh, ".openrig-vendor-version"))).toBe(false);
