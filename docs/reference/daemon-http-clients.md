@@ -310,3 +310,29 @@ The correlation survives daemon restart. An operation ID reused with different i
 
 A source-level fixture pass establishes the tested ownership, selection and reporting paths. Actual native
 conversation usefulness and authenticated-account continuity need a qualified runtime observation.
+
+## Per-rig delivery drain
+
+A maintenance owner can hold automatic queue wakes, watchdog delivery and stuck-sweep findings directed to one rig:
+
+- `GET /api/rigs/:rigId/delivery-drain` reads its current control and retained-notice counts.
+- `POST /api/rigs/:rigId/delivery-drain` begins a window, or renews the same window's review deadline:
+
+  ```json
+  {"drainId":"maintenance-window-1","owner":"maintainer@example","reviewAt":"2026-12-01T12:30:00Z"}
+  ```
+
+- `POST /api/rigs/:rigId/delivery-drain/end` with `{"drainId":"maintenance-window-1"}` explicitly ends that window.
+
+Status includes the owner, start, review deadline and drain ID, `retainedWorkCount`, and `nativeStartsDeferred: false`.
+The retained count is pending queue-wake intents plus due watchdog jobs, excluding maintenance review jobs; it is a count of notifications, not unique tasks. Work keeps its existing queue/outbox/job identities. Other destination rigs continue normally; a row's source rig and a watchdog's registering rig are provenance, not drain admission criteria.
+
+A deadline prompts the recorded owner through the existing watchdog; it never ends a drain automatically. Review checks and repeat prompts have a five-minute minimum interval, including a past or near deadline. Its review job remains usable even if its owner's rig also has a delivery drain. Repeating BEGIN with the same ID and settings keeps the same window and job; renewal preserves the start. An active window is returned as status if a different ID is requested. A completed window's ID never starts it again.
+
+END changes only the named current window and schedules one existing recovery pass for its pending queue notices. Repeating END does not schedule another pass. A delayed END for an earlier window cannot end a later one. `releaseScheduled` reports scheduling, not successful delivery: notices still use current queue state, recipient checks and normal receipts. The END pass adds no retry of failed, uncertain, in-flight, delivered or manually retained input. Completed work reconciles normally; existing failed or uncertain outcomes keep their ordinary recovery and visibility.
+
+This is delivery-only maintenance. Direct sends, control/END requests and ordinary reads stay usable. Automatic native starts are **not deferred**, and input already in flight can finish. Coordinate native or daemon lifecycle work separately; this control does not promise all-activity quiet or graceful stop.
+
+The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
+
+All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.
