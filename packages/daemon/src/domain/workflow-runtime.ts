@@ -553,9 +553,6 @@ export class WorkflowRuntime {
     // instance's spec expands the same way. With no bound rig the target
     // stays literal and is handled at the hop that selects it.
     const boundPod = input.targetPod ?? null;
-    if (boundPod === null && Object.values(specRow.spec.roles ?? {}).some((role) => (role.preferred_targets ?? []).some((target) => target.startsWith("{pod}-")))) {
-      throw new WorkflowProjectorError("bound_pod_invalid", "This workflow uses {pod} targets; provide --pod with a bound rig.", { specPath: input.specPath });
-    }
     if (boundPod !== null) {
       if (!boundRig || !boundPod.trim()) {
         throw new WorkflowProjectorError("bound_pod_invalid", "A valid --pod requires a bound rig.", { targetPod: boundPod, boundRig });

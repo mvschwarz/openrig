@@ -6,7 +6,7 @@ import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_i
 import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
 import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
-import { workflowBoundPodSchema } from "./migrations/158_workflow_bound_pod.js";
+import { workflowBoundPodSchema } from "./migrations/170_workflow_bound_pod.js";
 import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
 import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
@@ -329,7 +329,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueErasureSchema,
   queueErasureLinkIndexesSchema,
   queueErasureBatchesSchema,
-  workflowBoundPodSchema,
   queueInboxCheckinsSchema,
   queueItemsHandedOffFromIndexSchema,
   networkBindingsSchema,
@@ -341,4 +340,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueListReadIndexesSchema,
   seatHandoverAttemptsSchema,
   seatRuntimeHomeRecordsSchema,
+  workflowBoundPodSchema,
 ];

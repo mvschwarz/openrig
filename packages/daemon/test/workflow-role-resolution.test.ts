@@ -13,7 +13,7 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
-import { workflowBoundPodSchema } from "../src/db/migrations/158_workflow_bound_pod.js";
+import { workflowBoundPodSchema } from "../src/db/migrations/170_workflow_bound_pod.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";

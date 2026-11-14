@@ -147,7 +147,7 @@ export class WorkflowInstanceStore {
     // legacy INSERT; production always migrates).
     const boundRigCol = this.hasBoundRigColumn ? ", bound_rig" : "";
     const boundRigVal = this.hasBoundRigColumn ? ", ?" : "";
-    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 158");
+    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 170");
     const podCol = this.hasBoundPodColumn ? ", bound_pod" : "";
     const podVal = this.hasBoundPodColumn ? ", ?" : "";
     const lifecycleCols = this.hasLifecycleColumns

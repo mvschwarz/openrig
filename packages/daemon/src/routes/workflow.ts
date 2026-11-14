@@ -127,7 +127,7 @@ export function workflowRoutes(): Hono {
     }
     if (err instanceof QueueRepositoryError) {
       const status =
-        err.code === "unknown_destination_rig" ? 400
+        err.code === "unknown_destination_rig" || err.code === "unbound_destination_pod" ? 400
         : err.code === "qitem_not_found" ? 404
         : err.code === "workflow_frontier_packet" ? 400
         : 500;

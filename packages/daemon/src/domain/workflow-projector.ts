@@ -1603,6 +1603,11 @@ function resolveRoleOnBoundRig(
 /** Preserve the old topology gate for template-looking rig names. Registered
  * literal names, including archived rigs, remain recordable as on main. */
 export function assertBoundWorkflowTarget(target: string, queue: Pick<QueueRepository, "acceptsDestination">): void {
+  if (target.startsWith("{pod}-")) {
+    throw new QueueRepositoryError("unbound_destination_pod",
+      `Workflow target ${target} requires a pod binding. Start the workflow with --pod <namespace> and --rig <name>, or use a concrete destination.`,
+      { destinationSession: target });
+  }
   const at = target.indexOf("@");
   if (at >= 0 && target.slice(at + 1).includes("{rig}") && !queue.acceptsDestination(target)) {
     throw new QueueRepositoryError("unknown_destination_rig",

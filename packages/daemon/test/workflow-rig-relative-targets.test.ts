@@ -388,10 +388,36 @@ ${steps}`;
     expect(bad.body.error).toBe("bound_pod_unknown");
     const absent = await start(yaml, { targetRig: "rig-a" });
     expect(absent.status).toBe(400);
-    expect(absent.body.error).toBe("bound_pod_invalid");
+    expect(absent.body.error).toBe("unbound_destination_pod");
+    expect(absent.body.message).toContain("{pod}-watcher@rig-a");
+    expect(absent.body.message).toContain("--pod");
     const unbound = await start(yaml, { targetPod: "feature" });
     expect(unbound.status).toBe(400);
     expect(unbound.body.error).toBe("bound_pod_invalid");
+  });
+
+  it("starts without a pod when a pod-relative role is unused", async () => {
+    const yaml = specYaml("pod-unused", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    spare:\n      preferred_targets:\n        - "{pod}-spare@rig-a"\n`);
+    const started = await start(yaml, { targetRig: "rig-a" });
+    expect(started.status).toBe(201);
+    expect(entryDestination(started.body.instance.instanceId)).toBe("ops-watcher@rig-a");
+  });
+
+  it("starts without a pod and reports the missing binding at the later hop", async () => {
+    const yaml = specYaml("pod-later", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    finisher:\n      preferred_targets:\n        - "{pod}-finisher@rig-a"\n`, `    - id: watch\n      actor_role: watcher\n      allowed_exits:\n        - handoff\n      next_hop:\n        mode: require\n        suggested_roles:\n          - finisher\n    - id: finish\n      actor_role: finisher\n      allowed_exits:\n        - done\n`);
+    const started = await start(yaml, { targetRig: "rig-a" });
+    expect(started.status).toBe(201);
+    const packets = count("queue_items");
+    const response = await daemon.app.request("/api/workflow/project", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instanceId: started.body.instance.instanceId, currentPacketId: started.body.entryQitemId, exit: "handoff", actorSession: "ops-watcher@rig-a", resultNote: "next" }),
+    });
+    const body = await response.json() as { error: string; message: string };
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("unbound_destination_pod");
+    expect(body.message).toContain("{pod}-finisher@rig-a");
+    expect(body.message).toContain("--pod");
+    expect(count("queue_items")).toBe(packets);
   });
 
   // The four shapes whose {rig} is never the entry target actually used.
