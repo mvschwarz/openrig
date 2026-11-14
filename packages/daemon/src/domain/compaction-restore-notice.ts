@@ -5,24 +5,47 @@ import type { QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
 import { workflowHumanDestination } from "./workflow-human-destination.js";
+import { physicalSessionName } from "./session-registry.js";
+import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
-/** Recovery needs an independent agent, even when its recorded seat is missing or stopped. */
-function recoveryRecipient(db: Database.Database, session: string): { session: string; kind: "agent" | "human"; note: string } {
+/** Recovery needs an independent agent whose address can hold a row, even when its seat is missing or stopped. */
+function recoveryRecipient(db: Database.Database, queue: QueueRepository, session: string): { session: string; kind: "agent" | "human"; note: string } {
+  const unusable = (candidate: string): string | null => {
+    if (candidate === session || physicalSessionName(db, candidate) === physicalSessionName(db, session))
+      return `${candidate}, the receiving address, is the seat this notice is about`;
+    const humans = queue.humanRegistry();
+    if (humans.ok && resolveRegisteredHumanAddress(candidate, humans.entities))
+      return `${candidate}, the receiving address, resolves to a registered person rather than an independent agent`;
+    if (!queue.acceptsDestination(candidate)) return `${candidate} cannot hold this notice in its destination rig`;
+    return null;
+  };
+  const reasons: string[] = [];
   const parent = defaultResolveOrchestrator(db, session);
-  if (parent && parent !== session) {
-    const receiver = resolveDefaultReceiver(db, () => parent);
-    return { session: parent, kind: "agent", note: `Recovery owner: delegating parent ${parent}; recorded state ${receiver.state}${receiver.recorded ? ` (${receiver.recorded})` : ""}. Notices may wait; ownership does not establish delivery or pickup.` };
+  if (parent) {
+    const reason = unusable(parent);
+    if (!reason) {
+      const receiver = resolveDefaultReceiver(db, () => parent);
+      return { session: parent, kind: "agent", note: `Recovery owner: delegating parent ${parent}; recorded state ${receiver.state}${receiver.recorded && receiver.recorded !== receiver.state ? ` (${receiver.recorded})` : ""}. Notices may wait; ownership does not establish delivery or pickup.` };
+    }
+    reasons.push(reason);
   }
   let receiver = resolveDefaultReceiver(db);
-  // As with permission decisions, the failed seat cannot be its own recovery receiver. Unlike a permission
-  // decider, an explicitly configured but missing seat stays the owner; ordinary queue recovery handles delivery.
-  if (receiver.session === session) receiver = resolveDefaultReceiver(db, () => null);
-  if (receiver.session && receiver.session !== session) return {
-    session: receiver.session, kind: "agent",
-    note: `Recovery owner: ${describeDefaultReceiver(receiver)} This records ownership, not delivery or pickup.`,
-  };
-  return { session: workflowHumanDestination(), kind: "human", note: "No independent recovery agent could be resolved, so this notice goes to the registered person." };
+  if (receiver.session) {
+    const reason = unusable(receiver.session);
+    if (reason) {
+      reasons.push(reason);
+      receiver = resolveDefaultReceiver(db, () => ({ session: null, problem: reason }));
+    }
+  }
+  if (receiver.session) {
+    const reason = unusable(receiver.session);
+    if (!reason) return { session: receiver.session, kind: "agent",
+      note: `Recovery owner: ${describeDefaultReceiver(receiver)} This records ownership, not delivery or pickup.` };
+    if (!reasons.includes(reason)) reasons.push(reason);
+  }
+  return { session: workflowHumanDestination(), kind: "human",
+    note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}No independent recovery agent could be resolved, so this notice goes to the registered person.` };
 }
 
 /** One existing diagnostic queue item per compaction attempt, also across restarts. */
@@ -44,7 +67,7 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
   }
   // A successful fallback updates an existing diagnostic; it never starts a new owner wake.
   if (lastDelivery.ok) return;
-  const recipient = recoveryRecipient(db, sessionName);
+  const recipient = recoveryRecipient(db, queue, sessionName);
   const seat = shellQuote(sessionName);
   await queue.create({
     qitemId, sourceSession: sessionName,
@@ -68,12 +91,12 @@ export async function reportPreparationFailure(db: Database.Database, queue: Que
   if (existing) {
     if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary) {
       const humans = queue.humanRegistry();
-      const toPerson = !humans.ok || humans.entities.some(human => human.address === existing.destinationSession);
+      const toPerson = !humans.ok || resolveRegisteredHumanAddress(existing.destinationSession, humans.entities) !== null;
       queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: toPerson ? summary : `${summary}. ${evidence}` });
     }
     return;
   }
-  const recipient = recoveryRecipient(db, failure.sessionName);
+  const recipient = recoveryRecipient(db, queue, failure.sessionName);
   await queue.create({ qitemId, sourceSession: failure.sessionName,
     destinationSession: recipient.session,
     summary, wakeTrigger: "openrig", tags: ["compaction", "preparation-delivery", `occupant:${failure.occupantGeneration}`],

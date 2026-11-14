@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import * as humanSelection from "../src/domain/workflow-human-destination.js";
 import * as queueOwner from "../src/domain/queue-owner.js";
+import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { KERNEL_OPERATOR_SESSION } from "../src/domain/default-receiver.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
@@ -158,12 +160,15 @@ interface RouteCase {
   kernelStatus?: string;
   parent?: boolean;
   parentStatus?: string;
+  physicalWriter?: string;
+  reportAlias?: boolean;
+  wakeExpected?: boolean;
   selfParent?: boolean;
   unreadable?: boolean;
   expected: string;
   detail?: string;
 }
-const humanAddress = "human-owner@external";
+const humanAddress = "alice@external";
 const routes: RouteCase[] = [
   { name: "actual delegation parent precedes the configured agent", parent: true, chosen: "receiver@notice", receiverStatus: "running", expected: "owner@notice" },
   { name: "stopped parent stays ahead of the configured agent", parent: true, parentStatus: "exited", chosen: "receiver@notice", receiverStatus: "running", expected: "owner@notice", detail: "recorded state stopped (exited)" },
@@ -171,39 +176,46 @@ const routes: RouteCase[] = [
   { name: "configured running agent", chosen: "receiver@notice", receiverStatus: "running", expected: "receiver@notice", detail: "recorded as running" },
   { name: "configured idle agent", chosen: "receiver@notice", receiverStatus: "idle", expected: "receiver@notice", detail: "recorded as idle" },
   { name: "configured stopped agent remains owner", chosen: "receiver@notice", receiverStatus: "exited", kernelStatus: "running", expected: "receiver@notice", detail: "answers wait for it" },
-  { name: "configured missing agent remains owner", chosen: "receiver@notice", kernelStatus: "running", expected: "receiver@notice", detail: "no seat by that name" },
+  { name: "configured missing agent remains owner", chosen: "receiver@notice", kernelStatus: "running", expected: "receiver@notice", detail: "no seat by that name", wakeExpected: false },
   { name: "configured unknown agent remains owner", chosen: "receiver@notice", receiverStatus: "unknown", expected: "receiver@notice", detail: "recorded as unknown" },
-  { name: "unreadable telemetry does not abandon the configured agent", chosen: "receiver@notice", unreadable: true, expected: "receiver@notice", detail: "seat couldn't be read" },
+  { name: "unreadable telemetry does not abandon the configured agent", chosen: "receiver@notice", receiverStatus: "unknown", unreadable: true, expected: "receiver@notice", detail: "seat couldn't be read" },
   { name: "kernel default", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "the kernel operator" },
   { name: "stopped kernel stays owner", kernelStatus: "exited", expected: KERNEL_OPERATOR_SESSION, detail: "answers wait for it" },
-  { name: "self receiving agent uses independent kernel", chosen: "writer@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "self receiving agent uses independent kernel", chosen: "writer@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
   { name: "self receiving agent with no kernel reaches the person", chosen: "writer@notice", expected: humanAddress },
+  { name: "logical receiver alias cannot recover its own physical seat", chosen: "writer@notice", physicalWriter: "r42-original", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
+  { name: "physical receiver spelling cannot recover its own logical seat", chosen: "original@notice", physicalWriter: "original@notice", reportAlias: true, kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
+  { name: "registered person alias gets the human-safe fallback", chosen: "alice@notice", expected: humanAddress },
+  { name: "registered person alias is not an independent agent when the kernel exists", chosen: "alice@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "resolves to a registered person" },
+  { name: "absent receiver rig falls through to the kernel", chosen: "receiver@not-created", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "cannot hold this notice in its destination rig" },
+  { name: "absent receiver rig without kernel reaches the person", chosen: "receiver@not-created", expected: humanAddress },
   { name: "no independent agent reaches the person, never an unrelated running seat", expected: humanAddress },
 ];
 
 describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind) => {
   it.each(routes)("$name", async (route) => {
     const db = createDb(); migrate(db, ALL_MIGRATIONS);
-    const human = { entityId: "human-owner", class: "human", displayName: "Owner", address: humanAddress,
+    const human = { entityId: "alice", class: "human", displayName: "Owner", address: humanAddress,
       connectorBindings: [], prefs: {}, subscriptions: [] } as unknown as HumanFragment;
     vi.spyOn(humanSelection, "workflowHumanDestination").mockReturnValue(humanAddress);
     vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: route.chosen ?? null });
     try {
       const rigs = new RigRepository(db), sessions = new SessionRegistry(db), rig = rigs.createRig("notice");
-      const seat = (name: string, status: string) => {
+      const seat = (name: string, status: string, physical?: string) => {
         const node = rigs.addNode(rig.id, name, { runtime: "claude-code" });
-        const session = `${name}@notice`;
+        const session = physical ?? `${name}@notice`;
         const row = sessions.registerSession(node.id, session);
         sessions.updateBinding(node.id, { tmuxSession: session });
         sessions.updateStatus(row.id, status);
         return node;
       };
-      const writer = seat("writer", "running"); seat("unrelated", "running");
+      const writer = seat("writer", "running", route.physicalWriter); seat("unrelated", "running");
+      const failedSession = route.reportAlias ? "writer@notice" : route.physicalWriter ?? "writer@notice";
       if (route.receiverStatus) seat("receiver", route.receiverStatus);
       if (route.parent) { const owner = seat("owner", route.parentStatus ?? "running"); rigs.addEdge(rig.id, owner.id, writer.id, "delegates_to"); }
       if (route.selfParent) vi.spyOn(queueOwner, "defaultResolveOrchestrator").mockReturnValue("writer@notice");
       if (route.kernelStatus) {
-        const row = sessions.registerSession(rigs.addNode(rig.id, "kernel", { runtime: "claude-code" }).id, KERNEL_OPERATOR_SESSION);
+        const row = sessions.registerSession(rigs.addNode(rigs.createRig("kernel").id, "operator-agent", { runtime: "claude-code" }).id, KERNEL_OPERATOR_SESSION);
         sessions.updateBinding(row.nodeId, { tmuxSession: KERNEL_OPERATOR_SESSION });
         sessions.updateStatus(row.id, route.kernelStatus);
       }
@@ -215,12 +227,17 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
         }) as typeof db.prepare);
       }
       const send = vi.fn(async (_session: string, _text: string) => ({ ok: true, verified: true }));
-      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true,
-        loadHumanRegistry: () => ({ ok: true, entities: [human] }), transport: { send } });
-      const restore: RestoreDeliveryFailure = { sessionName: "writer@notice", attemptId: "routing-attempt",
+      const loadHumans = () => ({ ok: true as const, entities: [human] });
+      const validateRig = makeTopologyDestinationCheck({
+        findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name=? AND archived_at IS NULL").all(name),
+        loadHumanRegistry: loadHumans, sharedChannels: () => [],
+      });
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig,
+        loadHumanRegistry: loadHumans, transport: { send } });
+      const restore: RestoreDeliveryFailure = { sessionName: failedSession, attemptId: "routing-attempt",
         mapPath: "/private/maps/RESTORE-MAP.md", markerPath: "/private/markers/restore.json",
         lastDelivery: { stage: "restore_prompt", at: "2026-01-01T00:00:00Z", ok: false, reason: "target_activity_unknown", failures: 2 } };
-      const prep: PreparationFailure = { sessionName: "writer@notice", occupantGeneration: "generation-one", attemptId: "routing-attempt",
+      const prep: PreparationFailure = { sessionName: failedSession, occupantGeneration: "generation-one", attemptId: "routing-attempt",
         endedAttempts: 3, reason: "typing_guard_enabled", mapPath: restore.mapPath, statePath: "/private/maps/COMPACTION-STATE.json",
         inputBox: { status: "unknown", confidence: "low", cursor: null, evidence: ["/private/pane-evidence"] } };
       const report = (repository: QueueRepository, changed = false) => kind === "restore"
@@ -237,24 +254,25 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
         expect(row.body).toContain("No independent recovery agent could be resolved");
         expect(row.body).not.toContain("/private/");
       } else {
-        expect(send).toHaveBeenCalledTimes(1);
-        expect(send.mock.calls[0]![0]).toBe(route.expected);
+        expect(send).toHaveBeenCalledTimes(route.wakeExpected === false ? 0 : 1);
+        if (route.wakeExpected !== false) expect(send.mock.calls[0]![0]).toBe(route.expected);
+        else expect(row.lastNudgeResult).toContain("unroutable");
         expect(row.evidenceRef).toBe(kind === "restore" ? restore.mapPath : prep.statePath);
         if (route.detail) expect(row.body).toContain(route.detail);
       }
       // A new repository/changed configuration does not reroute or wake an existing notice.
       vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "unrelated@notice" });
-      const restarted = new QueueRepository(db, new EventBus(db), { validateRig: () => true,
-        loadHumanRegistry: () => ({ ok: true, entities: [human] }), transport: { send } });
+      const restarted = new QueueRepository(db, new EventBus(db), { validateRig,
+        loadHumanRegistry: loadHumans, transport: { send } });
       await report(restarted, true); await report(restarted, true);
       expect(restarted.getById(id)?.destinationSession).toBe(route.expected);
       expect(restarted.list({ limit: 20 })).toHaveLength(1);
       if (route.expected === humanAddress) expect(JSON.stringify(restarted.listTransitions(id))).not.toContain("/private/");
-      else expect(send).toHaveBeenCalledTimes(1);
+      else expect(send).toHaveBeenCalledTimes(route.wakeExpected === false ? 0 : 1);
       await restarted.update({ qitemId: id, actorSession: route.expected, state: "done", closureReason: "no-follow-on" });
       await report(restarted, true);
       expect(restarted.getById(id)?.state).toBe("done");
-      expect(send).toHaveBeenCalledTimes(route.expected === humanAddress ? 0 : 1);
+      expect(send).toHaveBeenCalledTimes(route.expected === humanAddress || route.wakeExpected === false ? 0 : 1);
     } finally { db.close(); }
   });
 
@@ -272,4 +290,29 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
       expect(create).toHaveBeenCalledWith(expect.objectContaining({ destinationSession: humanAddress, evidenceRef: null }));
     } finally { db.close(); }
   });
+});
+
+it("updates a persisted registered-person alias without adding agent-only preparation evidence", async () => {
+  const db = createDb(); migrate(db, ALL_MIGRATIONS);
+  try {
+    new RigRepository(db).createRig("notice");
+    const human = { entityId: "alice", class: "human", displayName: "Alice", address: humanAddress,
+      connectorBindings: [], prefs: {}, subscriptions: [] } as unknown as HumanFragment;
+    const loadHumanRegistry = () => ({ ok: true as const, entities: [human] });
+    const validateRig = makeTopologyDestinationCheck({
+      findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name=? AND archived_at IS NULL").all(name),
+      loadHumanRegistry, sharedChannels: () => [],
+    });
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig, loadHumanRegistry });
+    const failure: PreparationFailure = { sessionName: "writer@notice", occupantGeneration: "alias-generation", attemptId: "later",
+      endedAttempts: 4, reason: "typing_guard_enabled", mapPath: "/private/map", statePath: "/private/state",
+      inputBox: { status: "unknown", confidence: "low", cursor: null, evidence: ["/private/reading"] } };
+    const key = createHash("sha256").update(`${failure.sessionName}\0${failure.occupantGeneration}`).digest("hex").slice(0, 24);
+    const qitemId = `qitem-compaction-preparation-${key}`;
+    await queue.create({ qitemId, sourceSession: failure.sessionName, destinationSession: "alice@notice", body: "Earlier person notice", summary: "Earlier evidence", nudge: false });
+    await reportPreparationFailure(db, queue, failure);
+    expect(queue.getById(qitemId)?.destinationSession).toBe("alice@notice");
+    expect(queue.listTransitions(qitemId).at(-1)?.transitionNote).toContain("4 ended unsent attempts");
+    expect(JSON.stringify(queue.listTransitions(qitemId))).not.toContain("/private/");
+  } finally { db.close(); }
 });
