@@ -665,7 +665,7 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
   }
   return [
     "Before sending a request to another assistant, list the team's members.",
-    "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out.",
+    "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out.",
     "Don't pick from your own history or memory.",
     "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
     "If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.",
