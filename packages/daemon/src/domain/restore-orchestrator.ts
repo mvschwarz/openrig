@@ -1649,7 +1649,8 @@ export class RestoreOrchestrator {
    *  reused pane), mark its row superseded, and restore the prior state (the existing
    *  launch-failure compensating action). The caller fires this ONLY on a
    *  POSITIVE determination the session is fresh/blank — never for
-   *  unknown-but-possibly-valid continuity. */
+   *  unknown-but-possibly-valid continuity. When tmux doesn't confirm the stop, the session may still be running, so
+   *  its row and binding are left as they are and the result says the stop is unconfirmed. */
   private async rollbackToZeroSession(
     nodeId: string,
     sessionName: string,
@@ -1657,16 +1658,17 @@ export class RestoreOrchestrator {
     priorState: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } | undefined,
     assertCurrent?: () => boolean,
     keepPane = false,
-  ): Promise<{ rolledBack: boolean; terminalStopped: boolean }> {
+  ): Promise<{ rolledBack: boolean; terminalStopped: boolean; stopUnconfirmed?: true }> {
     if (assertCurrent && !assertCurrent()) return { rolledBack: false, terminalStopped: false };
-    // Whether tmux confirmed the stop: best effort here, and a fact for a caller that needs a known compensation.
+    // Whether tmux confirmed the stop. A kept pane isn't stopped.
     let terminalStopped = false;
     if (!keepPane) {
       try {
         terminalStopped = (await this.tmuxAdapter.killSession(sessionName)).ok === true;
-      } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
+      } catch { /* an unconfirmed stop, the same as a refused one */ }
     }
     if (assertCurrent && !assertCurrent()) return { rolledBack: false, terminalStopped };
+    if (!keepPane && !terminalStopped) return { rolledBack: false, terminalStopped, stopUnconfirmed: true };
     if (launchedSessionId) {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
     }
@@ -1767,18 +1769,21 @@ export class RestoreOrchestrator {
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
     const selected = opts?.selectedHistory;
-    const rollbackOwnBlank = async (): Promise<boolean> => {
-      const { rolledBack, terminalStopped } = await this.rollbackToZeroSession(
+    /** Rolls this restore's blank session back; null when it did, else the result the restore reports instead. */
+    const rollbackOwnBlank = async (): Promise<RestoreNodeResult | null> => {
+      const { rolledBack, terminalStopped, stopUnconfirmed } = await this.rollbackToZeroSession(
         node.id, sessionName, launchResult?.session.id, priorState,
         selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
         opts?.keepPane,
       );
       // Known compensation: tmux confirmed the terminal stopped, and the earlier state was put back.
       if (rolledBack && terminalStopped && priorState && !opts?.keepPane && opts?.compensation) opts.compensation.ran = true;
-      return rolledBack;
+      if (rolledBack) return null;
+      return stopUnconfirmed ? { nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
+        error: `Original session unresumable, and the blank session this restore launched couldn't be confirmed stopped: it may still be running, so its session record and binding were left in place. Check it with rig capture ${sessionName}, stop it with ${this.stopSeatCommand(rigId, data, node.logicalId)}, then retry the restore.` }
+        : { nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
+          error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." };
     };
-    const changedDuringRollback = (): RestoreNodeResult => ({ nodeId: node.id, logicalId: node.logicalId,
-      status: "attention_required", error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." });
     const selectedRows = selected ? data.sessions.filter(row => row.nodeId === node.id && row.id === selected.historySessionId) : [];
     const sessionResolution = selected
       ? selectedRows.length === 1 ? { kind: "resolved" as const, session: selectedRows[0]! } : { kind: "none" as const }
@@ -1963,7 +1968,7 @@ export class RestoreOrchestrator {
         // before any session exists. If it is somehow reached post-launch, the
         // just-created session is a confirmed blank (no resume was possible) —
         // roll back to zero sessions and present the decision honestly.
-        if (!await rollbackOwnBlank()) return changedDuringRollback();
+        { const kept = await rollbackOwnBlank(); if (kept) return kept; }
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
       } else {
         const launchedSessionId = launchResult?.session.id;
@@ -2003,7 +2008,7 @@ export class RestoreOrchestrator {
           // OPR.0.3.4.2 (B): resume CONCLUDED failed — the launched session is
           // a confirmed blank agent (precision guard trigger (i)). Roll back to
           // zero sessions; the stop-and-ask is realized as awaiting-decision.
-          if (!await rollbackOwnBlank()) return changedDuringRollback();
+          { const kept = await rollbackOwnBlank(); if (kept) return kept; }
           return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. Check the harness state manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
         }
       }
@@ -2013,7 +2018,7 @@ export class RestoreOrchestrator {
       // instead of silently downgrading to a fresh launch with amnesia.
       if (!resumeToken) {
         // Defense in depth (pre-launch classification catches this first).
-        if (!await rollbackOwnBlank()) return changedDuringRollback();
+        { const kept = await rollbackOwnBlank(); if (kept) return kept; }
         return {
           nodeId: node.id,
           logicalId: node.logicalId,
@@ -2029,7 +2034,7 @@ export class RestoreOrchestrator {
       // Explicit --fresh and non-resume policies stay the only fresh-prime paths.
       const resumeAdapter = seatAdapter(opts?.adapters, node.runtime, session?.communityHarness);
       if (!resumeAdapter) {
-        if (!await rollbackOwnBlank()) return changedDuringRollback();
+        { const kept = await rollbackOwnBlank(); if (kept) return kept; }
         return {
           nodeId: node.id,
           logicalId: node.logicalId,
@@ -2287,7 +2292,7 @@ export class RestoreOrchestrator {
                 // ONLY on the concluded-fresh determination; a genuinely
                 // unknown-but-possibly-valid continuity never reaches here
                 // (continuityOutcome would not be "fresh").
-                if (!await rollbackOwnBlank()) return changedDuringRollback();
+                { const kept = await rollbackOwnBlank(); if (kept) return kept; }
                 return {
                   nodeId: node.id,
                   logicalId: node.logicalId,
@@ -2330,7 +2335,7 @@ export class RestoreOrchestrator {
               // as unresumable. A pane that went back to its shell for another reason stays failed,
               // with its pane and binding kept, so its output can still be read.
               if (startupResult.missingConversation) {
-                if (!await rollbackOwnBlank()) return changedDuringRollback();
+                { const kept = await rollbackOwnBlank(); if (kept) return kept; }
                 // The records can't tell a seat that was never used from one whose conversation is elsewhere (a moved
                 // account or folder), so the seat waits for the person who knows, with the steps that start it fresh. A kept
                 // pane leaves the seat's own tmux session at a shell, which the fresh launch won't replace until it's stopped.
