@@ -768,6 +768,19 @@ function buildMissionShowCommand(): Command {
         const own = scopeNodes.find((node) => node.kind === "mission" && node.path === mission.absPath);
         const parentMatches = own?.parent ? scopeNodes.filter((node) => node.id === own.parent) : [];
         const parent = parentMatches.length === 1 ? parentMatches[0] : null;
+        const parentChain: typeof scopeNodes = [];
+        let parentGap: string | null = null;
+        const seenParents = new Set<string>();
+        let currentParent = own;
+        while (currentParent?.parent) {
+          const matches = scopeNodes.filter((node) => node.id === currentParent!.parent);
+          if (matches.length !== 1) { parentGap = `${currentParent.parent} does not resolve uniquely`; break; }
+          const next = matches[0]!;
+          if (seenParents.has(next.id) || next.id === own?.id) { parentGap = `cycle at ${next.id}`; break; }
+          seenParents.add(next.id);
+          parentChain.push(next);
+          currentParent = next.kind === "slice" ? scopeNodes.find((node) => node.kind === "mission" && node.id === next.missionId) : next;
+        }
         const childMissions = mission.id && scopeNodes.filter((node) => node.id === mission.id).length === 1 ? scopeNodes.filter((node) => node.kind === "mission" && node.parent === mission.id) : [];
         const payload = {
           ok: true,
@@ -784,6 +797,8 @@ function buildMissionShowCommand(): Command {
             slices,
             parent,
             parentId: own?.parent ?? null,
+            parentChain,
+            parentGap,
             childMissions,
           },
         };
@@ -926,10 +941,10 @@ function buildMissionCreateCommand(): Command {
         const title = opts.title ?? titleFromSlug(name.replace(/^release-/, ""));
         const intent = opts.intent ?? title;
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        const parentWarnings: string[] = [];
         if (opts.parent !== undefined) {
-          const nodes = readParentScope(missionsRoot, { strict: true });
-          if (nodes.some((node) => node.id === id)) throw new ScopeCliError({ fact: `Mission ID ${id} is already in use.`, consequence: "Mission not created.", action: "Choose an unused mission ID." });
-          validateMissionParent(nodes, id, opts.parent);
+          const nodes = readParentScope(missionsRoot, { onInvalid: (message) => parentWarnings.push(message) });
+          validateMissionParent(nodes, id, opts.parent, (message) => parentWarnings.push(message));
         }
         const project = id.split(".")[0];
         for (const dependency of dependsOn) {
@@ -1018,6 +1033,7 @@ function buildMissionCreateCommand(): Command {
         if (capabilityDeltaPath) humanLines.push(`  capability delta: ${capabilityDeltaPath}`);
         const advisories = [
           ...rootAdvisories,
+          ...parentWarnings,
           ...(notesRendered?.resolvedFrom === "legacy-env"
             ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
             : []),
@@ -1061,10 +1077,11 @@ function buildMissionParentCommand(): Command {
         if (path.dirname(realMission) !== realRoot) throw new ScopeCliError({ fact: `Mission ${name} is outside the selected missions root.`, consequence: "No parent was changed.", action: "Select a mission inside the selected workspace." });
         const writeTarget = fs.existsSync(path.join(mission.absPath, "mission.yaml")) ? path.join(mission.absPath, "mission.yaml") : mission.readmePath!;
         if (path.dirname(fs.realpathSync(writeTarget)) !== realMission) throw new ScopeCliError({ fact: `Mission file for ${name} is outside its directory.`, consequence: "No parent was changed.", action: "Use a mission whose authored files are inside its directory." });
-        if (!mission.id) throw new ScopeCliError({ fact: `Mission ${name} has no authored ID.`, consequence: "No parent was changed.", action: "Give the mission a stable ID first." });
-        const nodes = readParentScope(root, { strict: true });
-        if (nodes.filter((node) => node.id === mission.id).length !== 1) throw new Error(`Mission ID '${mission.id}' is not unique.`);
-        if (parent) validateMissionParent(nodes, mission.id, parent);
+        const warnings: string[] = [];
+        if (parent) {
+          const nodes = readParentScope(root, { onInvalid: (message) => warnings.push(message) });
+          validateMissionParent(nodes, mission.id ?? "", parent, (message) => warnings.push(message));
+        }
         const manifestPath = path.join(mission.absPath, "mission.yaml");
         if (fs.existsSync(manifestPath)) {
           const doc = YAML.parseDocument(fs.readFileSync(manifestPath, "utf8"));
@@ -1075,7 +1092,7 @@ function buildMissionParentCommand(): Command {
         } else {
           updateFrontmatter(mission.readmePath!, { parent: parent ?? null });
         }
-        emit(out, { ok: true, mission: mission.name, parent: parent ?? null }, json, [`Mission ${mission.name} parent: ${parent ?? "(none)"}`]);
+        emit(out, { ok: true, mission: mission.name, parent: parent ?? null, warnings }, json, [`Mission ${mission.name} parent: ${parent ?? "(none)"}`, ...warnings.map((message) => `Warning: ${message}`)]);
       } catch (err) { fail(err, json, out); }
     });
 }
@@ -1313,7 +1330,7 @@ function buildAuditCommand(): Command {
         const parentNodes = readParentScope(missionsRoot, { onInvalid: (message) => parentFindings.push(message) });
         const audited = parentNodes.find((node) => node.kind === "mission" && node.path === missionDir);
         if (audited?.parent) {
-          try { validateMissionParent(parentNodes, audited.id, audited.parent); }
+          try { validateMissionParent(parentNodes, audited.id, audited.parent, (message) => parentFindings.push(message)); }
           catch (error) { parentFindings.push((error as Error).message); }
         }
         if (audited) {

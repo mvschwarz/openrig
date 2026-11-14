@@ -231,7 +231,8 @@ A mission can link to the mission or slice whose work it breaks down. Use
 `rig scope mission create <name> --parent <dot-id>` when creating it, or
 `rig scope mission parent <mission> <dot-id>` to set the link later. Use
 `rig scope mission parent <mission> --clear` to remove it. The target must
-resolve uniquely within the project's missions root and cannot form a cycle.
+resolve uniquely within the project's missions root. Cycles and unresolved
+ancestors are warnings and are reported by scope audit.
 The link is `metadata.parent` in `mission.yaml`, or `parent` in the node
 frontmatter for a legacy mission without a manifest. It does not change
 folder layout, slice membership, or the meaning of `depends-on`.

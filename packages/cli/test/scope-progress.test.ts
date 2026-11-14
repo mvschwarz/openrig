@@ -191,7 +191,7 @@ describe("mission parent links", () => {
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
-  it("creates, reads and clears a link while refusing cycles and missing targets", async () => {
+  it("creates, reads and clears links, warning about cycles and refusing missing targets", async () => {
     const slice = await createSlice(env, "parent");
     const sliceInfo = await run(["slice", "show", slice, "--json"], env.missionsRoot);
     const sliceId = JSON.parse(sliceInfo.stdout).slice.id as string;
@@ -218,10 +218,19 @@ describe("mission parent links", () => {
     const child = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
     expect(child.parentId).toBe(sliceId);
     expect(child.parent.name).toContain("parent");
+    const childFile = path.join(env.missionsRoot, "child", "mission.yaml");
+    const originalManifest = fs.readFileSync(childFile, "utf8");
+    fs.writeFileSync(childFile, `metadata: { "parent": ${sliceId} }\n`);
+    const flowParent = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(flowParent.parentChain[0].id).toBe(sliceId);
+    fs.writeFileSync(childFile, originalManifest);
     const parentSlice = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice;
     expect(parentSlice.childMissions.map((node: { id: string }) => node.id)).toContain(childId);
     const cycle = await run(["mission", "parent", "release-0.4.0", childId, "--json"], env.missionsRoot);
-    expect(cycle.exitCode).toBe(1);
+    expect(cycle.exitCode).toBe(0);
+    expect(JSON.parse(cycle.stdout).warnings.join(" ")).toContain("cycle");
+    expect(JSON.parse((await run(["audit", "--mission", "release-0.4.0", "--json"], env.missionsRoot)).stdout).parentFindings.join(" ")).toContain("cycle");
+    await run(["mission", "parent", "release-0.4.0", "--clear", "--json"], env.missionsRoot);
     const missing = await run(["mission", "parent", "child", "OPR.99.0.999", "--json"], env.missionsRoot);
     expect(missing.exitCode).toBe(1);
     fs.writeFileSync(path.join(slice, "SPEC.md"), `---\nid: ${sliceId}\nstatus: shipped-to-release\n---\n# Parent\n`);
@@ -239,10 +248,16 @@ describe("mission parent links", () => {
     writeFile(path.join(env.missionsRoot, "broken", "SPEC.md"), "---\nid: [bad\n---\n# Invalid\n");
     const validRead = await run(["mission", "show", "child", "--json"], env.missionsRoot);
     expect(JSON.parse(validRead.stdout).mission.id).toBe(childId);
-    const strictWrite = await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot);
-    expect(strictWrite.exitCode).toBe(1);
+    const tolerantWrite = await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot);
+    expect(tolerantWrite.exitCode).toBe(0);
+    expect(JSON.parse(tolerantWrite.stdout).warnings.join(" ")).toContain("broken");
     const withWarning = JSON.parse((await run(["audit", "--mission", "child", "--json"], env.missionsRoot)).stdout);
     expect(withWarning.parentFindings.join(" ")).toContain("broken");
+    const idless = path.join(env.missionsRoot, "idless");
+    writeFile(path.join(idless, "SPEC.md"), "---\nparent: OPR.0.4.0\n---\n# Legacy\n");
+    const idlessClear = await run(["mission", "parent", "idless", "--clear", "--json"], env.missionsRoot);
+    expect(idlessClear.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(idless, "SPEC.md"), "utf8")).not.toContain("parent:");
   });
 });
 

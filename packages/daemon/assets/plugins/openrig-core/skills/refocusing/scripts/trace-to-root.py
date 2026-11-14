@@ -8,7 +8,14 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+TRACE_STARTED = time.monotonic()
+try:
+    PARENT_TRACE_BUDGET = max(0, float(os.environ.get("OPENRIG_REFOCUS_PARENT_BUDGET_MS", "1650")) / 1000)
+except ValueError:
+    PARENT_TRACE_BUDGET = 1.65
 
 SHELVES = {"rigs", "pods", "seats", "missions", "slices"}
 # The daemon's exact current-work refusal meaning "this seat holds no in-progress typed baton"
@@ -26,10 +33,10 @@ SESSION_CHARS = re.compile(r"[A-Za-z0-9\-_.@]+")
 HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A-Za-z0-9._:-]+@external")
 
 
-def rig_output(*args):
+def rig_output(*args, timeout=10):
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=10, check=False
+            ["rig", *args], capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -296,35 +303,20 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
 
             # Parent links are logical edges, not filesystem ancestors. Ask the
             # scope reader to resolve IDs so tracing uses the same rules as CLI.
-            manifest = read(node / "mission.yaml") if (node / "mission.yaml").is_file() else None
-            link_source = manifest if manifest is not None else text
-            if re.search(r"(?m)^\s*parent:\s*[^\s#]", link_source):
-                seen = set()
-                current = node
-                while current not in seen:
-                    seen.add(current)
-                    workspace = next((ancestor for ancestor in current.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), current.parent)
-                    raw = rig_output("scope", "mission", "show", str(current), "--workspace", str(workspace), "--json")
-                    try:
-                        mission = json.loads(raw)["mission"]
-                        parent_id = mission["parentId"]
-                        parent = mission["parent"]
-                    except (TypeError, ValueError, KeyError):
-                        failures.append(f"parent link unavailable: {current}")
-                        output.append(f"PARENT TRACE GAP — unable to read parent link at {current}")
-                        break
-                    if not parent_id:
-                        break
-                    if not parent:
-                        failures.append(f"unresolved parent {parent_id}: {current}")
-                        output.append(f"PARENT TRACE GAP — {parent_id} does not resolve uniquely")
-                        break
-                    output.append(f"PARENT · {parent_id} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
-                    parent_path = Path(parent["path"])
-                    current = parent_path.parent.parent if parent["kind"] == "slice" else parent_path
-                else:
-                    failures.append(f"parent cycle: {current}")
-                    output.append(f"PARENT TRACE GAP — cycle at {current}")
+            if node.parent.name == "missions" or (node / "mission.yaml").is_file():
+                remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+                workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
+                raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None
+                try:
+                    mission = json.loads(raw)["mission"]
+                    for parent in mission["parentChain"]:
+                        output.append(f"PARENT · {parent['id']} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
+                    if mission.get("parentGap"):
+                        failures.append(mission["parentGap"])
+                        output.append(f"PARENT TRACE GAP — {mission['parentGap']}")
+                except (TypeError, ValueError, KeyError):
+                    failures.append(f"parent link unavailable or timed out: {node}")
+                    output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
 
         notes, resolution_error = resolve_notes(node)
         if resolution_error:

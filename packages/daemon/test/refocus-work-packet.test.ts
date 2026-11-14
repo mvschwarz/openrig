@@ -55,8 +55,8 @@ if [ "$1 $2" = "queue whoami" ]; then
 fi
 if [ "$1 $2" = "whoami --json" ]; then printf '{"identity":{"rigName":"demo","sessionName":"builder@demo"}}\\n'; exit 0; fi
 if [ "$1 $2" = "config --json" ]; then printf '{}'; exit 0; fi
-if [ "$1 $2 $3" = "scope mission show" ] && [ -n "$RIG_PARENT_REPLY" ]; then
-  case "$4" in */release-a) printf '%s' "$RIG_PARENT_REPLY";; *) printf '{"mission":{"parentId":null,"parent":null}}';; esac; exit 0
+if [ "$1 $2 $3" = "scope mission show" ]; then
+  case "$4" in */release-a) if [ -n "$RIG_PARENT_REPLY" ]; then printf '%s' "$RIG_PARENT_REPLY"; else printf '{"mission":{"parentChain":[],"parentGap":null}}'; fi;; *) printf '{"mission":{"parentChain":[],"parentGap":null}}';; esac; exit 0
 fi
 if [ "$1 $2" = "scope resolve-notes" ]; then
   if [ -r "$3/NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"NOTES.md"}}\\n' "$3/NOTES.md"; exit 0; fi
@@ -244,7 +244,7 @@ describe("trace-to-root --packet — the work packet as text", () => {
   it("traces the logical parent intent, not just filesystem ancestors", () => {
     const w = world();
     writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
-    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: join(w.missions, "release-b"), kind: "mission", intent: "Ship B" } } });
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: join(w.missions, "release-b"), kind: "mission", intent: "Ship B" }], parentGap: null } });
     const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice], undefined, { RIG_PARENT_REPLY: reply });
     expect(result.stdout).toContain("PARENT · M.2");
     expect(result.stdout).toContain("intent: Ship B");
@@ -258,7 +258,7 @@ describe("trace-to-root --packet — the work packet as text", () => {
     writeFileSync(join(w.workspace, "project.yaml"), "missions:\n  root: internal/nested\n");
     writeFileSync(join(child, "SPEC.md"), "---\nintent: Child\n---\n");
     writeFileSync(join(child, "mission.yaml"), "metadata:\n  parent: M.2\n");
-    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: parent, kind: "mission", intent: "Parent" } } });
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: parent, kind: "mission", intent: "Parent" }], parentGap: null } });
     const result = w.trace(["--trees", "work", "--packet", "--work-start", child], undefined, { RIG_PARENT_REPLY: reply });
     expect(result.stdout).toContain("PARENT · M.2");
     expect(w.calls()).toContain(`--workspace ${w.workspace} --json`);
@@ -267,7 +267,7 @@ describe("trace-to-root --packet — the work packet as text", () => {
     const w = world();
     writeFileSync(join(w.root, "project.yaml"), "missions:\n  root: outside\n");
     writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
-    const reply = JSON.stringify({ mission: { parentId: "M.2", parent: { path: join(w.missions, "release-b"), kind: "mission", intent: "Parent" } } });
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: join(w.missions, "release-b"), kind: "mission", intent: "Parent" }], parentGap: null } });
     const result = w.trace(["--trees", "work", "--packet", "--work-start", join(w.missions, "release-a")], undefined, { RIG_PARENT_REPLY: reply });
     expect(result.stdout).toContain("PARENT · M.2");
     expect(w.calls()).toContain(`--workspace ${w.missions} --json`);

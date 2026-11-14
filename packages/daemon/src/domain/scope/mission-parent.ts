@@ -38,7 +38,6 @@ export function readParentScope(root: string, options: { strict?: boolean; onInv
   function readDocument<T>(file: string, read: () => T): T | null {
     try { return read(); }
     catch (error) {
-      if (!(error instanceof YAML.YAMLParseError) && !(error instanceof InvalidScopeDocument)) throw error;
       const message = `${file}: ${(error as Error).message}`;
       if (options.strict) throw new Error(message);
       options.onInvalid?.(message);
@@ -84,7 +83,7 @@ export function readParentScope(root: string, options: { strict?: boolean; onInv
 }
 
 /** Require an unambiguous node and reject a link that reaches its own mission. */
-export function validateMissionParent(nodes: ParentScopeNode[], missionId: string, parentId: string): ParentScopeNode {
+export function validateMissionParent(nodes: ParentScopeNode[], missionId: string, parentId: string, onWarning?: (message: string) => void): ParentScopeNode {
   const unique = (id: string) => {
     const found = nodes.filter((node) => node.id === id);
     if (found.length !== 1) throw new Error(`Parent scope '${id}' resolves to ${found.length} nodes; it must resolve uniquely.`);
@@ -94,10 +93,13 @@ export function validateMissionParent(nodes: ParentScopeNode[], missionId: strin
   const seen = new Set<string>();
   let current: ParentScopeNode | null = parent;
   while (current) {
-    const owner: ParentScopeNode = current.kind === "slice" ? unique(current.missionId) : current;
-    if (owner.id === missionId || seen.has(owner.id)) throw new Error(`Parent '${parentId}' would form or enter a cycle.`);
+    let owner: ParentScopeNode;
+    try { owner = current.kind === "slice" ? unique(current.missionId) : current; }
+    catch (error) { onWarning?.((error as Error).message); break; }
+    if (owner.id === missionId || seen.has(owner.id)) { onWarning?.(`Parent '${parentId}' would form or enter a cycle.`); break; }
     seen.add(owner.id);
-    current = owner.parent ? unique(owner.parent) : null;
+    try { current = owner.parent ? unique(owner.parent) : null; }
+    catch (error) { onWarning?.((error as Error).message); break; }
   }
   return parent;
 }
