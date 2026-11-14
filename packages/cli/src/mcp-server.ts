@@ -1895,7 +1895,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     async ({ cursor, start, rigId, nodeId, limit }) => {
       try {
         const params = new URLSearchParams();
-        if (rigId) {
+        if (rigId === "") params.set("rigId", rigId);
+        else if (rigId !== undefined) {
           const rig = await rigIdFor(client, rigId);
           if ("content" in rig) return rig;
           // The daemon filters by exact id and matches nothing for an unknown one, which would read as a quiet rig.
@@ -1904,9 +1905,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           }
           params.set("rigId", rig.id);
         }
-        if (cursor) params.set("cursor", cursor);
+        if (cursor !== undefined) params.set("cursor", cursor);
         if (start) params.set("start", start);
-        if (nodeId) params.set("nodeId", nodeId);
+        if (nodeId !== undefined) params.set("nodeId", nodeId);
         if (limit !== undefined) params.set("limit", String(limit));
         return mapResult(await client.get(`/api/telemetry/v1/events?${params.toString()}`));
       } catch (err) {
