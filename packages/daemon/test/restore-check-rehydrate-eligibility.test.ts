@@ -197,6 +197,20 @@ describe("restore-check current-state eligibility correction", () => {
     expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
   });
 
+  it("a member outside the restore snapshot's roster reads as left attached and not restored, not as a resume", async () => {
+    const rig = seedMoved("outside", true);
+    const lead = setup.rigRepo.addNode(rig.id, "dev.lead", { runtime: "codex", cwd: home, podId: "pod-outside" });
+    // The snapshot's roster names only the lead, as when the moved member was joined to this rig later.
+    setup.snapshotCapture.captureSnapshot(rig.id, "auto-pre-down", { intendedNodeIds: [lead.id] });
+    const result = await check(rig.name);
+    const ctx = result.checks.find((c: { check: string }) => c.check === "seat.dev-moved@outside.startup-context") as
+      { status: string; evidence: string; remediation: string };
+    expect(ctx).toMatchObject({ status: "yellow",
+      evidence: expect.stringContaining("Restore leaves dev-moved@outside attached and doesn't restore it: it isn't in this rig's restore roster.") });
+    expect(ctx.evidence).not.toContain("Restore tries");
+    expect(ctx.remediation).toBe("No startup-context repair is needed: restore doesn't touch this member.");
+  });
+
   it("without a resume token the seat stays blocked, and restore-check names a supported command instead of 'recreate'", async () => {
     const rig = seedMoved("unmoved", false);
     expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!).blockers)
