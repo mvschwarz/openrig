@@ -11,7 +11,8 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { chooseRestoreSnapshot, joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING, runExistingRigRestore, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
-import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
+import { buildRestorePlanPreview, collectPreviewSessionRows, type RestorePermissionSeat } from "../domain/restore-plan-preview.js";
+import { planRestorePermission } from "../domain/permission-account.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
 import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
@@ -120,7 +121,11 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   // snapshot capture (itself a mutation) is reported as would-happen, never
   // performed.
   if (plan) {
-    return c.json(buildRestorePlanPreview(rig, choice.snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, choice.snapshot ?? null, true), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id)), 200);
+    // Each seat's permission as this restore will start it: restore's own posture rule through the launch's resolver.
+    const restorer = deps.restoreOrchestrator;
+    const permissionOf = restorer ? (seat: RestorePermissionSeat) =>
+      planRestorePermission(snapshotRepo.db, { ...seat, restorePosture: () => restorer.resolveRestorePosture(seat.nodeId, rig.rig.id) }) : undefined;
+    return c.json(buildRestorePlanPreview(rig, choice.snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, choice.snapshot ?? null, true), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id), undefined, permissionOf), 200);
   }
 
   const fs = await import("node:fs");

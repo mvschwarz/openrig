@@ -50,8 +50,10 @@ function policyRefs(db: Database.Database, nodeId: string): { member: string | n
   return { ...refs, nonInterruptive };
 }
 
+/** `restore`: plan the seat's restore instead of its next fresh launch. Restore starts from the policy posture it re-reads
+ *  from the seat's saved provenance (RestoreOrchestrator.resolveRestorePosture), not the cached one a fresh launch uses. */
 export function planPermissionAccount(db: Database.Database, nodeId: string, seat: string, runtime: string | null,
-  env: NodeJS.ProcessEnv = process.env): PermissionAccount {
+  env: NodeJS.ProcessEnv = process.env, restore?: { launchPosture: NonNullable<NodeBinding["launchPosture"]> }): PermissionAccount {
   const controls = [
     `rig seat set-permissions ${seat} --mode <mode> --reason "<why>"`,
     `rig seat set-permissions ${seat} --mode inherit --reason "<why>" (clears the seat's choice)`,
@@ -78,7 +80,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   // choice and the team or kernel default through NativePermissionStore.apply.
   const repo = new RigRepository(db);
   const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined)?.rig_id;
-  const bindingPosture = repo.getNodePolicyProvenance(nodeId)?.launchPosture
+  const bindingPosture = restore?.launchPosture ?? repo.getNodePolicyProvenance(nodeId)?.launchPosture
     ?? (rigId ? repo.getRigPolicyProvenance(rigId)?.launchPosture : undefined) ?? "floor";
   const planned = store.apply({ nodeId, launchPosture: bindingPosture } as NodeBinding, runtime);
   const posture = planned.launchPosture;
@@ -97,7 +99,9 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     : codexPostureArg(profile ? ` -p ${profile}` : "", env, posture).trim();
   const openRigAdds: PermissionAccount["openRigAdds"] = { claudeAllow: [], claudeAsk: [], notes: [] };
   const unknown = [NOT_READ, UNVERIFIED,
-    runtime === "codex" && envelope
+    restore
+      ? "This is the plan for restoring this seat, from the policy posture restore re-reads from its saved provenance, then the seat's own choice and the team or kernel default."
+      : runtime === "codex" && envelope
       ? "This is the saved plan for a fresh launch. Resumes, restores and handovers emit the same envelope."
       : runtime === "codex"
       ? "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, and a rebuild handover can carry the previous occupant's observed Codex sandbox and approvals instead, without the extra roots or network setting."
@@ -181,6 +185,36 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   return {
     basis: "planned", runtime, source, nativeArgument, overrides, openRigAdds, unknown, controls, advisories: planNote ? [planNote] : [],
     ...(explicit ? { explicit: { mode: explicit.mode, actor: explicit.actor, reason: explicit.reason, updatedAt: explicit.updatedAt } } : {}),
-    summary: `Next launch: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
+    summary: `${restore ? "On restore" : "Next launch"}: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
   };
+}
+
+/** What a restore preview shows for one seat: its account as restore will decide it, or why it can't be read. */
+export type RestorePermissionPreview = PermissionAccount | { basis: "unknown"; runtime: string | null; summary: string };
+
+/** One seat's permission as a restore will start it, for the plan previews (`rig up --existing --plan`, `rig launch
+ *  --plan`): restore's own posture through the same NativePermissionStore.apply its launch calls. It's planned only for
+ *  the path that posture is exact for, a pod seat with saved startup context; `podAware` and `startupContext` come from
+ *  the snapshot restore reads (undefined when no saved node names the seat). Every other path, a runtime restore stops
+ *  for before launch, and a permission fact restore would refuse on read unknown with the reason, never a definite mode. */
+export function planRestorePermission(db: Database.Database, input: {
+  nodeId: string; seat: string; runtime: string | null;
+  restorePosture: () => NonNullable<NodeBinding["launchPosture"]>;
+  podAware?: boolean; startupContext?: boolean; runtimeError?: string;
+}, env: NodeJS.ProcessEnv = process.env): RestorePermissionPreview {
+  const unknown = (reason: string): RestorePermissionPreview => ({ basis: "unknown", runtime: input.runtime, summary: `Unknown: ${reason}` });
+  if (input.runtimeError) return unknown(`restore stops for a runtime decision before it starts this seat. ${input.runtimeError}`);
+  if (input.podAware === undefined) return unknown("no saved snapshot names this seat yet, so which launch path restore takes for it isn't known.");
+  if (!input.podAware) return unknown("restore takes this seat's runtime from its resume token, which this read doesn't know.");
+  if (input.startupContext === false) return unknown("this seat has no saved startup context, so restore starts it fresh and re-reads its policy then.");
+  if (input.runtime === null) return unknown("this seat's runtime isn't recorded.");
+  try {
+    const launchPosture = input.restorePosture();
+    // Startup makes this decision for every runtime (StartupOrchestrator's apply) and fails the seat on its error, so a
+    // choice it would refuse, even on a runtime OpenRig sets no native argument for, reads unknown here too.
+    new NativePermissionStore(db).apply({ nodeId: input.nodeId, launchPosture } as NodeBinding, input.runtime);
+    return planPermissionAccount(db, input.nodeId, input.seat, input.runtime, env, { launchPosture });
+  } catch (error) {
+    return unknown((error as Error).message);
+  }
 }

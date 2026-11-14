@@ -22,7 +22,7 @@ type LaunchResponse = {
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
-  targetNodes?: Array<{ nodeId: string; logicalId: string }>;
+  targetNodes?: Array<{ nodeId: string; logicalId: string; permission?: { summary?: string } }>;
   snapshotSelection?: { snapshotId: string; kind: string; createdAt: string; ageMs: number; mode: "explicit" | "automatic"; rationale: string; newerUsableAlternative: unknown };
   nonTargetEffects?: { mode: "unchanged" | "detach_and_hold"; reason: string | null; affected: unknown[] };
   planOnly?: boolean;
@@ -320,6 +320,11 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.plan && res.data.planOnly) {
           console.log("Plan only; no changes made.");
           printSnapshotSelection(res.data.snapshotSelection);
+          // Each target and the permission this launch will start it with (--json has the whole account).
+          if (res.data.targetNodes?.length) console.log("Targets:");
+          for (const target of res.data.targetNodes ?? []) {
+            console.log(`  ${target.logicalId}${target.permission?.summary ? `: ${target.permission.summary}` : ""}`);
+          }
           console.log(`Non-target effect: ${res.data.nonTargetEffects?.mode ?? "unavailable"}`);
           for (const node of res.data.nonTargetEffects?.affected ?? []) {
             const affected = node as { logicalId?: string; reason?: string };
