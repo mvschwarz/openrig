@@ -57,7 +57,7 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { recordedProcessStillRunning } from "./reconciler.js";
 import { readProcessTable, type ProcessTableRow } from "./process-table.js";
-import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
+import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, revertSelectedHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
   type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
 
 /**
@@ -658,6 +658,15 @@ export class SeatLifecycleService {
     return applySelectedHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
       node: { id: input.nodeId, runtime: input.runtime }, seat: { rigId: input.rigId, logicalId: input.logicalId }, plan: input.plan,
       original: input.original, operationId: input.operationId, operator: input.operator });
+  }
+
+  /** After a selected resume that didn't take, put back the home its apply replaced (revertSelectedHome). Null when
+   *  nothing was put back, such as when a record was made since. */
+  revertSelectedRuntimeHome(input: { nodeId: string; runtime: "claude-code" | "codex"; rigId: string; logicalId: string;
+    applied: RuntimeHomeRecordRef; operator: string | null }): RuntimeHomeRecordRef | null {
+    return revertSelectedHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
+      node: { id: input.nodeId, runtime: input.runtime }, seat: { rigId: input.rigId, logicalId: input.logicalId }, applied: input.applied,
+      operator: input.operator });
   }
 
   /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it

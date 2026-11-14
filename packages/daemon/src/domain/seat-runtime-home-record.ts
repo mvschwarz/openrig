@@ -134,7 +134,8 @@ export function observeRuntimeHome(home: string, runtime: RecordableRuntime, ori
       const projects = path.join(home, "projects");
       const top = look(projects);
       if (top !== "present") return { home: "present", original: top === "absent" ? "not_found" : "unknown", runningProcess };
-      const seen = fs.readdirSync(projects).map(dir => look(path.join(projects, dir, `${original}.jsonl`)));
+      const seen = fs.readdirSync(projects, { withFileTypes: true }).filter(entry => entry.isDirectory())
+        .map(entry => look(path.join(projects, entry.name, `${original}.jsonl`)));
       return { home: "present", original: seen.includes("present") ? "found" : seen.includes("unreadable") ? "unknown" : "not_found", runningProcess };
     }
     let budget = 50_000;
@@ -279,24 +280,30 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
 }
 
 /** Which runtime home a resume of a selected original conversation uses, so the home, original and revision stay one
- *  tuple through review and effect (a record made for one conversation is never applied to another):
- *  - as_is: nothing recorded, or the latest record was made for this original, so the seat's home slot already holds it;
- *  - apply: the latest record was made for another conversation and one was made for this original, so the newest of
- *    those is written back to the slot before the launch, as a new revision for this original;
- *  - other_conversation: every record was made for other conversations, so a resume would put this original under
- *    their home, and it stops before any effect. */
+ *  tuple through review and effect, and a record made for one conversation is never presented as another's:
+ *  - as_recorded: the latest record was made for this original, and the seat's home is still that record's home;
+ *  - apply: the seat's home is still the latest record's, which was made for another conversation, and one was made for
+ *    this original. The newest of those is written back to the slot before the launch, as a new revision for this
+ *    original, and put back if the resume doesn't take;
+ *  - as_set: the seat's home as it's set, with no record revision for this original. Either nothing was recorded, or
+ *    the home changed since the latest record (an account or runtime switch, say) and isn't reapplied over that change,
+ *    or no record was made for this original (`otherConversation` then names the latest, another conversation's). */
 export type SelectedHomePlan =
-  | { kind: "as_is"; record: RuntimeHomeRecordRef | null }
+  | { kind: "as_recorded"; record: RuntimeHomeRecordRef }
   | { kind: "apply"; record: RuntimeHomeRecordRef; latest: RuntimeHomeRecordRef }
-  | { kind: "other_conversation"; latest: RuntimeHomeRecordRef };
+  | { kind: "as_set"; why: "nothing_recorded" | "home_changed_since_record" | "no_record_for_this_conversation";
+      otherConversation?: RuntimeHomeRecordRef };
 
-export function selectedHomePlan(db: Database.Database, nodeId: string, selectedOriginal: string | null): SelectedHomePlan {
+export function selectedHomePlan(db: Database.Database, nodeId: string, runtime: RecordableRuntime, selectedOriginal: string | null): SelectedHomePlan {
   const latest = latestRuntimeHomeRecord(db, nodeId);
-  if (!latest || (selectedOriginal !== null && latest.original === selectedOriginal)) return { kind: "as_is", record: latest };
+  if (!latest) return { kind: "as_set", why: "nothing_recorded" };
+  // The slot no longer holds the latest record's home: something else set it since, and that setting stands.
+  if (seatRuntimeHome(db, nodeId, runtime).home !== latest.home) return { kind: "as_set", why: "home_changed_since_record" };
+  if (selectedOriginal !== null && latest.original === selectedOriginal) return { kind: "as_recorded", record: latest };
   const own = selectedOriginal === null ? undefined
     : db.prepare("SELECT * FROM seat_runtime_home_records WHERE node_id = ? AND original = ? ORDER BY revision DESC LIMIT 1")
       .get(nodeId, selectedOriginal) as RecordRow | undefined;
-  return own ? { kind: "apply", record: toRef(own), latest } : { kind: "other_conversation", latest };
+  return own ? { kind: "apply", record: toRef(own), latest } : { kind: "as_set", why: "no_record_for_this_conversation", otherConversation: latest };
 }
 
 /** The plan's apply: write the selected original's recorded home back to the seat's slot, as a new revision recorded for
@@ -334,4 +341,40 @@ export function applySelectedHome(deps: { db: Database.Database; sessions: Sessi
   }).immediate();
   if (persisted) deps.eventBus.notifySubscribers(persisted);
   return applied;
+}
+
+/** After a selected resume that didn't take (the seat's current conversation isn't the selected one), put the slot back
+ *  to the home the apply replaced, as a new revision recorded for the seat's current conversation, so its next launch
+ *  doesn't run it under the selected one's home. That home was the seat's own (an earlier record wrote it), so it goes
+ *  back to the same slot. CAS on the applied revision: a record made since is left alone. Null when nothing was put back. */
+export function revertSelectedHome(deps: { db: Database.Database; sessions: SessionRegistry; eventBus: EventBus },
+  input: { node: { id: string; runtime: RecordableRuntime }; seat: { rigId: string; logicalId: string }; applied: RuntimeHomeRecordRef;
+    operator: string | null }): RuntimeHomeRecordRef | null {
+  const { db } = deps;
+  const operationId = `${input.applied.operationId}-put-back`;
+  let persisted = null as ReturnType<EventBus["persistWithinTransaction"]> | null;
+  const restored = db.transaction((): RuntimeHomeRecordRef | null => {
+    const prior = db.prepare("SELECT * FROM seat_runtime_home_records WHERE operation_id = ?").get(operationId) as RecordRow | undefined;
+    if (prior) return toRef(prior);
+    const applied = db.prepare("SELECT * FROM seat_runtime_home_records WHERE operation_id = ?").get(input.applied.operationId) as RecordRow | undefined;
+    if (!applied?.previous_home || (applied.previous_source !== "member" && applied.previous_source !== "account-switch")) return null;
+    const current = readRuntimeHomeState(db, deps.sessions, input.node.id, input.node.runtime);
+    if (current.revision !== applied.revision) return null;
+    const slot = writeHomeSlot(db, input.node.id, input.node.runtime, applied.previous_home);
+    if (!slot) return null;
+    const revision = current.revision + 1;
+    const reason = `put back after the selected resume at revision ${applied.revision} didn't take`;
+    const createdAt = new Date().toISOString();
+    db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
+      original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(operationId, input.node.id, input.node.runtime, revision, applied.previous_home, slot, current.home, current.source, current.original,
+        current.occupantGeneration, `put-back:${applied.operation_id}`, reason, input.operator, createdAt);
+    persisted = deps.eventBus.persistWithinTransaction({ type: "seat.runtime_home_recorded", rigId: input.seat.rigId, nodeId: input.node.id,
+      logicalId: input.seat.logicalId, runtime: input.node.runtime, from: current.home, to: applied.previous_home, slot, revision, operationId,
+      original: current.original, occupantGeneration: current.occupantGeneration, reason, operator: input.operator });
+    return { revision, home: applied.previous_home, slot, original: current.original, occupantGeneration: current.occupantGeneration,
+      operationId, recordedAt: createdAt };
+  }).immediate();
+  if (persisted) deps.eventBus.notifySubscribers(persisted);
+  return restored;
 }

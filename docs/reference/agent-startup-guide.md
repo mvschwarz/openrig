@@ -648,12 +648,18 @@ record command with those values. It works for Claude Code and Codex seats.
 - **Restore.** Snapshots carry each seat's recorded home. Reviewing a selected history shows the current record beside
   the snapshot's, whether it was recorded for the selected conversation or another one, and which home the resume
   uses (`uses`):
-  - the seat's home as set, when nothing was recorded or the latest record is for the selected conversation;
-  - the newest home recorded for the selected conversation, when a later record is for another one. The resume writes
-    it back as a new revision for the selected conversation before it launches, and its result names the home and
-    revision it used;
-  - none, when only another conversation's home is recorded: the resume stops before anything starts, rather than run
-    the selected conversation under that home.
+  - the home recorded for the selected conversation, when the latest record is its own and the seat's home is still
+    that record's;
+  - the newest home recorded for the selected conversation, when a later record is for another one and the seat's home
+    is still that later record's. The resume writes it back as a new revision for the selected conversation before it
+    launches. If the resume doesn't take, the seat's home is put back, as a new revision, so its current conversation
+    doesn't next launch under the selected one's home;
+  - otherwise the seat's home as set, with no record revision for the selected conversation: when nothing was recorded,
+    when the home changed since the latest record (an account or runtime switch, say), which isn't undone, or when no
+    home was recorded for this conversation.
+
+  The review also says whether the selected conversation's record is found in that home, as context. The result
+  names the home the resume was bound to and attempted, and whether a launch went out with it.
 
   A recording made after the review, even to the same home, changes the review's revision, so a resume reviewed before
   it doesn't run. Review again and decide.
