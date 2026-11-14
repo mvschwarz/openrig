@@ -398,8 +398,7 @@ read without that wrapper cannot certify the launch.
 
 The filesystem selection replaces permission-mode and team/kernel defaults,
 including ambient YOLO. Fresh launches, both resume paths and restore emit the
-same selection. Hand-resuming from the command shown by `rig ps` does not yet
-carry this filesystem policy. A rebuild uses the saved filesystem policy ahead of an observed
+same selection. A rebuild uses the saved filesystem policy ahead of an observed
 predecessor sandbox; clearing or replacing the policy after a snapshot takes
 effect on restore. Status reports the plan and its limits, not observed native
 enforcement. Handover checks the successor's filesystem selection before

@@ -138,8 +138,8 @@ function makeValidFlagPolicy(posture: "floor" | "full_bypass"): string {
 }
 
 describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () => {
-  describe.each(["floor", "full_bypass", "auto"] as const)("filesystem policy with %s posture fallback", (resolvedPosture) => {
-    it.each([false, true])("labels the omitted policy with recorded launch=%s, including wrappers", (hasRecord) => {
+  describe.each(["floor", "full_bypass", "auto"] as const)("filesystem policy over a %s posture", (resolvedPosture) => {
+    it.each([false, true])("shows the policy's own flags with recorded launch=%s, including wrappers", (hasRecord) => {
       const display = buildCodexResumeDisplay("tok-filesystem", {
         codexPermissions: { filesystem: { ":root": "read", "/work": "write" }, approval: "never" },
         resolvedPosture,
@@ -149,14 +149,48 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
         } : null,
         launchWrapper: ["env", "POLICY_WRAPPER=1"],
       });
-      const fallback = buildCodexResumeDisplay("tok-filesystem", { resolvedPosture });
-      expect(display.command).toBe(fallback.command);
-      expect(display.command).not.toContain("default_permissions");
-      expect(display.label).toContain("shown command uses posture fallback");
-      expect(display.label).toContain("does not carry the agent's filesystem policy");
-      expect(display.label).toContain("omits launch_wrapper");
-      expect(display.label).not.toContain("a resume now uses");
-      expect(display.status).toBe(hasRecord ? "recorded_uncertain" : "no_recorded_launch");
+      expect(display.command).toBe(
+        `codex -a never -c 'default_permissions="openrig-seat"'`
+        + ` -c 'permissions={"openrig-seat"={filesystem={":root"="read","/work"="write"},network={enabled=false}}}'`
+        + ` ${UPDATE_OFF} resume 'tok-filesystem'`,
+      );
+      expect(display.command).not.toContain(" -s ");
+      expect(display.status).toBe(hasRecord ? "recorded_match" : "no_recorded_launch");
+      expect(display.label).toBe(hasRecord
+        ? "omits launch_wrapper (managed resume uses the wrapper)"
+        : "flags from current settings; omits launch_wrapper (managed resume uses the wrapper)");
+    });
+  });
+
+  it("labels a filesystem policy against its recorded launch: on-request records no approval, and a changed choice is a difference", () => {
+    const onRequest: CodexMemberPermissions = { filesystem: { "/work": "write" }, approval: "on-request", network_access: true };
+    const recordedPolicy: AppliedLaunchObservation = {
+      runtime: "codex", axis: "sandbox", state: "observed", value: "permissions:openrig-seat", reason: "emitted_launch_arguments",
+    };
+    const uncertain = buildCodexResumeDisplay("tok-fs-on-request", { codexPermissions: onRequest, recordedLaunch: recordedPolicy });
+    expect(uncertain.command).toContain(`codex -a on-request -c 'default_permissions="openrig-seat"'`);
+    expect(uncertain.command).toContain("network={enabled=true}");
+    expect(uncertain).toMatchObject({
+      status: "recorded_uncertain",
+      label: `launched with -c default_permissions="openrig-seat" (approval unrecorded); a resume now uses -c default_permissions="openrig-seat" -a on-request`,
+    });
+
+    const fromEnvelope = buildCodexResumeDisplay("tok-fs-from-envelope", {
+      codexPermissions: onRequest,
+      recordedLaunch: observeCodexEnvelope(codexMemberEnvelope(workspaceEnvelope)),
+    });
+    expect(fromEnvelope).toMatchObject({
+      status: "recorded_difference",
+      label: `launched with -s workspace-write -a never; a resume now uses -c default_permissions="openrig-seat" -a on-request`,
+    });
+
+    const toFloor = buildCodexResumeDisplay("tok-fs-to-floor", {
+      resolvedPosture: "floor",
+      recordedLaunch: { ...recordedPolicy, approvalPolicy: "never" },
+    });
+    expect(toFloor).toMatchObject({
+      status: "recorded_difference",
+      label: `launched with -c default_permissions="openrig-seat" -a never; a resume now uses -s workspace-write`,
     });
   });
 
@@ -398,7 +432,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     nodeId: string,
     rigId: string,
     token: string,
-    opts?: { daemonSupported?: boolean },
+    opts?: { daemonSupported?: boolean; filesystem?: boolean },
   ): Promise<string> {
     const resolvedPosture = restoreOrchestrator.resolveRestorePosture(nodeId, rigId);
     const override = permStore.launchOverride(nodeId, "codex");
@@ -412,6 +446,11 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       maxWaitMs: 0,
       exec: async () => "",
       ...(opts?.daemonSupported ? { detectDaemonSupport: async () => ({ kind: "supported" as const }) } : {}),
+      // A filesystem choice is read natively and pins its home before the resume; the shown command carries neither.
+      ...(opts?.filesystem ? {
+        codexHome: "/seat-codex-home",
+        verifyFilesystemPolicy: async () => ({ ok: true as const, verified: true as const }),
+      } : {}),
     });
     const res = await adapter.resume(
       "pane-1",
@@ -429,7 +468,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       override.codexPermissions,
     );
     expect(res.ok).toBe(true);
-    return sent[0]!.replace(" -c 'allow_login_shell=false'", "");
+    return sent[0]!.replace("env CODEX_HOME='/seat-codex-home' ", "").replace(" -c 'allow_login_shell=false'", "");
   }
 
   it("M1: shares one pure resolveLaunchOverrideFromFacts decision between NativePermissionStore.launchOverride and batched inventory across selection, envelope, kernel, team, runtime-switch target, and refusal cases", async () => {
@@ -489,6 +528,13 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       ...observeCodexEnvelope(codexMemberEnvelope(readOnlyOnRequestEnvelope)),
       daemonOptOut: true,
     });
+
+    const filesystemNode = rigRepo.addNode(teamRig.id, "dev.filesystem", {
+      runtime: "codex",
+      cwd: "/work/fs",
+      codexPermissions: { filesystem: { ":root": "read", "/work/fs": "write" }, approval: "never", network_access: false },
+    });
+    registry.updateResumeToken(registry.registerSession(filesystemNode.id, "dev-filesystem@team-rig").id, "codex_id", "tok-fs", "hook");
 
     const policyFloorNode = rigRepo.addNode(teamRig.id, "dev.policy-floor", { runtime: "codex", cwd: "/work/pfloor" });
     rigRepo.setNodePermissionPolicy(policyFloorNode.id, "builtin:locked");
@@ -554,6 +600,13 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     }
     expect(teamEntries.get("dev.floor")?.resumeCommand).not.toContain("danger-full-access");
     expect(kernelEntries.get("ops.profiled")?.resumeCommand).not.toContain("danger-full-access");
+
+    // A filesystem choice: the shown command is the one the real restore and adapter send.
+    const filesystemSent = await runRealRestoreResolvedResume(restoreOrchestrator, filesystemNode.id, teamRig.id, "tok-fs", { filesystem: true });
+    expect(filesystemSent).toContain(`codex -a never -c 'default_permissions="openrig-seat"'`);
+    expect(filesystemSent).not.toContain("CODEX_HOME");
+    expect(teamEntries.get("dev.filesystem")?.resumeCommand).toBe(filesystemSent);
+    expect(getNodeDetail(db, teamRig.id, "dev.filesystem")?.recoveryGuidance?.commands[0]).toBe(filesystemSent);
 
     // Refusal matrix: every refused seat surfaces the exact error thrown by real permStore.launchOverride.
     for (const [logicalId, nodeId] of [
