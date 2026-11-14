@@ -7,6 +7,8 @@ import { WorkflowSpecCache } from "./workflow-spec-cache.js";
 import type { WorkflowInstance, WorkflowSpec } from "./workflow-types.js";
 import type { EventBus } from "./event-bus.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { completedStepIds, type ProjectedSuccessor, type WorkflowProjector } from "./workflow-projector.js";
+import { WorkflowStepTrailLog } from "./workflow-step-trail-log.js";
 
 export interface GraphReconciliation {
   status: "current" | "source-only" | "compatible" | "incompatible" | "unavailable" | "unbound";
@@ -18,6 +20,8 @@ export interface GraphReconciliation {
   compatible: boolean;
   changes: Array<{ kind: string; ref: string; fields?: string[] }>;
   reasons: string[];
+  /** Unstarted steps whose every prerequisite has completed under the revised graph: applying projects each once. */
+  projects: string[];
   composition: { mode: string; explanation: string; boundSlices: string[]; executableSteps: Array<{ id: string; dependsOn: string[] }> };
   nextAction: string;
   applyCommand?: string;
@@ -66,7 +70,7 @@ function compare(db: Database.Database, instance: WorkflowInstance): { view: Gra
   const view: GraphReconciliation = {
     status: "unbound", adopted: null, boundDigest: instance.compiledInputDigest, proposedDigest: null,
     boundVersion: instance.workflowVersion, proposedVersion: null, compatible: false,
-    expectedVersion: instance.version, changes: [], reasons: [],
+    expectedVersion: instance.version, changes: [], reasons: [], projects: [],
     composition: {
       mode,
       explanation: mode === "legacy-slices"
@@ -134,10 +138,17 @@ function compare(db: Database.Database, instance: WorkflowInstance): { view: Gra
     }
     return seen;
   };
+  for (const step of oldSpec.steps) for (const parent of step.depends_on ?? [])
+    if (!(proposed.steps.find(s => s.id === step.id)?.depends_on ?? []).includes(parent))
+      view.changes.push({ kind: "dependency-removed", ref: parent + " before " + step.id });
+  // A required order can go only from work that hasn't started: the parent stays a required obligation (removing one
+  // is refused above), and each step whose required ancestry loses it has no completed, live or failed work.
   for (const id of oldRequired) {
     const before = ancestors(oldSpec, id), after = ancestors(proposed, id);
-    for (const parent of oldRequired) if (before.has(parent) && !after.has(parent))
-      view.reasons.push("Required order " + parent + " before " + id + " cannot be removed.");
+    for (const parent of oldRequired) if (before.has(parent) && !after.has(parent)) {
+      if (protectedIds.has(id)) view.reasons.push("Required order " + parent + " before " + id + " cannot be removed: " + id + " already has completed, live or failed work.");
+      else view.changes.push({ kind: "required-order-removed", ref: parent + " before " + id });
+    }
   }
   for (const step of proposed.steps) if (step.host && step.host !== "local")
     view.reasons.push("Step " + step.id + " requires unsupported remote execution; keep a local supported target.");
@@ -153,10 +164,13 @@ function compare(db: Database.Database, instance: WorkflowInstance): { view: Gra
   }
   for (const step of proposed.steps) if (!oldSpec.steps.some(s => s.id === step.id))
     view.changes.push({ kind: "step-added", ref: step.id });
-  // The existing projector creates successors when a prerequisite closes.
-  // Refuse a newly eligible root rather than invent a second scheduling path.
-  for (const step of proposed.steps) if (!protectedIds.has(step.id) && (step.depends_on ?? []).every(id => completed.has(id)))
-    view.reasons.push("Unstarted step " + step.id + " has no unfinished prerequisite to trigger it. Keep it dependent on outstanding work; this revision does not replay completed prerequisites.");
+  // An unstarted step whose every prerequisite has completed, by the projector's own completion order (a completion
+  // older than its prerequisite's re-run doesn't count), is projected once by the apply, through the projector's path.
+  const ready = completedStepIds(proposed, new WorkflowStepTrailLog(db).listForInstanceInAppendOrder(instance.instanceId));
+  for (const step of proposed.steps) if (!protectedIds.has(step.id) && (step.depends_on ?? []).every(id => ready.has(id))) {
+    view.projects.push(step.id);
+    view.changes.push({ kind: "step-projected", ref: step.id });
+  }
   view.adopted = instance.compiledInputDigest === compilation.compiledInputDigest;
   view.compatible = view.reasons.length === 0;
   view.status = view.adopted ? "current" : !view.compatible ? "incompatible" : same(graph(oldSpec), graph(proposed)) ? "source-only" : "compatible";
@@ -183,9 +197,11 @@ export function recoverGraphOperation(db: Database.Database, key: string): { kin
   return match ? { kind: "revision", instance: store.getByIdOrThrow(match.instance_id), receipt: JSON.parse(match.receipt) } : null;
 }
 
+/** Applies an inspected revision. Its newly ready steps are projected through `projector` in the same transaction, and
+ *  returned for the caller to wake after commit; a replay returns the recorded receipt and projects nothing. */
 export function reviseGraph(db: Database.Database, bus: EventBus, input: {
   instanceId: string; operationKey: string; expectedVersion: number; expectedDigest: string; actorSession: string; reason: string;
-}) {
+}, projector?: Pick<WorkflowProjector, "planRevisionSuccessors" | "projectRevisionSuccessors">) {
   const fail = (message: string, details?: Record<string, unknown>): never => { throw new WorkflowInstanceError("lifecycle_revision_conflict", message, details); };
   if (typeof input.operationKey !== "string" || !input.operationKey.trim() || typeof input.actorSession !== "string" || !input.actorSession.trim() || typeof input.reason !== "string" || !input.reason.trim() || !Number.isSafeInteger(input.expectedVersion) || typeof input.expectedDigest !== "string" || !input.expectedDigest)
     fail("Revision needs the inspected version/digest, stable operation key, actor and decision. Run rig workflow revise <instance>.");
@@ -195,9 +211,10 @@ export function reviseGraph(db: Database.Database, bus: EventBus, input: {
         prior.receipt.expectedVersion !== input.expectedVersion || prior.receipt.compiledInputDigest !== input.expectedDigest ||
         prior.receipt.actorSession !== input.actorSession || prior.receipt.reason !== input.reason)
       fail("This operation key already records a different decision. Inspect rig workflow operation " + shellQuote(input.operationKey));
-    return { ...prior, replayed: true };
+    return { ...prior, replayed: true, projected: [] as ProjectedSuccessor[] };
   }
   let receipt!: Record<string, unknown>;
+  let projected: ProjectedSuccessor[] = [];
   bus.withNotifyEnvelope(register => {
     if (recoverGraphOperation(db, input.operationKey)) fail("Operation committed concurrently; recover its exact key before another attempt.");
     const store = new WorkflowInstanceStore(db), instance = store.getByIdOrThrow(input.instanceId);
@@ -205,20 +222,27 @@ export function reviseGraph(db: Database.Database, bus: EventBus, input: {
     const { view, compilation } = proposal(db, instance, true);
     if (view.proposedDigest !== input.expectedDigest) fail("Authored input changed since inspection. Inspect the new proposal before applying it.", { expectedDigest: input.expectedDigest, actualDigest: view.proposedDigest });
     if (!view.compatible || view.adopted || !compilation?.workflowSpec) fail("Revision refused; existing work is preserved.", { reconciliation: view });
+    if (view.projects.length > 0 && !projector) fail("This revision projects newly ready steps; apply it through the daemon's workflow runtime.", { projects: view.projects });
     const binding = instance.lifecycleBinding!;
+    new WorkflowSpecCache(db).putGenerated(compilation!.workflowSpec!, compilation!.sources.find(s => s.kind === "mission")!.path, compilation!.compiledInputDigest);
+    // Owners and gates come from the revised specification before anything else is written: an unresolved owner refuses
+    // the whole revision, and the receipt names each packet it projects.
+    const planned = view.projects.length > 0 ? projector!.planRevisionSuccessors(instance, compilation!.workflowSpec!.version, view.projects) : null;
     receipt = { operationKey: input.operationKey, instanceId: input.instanceId, expectedVersion: input.expectedVersion,
       previousDigest: instance.compiledInputDigest, previousVersion: instance.workflowVersion,
       previousSources: binding.sources, previousGraphSource: binding.graphSource,
       compiledInputDigest: compilation!.compiledInputDigest, workflowVersion: compilation!.workflowSpec!.version,
       actorSession: input.actorSession, reason: input.reason, at: new Date().toISOString(), sourceOnly: view.status === "source-only",
-      preservedFrontier: instance.currentFrontier, changes: view.changes };
-    new WorkflowSpecCache(db).putGenerated(compilation!.workflowSpec!, compilation!.sources.find(s => s.kind === "mission")!.path, compilation!.compiledInputDigest);
+      preservedFrontier: instance.currentFrontier, changes: view.changes,
+      projected: planned?.plans.map(plan => ({ stepId: plan.step.id, qitemId: plan.packetId, owner: plan.owner })) ?? [] };
     store.reviseLifecycle(instance.instanceId, instance.version, compilation!.workflowSpec!.version, compilation!.compiledInputDigest, {
       ...binding, initialInputDigest: binding.initialInputDigest ?? instance.compiledInputDigest,
       sources: compilation!.sources, dependencies: compilation!.dependencies, graphSource: compilation!.graphSource,
       revisionHistory: [...(Array.isArray(binding.revisionHistory) ? binding.revisionHistory : []), receipt],
     });
+    if (planned) projected = projector!.projectRevisionSuccessors({ instance: store.getByIdOrThrow(instance.instanceId), spec: planned.spec,
+      plans: planned.plans, actorSession: input.actorSession, operationKey: input.operationKey, reason: input.reason, register });
     register(bus.persistWithinTransaction({ type: "workflow.revised", instanceId: instance.instanceId, workflowName: instance.workflowName, operationKey: input.operationKey, compiledInputDigest: compilation!.compiledInputDigest, revisedBy: input.actorSession }));
   });
-  return { kind: "revision", receipt, instance: new WorkflowInstanceStore(db).getByIdOrThrow(input.instanceId), replayed: false };
+  return { kind: "revision", receipt, instance: new WorkflowInstanceStore(db).getByIdOrThrow(input.instanceId), replayed: false, projected };
 }
