@@ -1446,6 +1446,24 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(probe(screen.replace("❯ No, continue without these permissions", "❯ No, exit"))).toMatchObject(gate);
   });
 
+  // "Claude Code v" inside the dialog is not Claude's version header: the screen is not cut there.
+  it.each([
+    ["'No, exit'", "❯ No, exit"],
+    ["'No, continue without these permissions'", "❯ No, continue without these permissions"],
+  ])("is the same gate, focus on %s, with a pre-approved grant that reads 'Claude Code v'", (_focus, option) => {
+    const grant = screen.replace("❯ No, continue without these permissions", option)
+      .replace("Bash(git status:*)", "Bash(echo Claude Code v*)");
+    expect(grant).toContain("Bash(echo Claude Code v*)");
+    expect(probe(grant)).toMatchObject(gate);
+  });
+
+  it("is the same gate in the 'No, exit' variant with the warning scrolled out, by its 'These will apply without asking' block", () => {
+    const rows = screen.replace("❯ No, continue without these permissions", "❯ No, exit").split("\n");
+    const scrolled = rows.filter(row => !row.includes("This folder pre-approves")).join("\n");
+    expect(scrolled).not.toMatch(/pre-approves|No, continue without/);
+    expect(probe(scrolled)).toMatchObject(gate);
+  });
+
   it("is the same gate when the git root is the home folder (the case item 1 deliberately does not seed)", () => {
     expect(probe(screen.replace("<lab>/repo/cadeiras/rig/seat", "/home/agent"))).toMatchObject(gate);
   });
@@ -1570,6 +1588,159 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     const plain = ["Accessing workspace:", "/some/workspace", "", "Quick safety check: Is this a project you created or one you trust?",
       "❯ 1. Yes, I trust this folder", "  2. No, exit"].join("\n");
     expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("the real plain prompt in a workspace whose path reads 'Claude Code v' is still trust_gate, never resumed", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const path = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    expect(path).toContain("/tmp/Claude Code v2/lab");
+    expect(probe(path)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["wrapped at a space", [" /home/agent/testes de", " Claude Code v2.1.322"]],
+    ["wrapped mid-word", [" /home/agent/labs/versoes-do-cli-claude/", " Claude Code v2.1.322 lab/seat"]],
+    ["after a dash", [" /home/agent/labs/old", " -Claude Code v2.1.322"]],
+    ["onto a row that starts with the box-rule glyph", [" /home/agent/labs/old", " ─Claude Code v2.1.322 lab"]],
+    ["onto a row that starts with a logo glyph", [" /home/agent/labs/old", " ▐Claude Code v2.1.322 lab"]],
+  ])("a workspace path with 'Claude Code v<x.y.z>' %s by a 40-column pane is still trust_gate", (_case, path) => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("<lab>/backstop/rep"));
+    const warning = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const note = rows.findIndex(row => row.includes("configuration."));
+    const plain = [...rows.slice(0, from), ...path, ...rows.slice(from + 2, warning), ...rows.slice(note + 1)].join("\n")
+      .replace(" ❯ No, continue without these", " ❯ No, exit");
+    expect(plain).not.toMatch(/pre-approves|without asking|No, continue/);
+    expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["'No, '", " No, folder/"],
+    ["'Yes, '", " Yes, folder/"],
+    ["the exact 'No, exit'", " No, exit"],
+    ["the exact 'Yes, I trust this folder'", " Yes, I trust this folder"],
+    ["the exact footer", " Enter to confirm · Esc to cancel"],
+  ])("a workspace path wrapped onto a row that reads %s before a header-like row is still trust_gate", (_case, row) => {
+    // A wrapped row that reads like an option or like the footer, even an exact one, is the dialog's text: the dialog
+    // ends at its last footer, below the path.
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const wrapped = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", ["/tmp/long", row, " ─Claude Code v2.1.322 lab"].join("\n"));
+    expect(wrapped).toContain(`${row}\n ─Claude Code v2.1.322 lab`);
+    expect(probe(wrapped)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [wrapped, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed).code).not.toBe("trust_gate");
+  });
+
+  it("a header-like row between the real options and the footer is the dialog's text: still trust_gate", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const between = plain.replace("Enter to confirm · Esc to cancel", "─Claude Code v2.1.322 lab\n Enter to confirm · Esc to cancel");
+    expect(between).toContain("─Claude Code v2.1.322 lab\n Enter to confirm");
+    expect(probe(between)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("Claude's version header drawn after the prompt still makes it history", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n").replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    for (const header of [" ▐▛███▛█▄╱✦  Claude Code v2.1.323", " ▐▛███▜▌   Claude Code v2.1.322", "Claude Code v2.1.322"]) {
+      const later = [plain, "", header, "", "────────────────", "❯ ", "────────────────"].join("\n");
+      expect(probe(later).code).not.toBe("trust_gate");
+    }
+  });
+
+  it.each([
+    ["bare", "Claude Code v2.1.322"],
+    ["after the logo, as a live 2.1.323 pane draws it", " ▐▛███▛█▄╱✦  Claude Code v2.1.323"],
+    ["after the 2.1.322 logo", " ▐▛███▜▌   Claude Code v2.1.322"],
+    ["in a box border", "╭─── Claude Code v2.0.14 ───────────╮"],
+  ])("Claude's version header alone (%s) drawn after the prompt makes it history", (_form, header) => {
+    // no input frame after the header: the header alone has to end the dialog
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    expect(probe([plain, "", header].join("\n")).code).not.toBe("trust_gate");
+  });
+
+  it.each([
+    ["a grant", "   Bash(echo Claude Code v*)"],
+    ["a grant that a narrow pane wraps onto a row drawn like the header", " ─Claude Code v2.1.322 lab"],
+  ])("a backstop captured before its options, with %s reading 'Claude Code v', waits (partial), never resumed", (_case, row) => {
+    // the maintainer's case 1: captured right after the grant, before the note and the options, so no "Yes, I trust
+    // this folder" is drawn below the row and the warning above it is the backstop's only mark
+    const grants = capture.gatedGrantsScreen.map(line => line.includes("Bash(ls:*)") ? row : line);
+    const partial = grants.slice(0, grants.indexOf(row) + 1);
+    expect(partial.join("\n")).not.toMatch(/Yes, I trust this folder/);
+    const result = probe([...partial, "", "❯ "].join("\n"));
+    expect(result).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("a dialog still being drawn whose text has a row equal to the footer above a header-like row is not closed by it", () => {
+    // A1b: the plain prompt with its options drawn and its real footer not yet; the path wraps onto the footer's words
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const forged = plain.replace("<lab>/simples/repo/cadeiras/rig/seat",
+      ["/tmp/long", " Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"].join("\n"));
+    const drawing = forged.replace(/\n\s*Enter to confirm · Esc to cancel\s*$/, "\n");
+    expect(drawing.match(/Enter to confirm/g)).toHaveLength(1);
+    expect(probe(drawing)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    expect(probe(forged)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [forged, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed)).toMatchObject({ status: "resumed" });
+    // A1e: a backstop captured before its options, with a grant row equal to the footer above a header-like grant
+    const grants = capture.gatedGrantsScreen.flatMap(line => line.includes("Bash(ls:*)")
+      ? ["   Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"] : [line]);
+    const partial = grants.slice(0, grants.indexOf(" ─Claude Code v2.1.322 lab") + 1);
+    expect(probe([...partial, "", "❯ "].join("\n"))).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("a complete backstop whose grant reads 'Claude Code v', with Claude's real header drawn below it, is history (closed-dialog control)", () => {
+    const grants = capture.gatedGrantsScreen.map(line => line.includes("Bash(ls:*)") ? "   Bash(echo Claude Code v*)" : line);
+    expect(probe(grants.join("\n"))).toMatchObject(gate);
+    const closed = [...grants, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed).code).not.toBe("claude_gated_grants_gate");
+    expect(probe(closed).code).not.toBe("trust_gate");
+    expect(probe(closed).status).not.toBe("inconclusive");
+  });
+});
+
+describe("Claude's version header is read by its shape (#2820 follow-up, maintainer's review of 9c93238)", () => {
+  const probe = (paneContent: string) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+
+  it("a legacy 'Choose a conversation' list whose last option wraps a 'Claude Code v2.1.300' title still reads as the chooser", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "     Claude Code v2.1.300 upgrade notes", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it.each([
+    ["Claude's logo", "     ▐▛███▜▌   Claude Code v2.1.322 twice"],
+    ["a box rule", "     ─── Claude Code v2.0.14 ───"],
+    ["the welcome glyph", "     ✻ Claude Code v2.1.300 welcome"],
+  ])("a legacy chooser whose last option wraps a title that starts with %s, reading like the header, still reads as the chooser", (_case, wrapped) => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. why does my pane show", wrapped, "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose last option wraps a 'Claude Code v2.1.300' title less indented than the title still reads as the chooser", () => {
+    // only the header's shape tells this row apart: it is not indented to the title's column
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "    Claude Code v2.1.300 upgrade notes", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose focused last option (❯) wraps a title that starts with Claude's logo still reads as the chooser", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo", "  2. project-bar",
+      "❯ 3. why does my pane show", "     ▐▛███▜▌   Claude Code v2.1.322 twice", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("the same list followed by Claude's real header is history", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "     Claude Code v2.1.300 upgrade notes", ""].join("\n");
+    expect(probe(`${chooser}\n ▐▛███▛█▄╱✦  Claude Code v2.1.323\n`).code).not.toBe("claude_resume_selection_prompt");
   });
 });
 

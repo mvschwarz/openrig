@@ -582,12 +582,16 @@ function looksLikeClaudeBypassConsentPrompt(paneContent: string): boolean {
 }
 
 // Claude Code's "gated grants" backstop (2.1.319+, #2820 item 2). Its marks, which the plain workspace trust prompt
-// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, and the option that
-// declines them. Its default choice declines them ("No, continue without these permissions") or exits ("No, exit").
-// The marks are read on the whitespace-joined screen too, so a row that a narrow pane wraps still counts.
-const CLAUDE_GATED_GRANTS_MARK = /This folder pre-approves \d+ tool permissions?\b|No, continue without these permissions/;
+// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, the note under the list
+// ("These will apply without asking"), and the option that declines them. Its default choice declines them ("No,
+// continue without these permissions") or exits ("No, exit"); in the "No, exit" variant only the warning and the note
+// mark it, and a long permission list can scroll the warning out. The marks are read on the whitespace-joined screen
+// too, so a row that a narrow pane wraps still counts.
+const CLAUDE_GATED_GRANTS_MARK =
+  /This folder pre-approves \d+ tool permissions?\b|These will apply without asking\b|No, continue without these permissions/;
 // One row of the backstop's marks, or of a part of one that a narrow pane wrapped.
-const CLAUDE_GATED_GRANTS_MARK_ROW = /This folder pre-approves\b|No, continue without\b|without these permissions\b/;
+const CLAUDE_GATED_GRANTS_MARK_ROW =
+  /This folder pre-approves\b|These will apply without\b|apply without asking\b|No, continue without\b|without these permissions\b/;
 const CLAUDE_TRUST_FOOTER = "Enter to confirm · Esc to cancel";
 const CLAUDE_TRUST_YES = "Yes, I trust this folder";
 const CLAUDE_TRUST_EXIT = "No, exit";
@@ -621,9 +625,18 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
   const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
+  // A header-like row inside a trust dialog's content is the dialog's text, not Claude's header: it never ends the dialog.
+  const scan = rows.map((row, at) => isClaudeVersionHeader(row) && insideClaudeTrustDialog(rows, at) ? "" : row);
   let current = rows;
+  // Walking up, the first row whose suffix has Claude's own UI (claudeDrawnAfter(scan.slice(at))) is the row where that
+  // UI starts: a header, a reply, or the opening rule of an input frame whose closing rule is below. Testing only that
+  // row keeps the walk linear on a tall screen.
+  let ruleBelow = false;
   for (let at = rows.length - 1; at >= 0; at--) {
-    if (!claudeDrawnAfter(rows.slice(at))) continue;
+    if (at + 2 < scan.length && CLAUDE_INPUT_RULE.test(scan[at + 2]!)) ruleBelow = true;
+    const drawn = isClaudeVersionHeader(scan[at]!) || /^[●⏺]/.test(scan[at]!)
+      || (ruleBelow && CLAUDE_INPUT_RULE.test(scan[at]!) && /^\s*❯/.test(scan[at + 1] ?? ""));
+    if (!drawn) continue;
     const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
     const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
     current = rows.slice((closing >= 0 ? closing : at) + 1);
@@ -726,9 +739,15 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   const verb = drawn.map((line) => /Choose (?:a|the) conversation|Select a conversation/.test(line)).lastIndexOf(true);
   if (verb < 0) return false;
   const recentStart = Math.max(verb + 1, drawn.length - 30);
-  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[❯›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  if (lastOption < 0) return false;
+  // A narrow pane wraps the last option's title onto the rows right under it, indented to the title's column; such a
+  // row is the option's text even when it reads like Claude's header ("     ▐▛███▜▌   Claude Code v2.1.322 twice").
+  const titleColumn = drawn[lastOption]!.search(/(?<=\d+\.\s+)\S/);
+  let titleEnd = lastOption;
+  while (drawn[titleEnd + 1]?.trim() && drawn[titleEnd + 1]!.search(/\S/) >= titleColumn) titleEnd++;
   // A draft's own numbered rows can read as the last options, so the input frame counts anywhere after the heading.
-  return lastOption >= 0 && !claudeDrawnAfter(drawn.slice(lastOption + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
+  return !claudeDrawnAfter(drawn.slice(titleEnd + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
 }
 
 /** Claude Code's "Resume session" picker (2.1.309), drawn when `claude --resume` has no exact session to open: a bare
@@ -764,8 +783,61 @@ function claudeSearchBoxEnd(rows: string[], top: number): number {
  *  doesn't count: it can sit under a live chooser, and a missed chooser reads resumed. Hint rows and blank rows under the
  *  options belong to the chooser. */
 function claudeDrawnAfter(rows: string[]): boolean {
-  return hasClaudeInputFrame(rows) || rows.some((line) => line.includes("Claude Code v") || /^[●⏺]/.test(line));
+  return hasClaudeInputFrame(rows) || rows.some((line) => isClaudeVersionHeader(line) || /^[●⏺]/.test(line));
 }
+
+/** A row drawn like Claude's version header (CLAUDE_VERSION_HEADER). The substring test first lets every other row,
+ *  a full-width rule of box characters included, skip the pattern. */
+function isClaudeVersionHeader(line: string): boolean {
+  return line.includes("Claude Code v") && CLAUDE_VERSION_HEADER.test(line);
+}
+
+/** Whether row `at` sits inside the content of a trust dialog drawn on these rows (#2820): below the dialog's heading
+ *  ("Accessing workspace:") or a mark of the gated-grants backstop, with no reply of Claude's or input frame between
+ *  them, and above the dialog's end. The dialog ends at its last footer ("Enter to confirm · Esc to cancel") before a
+ *  reply or an input frame. A row with a footer below it is inside; a row with no footer below it is inside while the
+ *  dialog is still being drawn, and outside once the footer of the dialog's options block, above the row, closed it:
+ *  that is where Claude's real header sits. The dialog's text can read like an option or the footer ("No, exit",
+ *  "Enter to confirm · Esc to cancel": a path, a title or a grant that a narrow pane wraps), and that text sits above
+ *  the real options and footer, so it never ends the dialog. A path or a grant that forges the "Yes, I trust this
+ *  folder" option and, anywhere below it, the footer, above a header-like row, captured before the real footer is
+ *  drawn, is a known limit of a textual boundary. */
+function insideClaudeTrustDialog(rows: string[], at: number): boolean {
+  const isReply = (row: string) => /^[●⏺]/.test(row);
+  const isFooter = (row: string) => row.trim() === CLAUDE_TRUST_FOOTER;
+  let heading = -1;
+  for (let index = at - 1; index >= 0 && heading < 0; index--) {
+    const row = rows[index]!;
+    if (isReply(row)) return false;
+    if (row.trim() === "Accessing workspace:" || CLAUDE_GATED_GRANTS_MARK_ROW.test(row)) heading = index;
+  }
+  if (heading < 0 || hasClaudeInputFrame(rows.slice(heading, at))) return false;
+  for (let index = at + 1; index < rows.length; index++) {
+    const row = rows[index]!;
+    if (isReply(row) || (CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(rows[index + 1] ?? ""))) break;
+    if (isFooter(row)) return true;
+  }
+  // No footer below: the dialog is still being drawn, unless a footer above the row closed it. Only the footer of the
+  // dialog's own options block closes it, so it counts only below one of its options ("Yes, I trust this folder", which
+  // both the plain prompt and the backstop draw); a row of the dialog's text equal to the footer, above the options,
+  // does not.
+  const option = rows.findIndex((row, index) => index > heading && index < at && CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES);
+  return option < 0 || !rows.slice(option + 1, at).some(isFooter);
+}
+
+// Claude's version header row: "Claude Code v<x.y.z>" at column 0, or after Claude's logo or a box border (with any
+// blanks around them), and a blank, a border or the row's end after it ("Claude Code v2.1.303",
+// " ▐▛███▜▌   Claude Code v2.1.322", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "╭─── Claude Code v2.0.14 ───╮"). The same
+// words elsewhere are not the header: a pre-approved grant ("Bash(echo Claude Code v*)"), the workspace path
+// ("/tmp/Claude Code v2/lab"), or a path or a title that a narrow pane wraps onto an indented row ("   Claude Code
+// v2.1.300 upgrade notes", the last option of a legacy chooser). A path wrapped onto a row that starts with one of the
+// glyphs (" ─Claude Code v2.1.322 lab") still reads like the header: inside a trust dialog, insideClaudeTrustDialog
+// keeps it the dialog's text. A logo glyph this list lacks only makes the header wait for Claude's input frame or a
+// reply, the safe direction; add it here. The prefix has one way to match (blanks, then the first glyph, then
+// anything of both), so a long row of glyphs never backtracks.
+const CLAUDE_HEADER_GLYPHS = "▐▛▜▌▙▟▀▄█▝▘▗▖╭╮─│✻╱✦";
+const CLAUDE_VERSION_HEADER = new RegExp(
+  `^(?:\\s*[${CLAUDE_HEADER_GLYPHS}][\\s${CLAUDE_HEADER_GLYPHS}]*)?Claude Code v\\d+\\.\\d+\\.\\d+(?=$|[\\s─╮╯│])`, "u");
 
 // On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
 const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;
