@@ -6,6 +6,10 @@
 // suite proves the wiring, provenance, honest-skip, best-effort, terminal-skip,
 // idempotency, and secret-free-event invariants.
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -98,6 +102,31 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     if (!row) return undefined;
     return { type: row.type, payload: JSON.parse(row.payload) as Record<string, unknown> };
   }
+
+  it("bind captures an unnamed Claude from its current PID file without a manual token", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "adopted-claude-"));
+    try {
+      const current = "f16594c5-179a-4be7-bf5e-fd759b2b87a3";
+      const startedAt = "2020-01-01T01:00:00Z";
+      fs.mkdirSync(path.join(home, "sessions"));
+      fs.writeFileSync(path.join(home, "sessions/4243.json"), JSON.stringify({ name: "My existing conversation", sessionId: current }));
+      const rows: NativeProcessRow[] = [
+        { pid: 4242, ppid: 1, pgid: 4242, tpgid: 4243, executableName: "bash", command: "bash", startedAt },
+        { pid: 4243, ppid: 4242, pgid: 4243, tpgid: 4243, executableName: "claude", command: "claude", startedAt },
+      ];
+      const probe = vi.fn(async () => "inconclusive" as const);
+      const reader = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: mockTmux,
+        claudeConfigDir: home, listClaudeProcesses: async () => rows, probeClaudeResume: probe });
+      const rig = rigRepo.createRig("test-rig");
+      const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: home });
+      const discovered = seedDiscovery({ runtimeHint: "claude-code", tmuxSession: "r42-original" });
+      const service = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: mockTmux,
+        contextUsageStore: { readSidecar }, resumeTokenCapturer: reader });
+      expect((await service.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "worker" })).ok).toBe(true);
+      expect(tokenRow(node.id)).toMatchObject({ resume_type: "claude_id", resume_token: current, resume_provenance: "adoption" });
+      expect(probe).not.toHaveBeenCalled();
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
 
   // ---- bind() path ----
 

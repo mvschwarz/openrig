@@ -18,7 +18,7 @@ import {
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
-import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudePaneRuntime, listNativeProcessesOrThrow, listNativeProcesses, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
@@ -156,8 +156,9 @@ export class ResumeMetadataRefresher {
     },
   ): Promise<void> {
     const fillNullOnly = opts?.fillNullOnly === true;
-    const claudeStartedAt = fillNullOnly && this.claudeStartedAtForPass
-      ? this.claudeStartedAtForPass(new ObservationPass()) : this.claudeProcessStartedAt;
+    const claudePass = fillNullOnly ? new ObservationPass() : undefined;
+    const claudeStartedAt = claudePass && this.claudeStartedAtForPass
+      ? this.claudeStartedAtForPass(claudePass) : this.claudeProcessStartedAt;
     // Snapshot-time discovery is SINGLE-ATTEMPT (mini-req 2): the 8-attempt
     // 250ms-sleep loop exists for the adoption boundary racing a booting codex;
     // on a recurring tick it multiplied `ps` spawns per seat, forever.
@@ -196,7 +197,7 @@ export class ResumeMetadataRefresher {
 
       if (session.runtime === "claude-code") {
         if (!fillNullOnly) {
-          const current = await this.captureClaudeSessionId(session);
+          const current = await this.captureClaudeSessionId(session.sessionName, session);
           if (current && this.sessionRegistry.resumeTokenMatches(session.sessionId, "claude_id", current)) {
             this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
             continue;
@@ -211,7 +212,11 @@ export class ResumeMetadataRefresher {
           // `scrape` provenance (rank 0) fills a null slot and never clobbers a
           // higher-trust adoption/hook/operator token (the FR-3 rank guard).
           const sidecar = this.contextUsageStore?.readSidecar(session.sessionName);
-          if (sidecar?.ok) {
+          if (fillNullOnly && sidecar && !sidecar.ok && sidecar.reason === "missing_sidecar") {
+            const token = await this.captureClaudeSessionId(session.sessionName, { ...session,
+              listProcesses: claudePass?.lister(this.listClaudeProcesses ?? listNativeProcessesOrThrow, this.listClaudeProcesses ?? listNativeProcesses) });
+            if (token) this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", token, "scrape");
+          } else if (sidecar?.ok) {
             const token = sidecar.data.session_id;
             if (typeof token === "string" && token.trim().length > 0
               && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, claudeStartedAt))) {
@@ -271,18 +276,17 @@ export class ResumeMetadataRefresher {
     }
   }
 
-  /** Shutdown-only read, bounded to the stable foreground Claude process's own
-   * file. A same-name file or launch argument cannot identify the post-/clear
-   * conversation. Missing/ambiguous observations retain the legacy fallback. */
-  private async captureClaudeSessionId(session: ResumeRefreshSession): Promise<string | undefined> {
+  /** Read the stable foreground Claude process's own PID file, in its selected config home.
+   * A native title or launch argument cannot identify the current conversation. Missing/ambiguous evidence stays absent. */
+  async captureClaudeSessionId(sessionName: string, opts?: { nodeId?: string; cwd?: string | null; listProcesses?: NativeProcessLister }): Promise<string | undefined> {
     try {
-      const input = { target: session.sessionName, tmux: this.tmuxAdapter, listProcesses: this.listClaudeProcesses };
+      const input = { target: sessionName, tmux: this.tmuxAdapter, listProcesses: opts?.listProcesses ?? this.listClaudeProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (!first) return undefined;
       const started = Date.parse(first.process.startedAt ?? "");
       if (!Number.isFinite(started)) return undefined;
-      const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
-      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
+      const seatHome = opts?.nodeId ? this.seatHome?.(opts?.nodeId, "claude-code") : undefined;
+      const configDir = nodePath.resolve(opts?.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
       const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
       const fd = fs.openSync(file, "r");
       let record: { name?: unknown; sessionId?: unknown };
@@ -292,7 +296,7 @@ export class ResumeMetadataRefresher {
         if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
         record = JSON.parse(fs.readFileSync(fd, "utf8"));
       } finally { fs.closeSync(fd); }
-      if (record?.name !== session.sessionName) return undefined;
+      // name is Claude's conversation title, not the OpenRig seat. PID, birth time and the second observation bind it.
       const valid = validateResumeToken("claude-code", record.sessionId);
       if (!valid.ok) return undefined;
       const final = await observeClaudePaneRuntime(input);
