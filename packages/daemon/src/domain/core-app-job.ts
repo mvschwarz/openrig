@@ -66,14 +66,17 @@ export class CoreAppJob {
     const path = `/api/apps/v1/requests/${encodeURIComponent(requestId)}`, query = `?actor=${encodeURIComponent(actor)}`;
     return { self: path + query, result: `${path}/result${query}` };
   }
+  /** Missing or unreadable live evidence is unknown, never positive replacement. */
+  private occupantGeneration(nodeId: string): string | undefined {
+    try { return new SessionRegistry(this.access.db).currentOccupantTenure(nodeId)?.generationUuid; }
+    catch { return undefined; }
+  }
   private unsupported(item: QueueItem): string | null {
     const reason = appAskUnsupported(this.queue, item);
     if (reason) return reason;
     const origin = runnerPermissionOrigin(item);
     if (origin) {
-      let generation: string | undefined;
-      try { generation = new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid; }
-      catch { throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true }); }
+      const generation = this.occupantGeneration(origin.nodeId);
       if (!generation) throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true });
       if (generation !== origin.generation) return "request_stale";
     }
@@ -164,7 +167,7 @@ export class CoreAppJob {
   private permission(item: QueueItem, nodes: Map<string, QueueItem>) {
     const origin = runnerPermissionOrigin(item);
     if (!origin) return { status: "not-applicable", nativeEffect: "unknown" };
-    const generation = new SessionRegistry(this.access.db).currentOccupantTenure(origin.nodeId)?.generationUuid;
+    const generation = this.occupantGeneration(origin.nodeId);
     let live: QueueItem | undefined = item;
     const seen = new Set<string>();
     for (let hops = 0; live && (live.state === "handed-off" || live.state === "done" && live.closureReason === "handed_off_to"); hops++) {

@@ -675,6 +675,11 @@ it.each(["missing", "failed"] as const)("retains an unfinished permission answer
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ submission: receipt.submission, replayed: true });
     }
+    const result = await f.send(`/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+    expect(result.status).toBe(200);
+    const body = await result.json();
+    expect(body.permissionDecision).toMatchObject({ status: "unknown", reason: "occupant_unavailable", nativeEffect: "unknown" });
+    expect(body.submissions).toEqual(expect.arrayContaining([expect.objectContaining({ answerId, submission: receipt.submission })]));
     expect(f.bus.maxSeq()).toBe(committedSeq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(committedChanges);
   } finally { later.mockRestore(); }
 });
